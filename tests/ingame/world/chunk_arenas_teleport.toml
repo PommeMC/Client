@@ -1,0 +1,42 @@
+# Chunk arenas too small for the render distance, then a teleport: every
+# arena fills with the new columns while free room is split into gaps too
+# small for them, and the nearer columns evict the farther until each fits,
+# without a farther one taking the room back first. The arena step does
+# nothing on vanilla.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+deterministic = true
+
+[[step]]
+option = { render_distance = 4 }
+
+[[step]]
+chunk_arenas = { vertices = 32768, max = 3 }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+chat = "/tp @s 800.5 -60 800.5 0 20"
+
+# The old columns unload and the new ones load over a few seconds.
+[[step]]
+wait_ms = 8000
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 20"
+
+# Back to the default, which the server's 4 caps.
+[[step]]
+option = { render_distance = 12 }

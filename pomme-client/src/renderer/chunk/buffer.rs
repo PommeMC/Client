@@ -514,6 +514,94 @@ struct Starved {
     need: Need,
 }
 
+/// The columns whose sections found no room, or were evicted for nearer
+/// ones, and the eviction frontier they wait behind.
+struct Waitlist {
+    columns: HashMap<ChunkPos, Starved>,
+    /// Columns handed back to evict farther ones for, whose new mesh hasn't
+    /// reached [`ChunkBufferStore::upload_batch`] yet. Until it has, the
+    /// room is theirs: nothing past the frontier comes back to take it, or
+    /// the two evict each other for good when the room is free in total but
+    /// split into gaps too small for the nearer one's sections.
+    claims: HashSet<ChunkPos>,
+    /// Columns this far from the eye, squared, or farther were evicted for
+    /// nearer ones, or are past those that were, and wait for room. It moves
+    /// back out as room frees, and is gone once nothing waits, so a column
+    /// arriving after an unload or a teleport tries for room first.
+    frontier_sq: f64,
+}
+
+impl Default for Waitlist {
+    fn default() -> Self {
+        Self {
+            columns: HashMap::new(),
+            claims: HashSet::new(),
+            frontier_sq: f64::INFINITY,
+        }
+    }
+}
+
+impl Waitlist {
+    /// Nothing waits for room or holds a claim to it.
+    fn is_empty(&self) -> bool {
+        self.columns.is_empty() && self.claims.is_empty()
+    }
+
+    fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
+        let starved = self.columns.entry(pos).or_default();
+        starved.sections.extend(sections);
+        starved.need = starved.need.max(need);
+    }
+
+    /// Hands `pos` back for re-meshing, holding a claim on the room until
+    /// its mesh is uploaded when `claim`.
+    fn hand_back(&mut self, pos: ChunkPos, claim: bool) -> Option<Starved> {
+        let starved = self.columns.remove(&pos);
+        if claim && starved.is_some() {
+            self.claims.insert(pos);
+        }
+        self.drop_frontier_if_empty();
+        starved
+    }
+
+    /// `pos`'s mesh reached upload: its claim, if any, is settled.
+    fn settle(&mut self, pos: ChunkPos) {
+        if self.claims.remove(&pos) {
+            self.drop_frontier_if_empty();
+        }
+    }
+
+    /// Forgets `pos`, which unloaded.
+    fn forget(&mut self, pos: ChunkPos) {
+        self.columns.remove(&pos);
+        self.claims.remove(&pos);
+        self.drop_frontier_if_empty();
+    }
+
+    fn drop_frontier_if_empty(&mut self) {
+        if self.is_empty() {
+            self.frontier_sq = f64::INFINITY;
+        }
+    }
+
+    /// Takes every column off the list, as there's room for them all.
+    fn take_all(&mut self) -> HashMap<ChunkPos, Starved> {
+        self.claims.clear();
+        self.frontier_sq = f64::INFINITY;
+        std::mem::take(&mut self.columns)
+    }
+
+    /// Moves the frontier in to `dist_sq` if that's nearer.
+    fn pull_frontier(&mut self, dist_sq: f64) {
+        self.frontier_sq = self.frontier_sq.min(dist_sq);
+    }
+
+    /// Whether `pos` is at or past the frontier, seen from `eye`.
+    fn beyond(&self, pos: ChunkPos, eye: Option<DVec3>) -> bool {
+        eye.is_some_and(|eye| column_dist_sq(pos, eye) >= self.frontier_sq)
+    }
+}
+
 /// One vertex and one index heap, sub-allocated by [`Tlsf`]: a heap of
 /// vanilla's `UberGpuBuffer`, its vertex and index halves paired so each
 /// arena draws in one call. Device-local behind the staging buffer, in
@@ -530,31 +618,40 @@ struct Arena {
 }
 
 impl Arena {
+    /// A new arena, or the driver's error when it has no memory for one.
     fn new(
         device: &rhi::backend::Device,
         use_staging: bool,
         format: TerrainFormat,
         size: ArenaSize,
-    ) -> Self {
-        Self {
-            vertex_buffer: create_pool(
-                device,
-                use_staging,
-                "vertex_arena",
-                u64::from(size.vertices) * format.vertex_size(),
-                rhi::BufferUsages::VERTEX,
-            ),
-            index_buffer: create_pool(
-                device,
-                use_staging,
-                "index_arena",
-                u64::from(size.indices) * INDEX_SIZE,
-                rhi::BufferUsages::INDEX,
-            ),
+    ) -> Result<Self, String> {
+        let vertex_buffer = create_pool(
+            device,
+            use_staging,
+            "vertex_arena",
+            u64::from(size.vertices) * format.vertex_size(),
+            rhi::BufferUsages::VERTEX,
+        )?;
+        let index_buffer = match create_pool(
+            device,
+            use_staging,
+            "index_arena",
+            u64::from(size.indices) * INDEX_SIZE,
+            rhi::BufferUsages::INDEX,
+        ) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                vertex_buffer.destroy(device);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            vertex_buffer,
+            index_buffer,
             vertices: Tlsf::new(size.vertices),
             indices: Tlsf::new(size.indices),
             doomed: None,
-        }
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -581,22 +678,29 @@ fn live(slot: &Option<Arena>) -> Option<&Arena> {
     slot.as_ref().filter(|arena| arena.doomed.is_none())
 }
 
-/// A vertex and an index slice from one live arena other than `exclude`,
-/// trying the fullest first so the emptiest can drain.
+/// The `live` arenas, as (id, vertices used, indices used), fullest first,
+/// for [`alloc_in`].
+fn alloc_order(live: impl Iterator<Item = (u16, u32, u32)>) -> Vec<u16> {
+    let mut order: Vec<_> = live.collect();
+    order.sort_unstable_by_key(|&(_, vertices, _)| std::cmp::Reverse(vertices));
+    order.into_iter().map(|(id, ..)| id).collect()
+}
+
+/// A vertex and an index slice from one of the arenas in `order` other than
+/// `exclude`, trying them in that order: the fullest first, so the emptiest
+/// can drain.
 fn alloc_in(
     arenas: &mut [Option<Arena>],
+    order: &[u16],
     exclude: Option<u16>,
     vertices: u32,
     indices: u32,
 ) -> Option<(u16, u32, u32)> {
-    let mut order: Vec<usize> = (0..arenas.len())
-        .filter(|&id| live(&arenas[id]).is_some() && exclude != Some(id as u16))
-        .collect();
-    order.sort_unstable_by_key(|&id| {
-        std::cmp::Reverse(arenas[id].as_ref().map_or(0, |a| a.vertices.used()))
-    });
-    for id in order {
-        let Some(arena) = arenas[id].as_mut() else {
+    for &id in order {
+        if exclude == Some(id) {
+            continue;
+        }
+        let Some(arena) = arenas[id as usize].as_mut() else {
             continue;
         };
         let Some(vertex) = arena.vertices.alloc(vertices) else {
@@ -606,7 +710,7 @@ fn alloc_in(
             arena.vertices.free(vertex);
             continue;
         };
-        return Some((id as u16, vertex, index));
+        return Some((id, vertex, index));
     }
     None
 }
@@ -646,19 +750,20 @@ pub struct ChunkBufferStore {
     arena_size: ArenaSize,
     /// The most arenas there may be, whatever the budget.
     max_arenas: usize,
-    /// Columns whose sections found no room, or were evicted for nearer
-    /// ones; handed back for re-meshing once there's room for them.
-    starved: HashMap<ChunkPos, Starved>,
+    waiting: Waitlist,
     /// The starved columns are worth retrying in the next
     /// [`Self::upload_batch`]: a slice was reclaimed, the eye reached another
     /// column, or the budget grew.
     retry_due: bool,
-    /// Columns this far from the eye, squared, or farther were evicted for
-    /// nearer ones, or are past those that were, and wait for room. It moves
-    /// back out as room frees.
-    frontier_sq: f64,
+    /// The live arenas, fullest first, as of the last arena change or
+    /// frame; the order allocation tries them in.
+    alloc_order: Vec<u16>,
     /// The arena compaction is emptying, kept out of allocation.
     draining: Option<u16>,
+    /// Columns that had sections in the draining arena when compaction
+    /// started and may still have some, so each frame moves the next ones
+    /// without rescanning every column.
+    drain_queue: Vec<ChunkPos>,
     /// The `frame_seq` before which compaction doesn't start.
     compact_after: u64,
 
@@ -760,10 +865,11 @@ impl ChunkBufferStore {
             format,
             arena_size: ARENA_SIZE,
             max_arenas: MAX_ARENAS,
-            starved: HashMap::new(),
+            waiting: Waitlist::default(),
             retry_due: false,
-            frontier_sq: f64::INFINITY,
+            alloc_order: Vec::new(),
             draining: None,
+            drain_queue: Vec::new(),
             compact_after: 0,
             chunks: HashMap::new(),
             chunk_visibility: HashMap::new(),
@@ -907,6 +1013,8 @@ impl ChunkBufferStore {
         let mut stg_i = 0usize;
 
         for mesh in meshes {
+            // Placed or starved again below, it no longer holds the room.
+            self.waiting.settle(mesh.pos);
             // The covered sections this job is authoritative for: reject any where
             // a newer upload (higher epoch) already landed. See
             // `ChunkMeshData::upload_epoch`.
@@ -959,7 +1067,7 @@ impl ChunkBufferStore {
             let mut plans: Vec<Plan> = Vec::with_capacity(upload_secs.len());
             let mut need = Need::default();
             // Past the eviction frontier a column waits for room instead.
-            let beyond = self.beyond_frontier(mesh.pos);
+            let beyond = self.waiting.beyond(mesh.pos, self.eye);
             let mut no_room = beyond;
             for sec in &upload_secs {
                 let vcount = sec.vertices.len() as u32;
@@ -1011,7 +1119,7 @@ impl ChunkBufferStore {
                     tracing::debug!("No room for {:?}'s mesh, keeping its old one", mesh.pos);
                     self.evict_beyond(mesh.pos, need);
                 }
-                self.starve(mesh.pos, accepted, need);
+                self.waiting.starve(mesh.pos, accepted, need);
                 continue;
             }
 
@@ -1171,14 +1279,29 @@ impl ChunkBufferStore {
         vertices: u32,
         indices: u32,
     ) -> Option<(u16, u32, u32)> {
-        if let Some(found) = alloc_in(&mut self.arenas, self.draining, vertices, indices) {
+        let alloc = |this: &mut Self| {
+            alloc_in(
+                &mut this.arenas,
+                &this.alloc_order,
+                this.draining,
+                vertices,
+                indices,
+            )
+        };
+        if let Some(found) = alloc(self) {
             return Some(found);
         }
-        if !self.can_add_arena(device) {
+        // Before evicting or growing, take the room compaction is draining.
+        if self.draining.is_some() {
+            self.back_off_compaction();
+            if let Some(found) = alloc(self) {
+                return Some(found);
+            }
+        }
+        if !self.can_add_arena(device) || !self.add_arena(device) {
             return None;
         }
-        self.add_arena(device);
-        alloc_in(&mut self.arenas, self.draining, vertices, indices)
+        alloc(self)
     }
 
     /// Whether one more arena fits the budget of the heaps arenas go in:
@@ -1187,11 +1310,11 @@ impl ChunkBufferStore {
     /// fits.
     fn can_add_arena(&self, device: &rhi::backend::Device) -> bool {
         let arenas = self.arena_count();
-        if arenas == 0 {
-            return true;
-        }
         if arenas as usize >= self.max_arenas {
             return false;
+        }
+        if arenas == 0 {
+            return true;
         }
         let bytes = self.arena_size.bytes(self.format);
         let location = arena_location(self.use_staging);
@@ -1207,15 +1330,31 @@ impl ChunkBufferStore {
         }
     }
 
-    fn add_arena(&mut self, device: &rhi::backend::Device) {
-        let arena = Arena::new(device, self.use_staging, self.format, self.arena_size);
+    /// Adds an arena, returning whether it did. When the driver has no
+    /// memory for one, the arenas are capped at those there are, so columns
+    /// starve and evict instead.
+    fn add_arena(&mut self, device: &rhi::backend::Device) -> bool {
+        let arena = match Arena::new(device, self.use_staging, self.format, self.arena_size) {
+            Ok(arena) => arena,
+            Err(error) => {
+                self.max_arenas = self.arena_count() as usize;
+                tracing::warn!("{error}; chunk arenas capped at {}", self.max_arenas);
+                return false;
+            }
+        };
         match self.arenas.iter().position(Option::is_none) {
             Some(id) => self.arenas[id] = Some(arena),
             None => self.arenas.push(Some(arena)),
         }
         self.camera_meta.resize_with(self.arenas.len(), Vec::new);
         self.shadow_meta.resize_with(self.arenas.len(), Vec::new);
+        self.refresh_alloc_order();
         self.log_arenas("added");
+        true
+    }
+
+    fn refresh_alloc_order(&mut self) {
+        self.alloc_order = alloc_order(self.live_use());
     }
 
     /// Arenas allocated, doomed ones included.
@@ -1254,7 +1393,7 @@ impl ChunkBufferStore {
             self.evict(victim);
             tracing::debug!("Evicted {victim:?} for {pos:?}");
         }
-        self.frontier_sq = self.frontier_sq.min(frontier);
+        self.waiting.pull_frontier(frontier);
     }
 
     /// Drops `pos`'s mesh, starving the column until there's room for it.
@@ -1264,20 +1403,8 @@ impl ChunkBufferStore {
         };
         self.retire_slices(alloc.sections.iter().map(SectionAlloc::slice));
         let sections = alloc.sections.iter().map(|s| s.section_index);
-        self.starve(pos, sections, alloc.need());
+        self.waiting.starve(pos, sections, alloc.need());
         self.meta_dirty = true;
-    }
-
-    fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
-        let starved = self.starved.entry(pos).or_default();
-        starved.sections.extend(sections);
-        starved.need = starved.need.max(need);
-    }
-
-    /// Whether `pos` is at or past the eviction frontier.
-    fn beyond_frontier(&self, pos: ChunkPos) -> bool {
-        self.eye
-            .is_some_and(|eye| column_dist_sq(pos, eye) >= self.frontier_sq)
     }
 
     /// Hands the starved columns that could fit now back for re-meshing: all
@@ -1288,25 +1415,20 @@ impl ChunkBufferStore {
         device: &rhi::backend::Device,
         out: &mut Vec<(ChunkPos, Vec<i32>)>,
     ) {
-        if self.starved.is_empty() {
+        if self.waiting.columns.is_empty() {
             return;
         }
         if self.can_add_arena(device) {
-            self.frontier_sq = f64::INFINITY;
             out.extend(
-                self.starved
-                    .drain()
+                self.waiting
+                    .take_all()
+                    .into_iter()
                     .map(|(pos, starved)| (pos, starved.sections.into_iter().collect())),
             );
             return;
         }
-        let arenas: Vec<&Arena> = self
-            .arenas
-            .iter()
-            .enumerate()
-            .filter(|&(id, _)| self.draining != Some(id as u16))
-            .filter_map(|(_, slot)| live(slot))
-            .collect();
+        // The draining arena too: allocation stops draining to use it.
+        let arenas: Vec<&Arena> = self.arenas.iter().filter_map(live).collect();
         let free_vertices: u64 = arenas
             .iter()
             .map(|a| u64::from(a.vertices.capacity() - a.vertices.used()))
@@ -1316,12 +1438,13 @@ impl ChunkBufferStore {
             .map(|a| u64::from(a.indices.capacity() - a.indices.used()))
             .sum();
         let dist = |pos| self.eye.map_or(0.0, |eye| column_dist_sq(pos, eye));
-        let farthest_loaded = self
-            .chunks
-            .keys()
-            .map(|&pos| dist(pos))
-            .fold(f64::NEG_INFINITY, f64::max);
-        let waiting = self.starved.iter().map(|(&pos, s)| Waiting {
+        let farthest_loaded = || {
+            self.chunks
+                .keys()
+                .map(|&pos| dist(pos))
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        let waiting = self.waiting.columns.iter().map(|(&pos, s)| Waiting {
             dist: dist(pos),
             pos,
             need: s.need,
@@ -1332,13 +1455,14 @@ impl ChunkBufferStore {
         let (retry, frontier_sq) = columns_to_retry(
             waiting,
             (free_vertices, free_indices),
-            self.frontier_sq,
+            self.waiting.frontier_sq,
+            !self.waiting.claims.is_empty(),
             farthest_loaded,
             self.arena_size,
         );
-        self.frontier_sq = frontier_sq;
-        for pos in retry {
-            if let Some(starved) = self.starved.remove(&pos) {
+        self.waiting.frontier_sq = frontier_sq;
+        for (pos, claim) in retry {
+            if let Some(starved) = self.waiting.hand_back(pos, claim) {
                 out.push((pos, starved.sections.into_iter().collect()));
             }
         }
@@ -1391,18 +1515,19 @@ impl ChunkBufferStore {
             self.free_slice(slice);
             self.retry_due = true;
         }
-        if !self.starved.is_empty()
+        if !self.waiting.is_empty()
             && self.frame_seq.is_multiple_of(BUDGET_RECHECK_FRAMES)
             && self.can_add_arena(device)
         {
             self.retry_due = true;
         }
         self.free_empty_arenas(device);
+        self.refresh_alloc_order();
         self.compact(device);
     }
 
-    /// Destroys doomed arenas no frame reads any more, and dooms empty ones,
-    /// as vanilla destroys an empty heap, keeping one for the next upload.
+    /// Destroys doomed arenas no frame reads any more, and dooms the empty
+    /// ones [`arenas_to_doom`] picks, as vanilla destroys an empty heap.
     fn free_empty_arenas(&mut self, device: &rhi::backend::Device) {
         let mut destroyed = false;
         for (id, slot) in self.arenas.iter_mut().enumerate() {
@@ -1422,20 +1547,34 @@ impl ChunkBufferStore {
         if destroyed {
             self.log_arenas("freed");
         }
-        let mut live_count = self.arenas.iter().filter_map(live).count();
-        for (id, slot) in self.arenas.iter_mut().enumerate() {
-            let Some(arena) = slot.as_mut() else {
-                continue;
-            };
-            if live_count > 1 && arena.doomed.is_none() && arena.is_empty() {
+        let live: Vec<(u16, bool)> = self
+            .arenas
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| live(slot).map(|arena| (id as u16, arena.is_empty())))
+            .collect();
+        for id in arenas_to_doom(&live, !self.waiting.is_empty()) {
+            if let Some(arena) = self.arenas[id as usize].as_mut() {
                 // Frames from here on skip it; earlier ones are done by then.
                 arena.doomed = Some(self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64);
-                live_count -= 1;
-                if self.draining == Some(id as u16) {
-                    self.draining = None;
-                }
+            }
+            if self.draining == Some(id) {
+                self.stop_draining();
             }
         }
+    }
+
+    /// Leaves the draining arena to allocation again.
+    fn stop_draining(&mut self) {
+        self.draining = None;
+        self.drain_queue.clear();
+    }
+
+    /// Stops draining and waits a while before compacting again, as the
+    /// room is wanted.
+    fn back_off_compaction(&mut self) {
+        self.stop_draining();
+        self.compact_after = self.frame_seq + COMPACT_BACKOFF_FRAMES;
     }
 
     /// Once the arenas' contents would fit one fewer, drains the emptiest
@@ -1445,8 +1584,8 @@ impl ChunkBufferStore {
     /// Not while columns are starved: they want the room, and the arena it
     /// frees would only be added back for them.
     fn compact(&mut self, device: &rhi::backend::Device) {
-        if !self.starved.is_empty() {
-            self.draining = None;
+        if !self.waiting.is_empty() {
+            self.stop_draining();
             return;
         }
         if self.frame_seq < self.compact_after {
@@ -1460,6 +1599,13 @@ impl ChunkBufferStore {
                 };
                 tracing::debug!("Compacting chunk arena {id}");
                 self.draining = Some(id);
+                // Nothing lands in it while it drains, so these are all.
+                self.drain_queue = self
+                    .chunks
+                    .iter()
+                    .filter(|(_, alloc)| alloc.sections.iter().any(|s| s.arena == id))
+                    .map(|(&pos, _)| pos)
+                    .collect();
                 id
             }
         };
@@ -1468,17 +1614,24 @@ impl ChunkBufferStore {
         let mut copies: Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)> = Vec::new();
         let mut retired = Vec::new();
         let mut moved = 0;
-        'columns: for alloc in self.chunks.values_mut() {
+        let mut no_room = false;
+        'columns: while let Some(&pos) = self.drain_queue.last() {
+            let Some(alloc) = self.chunks.get_mut(&pos) else {
+                self.drain_queue.pop();
+                continue;
+            };
             for sec in alloc.sections.iter_mut().filter(|s| s.arena == from) {
                 if moved >= COMPACT_VERTICES_PER_FRAME {
                     break 'columns;
                 }
-                let Some((to, vertex, index)) =
-                    alloc_in(&mut self.arenas, Some(from), sec.vtx_len, sec.idx_len)
-                else {
-                    tracing::debug!("No room to compact chunk arena {from}");
-                    self.draining = None;
-                    self.compact_after = self.frame_seq + COMPACT_BACKOFF_FRAMES;
+                let Some((to, vertex, index)) = alloc_in(
+                    &mut self.arenas,
+                    &self.alloc_order,
+                    Some(from),
+                    sec.vtx_len,
+                    sec.idx_len,
+                ) else {
+                    no_room = true;
                     break 'columns;
                 };
                 copies.push((
@@ -1501,6 +1654,11 @@ impl ChunkBufferStore {
                 sec.vertex_offset = vertex as i32;
                 moved += sec.vtx_len;
             }
+            self.drain_queue.pop();
+        }
+        if no_room {
+            tracing::debug!("No room to compact chunk arena {from}");
+            self.back_off_compaction();
         }
         if copies.is_empty() {
             return;
@@ -1527,7 +1685,7 @@ impl ChunkBufferStore {
     }
 
     pub fn remove(&mut self, pos: &ChunkPos) {
-        self.starved.remove(pos);
+        self.waiting.forget(*pos);
         if let Some(alloc) = self.chunks.remove(pos) {
             self.retire_slices(alloc.sections.iter().map(SectionAlloc::slice));
             self.meta_dirty = true;
@@ -1550,6 +1708,7 @@ impl ChunkBufferStore {
         for arena in self.arenas.drain(..).flatten() {
             arena.destroy(device);
         }
+        self.alloc_order.clear();
         self.camera_meta.clear();
         self.shadow_meta.clear();
     }
@@ -1587,9 +1746,8 @@ impl ChunkBufferStore {
             arena.indices.reset();
         }
         self.pending_free.clear();
-        self.starved.clear();
-        self.frontier_sq = f64::INFINITY;
-        self.draining = None;
+        self.waiting = Waitlist::default();
+        self.stop_draining();
         for meta in self.camera_meta.iter_mut().chain(&mut self.shadow_meta) {
             meta.clear();
         }
@@ -1601,9 +1759,10 @@ impl ChunkBufferStore {
     /// nearer than the eviction frontier: one that should fit.
     #[cfg(feature = "test-harness")]
     pub fn starved_column(&self) -> Option<ChunkPos> {
-        self.starved
+        self.waiting
+            .columns
             .keys()
-            .find(|&&pos| !self.beyond_frontier(pos))
+            .find(|&&pos| !self.waiting.beyond(pos, self.eye))
             .copied()
     }
 
@@ -1688,7 +1847,7 @@ impl ChunkBufferStore {
         eye: DVec3,
     ) {
         let column = |eye| ChunkPos::containing(BlockPos::containing(eye));
-        if !self.starved.is_empty() && self.eye.is_some_and(|last| column(last) != column(eye)) {
+        if !self.waiting.is_empty() && self.eye.is_some_and(|last| column(last) != column(eye)) {
             self.retry_due = true;
         }
         self.eye = Some(eye);
@@ -2006,26 +2165,35 @@ struct Waiting {
     fits_an_arena: bool,
 }
 
-/// The starved columns to hand back, nearest first, and the eviction
-/// frontier after. Inside the frontier a column comes back when it fits the
-/// free vertices and indices, or when a loaded column farther out (the
-/// farthest is at `farthest_loaded`) can be evicted for it; either way the
-/// free room is its, so no farther column takes it first. Past the frontier,
-/// only while [`FRONTIER_SLACK`] of an arena stays free after, moving the
-/// frontier out past it, so the frontier doesn't swing back and forth as
-/// columns come and go.
+/// The starved columns to hand back, nearest first, each with whether it
+/// claims the room (see [`Waitlist::claims`]), and the eviction frontier
+/// after. Inside the frontier a column comes back, claiming, when it fits
+/// the free vertices and indices, or when a loaded column farther out (the
+/// farthest is at `farthest_loaded()`, asked at most once and only then) can
+/// be evicted for it; either way the free room is its, so no farther column
+/// takes it first. Past the frontier, only while no column holds a claim
+/// (`claimed`, or one nearer in this pass) or was left short, and
+/// [`FRONTIER_SLACK`] of an arena stays free after, moving the frontier out
+/// past it, so the frontier doesn't swing back and forth as columns come and
+/// go.
 fn columns_to_retry(
     waiting: impl Iterator<Item = Waiting>,
     (mut free_vertices, mut free_indices): (u64, u64),
     mut frontier_sq: f64,
-    farthest_loaded: f64,
+    claimed: bool,
+    farthest_loaded: impl FnOnce() -> f64,
     arena: ArenaSize,
-) -> (Vec<ChunkPos>, f64) {
+) -> (Vec<(ChunkPos, bool)>, f64) {
     let mut waiting: Vec<Waiting> = waiting.collect();
     waiting.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
+    let farthest_loaded = std::cell::LazyCell::new(farthest_loaded);
     let mut retry = Vec::new();
+    let mut held = claimed;
     for column in waiting {
         let past = column.dist >= frontier_sq;
+        if past && held {
+            break;
+        }
         let (keep_vertices, keep_indices) = if past {
             (
                 u64::from(arena.vertices) / FRONTIER_SLACK,
@@ -2043,7 +2211,8 @@ fn columns_to_retry(
             if past {
                 break;
             }
-            if column.dist >= farthest_loaded {
+            held = true;
+            if column.dist >= *farthest_loaded {
                 continue;
             }
         }
@@ -2051,8 +2220,10 @@ fn columns_to_retry(
         free_indices = free_indices.saturating_sub(column.need.indices);
         if past {
             frontier_sq = column.dist.next_up();
+        } else {
+            held = true;
         }
-        retry.push(column.pos);
+        retry.push((column.pos, !past));
     }
     (retry, frontier_sq)
 }
@@ -2076,6 +2247,24 @@ fn arena_to_drain(live: impl Iterator<Item = (u16, u32, u32)>, arena: ArenaSize)
     live.iter().min_by_key(|&&(_, v, _)| v).map(|&(id, ..)| id)
 }
 
+/// Of the `live` arenas as (id, empty), those to doom: every empty one but
+/// the last arena left, and none while columns are `waiting` for room, as
+/// the arena would only be added back for them.
+fn arenas_to_doom(live: &[(u16, bool)], waiting: bool) -> Vec<u16> {
+    if waiting {
+        return Vec::new();
+    }
+    let mut left = live.len();
+    let mut doomed = Vec::new();
+    for &(id, empty) in live {
+        if left > 1 && empty {
+            doomed.push(id);
+            left -= 1;
+        }
+    }
+    doomed
+}
+
 /// Where arenas live: device-local behind the staging buffer, or
 /// host-visible.
 fn arena_location(use_staging: bool) -> rhi::MemoryLocation {
@@ -2094,13 +2283,13 @@ fn create_pool(
     label: &str,
     size: u64,
     usage: rhi::BufferUsages,
-) -> rhi::backend::Buffer {
+) -> Result<rhi::backend::Buffer, String> {
     let usage = usage | rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST;
     let location = arena_location(use_staging);
     if use_staging {
-        rhi::backend::Buffer::dedicated(device, label, size, usage, location)
+        rhi::backend::Buffer::try_dedicated(device, label, size, usage, location)
     } else {
-        rhi::backend::Buffer::new(device, label, size, usage, location)
+        rhi::backend::Buffer::try_new(device, label, size, usage, location)
     }
 }
 
@@ -2394,10 +2583,14 @@ mod tests {
             [waiting(1.0, 1, 50), waiting(4.0, 2, 500)].into_iter(),
             free,
             100.0,
-            9.0,
+            false,
+            || 9.0,
             ARENA_SIZE,
         );
-        assert_eq!(retry, [ChunkPos::new(1, 0), ChunkPos::new(2, 0)]);
+        assert_eq!(
+            retry,
+            [(ChunkPos::new(1, 0), true), (ChunkPos::new(2, 0), true)]
+        );
         assert_eq!(frontier, 100.0);
         // One coming back for eviction keeps the free room from a farther
         // one, past the frontier, that would fit it otherwise.
@@ -2406,20 +2599,48 @@ mod tests {
             [waiting(4.0, 2, slack + 11), waiting(200.0, 9, 1)].into_iter(),
             (slack + 10, u64::MAX),
             100.0,
-            300.0,
+            false,
+            || 300.0,
             ARENA_SIZE,
         );
-        assert_eq!(retry, [ChunkPos::new(2, 0)]);
+        assert_eq!(retry, [(ChunkPos::new(2, 0), true)]);
         assert_eq!(frontier, 100.0);
         // Nothing loaded farther out, so it waits.
         let (retry, _) = columns_to_retry(
             [waiting(4.0, 2, 500)].into_iter(),
             free,
             100.0,
-            1.0,
+            false,
+            || 1.0,
             ARENA_SIZE,
         );
         assert!(retry.is_empty());
+    }
+
+    /// The evicting column's room, free in total but split too small for it,
+    /// isn't handed to the column it evicted while it holds a claim, or the
+    /// two evict each other for good.
+    #[test]
+    fn columns_past_the_frontier_wait_for_nearer_claims() {
+        let slack = u64::from(ARENA_SIZE.vertices) / FRONTIER_SLACK;
+        let free = (slack + 1000, u64::MAX);
+        let evicted = || [waiting(200.0, 9, 100)].into_iter();
+        // A claim from an earlier pass holds it back.
+        let (retry, frontier) =
+            columns_to_retry(evicted(), free, 100.0, true, || 300.0, ARENA_SIZE);
+        assert!(retry.is_empty());
+        assert_eq!(frontier, 100.0);
+        // So does a nearer column handed back in this pass, though both fit.
+        let both = [waiting(4.0, 2, 100), waiting(200.0, 9, 100)].into_iter();
+        let (retry, _) = columns_to_retry(both, free, 100.0, false, || 300.0, ARENA_SIZE);
+        assert_eq!(retry, [(ChunkPos::new(2, 0), true)]);
+        // And one nearer left short, with nothing farther to evict.
+        let short = [waiting(4.0, 2, u64::MAX / 4), waiting(200.0, 9, 100)].into_iter();
+        let (retry, _) = columns_to_retry(short, free, 100.0, false, || 1.0, ARENA_SIZE);
+        assert!(retry.is_empty());
+        // Once nothing nearer holds it, it comes back without a claim.
+        let (retry, _) = columns_to_retry(evicted(), free, 100.0, false, || 300.0, ARENA_SIZE);
+        assert_eq!(retry, [(ChunkPos::new(9, 0), false)]);
     }
 
     #[test]
@@ -2435,12 +2656,13 @@ mod tests {
             .into_iter(),
             free,
             16.0,
-            f64::INFINITY,
+            false,
+            || f64::INFINITY,
             ARENA_SIZE,
         );
         // The first fits with the slack left and moves the frontier past it;
         // the second doesn't, and nothing farther comes back.
-        assert_eq!(retry, [ChunkPos::new(5, 0)]);
+        assert_eq!(retry, [(ChunkPos::new(5, 0), false)]);
         assert_eq!(frontier, 25.0f64.next_up());
     }
 
@@ -2451,5 +2673,71 @@ mod tests {
         assert_eq!(drain(&[(0, quarter, 0)]), None);
         assert_eq!(drain(&[(0, quarter * 2, 0), (3, quarter / 2, 0)]), Some(3));
         assert_eq!(drain(&[(0, quarter * 3, 0), (3, quarter, 0)]), None);
+    }
+
+    #[test]
+    fn retrying_columns_that_fit_never_walks_the_loaded_ones() {
+        let (retry, _) = columns_to_retry(
+            [waiting(1.0, 1, 50)].into_iter(),
+            (100, 150),
+            100.0,
+            false,
+            || panic!("asked for the farthest loaded column"),
+            ARENA_SIZE,
+        );
+        assert_eq!(retry, [(ChunkPos::new(1, 0), true)]);
+    }
+
+    #[test]
+    fn empty_arenas_but_one_are_doomed_unless_columns_wait() {
+        let live = [(0, true), (2, false), (5, true), (7, true)];
+        assert_eq!(arenas_to_doom(&live, false), [0, 5, 7]);
+        assert_eq!(arenas_to_doom(&[(0, true), (1, true)], false), [0]);
+        assert!(arenas_to_doom(&[(0, true)], false).is_empty());
+        assert!(arenas_to_doom(&live, true).is_empty());
+    }
+
+    #[test]
+    fn the_frontier_goes_once_nothing_waits() {
+        let at = DVec3::new(8.0, 0.0, 8.0);
+        let eye = Some(at);
+        let (near, far) = (ChunkPos::new(1, 0), ChunkPos::new(4, 0));
+        let mut waiting = Waitlist::default();
+        assert!(!waiting.beyond(far, eye));
+
+        waiting.starve(near, [0], need(10));
+        waiting.starve(far, [0, 1], need(10));
+        waiting.pull_frontier(column_dist_sq(far, at));
+        assert!(waiting.beyond(far, eye));
+        assert!(!waiting.beyond(near, eye));
+        assert!(!waiting.beyond(far, None));
+
+        // One still waits, so the frontier holds.
+        assert_eq!(
+            waiting.hand_back(far, false).map(|s| s.sections.len()),
+            Some(2)
+        );
+        assert!(waiting.beyond(far, eye));
+        // Handed back with a claim, the last one holds it until its mesh
+        // reaches upload.
+        assert!(waiting.hand_back(near, true).is_some());
+        assert!(!waiting.is_empty());
+        assert!(waiting.beyond(far, eye));
+        waiting.settle(near);
+        assert!(waiting.is_empty());
+        assert!(!waiting.beyond(far, eye));
+
+        // An unload of the last one drops it too, claim and all.
+        waiting.starve(near, [0], need(10));
+        waiting.pull_frontier(0.0);
+        waiting.hand_back(near, true);
+        waiting.forget(near);
+        assert!(waiting.is_empty());
+        assert!(!waiting.beyond(far, eye));
+
+        waiting.starve(far, [0], need(10));
+        waiting.pull_frontier(0.0);
+        assert_eq!(waiting.take_all().len(), 1);
+        assert!(!waiting.beyond(near, eye));
     }
 }

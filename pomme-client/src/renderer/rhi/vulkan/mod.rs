@@ -315,18 +315,17 @@ impl Buffer {
         Self::create(device, label, size, usage, location, false)
     }
 
-    /// Like [`Self::new`], in memory of its own, which goes back to the
+    /// Like [`Self::try_new`], in memory of its own, which goes back to the
     /// driver when the buffer is destroyed instead of staying in a shared
     /// block.
-    pub fn dedicated(
+    pub fn try_dedicated(
         device: &Device,
         label: &str,
         size: u64,
         usage: BufferUsages,
         location: MemoryLocation,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::create(device, label, size, usage, location, true)
-            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     fn create(

@@ -60,6 +60,39 @@ wait_ms = 3000
 expect = { terrain = "compacted" }
 timeout_ms = 30000
 
+# Capped again, the far columns wait behind the eviction frontier; a lower
+# distance unloads them, so nothing waits and the frontier goes, and coming
+# back out every column inside the one it sets again draws.
+[[step]]
+chunk_arenas = { vertices = 32768, max = 1 }
+
+[[step]]
+option = { render_distance = 4 }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+option = { render_distance = 2 }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+option = { render_distance = 3 }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# The last screenshot's chat line fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "capped"
+
 # Back to the default, which the server's 4 caps.
 [[step]]
 option = { render_distance = 12 }
