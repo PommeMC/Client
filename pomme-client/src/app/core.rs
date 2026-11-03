@@ -144,6 +144,9 @@ enum InlineObjectContent {
 
 /// Vanilla `PlayerSkinRenderCache.CACHE_DURATION`.
 const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// How long a frame spends on chunk packets before the rest wait for the
+/// next.
+const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
 /// Applies a server-driven block change: block-entity sync, prediction
 /// absorption, the block + light write, and the remesh cascade. The block
@@ -1784,9 +1787,24 @@ impl AppCore {
         let mut disconnect_reason: Option<String> = None;
         self.drain_player_skin_results(renderer);
 
-        // Vanilla `PacketProcessor.processQueuedPackets`: drain everything
-        // before this frame's ticks.
-        while let Ok(event) = rx.try_recv() {
+        // Vanilla `PacketProcessor.processQueuedPackets` drains everything
+        // before this frame's ticks. A departure: after `CHUNK_PACKET_BUDGET`
+        // of chunk packets the rest wait, in order, for the next frame, so a
+        // burst of chunks is a few short frames instead of one long one. The
+        // batch acknowledgement goes out when its chunks are taken, so the
+        // server paces itself to it as it does to a slower client.
+        let mut chunk_work = std::time::Duration::ZERO;
+        while chunk_work < CHUNK_PACKET_BUDGET
+            && let Ok(event) = rx.try_recv()
+        {
+            let chunk_packet = matches!(
+                event,
+                NetworkEvent::ChunkLoaded { .. }
+                    | NetworkEvent::ChunkUnloaded { .. }
+                    | NetworkEvent::LightUpdate { .. }
+                    | NetworkEvent::ChunkBiomes { .. }
+            )
+            .then(std::time::Instant::now);
             match event {
                 NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
                 NetworkEvent::Connected => {
@@ -3131,6 +3149,9 @@ impl AppCore {
                 NetworkEvent::TabListHeaderFooter { header, footer } => {
                     game.tab_list.set_header_footer(header, footer);
                 }
+            }
+            if let Some(started) = chunk_packet {
+                chunk_work += started.elapsed();
             }
         }
 
