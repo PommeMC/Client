@@ -4,18 +4,31 @@
 use azalea_block::BlockState;
 use glam::DVec3;
 
+use super::block::BlockStateTable;
 use super::block::block_registry::BlockRegistry;
 use super::chunk::ChunkStore;
 use crate::position::BlockPos;
 
-/// World services for a block callback; never retains a chunk snapshot.
+/// Scoped world queries and block callbacks; never retains a chunk snapshot.
 pub struct LevelContext<'a> {
     chunks: &'a ChunkStore,
+    block_state_table: BlockStateTable,
 }
 
 impl<'a> LevelContext<'a> {
-    pub(crate) fn new(chunks: &'a ChunkStore) -> Self {
-        Self { chunks }
+    pub(crate) fn new(chunks: &'a ChunkStore, block_state_table: BlockStateTable) -> Self {
+        Self {
+            chunks,
+            block_state_table,
+        }
+    }
+
+    pub(crate) fn chunks(&self) -> &ChunkStore {
+        self.chunks
+    }
+
+    pub(crate) fn block_state_table(&self) -> BlockStateTable {
+        self.block_state_table
     }
 
     /// Missing chunks and positions outside the dimension height read as air.
@@ -51,7 +64,7 @@ impl LevelRuntime {
             block_registry,
             player_pos,
             |radius| self.animation_rng.i32(0..radius),
-            &mut LevelContext::new(chunks),
+            &mut LevelContext::new(chunks, block_registry.block_state_table()),
             fastrand::Rng::new(),
         );
     }
