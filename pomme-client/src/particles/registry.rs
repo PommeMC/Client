@@ -1,6 +1,7 @@
-//! Canonical particle-type bootstrap contract, independent of client providers
-//! and resource packs. No registry storage or implementation is supplied.
+//! Canonical particle-type bootstrap and storage, independent of client
+//! providers and resource packs.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::types::{ParticleType, ParticleTypeInfo, TypedParticleOptions};
@@ -55,4 +56,62 @@ pub trait ParticleRegistry {
     /// fail. Lookup and existing tokens remain valid. Client provider state
     /// and resource-pack/sprite reloads are NOT frozen by this operation.
     fn freeze(&mut self);
+}
+
+trait RegisteredParticleType {
+    fn info(&self) -> &ParticleTypeInfo;
+}
+
+impl<O: TypedParticleOptions> RegisteredParticleType for ParticleType<O> {
+    fn info(&self) -> &ParticleTypeInfo {
+        ParticleType::info(self)
+    }
+}
+
+/// Owns canonical typed tokens across option schemas, keyed only by resource
+/// name. Freezing type bootstrap does not freeze client provider resources.
+#[derive(Default)]
+pub struct MappedParticleRegistry {
+    entries: BTreeMap<ResourceId, Rc<dyn RegisteredParticleType>>,
+    frozen: bool,
+}
+
+impl MappedParticleRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ParticleRegistry for MappedParticleRegistry {
+    fn register<O: TypedParticleOptions>(
+        &mut self,
+        name: ResourceId,
+        override_limiter: bool,
+    ) -> Result<Rc<ParticleType<O>>, ParticleTypeRegistrationError> {
+        if self.frozen {
+            return Err(ParticleTypeRegistrationError::Frozen);
+        }
+        if self.entries.contains_key(&name) {
+            return Err(ParticleTypeRegistrationError::DuplicateName(name));
+        }
+
+        let particle_type = Rc::new(ParticleType::<O>::new(name.clone(), override_limiter));
+        let retained = Rc::clone(&particle_type);
+        self.entries.insert(name, retained);
+        Ok(particle_type)
+    }
+
+    fn get_value(&self, name: &ResourceId) -> Option<&ParticleTypeInfo> {
+        self.entries
+            .get(name)
+            .map(|particle_type| particle_type.info())
+    }
+
+    fn size(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn freeze(&mut self) {
+        self.frozen = true;
+    }
 }

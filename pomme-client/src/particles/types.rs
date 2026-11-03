@@ -33,9 +33,10 @@ impl ParticleTypeInfo {
 
 /// Type token tying a resource name to exactly one options schema, established
 /// independently of client provider registration. Canonical name registration
-/// belongs to ParticleRegistry::register; its implementation remains deferred.
-/// No public constructor or independently supplied erasure metadata. The
-/// invariant marker also prevents function-type subtyping from changing O.
+/// belongs to ParticleRegistry::register, implemented by
+/// MappedParticleRegistry. No public constructor or independently supplied
+/// erasure metadata. The invariant marker also prevents function-type subtyping
+/// from changing O.
 pub struct ParticleType<O: TypedParticleOptions> {
     info: ParticleTypeInfo,
     options: PhantomData<fn(O) -> O>,
