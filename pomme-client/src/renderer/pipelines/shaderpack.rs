@@ -77,7 +77,7 @@ impl PackGeometry {
         matches!(self.drawn(), Self::Terrain | Self::Water)
     }
 
-    /// Whether it draws `draw_water`'s translucent sections.
+    /// Whether it draws the translucent water sections.
     fn water(self) -> bool {
         self.drawn() == Self::Water
     }
@@ -700,11 +700,6 @@ impl PackRenderer {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured)
         );
         let push_constants = match geometry {
-            // `draw_water`'s section origin and fade.
-            Some(g) if g.water() => Some(rhi::PushConstants {
-                visibility: rhi::ShaderStages::VERTEX,
-                size: 16,
-            }),
             // The block-entity push block: model, tint, overlay, uv params.
             Some(g) if g.drawn() == PackGeometry::BlockEntities => Some(rhi::PushConstants {
                 visibility: rhi::ShaderStages::VERTEX,
@@ -733,8 +728,7 @@ impl PackRenderer {
         let sky_buffers = [SkyVertex::BUFFER];
         let vertex_buffers: &[rhi::VertexBufferLayout] = match geometry.map(PackGeometry::drawn) {
             Some(PackGeometry::SkyBasic | PackGeometry::SkyTextured) => &sky_buffers,
-            Some(PackGeometry::Terrain) => &PACK_CHUNK_VERTEX_BUFFERS,
-            Some(PackGeometry::Water) => &PACK_CHUNK_VERTEX_BUFFERS[..1],
+            Some(PackGeometry::Terrain | PackGeometry::Water) => &PACK_CHUNK_VERTEX_BUFFERS,
             Some(
                 PackGeometry::Entities
                 | PackGeometry::EntitiesTranslucent

@@ -320,7 +320,7 @@ impl DistantBuffers {
         };
         let storage = rhi::BufferUsages::STORAGE;
         let arena_bytes = MAX_ARENA_BYTES
-            .min(device.device_local_bytes / 8)
+            .min(device.memory_bytes(rhi::MemoryLocation::Device) / 8)
             .max(MIN_ARENA_BYTES)
             / 8
             * 8;
@@ -698,7 +698,7 @@ impl DistantBuffers {
         meta[0] = [(top.len() as u32).div_ceil(32), 1, 1, top.len() as u32];
         self.queue_meta_staging[frame].write_at(0, bytemuck::cast_slice(&meta));
         encoder.transition_buffers_many(&[
-            (rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst),
+            (rhi::BufferUse::DrawInput, rhi::BufferUse::CopyDst),
             (rhi::BufferUse::Storage, rhi::BufferUse::CopyDst),
         ]);
         encoder.copy_buffer(
@@ -710,7 +710,7 @@ impl DistantBuffers {
         encoder.fill_buffer(self.requests.handle(), 0, 8, 0);
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
-            (rhi::BufferUse::CopyDst, rhi::BufferUse::Indirect),
+            (rhi::BufferUse::CopyDst, rhi::BufferUse::DrawInput),
         ]);
     }
 
@@ -777,7 +777,7 @@ impl DistantBuffers {
             return;
         }
         let stride = size_of::<DrawCommand>() as u64;
-        encoder.transition_buffers(rhi::BufferUse::Indirect, rhi::BufferUse::CopyDst);
+        encoder.transition_buffers(rhi::BufferUse::DrawInput, rhi::BufferUse::CopyDst);
         for region in Region::ALL {
             let (first, count_offset, max_draws) = region.layout();
             let count = self.last_counts[count_offset as usize / 4];

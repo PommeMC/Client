@@ -1,13 +1,13 @@
 //! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher and its
-//! worker queue, the per-frame fade rebuild, cave culling, chunk packet
-//! decoding and distant terrain, with no window or Vulkan device.
+//! worker queue, the chunk draw lists, cave culling, chunk packet decoding
+//! and distant terrain, with no window or Vulkan device.
 //! Criterion reports each run's change against the last.
 
 mod chunk_decode;
 mod dispatch;
 mod distant;
-mod fade;
 mod fixtures;
+mod lists;
 mod mesh;
 mod mesh_hash;
 mod occlusion;
@@ -43,7 +43,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
         distant::bench(&mut c, &assets);
     }
     chunk_decode::bench(&mut c, block_state_table);
-    fade::bench(&mut c);
+    lists::bench(&mut c);
     occlusion::bench_walk(&mut c);
 
     c.final_summary();

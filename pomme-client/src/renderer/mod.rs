@@ -30,7 +30,7 @@ use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::{AtlasUVMap, TextureAtlas};
-use chunk::buffer::{ChunkBufferStore, View};
+use chunk::buffer::{ChunkBufferStore, Layer, View};
 use chunk::mesh_source::MeshSource;
 use chunk::mesher::{ChunkMeshData, TerrainFormat};
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
@@ -891,17 +891,17 @@ impl Renderer {
         let terrain = |pack: &mut PackRenderer, geometry, view| {
             if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
                 pass.set_bind_group(3, pack.atlas_group);
-                for cutout in [false, true] {
-                    chunks.draw_indirect(&pass, frame, cutout, view);
+                for (layer, cutout) in [(Layer::Solid, false), (Layer::Cutout, true)] {
+                    chunks.draw_indirect(&pass, frame, layer, view);
                     moving_blocks.draw(&pass, frame, cutout);
                 }
                 pack.end_geometry(encoder, pass, geometry);
             }
         };
-        let water = |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6]| {
+        let water = |pack: &mut PackRenderer, geometry, view| {
             if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
                 pass.set_bind_group(3, pack.atlas_group);
-                chunks.draw_water(&pass, frustum, anchor, eye);
+                chunks.draw_indirect(&pass, frame, Layer::Water, view);
                 pack.end_geometry(encoder, pass, geometry);
             }
         };
@@ -947,7 +947,7 @@ impl Renderer {
             draw_entities(&mut pack, PackGeometry::ShadowEntities, &planes, casters);
             draw_block_entities(&mut pack, PackGeometry::ShadowBlockEntities);
             pack.copy_opaque_depth(encoder, true);
-            water(&mut pack, PackGeometry::ShadowWater, &planes);
+            water(&mut pack, PackGeometry::ShadowWater, View::Shadow);
         }
         // Drawn underwater too, as Iris does; the pack fogs it.
         // TODO: skipped in lava and powder snow, or under an effect that
@@ -978,7 +978,7 @@ impl Renderer {
         }
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
-        water(&mut pack, PackGeometry::Water, &frustum);
+        water(&mut pack, PackGeometry::Water, View::Camera);
         pack.run_full_screen(device, encoder, frame, false);
         // TODO: particles, weather, clouds, dropped items, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
@@ -1324,6 +1324,20 @@ impl Renderer {
     #[cfg(feature = "test-harness")]
     pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
         self.chunk_buffers.starved_column()
+    }
+
+    /// See [`ChunkBufferStore::compacting`].
+    #[cfg(feature = "test-harness")]
+    pub fn chunk_arenas_compacting(&self) -> bool {
+        self.chunk_buffers.compacting()
+    }
+
+    /// See [`ChunkBufferStore::set_arena_limits`].
+    #[cfg(feature = "test-harness")]
+    pub fn set_chunk_arena_limits(&mut self, vertices: u32, max: usize) -> bool {
+        self.wait_for_all_frames();
+        self.chunk_buffers
+            .set_arena_limits(&self.ctx.device, vertices, max)
     }
 
     /// Sections actually drawn after frustum culling (lags a few frames). The
@@ -2148,11 +2162,11 @@ impl Renderer {
                             .upload(&self.ctx.device, frame, moving_blocks);
                         self.chunk_pipeline.bind(&mut pass, frame, false);
                         self.chunk_buffers
-                            .draw_indirect(&pass, frame, false, View::Camera);
+                            .draw_indirect(&pass, frame, Layer::Solid, View::Camera);
                         self.moving_block_buffers.draw(&pass, frame, false);
                         self.chunk_pipeline.bind(&mut pass, frame, true);
                         self.chunk_buffers
-                            .draw_indirect(&pass, frame, true, View::Camera);
+                            .draw_indirect(&pass, frame, Layer::Cutout, View::Camera);
                         self.moving_block_buffers.draw(&pass, frame, true);
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
@@ -2252,12 +2266,11 @@ impl Renderer {
 
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
-                    // but doesn't write depth. CPU frustum-culled, reusing the entity
-                    // frustum/eye.
+                    // but doesn't write depth.
                     if vanilla_terrain {
                         self.chunk_pipeline.bind_water(&mut pass, frame);
                         self.chunk_buffers
-                            .draw_water(&pass, &ent_frustum, anchor, eye);
+                            .draw_indirect(&pass, frame, Layer::Water, View::Camera);
                     }
 
                     // Clouds draw after opaque world geometry (so terrain occludes

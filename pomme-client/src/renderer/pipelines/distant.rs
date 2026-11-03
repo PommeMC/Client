@@ -715,7 +715,7 @@ impl DistantPipeline {
         // `distant_prep.comp`, after last frame's draws are done with the
         // counts and positions and the traversal with the render list.
         encoder.transition_buffers_many(&[
-            (rhi::BufferUse::Indirect, rhi::BufferUse::Storage),
+            (rhi::BufferUse::DrawInput, rhi::BufferUse::Storage),
             (rhi::BufferUse::ShaderRead, rhi::BufferUse::Storage),
             (rhi::BufferUse::Storage, rhi::BufferUse::CopyDst),
         ]);
@@ -723,7 +723,7 @@ impl DistantPipeline {
         encoder.fill_buffer(translucent, 0, u64::from(TRANSLUCENT_BUCKETS) * 4, 0);
         buffers.record_draw_slots(encoder);
         encoder.transition_buffers_many(&[
-            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput),
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
             (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
         ]);
@@ -779,7 +779,7 @@ impl DistantPipeline {
         );
         buffers.record_count_readback(encoder, frame);
         encoder.transition_buffers_many(&[
-            (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput),
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),
         ]);
 
@@ -924,7 +924,7 @@ impl DistantPipeline {
         for iteration in 1..u32::from(LEVELS) {
             encoder.transition_buffers_many(&[
                 (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
-                (rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect),
+                (rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput),
             ]);
             let queues = if iteration % 2 == 1 {
                 Iteration::Odd

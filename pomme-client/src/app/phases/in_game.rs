@@ -4334,9 +4334,28 @@ pub fn update_game(
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
+        // Vanilla `BlockEntityRenderer.shouldRender`: within 64 blocks of the
+        // camera, in a section the occlusion graph hasn't proven hidden.
+        let eye = gfx.renderer.camera_render_position();
+        let min_section_y = game.chunk_store.min_y() >> 4;
+        let in_view = |pos: &BlockPos| {
+            let center = glam::DVec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            );
+            if center.distance_squared(eye) >= 64.0 * 64.0 {
+                return false;
+            }
+            let section = (pos.y >> 4) - min_section_y;
+            game.vis_mask
+                .get(&ChunkPos::new(pos.x >> 4, pos.z >> 4))
+                .is_none_or(|mask| mask & (1u32 << section) != 0)
+        };
         game.chunk_store
             .block_entities
             .iter()
+            .filter(|(pos, _)| in_view(pos))
             .filter_map(|(pos, be)| {
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
                 let block_state_data = game.block_registry.block_state_data(state);

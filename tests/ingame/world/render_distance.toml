@@ -46,9 +46,10 @@ option = { render_distance = 4 }
 expect = { terrain = "settled" }
 timeout_ms = 30000
 
-# Vanilla's sections can report compiled before its chunks are back.
+# Vanilla's sections can report compiled before its chunks are back, and
+# chat fades after 10 seconds.
 [[step]]
-wait_ms = 3000
+wait_ms = 11000
 
 [[step]]
 screenshot = "far"

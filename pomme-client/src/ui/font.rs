@@ -440,7 +440,7 @@ struct ResolvedProvider {
     filter: FontFilter,
 }
 
-struct FontSetData {
+pub(crate) struct FontSetData {
     glyphs: HashMap<char, Arc<GlyphInfo>>,
     /// Vanilla `SelectedGlyphs.nonFishy` for codepoints whose first glyph has
     /// a fishy advance: the first later non-fishy glyph, or MISSING.
@@ -542,29 +542,37 @@ impl GlyphMap {
         &self.missing_glyph
     }
 
-    /// The glyph for `ch` in `font`; unknown fonts render MISSING rather than
-    /// falling back to the default, like vanilla `FontManager.getFontSetRaw`.
-    pub(crate) fn glyph(&self, ch: char, font: Option<&str>) -> &GlyphInfo {
-        self.font_sets
-            .get(font.unwrap_or(DEFAULT_FONT))
-            .and_then(|set| set.glyphs.get(&ch))
+    /// `font`'s set, looked up once per run of text; unknown fonts render
+    /// MISSING rather than falling back to the default, like vanilla
+    /// `FontManager.getFontSetRaw`.
+    pub(crate) fn font_set(&self, font: Option<&str>) -> Option<&FontSetData> {
+        self.font_sets.get(font.unwrap_or(DEFAULT_FONT))
+    }
+
+    /// The glyph for `ch` in `set` (from [`Self::font_set`]).
+    pub(crate) fn glyph_in<'a>(&'a self, set: Option<&'a FontSetData>, ch: char) -> &'a GlyphInfo {
+        set.and_then(|set| set.glyphs.get(&ch))
             .unwrap_or(&self.missing_glyph)
+    }
+
+    /// The glyph for `ch` in `font`.
+    #[cfg(test)]
+    pub(crate) fn glyph(&self, ch: char, font: Option<&str>) -> &GlyphInfo {
+        self.glyph_in(self.font_set(font), ch)
     }
 
     /// Vanilla `FontSet.getRandomGlyph`: `pick` chooses an index among the
     /// codepoints of this width, whose non-fishy glyph is returned.
-    pub(crate) fn random_glyph(
-        &self,
+    pub(crate) fn random_glyph<'a>(
+        &'a self,
         width: i32,
-        font: Option<&str>,
+        set: Option<&'a FontSetData>,
         pick: impl FnOnce(usize) -> usize,
-    ) -> &GlyphInfo {
-        let Some(set) = self.font_sets.get(font.unwrap_or(DEFAULT_FONT)) else {
+    ) -> &'a GlyphInfo {
+        let Some(bucket) = set.and_then(|set| set.obfuscation_glyphs.get(&width)) else {
             return &self.missing_glyph;
         };
-        let Some(bucket) = set.obfuscation_glyphs.get(&width) else {
-            return &self.missing_glyph;
-        };
+        let set = set.expect("the bucket's set");
         let ch = bucket[pick(bucket.len())];
         match set.non_fishy.get(&ch) {
             Some(glyph) => glyph.as_deref().unwrap_or(&self.missing_glyph),
@@ -2172,10 +2180,11 @@ mod tests {
             cell_h: 8,
         };
         // A fishy first glyph picks the next non-fishy one, or MISSING.
-        assert_eq!(map.random_glyph(40, None, |_| 0).advance, 6.0);
-        assert_eq!(map.random_glyph(40, None, |_| 1).advance, 123.0);
-        assert_eq!(map.random_glyph(6, None, |_| 0).advance, 6.0);
-        assert_eq!(map.random_glyph(99, None, |_| 0).advance, 123.0);
+        let set = map.font_set(None);
+        assert_eq!(map.random_glyph(40, set, |_| 0).advance, 6.0);
+        assert_eq!(map.random_glyph(40, set, |_| 1).advance, 123.0);
+        assert_eq!(map.random_glyph(6, set, |_| 0).advance, 6.0);
+        assert_eq!(map.random_glyph(99, set, |_| 0).advance, 123.0);
     }
 
     #[cfg(feature = "ttf-fonts")]

@@ -213,7 +213,8 @@ pub enum BufferUse {
     FragmentWrite,
     /// Read by a vertex or fragment shader.
     ShaderRead,
-    Indirect,
+    /// A draw's inputs: its indirect command, vertices and indices.
+    DrawInput,
     HostRead,
 }
 

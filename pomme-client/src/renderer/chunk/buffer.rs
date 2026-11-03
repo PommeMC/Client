@@ -11,19 +11,17 @@ use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::rhi::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
-/// Vertices per arena: vanilla's 128 MiB vertex heap (`UberGpuBuffer`) at
-/// the vanilla format's 16-byte vertex.
-const ARENA_VERTICES: u32 = 8 << 20;
-/// Indices per arena: six per four-vertex quad.
-const ARENA_INDICES: u32 = ARENA_VERTICES / 2 * 3;
+/// An arena of vanilla's 128 MiB vertex heap (`UberGpuBuffer`) at the
+/// vanilla format's 16-byte vertex.
+const ARENA_SIZE: ArenaSize = ArenaSize::new(8 << 20);
 const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 /// Discrete GPUs batch a frame's uploads through the staging buffer in one
 /// transfer, so it holds several columns to keep sub-flushes rare. Sized for
 /// vanilla vertices; a shader pack's larger ones flush sooner.
 const STAGING_SIZE: u64 = 12 << 20;
-/// Without `VK_EXT_memory_budget`, the share of device-local memory the
-/// arenas may take.
-const VRAM_BUDGET_FRACTION: f64 = 0.25;
+/// Without `VK_EXT_memory_budget`, the share of the arenas' memory heaps
+/// they may take.
+const BUDGET_FRACTION: f64 = 0.25;
 /// With it, the least of the budget left for everything else.
 const MIN_BUDGET_HEADROOM: u64 = 512 << 20;
 /// Compaction starts once the arenas' contents would fit one fewer arena
@@ -45,11 +43,36 @@ const INITIAL_META: usize = 16384;
 /// allows.
 const MAX_ARENAS: usize = 256;
 
-/// The cull pass's bindings: meta, frustum, solid indirect/count, cutout
-/// indirect/count.
+/// One arena's vertex and index heap lengths.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ArenaSize {
+    vertices: u32,
+    indices: u32,
+}
+
+impl ArenaSize {
+    /// Room for `vertices`, and six indices per four-vertex quad.
+    const fn new(vertices: u32) -> Self {
+        Self {
+            vertices,
+            indices: vertices / 2 * 3,
+        }
+    }
+
+    /// Both heaps in bytes, at `format`'s vertex size.
+    fn bytes(self, format: TerrainFormat) -> u64 {
+        u64::from(self.vertices) * format.vertex_size() + u64::from(self.indices) * INDEX_SIZE
+    }
+}
+
+/// The cull pass's bindings: meta, frustum, then indirect draws and a count
+/// per [`Layer`], and the columns' visibility masks.
 const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::uniform(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
+    rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
@@ -58,11 +81,31 @@ const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
 /// A draw count per arena.
 const COUNTS_SIZE: u64 = (MAX_ARENAS * size_of::<u32>()) as u64;
 const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
-/// Per-section fade-in length, shared by the opaque indirect path and water.
-const FADE_DURATION_MS: f32 = 1000.0;
+/// Column slots the visibility masks start with room for.
+const INITIAL_COLUMNS: usize = 1 << 14;
+/// The least meta slots an arena's segment holds; segments grow by doubling
+/// so a section landing in one rarely moves the rest.
+const MIN_SEGMENT: u32 = 64;
+/// Staging buffers in flight: one per frame that may still read one, and one
+/// written while they do.
+const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
 /// Columns within this squared X/Z distance of the camera render opaque
 /// immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
+/// A camera move this far, squared, re-sorts the draw lists front to back.
+const SORT_RECAM_SQ: f64 = 64.0;
+
+/// A render layer of the terrain: the index ranges the cull splits each
+/// section's draw into, each drawn by its own pipeline.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// Opaque, no discard; first, so early-Z rejects what it hides.
+    Solid,
+    /// Alpha-tested.
+    Cutout,
+    /// Translucent water, blended after everything opaque.
+    Water,
+}
 
 /// Whether a column's center is within the always-near X/Z radius of the eye
 /// (vanilla `isNearby`), rebased in f64 for precision at extreme coordinates.
@@ -78,28 +121,39 @@ fn column_dist_sq(pos: ChunkPos, eye: DVec3) -> f64 {
     dx * dx + dz * dz
 }
 
+/// A section's entry in the draw lists (`cull.comp`'s `ChunkMeta`): what the
+/// cull needs to test and draw it, static from its upload on but for
+/// `visibility`, which the cull writes each frame.
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ChunkMeta {
     /// Section-local vertex bounds; the cull shader rebases them via `origin`.
     aabb_min: [f32; 3],
-    /// Where the section's arena's draws start in the draw lists.
-    draw_base: u32,
-    aabb_max: [f32; 3],
-    /// The section's arena, which picks its draw count.
+    /// The section's arena: its draw count, and where its draws start.
     arena: u32,
+    aabb_max: [f32; 3],
     index_count: u32,
     first_index: u32,
     vertex_offset: i32,
+    /// The fade-in factor, read per instance by the vertex stage.
     visibility: u32,
+    /// Leading indices belonging to the solid (no-discard) pass; the rest
+    /// are cutout.
+    solid_index_count: u32,
     /// Absolute section origin as integers (vanilla `ChunkPosition`), bound
     /// as a per-instance vertex attribute; the vertex shader subtracts the
     /// camera block position in integer math, so no large f32 is ever
     /// formed.
     origin: [i32; 3],
-    /// Read by the cull shader to split the solid/cutout draws; fills the
-    /// fourth lane of `origin`'s 16-byte slot, keeping the struct at 64 bytes.
-    solid_index_count: u32,
+    /// Water indices, right after the opaque ones in the same slice.
+    water_index_count: u32,
+    /// The column's slot in the visibility masks and the section's bit.
+    column: u32,
+    section: u32,
+    /// Milliseconds since the store was made at the upload, for the fade; 0
+    /// for none.
+    uploaded_ms: u32,
+    _pad: u32,
 }
 
 impl ChunkMeta {
@@ -111,6 +165,18 @@ impl ChunkMeta {
             visibility: 1.0f32.to_bits(),
             ..bytemuck::Zeroable::zeroed()
         }
+    }
+
+    /// The squared distance from `eye` to the section's center, as the
+    /// front-to-back sort orders by; the origin is rebased in f64 for
+    /// precision at extreme coordinates.
+    fn center_dist_sq(&self, eye: DVec3) -> f64 {
+        let center = DVec3::new(
+            f64::from((self.aabb_min[0] + self.aabb_max[0]) * 0.5),
+            f64::from((self.aabb_min[1] + self.aabb_max[1]) * 0.5),
+            f64::from((self.aabb_min[2] + self.aabb_max[2]) * 0.5),
+        );
+        (origin_dvec(self.origin) + center - eye).length_squared()
     }
 }
 
@@ -218,138 +284,407 @@ pub(crate) struct DrawCommand {
     pub first_instance: u32,
 }
 
-/// Camera-relative frustum test of a section-local AABB, mirroring `cull.comp`
-/// (the GPU opaque path); used by the CPU-driven water pass. The section
-/// origin is rebased against the eye in f64 for precision at extreme
-/// coordinates.
-fn aabb_in_frustum(aabb: &ChunkAABB, origin: [i32; 3], planes: &[[f32; 4]; 6], eye: DVec3) -> bool {
-    let base = (origin_dvec(origin) - eye).as_vec3();
-    let mn = [
-        base.x + aabb.min[0],
-        base.y + aabb.min[1],
-        base.z + aabb.min[2],
-    ];
-    let mx = [
-        base.x + aabb.max[0],
-        base.y + aabb.max[1],
-        base.z + aabb.max[2],
-    ];
-    for p in planes {
-        let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
-            + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }
-            + p[2] * if p[2] >= 0.0 { mx[2] } else { mn[2] }
-            + p[3];
-        if d < 0.0 {
-            return false;
-        }
-    }
-    true
-}
-
 /// An integer section origin widened for f64 math.
 fn origin_dvec(origin: [i32; 3]) -> DVec3 {
     DVec3::new(origin[0] as f64, origin[1] as f64, origin[2] as f64)
-}
-
-/// Whether `pos`'s column renders opaque immediately: fading is off, or the
-/// column is near the eye (a nearby column never fades in).
-fn column_nearby(fade_enabled: bool, pos: ChunkPos, eye: DVec3) -> bool {
-    !fade_enabled || column_is_near(pos, eye)
-}
-
-/// Rebuilds the draw lists into `out`, one per arena: one [`ChunkMeta`] per
-/// uploaded section the occlusion mask keeps (all of them without one), with
-/// its fade-in factor at `now`. The lists are uploaded back to back, each
-/// arena's draws starting where the previous arena's end.
-pub(crate) fn build_meta(
-    chunks: &HashMap<ChunkPos, ChunkAlloc>,
-    chunk_visibility: Option<&HashMap<ChunkPos, u32>>,
-    fade_enabled: bool,
-    eye: DVec3,
-    now: std::time::Instant,
-    out: &mut [Vec<ChunkMeta>],
-) {
-    out.iter_mut().for_each(Vec::clear);
-    for (pos, alloc) in chunks.iter() {
-        // Near columns never fade; otherwise each section fades on its own
-        // timer (X/Z distance is per-column).
-        let nearby = column_nearby(fade_enabled, *pos, eye);
-
-        // CPU omission: the visibility graph's mask skips sections proven
-        // occluded, so they never reach the GPU cull (absent => all draw).
-        let col_vis = chunk_visibility
-            .and_then(|v| v.get(pos).copied())
-            .unwrap_or(u32::MAX);
-
-        for sec in &alloc.sections {
-            if col_vis & (1u32 << sec.section_index) == 0 {
-                continue;
-            }
-            let vis = ChunkBufferStore::section_visibility(nearby, sec, now);
-            let [min_x, min_y, min_z, _] = sec.aabb.min;
-            let [max_x, max_y, max_z, _] = sec.aabb.max;
-            out[sec.arena as usize].push(ChunkMeta {
-                aabb_min: [min_x, min_y, min_z],
-                draw_base: 0,
-                aabb_max: [max_x, max_y, max_z],
-                arena: u32::from(sec.arena),
-                index_count: sec.index_count,
-                first_index: sec.first_index,
-                vertex_offset: sec.vertex_offset,
-                visibility: vis.to_bits(),
-                origin: sec.origin,
-                solid_index_count: sec.solid_index_count,
-            });
-        }
-    }
-    let mut base = 0;
-    for list in out {
-        for meta in list.iter_mut() {
-            meta.draw_base = base;
-        }
-        base += list.len() as u32;
-    }
-}
-
-/// Sorts the draw list front-to-back by section center distance to `eye`.
-pub(crate) fn sort_meta(meta: &mut [ChunkMeta], eye: DVec3) {
-    // Section centers rebased against the eye in f64, for precision at
-    // extreme coordinates.
-    let center_dist_sq = |m: &ChunkMeta| {
-        let center = DVec3::new(
-            ((m.aabb_min[0] + m.aabb_max[0]) * 0.5) as f64,
-            ((m.aabb_min[1] + m.aabb_max[1]) * 0.5) as f64,
-            ((m.aabb_min[2] + m.aabb_max[2]) * 0.5) as f64,
-        );
-        (origin_dvec(m.origin) + center - eye).length_squared()
-    };
-    meta.sort_unstable_by(|a, b| {
-        center_dist_sq(a)
-            .partial_cmp(&center_dist_sq(b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrustumData {
     planes: [[f32; 4]; 6],
+    /// Meta slots to walk: every segment, headroom included.
     chunk_count: u32,
     /// Camera block position (the render anchor as integers); the cull
     /// subtracts it from the absolute integer section origins.
     cam_block: [i32; 3],
     /// Eye position relative to `cam_block` (small, full precision).
     frac: [f32; 3],
-    /// Pads the struct to a 16-byte multiple so the buffer always covers the
-    /// std140 block size.
-    _pad: f32,
+    /// Milliseconds since the store was made, for the fade.
+    now_ms: u32,
+    /// Whether the columns' occlusion masks apply.
+    use_visibility: u32,
+    _pad: [u32; 3],
+    /// Per arena, where its segment starts and how many sections it holds,
+    /// four to a row as std140 lays `uint` arrays out.
+    arena_base: [[u32; 4]; MAX_ARENAS / 4],
+    arena_len: [[u32; 4]; MAX_ARENAS / 4],
+}
+
+/// The columns with uploaded sections, each in a slot the visibility masks
+/// and the metas refer to it by.
+#[derive(Default)]
+pub(crate) struct Columns {
+    slots: Vec<Option<Column>>,
+    free: Vec<u32>,
+    by_pos: HashMap<ChunkPos, u32>,
+    /// Sections over every column.
+    sections: usize,
+}
+
+pub(crate) struct Column {
+    pos: ChunkPos,
+    sections: Vec<SectionAlloc>,
+    /// What the sections take, summed.
+    vertices: u64,
+    indices: u64,
+}
+
+impl Column {
+    /// What the column's sections take.
+    fn need(&self) -> Need {
+        let mut need = Need::default();
+        for sec in &self.sections {
+            need.add(sec.vtx_len, sec.idx_len);
+        }
+        need
+    }
+}
+
+impl Columns {
+    fn get(&self, pos: &ChunkPos) -> Option<&Column> {
+        self.by_pos.get(pos).map(|&slot| self.by_slot(slot))
+    }
+
+    fn slot(&self, pos: &ChunkPos) -> Option<u32> {
+        self.by_pos.get(pos).copied()
+    }
+
+    fn by_slot(&self, slot: u32) -> &Column {
+        self.slots[slot as usize]
+            .as_ref()
+            .expect("a column slot in use")
+    }
+
+    fn by_slot_mut(&mut self, slot: u32) -> &mut Column {
+        self.slots[slot as usize]
+            .as_mut()
+            .expect("a column slot in use")
+    }
+
+    /// `pos`'s slot, taking one if it has none.
+    fn slot_or_insert(&mut self, pos: ChunkPos) -> u32 {
+        if let Some(&slot) = self.by_pos.get(&pos) {
+            return slot;
+        }
+        let column = Column {
+            pos,
+            sections: Vec::new(),
+            vertices: 0,
+            indices: 0,
+        };
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                self.slots[slot as usize] = Some(column);
+                slot
+            }
+            None => {
+                self.slots.push(Some(column));
+                self.slots.len() as u32 - 1
+            }
+        };
+        self.by_pos.insert(pos, slot);
+        slot
+    }
+
+    fn remove(&mut self, pos: &ChunkPos) -> Option<Column> {
+        let slot = self.by_pos.remove(pos)?;
+        let column = self.slots[slot as usize].take()?;
+        self.free.push(slot);
+        self.sections -= column.sections.len();
+        Some(column)
+    }
+
+    /// Adds `section` to `slot`'s column, returning its index there.
+    fn push(&mut self, slot: u32, section: SectionAlloc) -> usize {
+        self.sections += 1;
+        let column = self.by_slot_mut(slot);
+        column.vertices += u64::from(section.vtx_len);
+        column.indices += u64::from(section.idx_len);
+        column.sections.push(section);
+        column.sections.len() - 1
+    }
+
+    /// Drops `slot`'s sections `keep` rejects, handing each to `dropped`.
+    fn retain(
+        &mut self,
+        slot: u32,
+        mut keep: impl FnMut(&SectionAlloc) -> bool,
+        mut dropped: impl FnMut(SectionAlloc),
+    ) {
+        let column = self.by_slot_mut(slot);
+        let mut i = 0;
+        let mut removed = 0;
+        while i < column.sections.len() {
+            if keep(&column.sections[i]) {
+                i += 1;
+                continue;
+            }
+            let section = column.sections.swap_remove(i);
+            column.vertices -= u64::from(section.vtx_len);
+            column.indices -= u64::from(section.idx_len);
+            removed += 1;
+            dropped(section);
+        }
+        self.sections -= removed;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u32, &Column)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, column)| Some((slot as u32, column.as_ref()?)))
+    }
+
+    fn len(&self) -> usize {
+        self.by_pos.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_pos.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.by_pos.clear();
+        self.sections = 0;
+    }
+}
+
+/// One arena's run of meta slots in the meta and indirect buffers: its
+/// sections' metas, then headroom up to `cap`, so a section arriving or
+/// leaving touches only this run.
+#[derive(Default)]
+struct Segment {
+    base: u32,
+    cap: u32,
+    metas: Vec<ChunkMeta>,
+    /// Slots of the run to write to the GPU, over the next `pending` frame
+    /// slots; the end may lie past `metas` to clear slots that emptied.
+    dirty: Option<(u32, u32)>,
+    pending: u32,
+}
+
+impl Segment {
+    fn mark(&mut self, lo: u32, hi: u32) {
+        self.dirty = Some(match self.dirty {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+        self.pending = MAX_FRAMES_IN_FLIGHT as u32;
+    }
+}
+
+/// The per-arena draw lists, kept up to date as sections come and go rather
+/// than rebuilt, laid out back to back in the meta buffer.
+#[derive(Default)]
+pub(crate) struct Lists {
+    columns: Columns,
+    segments: Vec<Segment>,
+    /// The next segment the front-to-back sort reaches, while one is under
+    /// way.
+    sort_at: Option<usize>,
+    /// Eye position at the last front-to-back sort.
+    last_sort_cam: DVec3,
+}
+
+impl Lists {
+    /// Meta slots over every segment, headroom included.
+    fn slots(&self) -> u32 {
+        self.segments
+            .iter()
+            .map(|s| s.base + s.cap)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Adds `section` to `slot`'s column and lists it, as
+    /// [`Self::list_meta`] does.
+    fn insert(&mut self, slot: u32, section: SectionAlloc) -> bool {
+        let section_index = section.section_index;
+        self.columns.push(slot, section);
+        self.list_meta(slot, section_index)
+    }
+
+    /// Lists the meta of `slot`'s section `section_index` in its arena's
+    /// segment, laying the segments out anew when that is full. Returns
+    /// whether they moved.
+    fn list_meta(&mut self, slot: u32, section_index: i32) -> bool {
+        let sec = self.section_at(slot, section_index);
+        let (arena, meta) = (sec.arena as usize, sec.meta(slot));
+        if self.segments.len() <= arena {
+            self.segments.resize_with(arena + 1, Segment::default);
+        }
+        let at = self.segments[arena].metas.len() as u32;
+        self.section_at(slot, section_index).meta_index = at;
+        let segment = &mut self.segments[arena];
+        segment.metas.push(meta);
+        if at < segment.cap {
+            segment.mark(at, at + 1);
+            return false;
+        }
+        self.relayout();
+        true
+    }
+
+    /// Drops the meta at `index` of `arena`'s list, moving its last into the
+    /// gap.
+    fn remove(&mut self, arena: u16, index: u32) {
+        let segment = &mut self.segments[arena as usize];
+        let last = segment.metas.len() as u32 - 1;
+        segment.metas.swap_remove(index as usize);
+        segment.mark(index, last + 1);
+        if index < last {
+            let moved = segment.metas[index as usize];
+            self.section_mut(&moved).meta_index = index;
+        }
+    }
+
+    /// The section `meta` stands for.
+    fn section_mut(&mut self, meta: &ChunkMeta) -> &mut SectionAlloc {
+        self.section_at(meta.column, meta.section as i32)
+    }
+
+    /// `slot`'s section `section_index`.
+    fn section_at(&mut self, slot: u32, section_index: i32) -> &mut SectionAlloc {
+        self.columns
+            .by_slot_mut(slot)
+            .sections
+            .iter_mut()
+            .find(|s| s.section_index == section_index)
+            .expect("a column's section")
+    }
+
+    /// Drops `slot`'s sections `keep` rejects from their lists and the
+    /// column, returning them.
+    fn remove_sections(
+        &mut self,
+        slot: u32,
+        keep: impl Fn(&SectionAlloc) -> bool,
+    ) -> Vec<SectionAlloc> {
+        let to_drop: Vec<i32> = self
+            .columns
+            .by_slot(slot)
+            .sections
+            .iter()
+            .filter(|s| !keep(s))
+            .map(|s| s.section_index)
+            .collect();
+        for si in to_drop {
+            let (arena, index) = {
+                let sec = self.section_at(slot, si);
+                (sec.arena, sec.meta_index)
+            };
+            self.remove(arena, index);
+        }
+        let mut dropped = Vec::new();
+        self.columns
+            .retain(slot, keep, |section| dropped.push(section));
+        dropped
+    }
+
+    /// Takes `slot`'s section `section_index` out of its list, lets `update`
+    /// change where its geometry lives, and lists it again. Returns whether
+    /// the segments moved.
+    fn move_section(
+        &mut self,
+        slot: u32,
+        section_index: i32,
+        update: impl FnOnce(&mut SectionAlloc),
+    ) -> bool {
+        let (arena, index) = {
+            let sec = self.section_at(slot, section_index);
+            (sec.arena, sec.meta_index)
+        };
+        self.remove(arena, index);
+        update(self.section_at(slot, section_index));
+        self.list_meta(slot, section_index)
+    }
+
+    /// Lays the segments out back to back, each with headroom.
+    fn relayout(&mut self) {
+        let mut base = 0;
+        for segment in &mut self.segments {
+            let len = segment.metas.len() as u32;
+            segment.base = base;
+            segment.cap = len.max(MIN_SEGMENT).next_power_of_two();
+            base += segment.cap;
+            segment.mark(0, segment.cap);
+        }
+    }
+
+    /// Starts a front-to-back sort of every list when the eye has moved far
+    /// enough since the last, then sorts one list per call until done.
+    pub(crate) fn sort_step(&mut self, eye: DVec3) {
+        if (eye - self.last_sort_cam).length_squared() > SORT_RECAM_SQ {
+            self.last_sort_cam = eye;
+            self.sort_at = Some(0);
+        }
+        let Some(start) = self.sort_at else {
+            return;
+        };
+        let Some(arena) = (start..self.segments.len()).find(|&i| self.segments[i].metas.len() > 1)
+        else {
+            self.sort_at = None;
+            return;
+        };
+        self.sort_at = Some(arena + 1);
+        let eye = self.last_sort_cam;
+        let mut metas = std::mem::take(&mut self.segments[arena].metas);
+        metas.sort_by_cached_key(|m| (m.center_dist_sq(eye) as f32).to_bits());
+        for (i, meta) in metas.iter().enumerate() {
+            self.section_mut(meta).meta_index = i as u32;
+        }
+        let segment = &mut self.segments[arena];
+        segment.metas = metas;
+        segment.mark(0, segment.metas.len() as u32);
+    }
+
+    /// Hands the slots marked since to `write`, as `(byte offset, metas)`,
+    /// for one frame slot.
+    fn write_pending(&mut self, mut write: impl FnMut(usize, &[ChunkMeta])) {
+        for segment in &mut self.segments {
+            let Some((lo, hi)) = segment.dirty else {
+                continue;
+            };
+            let hi = hi.min(segment.cap);
+            let len = segment.metas.len() as u32;
+            let metas: Vec<ChunkMeta> = (lo..hi)
+                .map(|i| {
+                    if i < len {
+                        segment.metas[i as usize]
+                    } else {
+                        bytemuck::Zeroable::zeroed()
+                    }
+                })
+                .collect();
+            write(
+                (segment.base + lo) as usize * size_of::<ChunkMeta>(),
+                &metas,
+            );
+            segment.pending -= 1;
+            if segment.pending == 0 {
+                segment.dirty = None;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.columns.clear();
+        for segment in &mut self.segments {
+            segment.metas.clear();
+        }
+        self.relayout();
+        self.sort_at = None;
+    }
 }
 
 /// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
 /// `first_index`/`index_count` are the section's index slice and
 /// `vertex_offset` its vertex slice base, both in `arena`; `vtx_len` is the
 /// slice length, kept so the slices can be returned to the arena on removal.
-/// `uploaded_at` drives the per-section fade so editing one section never
+/// `uploaded_ms` drives the per-section fade so editing one section never
 /// re-fades the rest of the column.
 pub(crate) struct SectionAlloc {
     section_index: i32,
@@ -362,20 +697,22 @@ pub(crate) struct SectionAlloc {
     /// Opaque index count (the GPU-culled draw); water is excluded.
     index_count: u32,
     /// Leading indices belonging to the solid (no-discard) pass; the rest are
-    /// cutout. Passed to the GPU via `ChunkMeta.origin[3]`.
+    /// cutout.
     solid_index_count: u32,
-    /// Translucent water index slice, stored right after the opaque indices in
-    /// the same index allocation. Drawn in a separate blended pass.
-    water_first_index: u32,
+    /// Translucent water indices, stored right after the opaque ones in the
+    /// same index allocation and drawn in a separate blended pass.
     water_index_count: u32,
     /// Total allocated index slice length (opaque + water), for freeing.
     idx_len: u32,
     vertex_offset: i32,
     vtx_len: u32,
-    uploaded_at: std::time::Instant,
+    /// Milliseconds since the store was made at the upload; 0 for no fade.
+    uploaded_ms: u32,
     /// Upload epoch this section's geometry came from; an older upload is
     /// rejected. See [`ChunkMeshData::upload_epoch`].
     epoch: u64,
+    /// Where its meta sits in its arena's list.
+    meta_index: u32,
 }
 
 impl SectionAlloc {
@@ -390,56 +727,88 @@ impl SectionAlloc {
             index_len: self.idx_len,
         }
     }
-}
 
-pub(crate) struct ChunkAlloc {
-    sections: Vec<SectionAlloc>,
-}
-
-impl ChunkAlloc {
-    /// What the column's sections take.
-    fn need(&self) -> Need {
-        let mut need = Need::default();
-        for sec in &self.sections {
-            need.add(sec.vtx_len, sec.idx_len);
+    /// The section's draw-list entry, for a column in `slot`.
+    fn meta(&self, slot: u32) -> ChunkMeta {
+        let [min_x, min_y, min_z, _] = self.aabb.min;
+        let [max_x, max_y, max_z, _] = self.aabb.max;
+        ChunkMeta {
+            aabb_min: [min_x, min_y, min_z],
+            arena: u32::from(self.arena),
+            aabb_max: [max_x, max_y, max_z],
+            index_count: self.index_count,
+            first_index: self.first_index,
+            vertex_offset: self.vertex_offset,
+            visibility: 1.0f32.to_bits(),
+            solid_index_count: self.solid_index_count,
+            origin: self.origin,
+            water_index_count: self.water_index_count,
+            column: slot,
+            section: self.section_index as u32,
+            uploaded_ms: self.uploaded_ms,
+            _pad: 0,
         }
-        need
     }
 }
 
 #[cfg(any(test, feature = "cpu-bench"))]
-impl ChunkAlloc {
-    /// A column of synthetic full-size sections at `section_indices`, all
-    /// uploaded at `uploaded_at`, for tests and the CPU bench.
-    pub(crate) fn synthetic(
+impl Lists {
+    /// Lists synthetic `sections` of the column at `pos`, all in `arena`.
+    pub(crate) fn list(
+        &mut self,
         pos: ChunkPos,
         min_y: i32,
-        section_indices: impl IntoIterator<Item = i32>,
-        uploaded_at: std::time::Instant,
-    ) -> Self {
-        let sections = section_indices
-            .into_iter()
-            .map(|si| SectionAlloc {
-                section_index: si,
-                aabb: ChunkAABB {
-                    min: [0.0, 0.0, 0.0, 0.0],
-                    max: [16.0, 16.0, 16.0, 0.0],
-                },
-                origin: [pos.x * 16, min_y + si * 16, pos.z * 16],
-                arena: 0,
-                first_index: 0,
-                index_count: 6,
-                solid_index_count: 6,
-                water_first_index: 0,
-                water_index_count: 0,
-                idx_len: 6,
-                vertex_offset: 0,
-                vtx_len: 4,
-                uploaded_at,
-                epoch: 0,
-            })
-            .collect();
-        Self { sections }
+        sections: impl IntoIterator<Item = i32>,
+        arena: u16,
+    ) {
+        let slot = self.columns.slot_or_insert(pos);
+        for si in sections {
+            self.insert(slot, SectionAlloc::synthetic(pos, min_y, si, arena));
+        }
+    }
+}
+
+#[cfg(feature = "cpu-bench")]
+impl Lists {
+    /// Sets the next sort step at `arena`, keyed to `eye`.
+    pub(crate) fn sort_from(&mut self, arena: usize, eye: DVec3) {
+        self.last_sort_cam = eye;
+        self.sort_at = Some(arena);
+    }
+
+    /// Drops the column at `pos` from its lists.
+    pub(crate) fn drop_column(&mut self, pos: ChunkPos) {
+        if let Some(slot) = self.columns.slot(&pos) {
+            self.remove_sections(slot, |_| false);
+            self.columns.remove(&pos);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "cpu-bench"))]
+impl SectionAlloc {
+    /// A synthetic full-size section `si` of the column at `pos`, in `arena`,
+    /// for tests and the CPU bench.
+    pub(crate) fn synthetic(pos: ChunkPos, min_y: i32, si: i32, arena: u16) -> Self {
+        Self {
+            section_index: si,
+            aabb: ChunkAABB {
+                min: [0.0, 0.0, 0.0, 0.0],
+                max: [16.0, 16.0, 16.0, 0.0],
+            },
+            origin: [pos.x * 16, min_y + si * 16, pos.z * 16],
+            arena,
+            first_index: 0,
+            index_count: 6,
+            solid_index_count: 6,
+            water_index_count: 0,
+            idx_len: 6,
+            vertex_offset: 0,
+            vtx_len: 4,
+            uploaded_ms: 0,
+            epoch: 0,
+            meta_index: 0,
+        }
     }
 }
 
@@ -511,24 +880,29 @@ struct Arena {
 }
 
 impl Arena {
-    fn new(device: &rhi::backend::Device, use_staging: bool, format: TerrainFormat) -> Self {
+    fn new(
+        device: &rhi::backend::Device,
+        use_staging: bool,
+        format: TerrainFormat,
+        size: ArenaSize,
+    ) -> Self {
         Self {
             vertex_buffer: create_pool(
                 device,
                 use_staging,
                 "vertex_arena",
-                u64::from(ARENA_VERTICES) * format.vertex_size(),
+                u64::from(size.vertices) * format.vertex_size(),
                 rhi::BufferUsages::VERTEX,
             ),
             index_buffer: create_pool(
                 device,
                 use_staging,
                 "index_arena",
-                u64::from(ARENA_INDICES) * INDEX_SIZE,
+                u64::from(size.indices) * INDEX_SIZE,
                 rhi::BufferUsages::INDEX,
             ),
-            vertices: Tlsf::new(ARENA_VERTICES),
-            indices: Tlsf::new(ARENA_INDICES),
+            vertices: Tlsf::new(size.vertices),
+            indices: Tlsf::new(size.indices),
             doomed: None,
         }
     }
@@ -541,14 +915,6 @@ impl Arena {
         self.vertex_buffer.destroy(device);
         self.index_buffer.destroy(device);
     }
-}
-
-/// The meta and indirect buffer sizes for `draws` draws.
-fn list_sizes(draws: usize) -> (u64, u64) {
-    (
-        (draws * size_of::<ChunkMeta>()) as u64,
-        (draws * size_of::<DrawCommand>()) as u64,
-    )
 }
 
 /// The arena that can be drawn from and allocated in: neither destroyed nor
@@ -587,14 +953,16 @@ fn alloc_in(
     None
 }
 
-/// Groups `copies` by destination arena and records them from `src`'s
-/// buffers, or the staging buffer's halves when `src` is `None`.
+/// A copy into an arena: the arena, and its vertex and index copies.
+type ArenaCopy = (u16, rhi::BufferCopy, rhi::BufferCopy);
+
+/// Groups `copies` by destination arena and records them from the `src`
+/// vertex and index buffers.
 fn record_copies(
     encoder: &rhi::backend::CommandEncoder,
     arenas: &[Option<Arena>],
-    src: Option<&Arena>,
-    staging: &rhi::backend::Buffer,
-    copies: &mut [(u16, rhi::BufferCopy, rhi::BufferCopy)],
+    src: (rhi::backend::BufferHandle, rhi::backend::BufferHandle),
+    copies: &mut [ArenaCopy],
 ) {
     copies.sort_unstable_by_key(|&(arena, ..)| arena);
     for group in copies.chunk_by(|a, b| a.0 == b.0) {
@@ -603,24 +971,58 @@ fn record_copies(
         };
         let vertex: Vec<_> = group.iter().map(|&(_, v, _)| v).collect();
         let index: Vec<_> = group.iter().map(|&(.., i)| i).collect();
-        let (src_vertex, src_index) = match src {
-            Some(src) => (src.vertex_buffer.handle(), src.index_buffer.handle()),
-            None => (staging.handle(), staging.handle()),
-        };
-        encoder.copy_buffer(src_vertex, dst.vertex_buffer.handle(), &vertex);
-        encoder.copy_buffer(src_index, dst.index_buffer.handle(), &index);
+        encoder.copy_buffer(src.0, dst.vertex_buffer.handle(), &vertex);
+        encoder.copy_buffer(src.1, dst.index_buffer.handle(), &index);
     }
+}
+
+/// Records `copies` grouped by their tag, from the vertex and index buffers
+/// `src_of` names for each tag; a tag it names none for is skipped.
+fn record_grouped<T: Copy + Ord>(
+    encoder: &rhi::backend::CommandEncoder,
+    arenas: &[Option<Arena>],
+    copies: &mut [(T, ArenaCopy)],
+    mut src_of: impl FnMut(T) -> Option<(rhi::backend::BufferHandle, rhi::backend::BufferHandle)>,
+) {
+    copies.sort_unstable_by_key(|&(tag, _)| tag);
+    for group in copies.chunk_by(|a, b| a.0 == b.0) {
+        let Some(src) = src_of(group[0].0) else {
+            continue;
+        };
+        let mut copies: Vec<_> = group.iter().map(|&(_, copy)| copy).collect();
+        record_copies(encoder, arenas, src, &mut copies);
+    }
+}
+
+/// The camera's draw list and a shader pack's `shadow` one, if made.
+fn draw_lists<'a>(
+    camera: &'a mut DrawList,
+    shadow: &'a mut Option<DrawList>,
+) -> impl Iterator<Item = &'a mut DrawList> {
+    std::iter::once(camera).chain(shadow)
 }
 
 pub struct ChunkBufferStore {
     indirect_draw: IndirectDrawFeatures,
     /// By id; a destroyed arena's slot is reused by the next one.
     arenas: Vec<Option<Arena>>,
-    staging_buffer: rhi::backend::Buffer,
+    /// A frame's uploads, written during the update and copied into the
+    /// arenas as the frame starts; one per frame that may still read one.
+    staging: Vec<rhi::backend::Buffer>,
+    /// How much of each staging buffer's halves the pending copies use, and
+    /// the `frame_seq` until which frames may still read it.
+    staging_used: [(usize, usize); STAGING_SLOTS],
+    staging_busy: [u64; STAGING_SLOTS],
+    /// Staging copies to record as the next frame starts, by staging slot.
+    pending_copies: Vec<(usize, ArenaCopy)>,
+    /// Compaction's copies to record as the next frame starts, by source
+    /// arena.
+    pending_moves: Vec<(u16, ArenaCopy)>,
     use_staging: bool,
     format: TerrainFormat,
-    /// Without `VK_EXT_memory_budget`, what the arenas' share is of.
-    device_local_bytes: u64,
+    arena_size: ArenaSize,
+    /// The most arenas there may be, whatever the budget.
+    max_arenas: usize,
     /// Columns whose sections found no room, or were evicted for nearer
     /// ones; handed back for re-meshing once there's room for them.
     starved: HashMap<ChunkPos, Starved>,
@@ -637,40 +1039,38 @@ pub struct ChunkBufferStore {
     /// The `frame_seq` before which compaction doesn't start.
     compact_after: u64,
 
-    chunks: HashMap<ChunkPos, ChunkAlloc>,
+    lists: Lists,
     /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
     chunk_visibility: HashMap<ChunkPos, u32>,
-    /// Per arena, the camera's and the shadow view's draws.
-    camera_meta: Vec<Vec<ChunkMeta>>,
-    shadow_meta: Vec<Vec<ChunkMeta>>,
-    /// Capacity (in draws, over every arena) of the draw lists' meta and
-    /// indirect buffers.
+    /// The masks by column slot, as the cull reads them, and the frame slots
+    /// still to receive them.
+    column_visibility: Vec<u32>,
+    visibility_pending: u32,
+    /// Per frame slot, the metas and the column masks the culls read.
+    meta_buffers: Vec<rhi::backend::Buffer>,
+    visibility_buffers: Vec<rhi::backend::Buffer>,
+    /// Capacity, in meta slots and column slots, of those buffers.
     max_meta: usize,
+    max_columns: usize,
     camera: DrawList,
     /// A shader pack's shadow view, made on its first cull.
     shadow: Option<DrawList>,
     /// The camera's per-arena draw counts, solid then cutout, copied after
     /// each cull for the debug overlay.
     count_readbacks: Vec<rhi::backend::Buffer>,
-    meta_dirty: bool,
-    /// End of the current fade-in window. While `now < fade_until` the
-    /// per-section fade values change each frame, so the draw lists must be
-    /// rebuilt; an O(1) check replacing the old all-sections scan.
-    fade_until: std::time::Instant,
-    /// Eye position at the last front-to-back sort; the sort (an early-Z
-    /// optimization) is only redone once the camera moves past a threshold.
-    last_sort_cam: DVec3,
     /// The eye of the last cull, which eviction measures distance from.
     eye: Option<DVec3>,
+    /// What `uploaded_ms` counts from.
+    epoch: std::time::Instant,
 
     compute_pipeline: rhi::backend::ComputePipeline,
     compute_layout: rhi::backend::PipelineLayout,
     cull_layout: rhi::backend::BindGroupLayout,
 
-    /// The shadow lists need rebuilding from the sections.
-    shadow_dirty: bool,
+    /// Sections uploaded before the first cull appear at once; later ones
+    /// fade in.
     fade_enabled: bool,
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
@@ -692,25 +1092,30 @@ impl ChunkBufferStore {
         let format = TerrainFormat::Vanilla;
 
         // The integrated path writes mapped memory directly and never touches
-        // the staging buffer.
-        let staging_buffer = rhi::backend::Buffer::new(
-            device,
-            "staging",
-            if use_staging { STAGING_SIZE } else { 64 << 10 },
-            rhi::BufferUsages::COPY_SRC,
-            rhi::MemoryLocation::Host,
-        );
+        // the staging buffers.
+        let staging = (0..STAGING_SLOTS)
+            .map(|_| {
+                rhi::backend::Buffer::new(
+                    device,
+                    "staging",
+                    if use_staging { STAGING_SIZE } else { 64 << 10 },
+                    rhi::BufferUsages::COPY_SRC,
+                    rhi::MemoryLocation::Host,
+                )
+            })
+            .collect();
 
+        let location = arena_location(use_staging);
         tracing::info!(
-            "Chunk arenas: {}, {} MB each; GPU VRAM {} MB, budget query {}",
+            "Chunk arenas: {}, {} MB each; their heaps {} MB, budget query {}",
             if use_staging {
                 "DEVICE_LOCAL + staging"
             } else {
                 "HOST_VISIBLE"
             },
-            arena_bytes(format) / (1024 * 1024),
-            device.device_local_bytes / (1024 * 1024),
-            if device.device_local_budget().is_some() {
+            ARENA_SIZE.bytes(format) / (1024 * 1024),
+            device.memory_bytes(location) / (1024 * 1024),
+            if device.memory_budget(location).is_some() {
                 "on"
             } else {
                 "off"
@@ -725,25 +1130,42 @@ impl ChunkBufferStore {
             "cull",
             shader::include_shader!("cull.comp"),
         );
+        let meta_buffers = meta_buffers(device, INITIAL_META);
+        let visibility_buffers = visibility_buffers(device, INITIAL_COLUMNS);
+        let camera = DrawList::new(
+            device,
+            cull_layout,
+            &meta_buffers,
+            &visibility_buffers,
+            INITIAL_META,
+        );
 
         Self {
             indirect_draw,
             arenas: Vec::new(),
-            staging_buffer,
+            staging,
+            staging_used: [(0, 0); STAGING_SLOTS],
+            staging_busy: [0; STAGING_SLOTS],
+            pending_copies: Vec::new(),
+            pending_moves: Vec::new(),
             use_staging,
             format,
-            device_local_bytes: device.device_local_bytes,
+            arena_size: ARENA_SIZE,
+            max_arenas: MAX_ARENAS,
             starved: HashMap::new(),
             retry_due: false,
             frontier_sq: f64::INFINITY,
             draining: None,
             compact_after: 0,
-            chunks: HashMap::new(),
+            lists: Lists::default(),
             chunk_visibility: HashMap::new(),
-            camera_meta: Vec::new(),
-            shadow_meta: Vec::new(),
+            column_visibility: Vec::new(),
+            visibility_pending: 0,
+            meta_buffers,
+            visibility_buffers,
             max_meta: INITIAL_META,
-            camera: DrawList::new(device, cull_layout, INITIAL_META),
+            max_columns: INITIAL_COLUMNS,
+            camera,
             shadow: None,
             count_readbacks: (0..MAX_FRAMES_IN_FLIGHT)
                 .map(|_| {
@@ -756,14 +1178,11 @@ impl ChunkBufferStore {
                     )
                 })
                 .collect(),
-            meta_dirty: true,
-            fade_until: std::time::Instant::now(),
-            last_sort_cam: DVec3::MAX,
             eye: None,
+            epoch: std::time::Instant::now(),
             compute_pipeline,
             compute_layout,
             cull_layout,
-            shadow_dirty: true,
             fade_enabled: false,
             last_draw_count: 0,
             frame_seq: 0,
@@ -777,28 +1196,59 @@ impl ChunkBufferStore {
         self.last_draw_count
     }
 
-    /// Submit the accumulated staging copies as a single transfer and wait for
-    /// it, so a frame's uploads synchronize once instead of once per mesh.
-    fn flush_transfer(
-        &self,
-        device: &rhi::backend::Device,
-        copies: &mut Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)>,
-    ) {
-        if copies.is_empty() {
+    /// Milliseconds since the store was made, never 0 (no fade).
+    fn now_ms(&self) -> u32 {
+        (self.epoch.elapsed().as_millis() as u32).max(1)
+    }
+
+    /// The staging buffer the next frame's uploads go in.
+    fn upload_slot(&self) -> usize {
+        (self.frame_seq as usize + 1) % STAGING_SLOTS
+    }
+
+    /// Records the pending staging copies and compaction moves into the
+    /// frame, ahead of its draws.
+    fn record_uploads(&mut self, encoder: &rhi::backend::CommandEncoder) {
+        if self.pending_copies.is_empty() && self.pending_moves.is_empty() {
             return;
         }
-        device.submit(|encoder| {
-            record_copies(encoder, &self.arenas, None, &self.staging_buffer, copies);
+        let busy_until = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
+        record_grouped(encoder, &self.arenas, &mut self.pending_copies, |slot| {
+            self.staging_used[slot] = (0, 0);
+            self.staging_busy[slot] = busy_until;
+            let staging = self.staging[slot].handle();
+            Some((staging, staging))
         });
-        copies.clear();
+        self.pending_copies.clear();
+        record_grouped(encoder, &self.arenas, &mut self.pending_moves, |from| {
+            let src = self.arenas[from as usize].as_ref()?;
+            Some((src.vertex_buffer.handle(), src.index_buffer.handle()))
+        });
+        self.pending_moves.clear();
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::DrawInput);
+    }
+
+    /// Submits the pending staging copies now and waits for them, when a
+    /// batch outgrows its staging buffer, or a frame that never drew left it
+    /// in use.
+    fn flush_now(&mut self, device: &rhi::backend::Device) {
+        device.submit(|encoder| {
+            record_grouped(encoder, &self.arenas, &mut self.pending_copies, |slot| {
+                let staging = self.staging[slot].handle();
+                Some((staging, staging))
+            });
+        });
+        self.pending_copies.clear();
+        self.staging_used = [(0, 0); STAGING_SLOTS];
+        self.staging_busy = [0; STAGING_SLOTS];
     }
 
     /// Upload a batch of mesh results, each replacing the sections in its
-    /// `mesh.replaced` range. Staging copies for the whole batch are coalesced
-    /// into as few transfers as the staging buffer holds (one per overflow,
-    /// plus a final flush), each synchronized by a single fence wait — so a
-    /// streaming frame stalls once, not once per mesh. Returns the starved
-    /// sections that may fit now, per column, for re-meshing.
+    /// `mesh.replaced` range. The vertices go to this frame's staging buffer
+    /// and the copies into the arenas are recorded as the frame starts, so a
+    /// streaming frame never waits for the GPU; only a batch outgrowing the
+    /// staging buffer is flushed and waited for on the spot. Returns the
+    /// starved sections that may fit now, per column, for re-meshing.
     pub fn upload_batch(
         &mut self,
         device: &rhi::backend::Device,
@@ -873,11 +1323,14 @@ impl ChunkBufferStore {
 
         let staging_half = STAGING_SIZE as usize / 2;
         let vertex_size = self.format.vertex_size();
-        // Copies accumulated for the current (not-yet-submitted) transfer, and the
-        // running write cursors into each half of the staging buffer.
-        let mut copies: Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)> = Vec::new();
-        let mut stg_v = 0usize;
-        let mut stg_i = 0usize;
+        let slot = self.upload_slot();
+        // A frame that began but never drew left its staging buffer waiting
+        // on copies no frame recorded; a frame may still be reading it.
+        if self.staging_busy[slot] > self.frame_seq {
+            device.wait_idle();
+            self.flush_now(device);
+        }
+        let now_ms = self.now_ms();
 
         for mesh in meshes {
             // The covered sections this job is authoritative for: reject any where
@@ -888,7 +1341,8 @@ impl ChunkBufferStore {
                 .clone()
                 .filter(|si| {
                     let stored = self
-                        .chunks
+                        .lists
+                        .columns
                         .get(&mesh.pos)
                         .and_then(|c| c.sections.iter().find(|s| s.section_index == *si))
                         .map(|s| s.epoch)
@@ -922,6 +1376,7 @@ impl ChunkBufferStore {
                         i_bytes,
                     );
                     self.retire_sections(mesh.pos, &accepted);
+                    self.drop_if_empty(mesh.pos);
                     continue;
                 }
             }
@@ -991,15 +1446,8 @@ impl ChunkBufferStore {
             // instantly while a freshly revealed one still fades in.
             let was_present = self.retire_sections(mesh.pos, &accepted);
             if plans.is_empty() {
-                // Every accepted section is now empty; drop the column if
-                // nothing remains.
-                if self
-                    .chunks
-                    .get(&mesh.pos)
-                    .is_some_and(|c| c.sections.is_empty())
-                {
-                    self.chunks.remove(&mesh.pos);
-                }
+                // Every accepted section is now empty.
+                self.drop_if_empty(mesh.pos);
                 continue;
             }
 
@@ -1010,14 +1458,14 @@ impl ChunkBufferStore {
                     .map(|p| p.index_len() as usize * INDEX_SIZE as usize)
                     .sum();
                 // This mesh alone fits a half (checked above), so a flush always
-                // makes room: submit the pending transfer and reset the cursors.
+                // makes room.
+                let (stg_v, stg_i) = self.staging_used[slot];
                 if stg_v + mv > staging_half || stg_i + mi > staging_half {
-                    self.flush_transfer(device, &mut copies);
-                    stg_v = 0;
-                    stg_i = 0;
+                    self.flush_now(device);
                 }
+                let (mut stg_v, mut stg_i) = self.staging_used[slot];
                 for p in &plans {
-                    self.staging_buffer.write_at(stg_v, p.verts);
+                    self.staging[slot].write_at(stg_v, p.verts);
                     let vbytes = p.verts.len();
                     let vertex = rhi::BufferCopy {
                         src_offset: stg_v as u64,
@@ -1027,15 +1475,16 @@ impl ChunkBufferStore {
                     stg_v += vbytes;
 
                     let off = staging_half + stg_i;
-                    let ibytes = p.write_indices(&mut self.staging_buffer, off);
+                    let ibytes = p.write_indices(&mut self.staging[slot], off);
                     let index = rhi::BufferCopy {
                         src_offset: off as u64,
                         dst_offset: u64::from(p.idx_off) * INDEX_SIZE,
                         size: ibytes as u64,
                     };
                     stg_i += ibytes;
-                    copies.push((p.arena, vertex, index));
+                    self.pending_copies.push((slot, (p.arena, vertex, index)));
                 }
+                self.staging_used[slot] = (stg_v, stg_i);
             } else {
                 for p in &plans {
                     let Some(arena) = self.arenas[p.arena as usize].as_mut() else {
@@ -1050,81 +1499,103 @@ impl ChunkBufferStore {
                 }
             }
 
-            let now = std::time::Instant::now();
-            let new_sections = plans.iter().map(|p| SectionAlloc {
-                section_index: p.section_index,
-                aabb: p.aabb,
-                origin: p.origin,
-                arena: p.arena,
-                first_index: p.idx_off,
-                index_count: p.indices.len() as u32,
-                solid_index_count: p.solid_index_count,
-                water_first_index: p.idx_off + p.indices.len() as u32,
-                water_index_count: p.water_indices.len() as u32,
-                idx_len: p.index_len(),
-                vertex_offset: p.vtx_off as i32,
-                vtx_len: p.vertex_count,
-                // A re-meshed section swaps instantly; a freshly revealed one fades in.
-                uploaded_at: if was_present.contains(&p.section_index) {
-                    now.checked_sub(std::time::Duration::from_secs(2))
-                        .unwrap_or(now)
-                } else {
-                    now
-                },
-                epoch: mesh.upload_epoch,
-            });
-
-            // Freshly revealed sections fade in, so extend the fade window the
-            // cull's O(1) check reads; re-meshed-only uploads swap instantly.
-            // Nearby columns never fade, so extending for them only forces
-            // redundant rebuilds — skip them. `last_sort_cam` is the camera the
-            // draw list is keyed to (unset => far, the safe default).
-            let revealed = plans
-                .iter()
-                .any(|p| !was_present.contains(&p.section_index));
-            if revealed && !column_nearby(self.fade_enabled, mesh.pos, self.last_sort_cam) {
-                let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
-                self.fade_until = self.fade_until.max(now + dur);
+            let column = self.column_slot(mesh.pos);
+            for p in &plans {
+                let section = SectionAlloc {
+                    section_index: p.section_index,
+                    aabb: p.aabb,
+                    origin: p.origin,
+                    arena: p.arena,
+                    first_index: p.idx_off,
+                    index_count: p.indices.len() as u32,
+                    solid_index_count: p.solid_index_count,
+                    water_index_count: p.water_indices.len() as u32,
+                    idx_len: p.index_len(),
+                    vertex_offset: p.vtx_off as i32,
+                    vtx_len: p.vertex_count,
+                    // A re-meshed section swaps instantly; a freshly revealed
+                    // one fades in, once the first cull has run.
+                    uploaded_ms: if was_present.contains(&p.section_index) || !self.fade_enabled {
+                        0
+                    } else {
+                        now_ms
+                    },
+                    epoch: mesh.upload_epoch,
+                    meta_index: 0,
+                };
+                self.lists.insert(column, section);
             }
-
-            self.chunks
-                .entry(mesh.pos)
-                .or_insert_with(|| ChunkAlloc {
-                    sections: Vec::new(),
-                })
-                .sections
-                .extend(new_sections);
         }
 
-        // Flush whatever remains accumulated from the last (or only) batch.
-        self.flush_transfer(device, &mut copies);
         self.ensure_meta_capacity(device);
-
         needs_remesh
     }
 
-    /// Grow the draw lists' meta and indirect buffers to hold every
-    /// section's draw. No-op while capacity suffices.
+    /// `pos`'s column slot, made with its visibility mask if it has none.
+    fn column_slot(&mut self, pos: ChunkPos) -> u32 {
+        let slot = self.lists.columns.slot_or_insert(pos) as usize;
+        if self.column_visibility.len() <= slot {
+            self.column_visibility.resize(slot + 1, u32::MAX);
+        }
+        let mask = self.chunk_visibility.get(&pos).copied().unwrap_or(u32::MAX);
+        if self.column_visibility[slot] != mask {
+            self.column_visibility[slot] = mask;
+            self.visibility_pending = MAX_FRAMES_IN_FLIGHT as u32;
+        }
+        slot as u32
+    }
+
+    /// Grow the meta and indirect buffers to hold every segment, and the
+    /// visibility masks every column. No-op while capacity suffices.
     fn ensure_meta_capacity(&mut self, device: &rhi::backend::Device) {
-        let needed: usize = self.chunks.values().map(|c| c.sections.len()).sum();
-        if needed <= self.max_meta {
+        let slots = self.lists.slots() as usize;
+        let columns = self.column_visibility.len();
+        if slots <= self.max_meta && columns <= self.max_columns {
             return;
         }
-        // The meta/indirect buffers are referenced by every in-flight frame's
-        // bind group; wait the GPU out before freeing them.
+        // The buffers are referenced by every in-flight frame's bind group;
+        // wait the GPU out before freeing them.
         device.wait_idle();
-        self.max_meta = (needed.saturating_mul(3) / 2)
-            .next_power_of_two()
-            .max(self.max_meta * 2);
-        let (layout, draws) = (self.cull_layout, self.max_meta);
-        for list in self.draw_lists_mut() {
-            list.regrow(device, layout, draws);
+        let grow_meta = slots > self.max_meta;
+        if grow_meta {
+            self.max_meta = (slots.saturating_mul(3) / 2)
+                .next_power_of_two()
+                .max(self.max_meta * 2);
+            util::destroy_buffers(device, &mut self.meta_buffers);
+            self.meta_buffers = meta_buffers(device, self.max_meta);
+            for segment in &mut self.lists.segments {
+                segment.mark(0, segment.cap);
+            }
+        }
+        if columns > self.max_columns {
+            self.max_columns = columns.next_power_of_two().max(self.max_columns * 2);
+            util::destroy_buffers(device, &mut self.visibility_buffers);
+            self.visibility_buffers = visibility_buffers(device, self.max_columns);
+            self.visibility_pending = MAX_FRAMES_IN_FLIGHT as u32;
+        }
+        for list in draw_lists(&mut self.camera, &mut self.shadow) {
+            if grow_meta {
+                list.regrow(device, self.max_meta);
+            }
+            list.bind(
+                device,
+                self.cull_layout,
+                &self.meta_buffers,
+                &self.visibility_buffers,
+            );
         }
     }
 
-    /// The camera's draw list and a shader pack's shadow one, if made.
-    fn draw_lists_mut(&mut self) -> impl Iterator<Item = &mut DrawList> {
-        std::iter::once(&mut self.camera).chain(&mut self.shadow)
+    /// Drops `pos`'s column once none of its sections remain.
+    fn drop_if_empty(&mut self, pos: ChunkPos) {
+        if self
+            .lists
+            .columns
+            .get(&pos)
+            .is_some_and(|c| c.sections.is_empty())
+        {
+            self.lists.columns.remove(&pos);
+        }
     }
 
     /// Return one slice's vertex and index ranges to its arena.
@@ -1153,38 +1624,38 @@ impl ChunkBufferStore {
         alloc_in(&mut self.arenas, self.draining, vertices, indices)
     }
 
-    /// Whether one more arena fits the budget: what `VK_EXT_memory_budget`
-    /// says this process may use, less headroom for everything else, or
-    /// without it a share of device-local memory. The first always fits.
+    /// Whether one more arena fits the budget of the heaps arenas go in:
+    /// what `VK_EXT_memory_budget` says this process may use, less headroom
+    /// for everything else, or without it a share of them. The first always
+    /// fits.
     fn can_add_arena(&self, device: &rhi::backend::Device) -> bool {
         let arenas = self.arena_count();
         if arenas == 0 {
             return true;
         }
-        if arenas as usize >= MAX_ARENAS {
+        if arenas as usize >= self.max_arenas {
             return false;
         }
-        let bytes = arena_bytes(self.format);
-        match device.device_local_budget() {
+        let bytes = self.arena_size.bytes(self.format);
+        let location = arena_location(self.use_staging);
+        match device.memory_budget(location) {
             Some(budget) => {
                 let headroom = MIN_BUDGET_HEADROOM.max(budget.budget / 8);
                 budget.usage + bytes + headroom <= budget.budget
             }
             None => {
                 (arenas + 1) * bytes
-                    <= (self.device_local_bytes as f64 * VRAM_BUDGET_FRACTION) as u64
+                    <= (device.memory_bytes(location) as f64 * BUDGET_FRACTION) as u64
             }
         }
     }
 
     fn add_arena(&mut self, device: &rhi::backend::Device) {
-        let arena = Arena::new(device, self.use_staging, self.format);
+        let arena = Arena::new(device, self.use_staging, self.format, self.arena_size);
         match self.arenas.iter().position(Option::is_none) {
             Some(id) => self.arenas[id] = Some(arena),
             None => self.arenas.push(Some(arena)),
         }
-        self.camera_meta.resize_with(self.arenas.len(), Vec::new);
-        self.shadow_meta.resize_with(self.arenas.len(), Vec::new);
         self.log_arenas("added");
     }
 
@@ -1197,42 +1668,57 @@ impl ChunkBufferStore {
         let arenas = self.arena_count();
         tracing::info!(
             "Chunk arena {change}: {arenas} arenas, {} MB",
-            arenas * arena_bytes(self.format) / (1024 * 1024)
+            arenas * self.arena_size.bytes(self.format) / (1024 * 1024)
         );
     }
 
     /// Evicts the columns farthest from the eye, all farther than `pos`, until
     /// they free what `pos` needs, so a full budget draws a shorter distance
     /// instead of leaving holes nearby. The evicted columns starve until
-    /// there's room for them again.
+    /// there's room for them again; when even all of them can't make room,
+    /// so does `pos`.
     fn evict_beyond(&mut self, pos: ChunkPos, need: Need) {
         let Some(eye) = self.eye else {
             return;
         };
-        let loaded = self
-            .chunks
-            .iter()
-            .map(|(&p, alloc)| (column_dist_sq(p, eye), p, alloc.need()));
-        let victims = eviction_victims(loaded, column_dist_sq(pos, eye), need);
-        let Some(&(nearest, _)) = victims.last() else {
-            return;
+        let dist = column_dist_sq(pos, eye);
+        let loaded = self.lists.columns.iter().map(|(_, column)| {
+            let taken = Need {
+                vertices: column.vertices,
+                indices: column.indices,
+                ..Need::default()
+            };
+            (column_dist_sq(column.pos, eye), column.pos, taken)
+        });
+        let (victims, freed) = eviction_victims(loaded, dist, need);
+        let frontier = match victims.last() {
+            Some(&(nearest, _)) if freed => nearest,
+            _ => dist,
         };
         for (_, victim) in victims {
             self.evict(victim);
             tracing::debug!("Evicted {victim:?} for {pos:?}");
         }
-        self.frontier_sq = self.frontier_sq.min(nearest);
+        self.frontier_sq = self.frontier_sq.min(frontier);
     }
 
     /// Drops `pos`'s mesh, starving the column until there's room for it.
     fn evict(&mut self, pos: ChunkPos) {
-        let Some(alloc) = self.chunks.remove(&pos) else {
+        let Some(column) = self.take_column(pos) else {
             return;
         };
-        self.retire_slices(alloc.sections.iter().map(SectionAlloc::slice));
-        let sections = alloc.sections.iter().map(|s| s.section_index);
-        self.starve(pos, sections, alloc.need());
-        self.meta_dirty = true;
+        let sections = column.sections.iter().map(|s| s.section_index);
+        self.starve(pos, sections, column.need());
+    }
+
+    /// Drops `pos`'s column from the draw lists and retires its slices.
+    fn take_column(&mut self, pos: ChunkPos) -> Option<Column> {
+        let slot = self.lists.columns.slot(&pos)?;
+        let dropped = self.lists.remove_sections(slot, |_| false);
+        self.retire_slices(dropped.iter().map(SectionAlloc::slice));
+        let mut column = self.lists.columns.remove(&pos)?;
+        column.sections = dropped;
+        Some(column)
     }
 
     fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
@@ -1284,9 +1770,10 @@ impl ChunkBufferStore {
             .sum();
         let dist = |pos| self.eye.map_or(0.0, |eye| column_dist_sq(pos, eye));
         let farthest_loaded = self
-            .chunks
-            .keys()
-            .map(|&pos| dist(pos))
+            .lists
+            .columns
+            .iter()
+            .map(|(_, column)| dist(column.pos))
             .fold(f64::NEG_INFINITY, f64::max);
         let waiting = self.starved.iter().map(|(&pos, s)| Waiting {
             dist: dist(pos),
@@ -1301,6 +1788,7 @@ impl ChunkBufferStore {
             (free_vertices, free_indices),
             self.frontier_sq,
             farthest_loaded,
+            self.arena_size,
         );
         self.frontier_sq = frontier_sq;
         for pos in retry {
@@ -1312,23 +1800,14 @@ impl ChunkBufferStore {
 
     /// Retires `pos`'s `sections`, returning those it had; the others stay.
     fn retire_sections(&mut self, pos: ChunkPos, sections: &HashSet<i32>) -> HashSet<i32> {
-        let mut freed = Vec::new();
-        let mut was_present = HashSet::new();
-        if let Some(entry) = self.chunks.get_mut(&pos) {
-            entry.sections.retain(|s| {
-                if sections.contains(&s.section_index) {
-                    was_present.insert(s.section_index);
-                    freed.push(s.slice());
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        self.retire_slices(freed);
-        // The draw list must drop them before their slices are reused.
-        self.meta_dirty = true;
-        was_present
+        let Some(slot) = self.lists.columns.slot(&pos) else {
+            return HashSet::new();
+        };
+        let dropped = self
+            .lists
+            .remove_sections(slot, |s| !sections.contains(&s.section_index));
+        self.retire_slices(dropped.iter().map(SectionAlloc::slice));
+        dropped.iter().map(|s| s.section_index).collect()
     }
 
     /// Defer returning slices to the arenas until `MAX_FRAMES_IN_FLIGHT`
@@ -1371,7 +1850,7 @@ impl ChunkBufferStore {
     /// as vanilla destroys an empty heap, keeping one for the next upload.
     fn free_empty_arenas(&mut self, device: &rhi::backend::Device) {
         let mut destroyed = false;
-        for (id, slot) in self.arenas.iter_mut().enumerate() {
+        for slot in self.arenas.iter_mut() {
             if slot
                 .as_ref()
                 .and_then(|a| a.doomed)
@@ -1380,8 +1859,6 @@ impl ChunkBufferStore {
                 if let Some(arena) = slot.take() {
                     arena.destroy(device);
                 }
-                self.camera_meta[id].clear();
-                self.shadow_meta[id].clear();
                 destroyed = true;
             }
         }
@@ -1406,7 +1883,7 @@ impl ChunkBufferStore {
 
     /// Once the arenas' contents would fit one fewer, drains the emptiest
     /// into the rest, a bounded amount per frame, so freeing it can shrink
-    /// the total.
+    /// the total. The copies are recorded as the frame starts.
     ///
     /// Not while columns are starved: they want the room, and the arena it
     /// frees would only be added back for them.
@@ -1421,10 +1898,7 @@ impl ChunkBufferStore {
         let from = match self.draining {
             Some(id) => id,
             None => {
-                let live = self.arenas.iter().enumerate().filter_map(|(id, slot)| {
-                    live(slot).map(|a| (id as u16, a.vertices.used(), a.indices.used()))
-                });
-                let Some(id) = arena_to_drain(live) else {
+                let Some(id) = arena_to_drain(self.live_use(), self.arena_size) else {
                     return;
                 };
                 tracing::debug!("Compacting chunk arena {id}");
@@ -1434,66 +1908,76 @@ impl ChunkBufferStore {
         };
 
         let vertex_size = self.format.vertex_size();
-        let mut copies: Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)> = Vec::new();
         let mut retired = Vec::new();
         let mut moved = 0;
-        'columns: for alloc in self.chunks.values_mut() {
-            for sec in alloc.sections.iter_mut().filter(|s| s.arena == from) {
-                if moved >= COMPACT_VERTICES_PER_FRAME {
-                    break 'columns;
-                }
-                let Some((to, vertex, index)) =
-                    alloc_in(&mut self.arenas, Some(from), sec.vtx_len, sec.idx_len)
-                else {
-                    tracing::debug!("No room to compact chunk arena {from}");
-                    self.draining = None;
-                    self.compact_after = self.frame_seq + COMPACT_BACKOFF_FRAMES;
-                    break 'columns;
-                };
-                copies.push((
-                    to,
-                    rhi::BufferCopy {
-                        src_offset: sec.vertex_offset as u64 * vertex_size,
-                        dst_offset: u64::from(vertex) * vertex_size,
-                        size: u64::from(sec.vtx_len) * vertex_size,
-                    },
-                    rhi::BufferCopy {
-                        src_offset: u64::from(sec.first_index) * INDEX_SIZE,
-                        dst_offset: u64::from(index) * INDEX_SIZE,
-                        size: u64::from(sec.idx_len) * INDEX_SIZE,
-                    },
+        // The arena's list is the sections in it.
+        let in_from: Vec<(u32, i32)> =
+            self.lists
+                .segments
+                .get(from as usize)
+                .map_or_else(Vec::new, |segment| {
+                    segment
+                        .metas
+                        .iter()
+                        .map(|m| (m.column, m.section as i32))
+                        .collect()
+                });
+        for (column, section_index) in in_from {
+            if moved >= COMPACT_VERTICES_PER_FRAME {
+                break;
+            }
+            let (vtx_len, idx_len) = {
+                let sec = self.lists.section_at(column, section_index);
+                (sec.vtx_len, sec.idx_len)
+            };
+            let Some((to, vertex, index)) =
+                alloc_in(&mut self.arenas, Some(from), vtx_len, idx_len)
+            else {
+                tracing::debug!("No room to compact chunk arena {from}");
+                self.draining = None;
+                self.compact_after = self.frame_seq + COMPACT_BACKOFF_FRAMES;
+                break;
+            };
+            let relaid = self.lists.move_section(column, section_index, |sec| {
+                self.pending_moves.push((
+                    from,
+                    (
+                        to,
+                        rhi::BufferCopy {
+                            src_offset: sec.vertex_offset as u64 * vertex_size,
+                            dst_offset: u64::from(vertex) * vertex_size,
+                            size: u64::from(sec.vtx_len) * vertex_size,
+                        },
+                        rhi::BufferCopy {
+                            src_offset: u64::from(sec.first_index) * INDEX_SIZE,
+                            dst_offset: u64::from(index) * INDEX_SIZE,
+                            size: u64::from(sec.idx_len) * INDEX_SIZE,
+                        },
+                    ),
                 ));
                 retired.push(sec.slice());
                 sec.arena = to;
-                sec.water_first_index = index + (sec.water_first_index - sec.first_index);
                 sec.first_index = index;
                 sec.vertex_offset = vertex as i32;
-                moved += sec.vtx_len;
+            });
+            if relaid {
+                self.ensure_meta_capacity(device);
             }
+            moved += vtx_len;
         }
-        if copies.is_empty() {
-            return;
-        }
-        let src = self.arenas[from as usize].as_ref();
-        device.submit(|encoder| {
-            record_copies(
-                encoder,
-                &self.arenas,
-                src,
-                &self.staging_buffer,
-                &mut copies,
-            );
-        });
         self.retire_slices(retired);
-        self.meta_dirty = true;
+    }
+
+    /// Each live arena as (id, vertices used, indices used).
+    fn live_use(&self) -> impl Iterator<Item = (u16, u32, u32)> + '_ {
+        self.arenas.iter().enumerate().filter_map(|(id, slot)| {
+            live(slot).map(|a| (id as u16, a.vertices.used(), a.indices.used()))
+        })
     }
 
     pub fn remove(&mut self, pos: &ChunkPos) {
         self.starved.remove(pos);
-        if let Some(alloc) = self.chunks.remove(pos) {
-            self.retire_slices(alloc.sections.iter().map(SectionAlloc::slice));
-            self.meta_dirty = true;
-        }
+        self.take_column(*pos);
     }
 
     /// Drops every mesh and, for a new format, the arenas, remade at its
@@ -1504,11 +1988,37 @@ impl ChunkBufferStore {
             return;
         }
         self.format = format;
+        self.drop_arenas(device);
+    }
+
+    /// Destroys every arena; the next upload makes them anew.
+    fn drop_arenas(&mut self, device: &rhi::backend::Device) {
         for arena in self.arenas.drain(..).flatten() {
             arena.destroy(device);
         }
-        self.camera_meta.clear();
-        self.shadow_meta.clear();
+        self.lists.segments.clear();
+    }
+
+    /// Arenas of `vertices`, at most `max` of them, so the harness fills
+    /// them at a small render distance. A new size drops every mesh as
+    /// [`Self::set_format`] does; returns whether it did. The caller waits
+    /// for in-flight frames first.
+    #[cfg(feature = "test-harness")]
+    pub fn set_arena_limits(
+        &mut self,
+        device: &rhi::backend::Device,
+        vertices: u32,
+        max: usize,
+    ) -> bool {
+        self.max_arenas = max.clamp(1, MAX_ARENAS);
+        let size = ArenaSize::new(vertices);
+        if size == self.arena_size {
+            return false;
+        }
+        self.arena_size = size;
+        self.clear();
+        self.drop_arenas(device);
+        true
     }
 
     pub fn format(&self) -> TerrainFormat {
@@ -1516,26 +2026,38 @@ impl ChunkBufferStore {
     }
 
     pub fn clear(&mut self) {
-        self.chunks.clear();
+        self.lists.clear();
+        self.column_visibility.clear();
         for arena in self.arenas.iter_mut().flatten() {
             arena.vertices.reset();
             arena.indices.reset();
         }
         self.pending_free.clear();
+        self.pending_copies.clear();
+        self.pending_moves.clear();
+        self.staging_used = [(0, 0); STAGING_SLOTS];
         self.starved.clear();
         self.frontier_sq = f64::INFINITY;
         self.draining = None;
-        for meta in self.camera_meta.iter_mut().chain(&mut self.shadow_meta) {
-            meta.clear();
-        }
-        self.meta_dirty = true;
         self.fade_enabled = false;
     }
 
-    /// A column not drawing its newest mesh, or none, for lack of room.
+    /// A column not drawing its newest mesh, or none, for lack of room,
+    /// nearer than the eviction frontier: one that should fit.
     #[cfg(feature = "test-harness")]
     pub fn starved_column(&self) -> Option<ChunkPos> {
-        self.starved.keys().next().copied()
+        self.starved
+            .keys()
+            .find(|&&pos| !self.beyond_frontier(pos))
+            .copied()
+    }
+
+    /// Compaction has an arena to drain, or a drained one to free.
+    #[cfg(feature = "test-harness")]
+    pub fn compacting(&self) -> bool {
+        self.draining.is_some()
+            || self.arenas.iter().flatten().any(|a| a.doomed.is_some())
+            || arena_to_drain(self.live_use(), self.arena_size).is_some()
     }
 
     /// Where an arena's ranges overlap, if they do: live sections, slices
@@ -1554,9 +2076,10 @@ impl ChunkBufferStore {
             })
             .collect();
         let live = self
-            .chunks
-            .values()
-            .flat_map(|c| &c.sections)
+            .lists
+            .columns
+            .iter()
+            .flat_map(|(_, c)| &c.sections)
             .map(SectionAlloc::slice);
         let retired = self.pending_free.iter().map(|&(_, slice)| slice);
         for slice in live.chain(retired) {
@@ -1588,7 +2111,7 @@ impl ChunkBufferStore {
     }
 
     pub fn chunk_count(&self) -> u32 {
-        self.chunks.len() as u32
+        self.lists.columns.len() as u32
     }
 
     /// Push the CPU visibility graph's per-column visible-section masks.
@@ -1596,7 +2119,40 @@ impl ChunkBufferStore {
     /// sections the graph proved occluded.
     pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
         self.chunk_visibility = vis;
-        self.meta_dirty = true;
+        for (slot, column) in self.lists.columns.iter() {
+            self.column_visibility[slot as usize] = self
+                .chunk_visibility
+                .get(&column.pos)
+                .copied()
+                .unwrap_or(u32::MAX);
+        }
+        self.visibility_pending = MAX_FRAMES_IN_FLIGHT as u32;
+    }
+
+    /// The cull's view of the frame: the camera, the clock and the segments.
+    fn frustum_data(
+        &self,
+        frustum: &[[f32; 4]; 6],
+        anchor: DVec3,
+        eye: DVec3,
+        use_visibility: bool,
+    ) -> FrustumData {
+        let mut data = FrustumData {
+            planes: *frustum,
+            chunk_count: self.lists.slots(),
+            cam_block: anchor.as_ivec3().to_array(),
+            frac: (eye - anchor).as_vec3().to_array(),
+            now_ms: self.now_ms(),
+            use_visibility: u32::from(use_visibility),
+            _pad: [0; 3],
+            arena_base: [[0; 4]; MAX_ARENAS / 4],
+            arena_len: [[0; 4]; MAX_ARENAS / 4],
+        };
+        for (id, segment) in self.lists.segments.iter().enumerate() {
+            data.arena_base[id / 4][id % 4] = segment.base;
+            data.arena_len[id / 4][id % 4] = segment.metas.len() as u32;
+        }
+        data
     }
 
     /// `anchor` must be the same `Camera::anchor()` this frame's
@@ -1615,42 +2171,21 @@ impl ChunkBufferStore {
             self.retry_due = true;
         }
         self.eye = Some(eye);
-        if self.chunks.is_empty() {
+        self.record_uploads(encoder);
+        if self.lists.columns.is_empty() {
             return;
         }
 
-        let now = std::time::Instant::now();
-        // Re-sort only once the camera moves ~8 blocks; front-to-back order is an
-        // early-Z optimization, so finer staleness is harmless.
-        const SORT_RECAM_SQ: f64 = 64.0;
-
-        // A fade in flight changes per-section visibility every frame, so the draw
-        // list must rebuild; otherwise it only changes on edits/loads/visibility
-        // (`meta_dirty`). The fade check is O(1) against `fade_until`.
-        let any_fading = self.fade_enabled && now < self.fade_until;
-        let content_changed = self.meta_dirty || any_fading;
-
-        if content_changed {
-            build_meta(
-                &self.chunks,
-                Some(&self.chunk_visibility),
-                self.fade_enabled,
-                eye,
-                now,
-                &mut self.camera_meta,
-            );
-            self.meta_dirty = false;
-            self.shadow_dirty = true;
-        }
-
-        let cam_moved = (eye - self.last_sort_cam).length_squared() > SORT_RECAM_SQ;
-        if content_changed || cam_moved {
-            for meta in &mut self.camera_meta {
-                sort_meta(meta, eye);
-            }
-            self.last_sort_cam = eye;
-            // Draw lists reordered: every frame slot's meta buffer needs the refresh.
-            self.camera.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
+        // Front-to-back order is an early-Z optimization, so it follows the
+        // camera a list per frame, once it has moved far enough.
+        self.lists.sort_step(eye);
+        let meta = &mut self.meta_buffers[frame];
+        self.lists.write_pending(|offset, metas| {
+            meta.write_at(offset, bytemuck::cast_slice(metas));
+        });
+        if self.visibility_pending > 0 {
+            self.visibility_buffers[frame].write(bytemuck::cast_slice(&self.column_visibility));
+            self.visibility_pending -= 1;
         }
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
@@ -1659,21 +2194,19 @@ impl ChunkBufferStore {
             let (counts, _) = bytes.as_chunks::<4>();
             counts.iter().map(|&count| u32::from_ne_bytes(count)).sum()
         });
+        let data = self.frustum_data(frustum, anchor, eye, true);
         self.camera.cull(
             encoder,
             &self.compute_pipeline,
             frame,
-            &self.camera_meta,
-            frustum,
-            anchor,
-            eye,
+            &data,
             !self.indirect_draw.count,
         );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
         let readback = self.count_readbacks[frame].handle();
         for (i, count) in [
-            &self.camera.count_buffers[frame],
-            &self.camera.count_cutout_buffers[frame],
+            &self.camera.counts[Layer::Solid as usize][frame],
+            &self.camera.counts[Layer::Cutout as usize][frame],
         ]
         .into_iter()
         .enumerate()
@@ -1689,10 +2222,7 @@ impl ChunkBufferStore {
             );
         }
         encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::HostRead);
-
-        if !self.fade_enabled {
-            self.fade_enabled = true;
-        }
+        self.fade_enabled = true;
     }
 
     /// Culls every section, the camera's occluded ones too, against a shader
@@ -1707,83 +2237,62 @@ impl ChunkBufferStore {
         anchor: DVec3,
         eye: DVec3,
     ) {
-        if self.chunks.is_empty() {
+        if self.lists.columns.is_empty() {
             return;
         }
-        if self.shadow_dirty {
-            build_meta(
-                &self.chunks,
-                None,
-                self.fade_enabled,
-                eye,
-                std::time::Instant::now(),
-                &mut self.shadow_meta,
-            );
-            if let Some(shadow) = &mut self.shadow {
-                shadow.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
-            }
-            self.shadow_dirty = false;
-        }
-        let shadow = self
-            .shadow
-            .get_or_insert_with(|| DrawList::new(device, self.cull_layout, self.max_meta));
+        let data = self.frustum_data(frustum, anchor, eye, false);
+        let shadow = self.shadow.get_or_insert_with(|| {
+            DrawList::new(
+                device,
+                self.cull_layout,
+                &self.meta_buffers,
+                &self.visibility_buffers,
+                self.max_meta,
+            )
+        });
         shadow.cull(
             encoder,
             &self.compute_pipeline,
             frame,
-            &self.shadow_meta,
-            frustum,
-            anchor,
-            eye,
+            &data,
             !self.indirect_draw.count,
         );
     }
 
-    /// Issue one render layer's indirect draws for `view`, one call per
-    /// arena over its range of the draw lists. `cutout` selects the discard
-    /// pass's draw lists (drawn after `solid`, which lays down depth); the
-    /// caller binds the matching pipeline first. Both layers share each
-    /// arena's vertex/index buffers, the meta buffer and the cull-written
-    /// draw lists.
+    /// Issue one render `layer`'s indirect draws for `view`, one call per
+    /// arena over its segment of the draw lists; the caller binds the
+    /// matching pipeline first. The layers share each arena's vertex/index
+    /// buffers, the meta buffer and the cull-written draw lists.
     pub fn draw_indirect(
         &self,
         pass: &rhi::backend::RenderPassEncoder,
         frame: usize,
-        cutout: bool,
+        layer: Layer,
         view: View,
     ) {
-        if self.chunks.is_empty() {
+        if self.lists.columns.is_empty() {
             return;
         }
-        let (metas, list) = match (view, &self.shadow) {
-            (View::Camera, _) => (&self.camera_meta, &self.camera),
-            (View::Shadow, Some(shadow)) => (&self.shadow_meta, shadow),
+        let list = match (view, &self.shadow) {
+            (View::Camera, _) => &self.camera,
+            (View::Shadow, Some(shadow)) => shadow,
             (View::Shadow, None) => return,
         };
-        let (indirect, count) = if cutout {
-            (
-                list.indirect_cutout_buffers[frame].handle(),
-                list.count_cutout_buffers[frame].handle(),
-            )
-        } else {
-            (
-                list.indirect_buffers[frame].handle(),
-                list.count_buffers[frame].handle(),
-            )
-        };
+        let indirect = list.draws[layer as usize][frame].handle();
+        let count = list.counts[layer as usize][frame].handle();
         // Binding 1: the meta buffer, read per instance for the section
         // origin + fade (indexed by `first_instance`).
-        pass.set_vertex_buffer(1, list.meta_buffers[frame].handle());
+        pass.set_vertex_buffer(1, self.meta_buffers[frame].handle());
         let stride = size_of::<DrawCommand>() as u32;
-        for (id, (slot, meta)) in self.arenas.iter().zip(metas).enumerate() {
-            let Some(arena) = live(slot).filter(|_| !meta.is_empty()) else {
+        for (id, (slot, segment)) in self.arenas.iter().zip(&self.lists.segments).enumerate() {
+            let Some(arena) = live(slot).filter(|_| !segment.metas.is_empty()) else {
                 continue;
             };
             // Binding 0: the arena's packed vertices.
             pass.set_vertex_buffer(0, arena.vertex_buffer.handle());
             pass.set_index_buffer(arena.index_buffer.handle());
-            let max_draws = meta.len() as u32;
-            let offset = u64::from(meta[0].draw_base * stride);
+            let max_draws = segment.metas.len() as u32;
+            let offset = u64::from(segment.base * stride);
             if self.indirect_draw.count {
                 let count_offset = (id * size_of::<u32>()) as u64;
                 pass.draw_indexed_indirect_count(
@@ -1804,89 +2313,12 @@ impl ChunkBufferStore {
         }
     }
 
-    /// Per-section fade-in factor in `[0, 1]`: near columns appear instantly,
-    /// the rest ramp over [`FADE_DURATION_MS`] from their upload time. Drives
-    /// both the opaque indirect meta and the water pass so they fade in
-    /// together.
-    fn section_visibility(nearby: bool, sec: &SectionAlloc, now: std::time::Instant) -> f32 {
-        if nearby {
-            return 1.0;
-        }
-        let elapsed_ms = now.duration_since(sec.uploaded_at).as_secs_f32() * 1000.0;
-        (elapsed_ms / FADE_DURATION_MS).min(1.0)
-    }
-
-    /// Draw the translucent water of every section that survives a CPU frustum
-    /// cull. Reuses the arenas' vertex/index buffers (water indices live right
-    /// after the opaque ones in each section's slice); the caller binds the
-    /// blended water pipeline first. Not GPU-culled — water sections are a
-    /// small subset, so a per-section draw is cheap and keeps the opaque
-    /// indirect path untouched.
-    ///
-    /// `anchor` must be the same `Camera::anchor()` this frame's
-    /// `CameraUniform` was built with: the push-constant origins are rebased
-    /// against it and the shader adds back `camera_pos` (the eye's offset
-    /// from that anchor).
-    ///
-    /// TODO: water isn't depth-sorted, so overlapping translucent surfaces
-    /// (oceans at grazing angles, water seen through water) can blend out of
-    /// order.
-    pub fn draw_water(
-        &self,
-        pass: &rhi::backend::RenderPassEncoder,
-        frustum: &[[f32; 4]; 6],
-        anchor: DVec3,
-        eye: DVec3,
-    ) {
-        if self.chunks.is_empty() {
-            return;
-        }
-
-        let mut bound = None;
-        let now = std::time::Instant::now();
-        for (pos, alloc) in self.chunks.iter() {
-            let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
-            let nearby = column_nearby(self.fade_enabled, *pos, eye);
-            for sec in &alloc.sections {
-                if sec.water_index_count == 0
-                    || col_vis & (1u32 << sec.section_index) == 0
-                    || !aabb_in_frustum(&sec.aabb, sec.origin, frustum, eye)
-                {
-                    continue;
-                }
-                if bound != Some(sec.arena) {
-                    let Some(arena) = self.arenas[sec.arena as usize].as_ref() else {
-                        continue;
-                    };
-                    pass.set_vertex_buffer(0, arena.vertex_buffer.handle());
-                    pass.set_index_buffer(arena.index_buffer.handle());
-                    bound = Some(sec.arena);
-                }
-                let vis = Self::section_visibility(nearby, sec, now);
-                let rel = (origin_dvec(sec.origin) - anchor).as_vec3();
-                let origin_fade = [rel.x, rel.y, rel.z, vis];
-                pass.set_push_constants(
-                    rhi::ShaderStages::VERTEX,
-                    0,
-                    bytemuck::bytes_of(&origin_fade),
-                );
-                pass.draw_indexed(
-                    sec.water_index_count,
-                    1,
-                    sec.water_first_index,
-                    sec.vertex_offset,
-                    0,
-                );
-            }
-        }
-    }
-
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
-        for arena in self.arenas.drain(..).flatten() {
-            arena.destroy(device);
-        }
-        std::mem::take(&mut self.staging_buffer).destroy(device);
-        for list in self.draw_lists_mut() {
+        self.drop_arenas(device);
+        util::destroy_buffers(device, &mut self.staging);
+        util::destroy_buffers(device, &mut self.meta_buffers);
+        util::destroy_buffers(device, &mut self.visibility_buffers);
+        for list in draw_lists(&mut self.camera, &mut self.shadow) {
             list.destroy(device);
         }
         util::destroy_buffers(device, &mut self.count_readbacks);
@@ -1897,19 +2329,35 @@ impl ChunkBufferStore {
     }
 }
 
-/// One arena's vertex and index heaps in bytes, at `format`'s vertex size.
-fn arena_bytes(format: TerrainFormat) -> u64 {
-    u64::from(ARENA_VERTICES) * format.vertex_size() + u64::from(ARENA_INDICES) * INDEX_SIZE
+/// Per frame slot, a meta buffer of `draws` slots.
+fn meta_buffers(device: &rhi::backend::Device, draws: usize) -> Vec<rhi::backend::Buffer> {
+    util::create_per_frame_host_buffers(
+        device,
+        (draws * size_of::<ChunkMeta>()) as u64,
+        rhi::BufferUsages::STORAGE | rhi::BufferUsages::VERTEX,
+        "chunk_meta",
+    )
+}
+
+/// Per frame slot, a visibility mask buffer of `columns` slots.
+fn visibility_buffers(device: &rhi::backend::Device, columns: usize) -> Vec<rhi::backend::Buffer> {
+    util::create_per_frame_host_buffers(
+        device,
+        (columns * size_of::<u32>()) as u64,
+        rhi::BufferUsages::STORAGE,
+        "column_visibility",
+    )
 }
 
 /// Of the `loaded` columns, as (distance from the eye squared, position,
 /// what they take), those to evict for `need`: the farthest first, all
-/// farther than `limit`, until they free it. Nearest last.
+/// farther than `limit`, until they free it, nearest last; and whether they
+/// do.
 fn eviction_victims(
     loaded: impl Iterator<Item = (f64, ChunkPos, Need)>,
     limit: f64,
     need: Need,
-) -> Vec<(f64, ChunkPos)> {
+) -> (Vec<(f64, ChunkPos)>, bool) {
     let mut far: Vec<_> = loaded.filter(|&(dist, ..)| dist > limit).collect();
     far.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let mut freed = Need::default();
@@ -1922,7 +2370,7 @@ fn eviction_victims(
         freed.indices += taken.indices;
         victims.push((dist, pos));
     }
-    victims
+    (victims, need.fits_in(freed.vertices, freed.indices))
 }
 
 /// A starved column, for [`columns_to_retry`].
@@ -1938,15 +2386,17 @@ struct Waiting {
 /// The starved columns to hand back, nearest first, and the eviction
 /// frontier after. Inside the frontier a column comes back when it fits the
 /// free vertices and indices, or when a loaded column farther out (the
-/// farthest is at `farthest_loaded`) can be evicted for it. Past it, only
-/// while [`FRONTIER_SLACK`] of an arena stays free after, moving the frontier
-/// out past it, so the frontier doesn't swing back and forth as columns come
-/// and go.
+/// farthest is at `farthest_loaded`) can be evicted for it; either way the
+/// free room is its, so no farther column takes it first. Past the frontier,
+/// only while [`FRONTIER_SLACK`] of an arena stays free after, moving the
+/// frontier out past it, so the frontier doesn't swing back and forth as
+/// columns come and go.
 fn columns_to_retry(
     waiting: impl Iterator<Item = Waiting>,
     (mut free_vertices, mut free_indices): (u64, u64),
     mut frontier_sq: f64,
     farthest_loaded: f64,
+    arena: ArenaSize,
 ) -> (Vec<ChunkPos>, f64) {
     let mut waiting: Vec<Waiting> = waiting.collect();
     waiting.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
@@ -1955,8 +2405,8 @@ fn columns_to_retry(
         let past = column.dist >= frontier_sq;
         let (keep_vertices, keep_indices) = if past {
             (
-                u64::from(ARENA_VERTICES) / FRONTIER_SLACK,
-                u64::from(ARENA_INDICES) / FRONTIER_SLACK,
+                u64::from(arena.vertices) / FRONTIER_SLACK,
+                u64::from(arena.indices) / FRONTIER_SLACK,
             )
         } else {
             (0, 0)
@@ -1966,18 +2416,20 @@ fn columns_to_retry(
                 free_vertices.saturating_sub(keep_vertices),
                 free_indices.saturating_sub(keep_indices),
             );
-        if fits {
-            free_vertices -= column.need.vertices;
-            free_indices -= column.need.indices;
+        if !fits {
             if past {
-                frontier_sq = column.dist.next_up();
+                break;
             }
-            retry.push(column.pos);
-        } else if past {
-            break;
-        } else if column.dist < farthest_loaded {
-            retry.push(column.pos);
+            if column.dist >= farthest_loaded {
+                continue;
+            }
         }
+        free_vertices = free_vertices.saturating_sub(column.need.vertices);
+        free_indices = free_indices.saturating_sub(column.need.indices);
+        if past {
+            frontier_sq = column.dist.next_up();
+        }
+        retry.push(column.pos);
     }
     (retry, frontier_sq)
 }
@@ -1985,7 +2437,7 @@ fn columns_to_retry(
 /// The arena compaction should drain, of the `live` ones as (id, vertices
 /// used, indices used): the emptiest, once the others could hold everything
 /// filled to [`COMPACT_FILL`].
-fn arena_to_drain(live: impl Iterator<Item = (u16, u32, u32)>) -> Option<u16> {
+fn arena_to_drain(live: impl Iterator<Item = (u16, u32, u32)>, arena: ArenaSize) -> Option<u16> {
     let live: Vec<_> = live.collect();
     if live.len() < 2 {
         return None;
@@ -1993,16 +2445,26 @@ fn arena_to_drain(live: impl Iterator<Item = (u16, u32, u32)>) -> Option<u16> {
     let used_vertices: u64 = live.iter().map(|&(_, v, _)| u64::from(v)).sum();
     let used_indices: u64 = live.iter().map(|&(.., i)| u64::from(i)).sum();
     let room = (live.len() - 1) as f64 * COMPACT_FILL;
-    if used_vertices as f64 > room * f64::from(ARENA_VERTICES)
-        || used_indices as f64 > room * f64::from(ARENA_INDICES)
+    if used_vertices as f64 > room * f64::from(arena.vertices)
+        || used_indices as f64 > room * f64::from(arena.indices)
     {
         return None;
     }
     live.iter().min_by_key(|&&(_, v, _)| v).map(|&(id, ..)| id)
 }
 
-/// An arena heap: device-local behind the staging buffer, or host-visible.
-/// Either way a copy source and target, for compaction.
+/// Where arenas live: device-local behind the staging buffer, or
+/// host-visible.
+fn arena_location(use_staging: bool) -> rhi::MemoryLocation {
+    if use_staging {
+        rhi::MemoryLocation::Device
+    } else {
+        rhi::MemoryLocation::Host
+    }
+}
+
+/// An arena heap, in [`arena_location`]; a copy source and target, for
+/// compaction.
 fn create_pool(
     device: &rhi::backend::Device,
     use_staging: bool,
@@ -2011,10 +2473,11 @@ fn create_pool(
     usage: rhi::BufferUsages,
 ) -> rhi::backend::Buffer {
     let usage = usage | rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST;
+    let location = arena_location(use_staging);
     if use_staging {
-        rhi::backend::Buffer::dedicated(device, label, size, usage, rhi::MemoryLocation::Device)
+        rhi::backend::Buffer::dedicated(device, label, size, usage, location)
     } else {
-        rhi::backend::Buffer::new(device, label, size, usage, rhi::MemoryLocation::Host)
+        rhi::backend::Buffer::new(device, label, size, usage, location)
     }
 }
 
@@ -2026,29 +2489,23 @@ pub enum View {
     Shadow,
 }
 
-/// One view's sections over every arena and, per frame slot, the cull's
-/// frustum and the draw lists it writes, a range and a draw count per arena.
+/// One view's cull: per frame slot, its frustum and the draw lists it
+/// writes over the shared metas, a range and a draw count per arena and
+/// [`Layer`].
 struct DrawList {
-    /// Frame slots still needing the latest meta uploaded. Set to
-    /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
-    /// frame; at steady state the per-frame meta copy stops.
-    upload_pending: u32,
     cull_sets: Vec<rhi::backend::BindGroup>,
-    meta_buffers: Vec<rhi::backend::Buffer>,
     frustum_buffers: Vec<rhi::backend::Buffer>,
-    // Solid (no-discard, early-Z) draw list, written by the cull shader.
-    indirect_buffers: Vec<rhi::backend::Buffer>,
-    count_buffers: Vec<rhi::backend::Buffer>,
-    // Cutout (discard) draw list. Same sections, the back of each section's
-    // index slice; drawn in a second pass after solid lays down depth.
-    indirect_cutout_buffers: Vec<rhi::backend::Buffer>,
-    count_cutout_buffers: Vec<rhi::backend::Buffer>,
+    /// By [`Layer`], then frame slot.
+    draws: [Vec<rhi::backend::Buffer>; 3],
+    counts: [Vec<rhi::backend::Buffer>; 3],
 }
 
 impl DrawList {
     fn new(
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
+        meta: &[rhi::backend::Buffer],
+        visibility: &[rhi::backend::Buffer],
         draws: usize,
     ) -> Self {
         let count = |name: &str| {
@@ -2062,140 +2519,108 @@ impl DrawList {
             )
         };
         let mut this = Self {
-            upload_pending: 0,
             cull_sets: vec![rhi::backend::BindGroup::default(); MAX_FRAMES_IN_FLIGHT],
-            meta_buffers: Vec::new(),
             frustum_buffers: util::create_per_frame_host_buffers(
                 device,
                 FRUSTUM_SIZE,
                 rhi::BufferUsages::UNIFORM,
                 "frustum_ubo",
             ),
-            indirect_buffers: Vec::new(),
-            count_buffers: count("draw_count"),
-            indirect_cutout_buffers: Vec::new(),
-            count_cutout_buffers: count("draw_count_cutout"),
+            draws: Default::default(),
+            counts: [
+                count("draw_count"),
+                count("draw_count_cutout"),
+                count("draw_count_water"),
+            ],
         };
-        this.regrow(device, layout, draws);
+        this.regrow(device, draws);
+        this.bind(device, layout, meta, visibility);
         this
     }
 
-    /// Remakes the per-frame meta and indirect buffers to hold `draws` and
-    /// points each frame's cull group at its buffers.
-    fn regrow(
+    /// Remakes the per-frame indirect buffers to hold `draws`; the caller
+    /// binds after.
+    fn regrow(&mut self, device: &rhi::backend::Device, draws: usize) {
+        let size = (draws * size_of::<DrawCommand>()) as u64;
+        for (buffers, name) in self.draws.iter_mut().zip([
+            "indirect_cmds",
+            "indirect_cmds_cutout",
+            "indirect_cmds_water",
+        ]) {
+            util::destroy_buffers(device, buffers);
+            *buffers = util::create_per_frame_host_buffers(
+                device,
+                size,
+                rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
+                name,
+            );
+        }
+    }
+
+    /// Points each frame's cull group at its buffers.
+    fn bind(
         &mut self,
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
-        draws: usize,
+        meta: &[rhi::backend::Buffer],
+        visibility: &[rhi::backend::Buffer],
     ) {
-        let (meta_size, indirect_size) = list_sizes(draws);
-        for buffers in [
-            &mut self.meta_buffers,
-            &mut self.indirect_buffers,
-            &mut self.indirect_cutout_buffers,
-        ] {
-            util::destroy_buffers(device, buffers);
-        }
-        let indirect = |name: &str| {
-            util::create_per_frame_host_buffers(
-                device,
-                indirect_size,
-                rhi::BufferUsages::STORAGE | rhi::BufferUsages::INDIRECT,
-                name,
-            )
-        };
-        self.meta_buffers = util::create_per_frame_host_buffers(
-            device,
-            meta_size,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::VERTEX,
-            "chunk_meta",
-        );
-        self.indirect_buffers = indirect("indirect_cmds");
-        self.indirect_cutout_buffers = indirect("indirect_cmds_cutout");
-        self.upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
-
         let storage = rhi::backend::BindingResource::storage;
         let uniform = rhi::backend::BindingResource::uniform;
         for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let draws = |layer: Layer| {
+                let buffer = &self.draws[layer as usize][i];
+                storage(buffer, buffer.size())
+            };
+            let counts = |layer: Layer| storage(&self.counts[layer as usize][i], COUNTS_SIZE);
             let bindings = [
-                (0, storage(&self.meta_buffers[i], meta_size)),
+                (0, storage(&meta[i], meta[i].size())),
                 (1, uniform(&self.frustum_buffers[i], FRUSTUM_SIZE)),
-                (2, storage(&self.indirect_buffers[i], indirect_size)),
-                (3, storage(&self.count_buffers[i], COUNTS_SIZE)),
-                (4, storage(&self.indirect_cutout_buffers[i], indirect_size)),
-                (5, storage(&self.count_cutout_buffers[i], COUNTS_SIZE)),
+                (2, draws(Layer::Solid)),
+                (3, counts(Layer::Solid)),
+                (4, draws(Layer::Cutout)),
+                (5, counts(Layer::Cutout)),
+                (6, draws(Layer::Water)),
+                (7, counts(Layer::Water)),
+                (8, storage(&visibility[i], visibility[i].size())),
             ];
             self.cull_sets[i].replace(device, layout, &bindings);
         }
     }
 
-    /// Records the cull of `metas`, this list's sections per arena, against
-    /// `frustum` into this frame slot's draw lists, uploading `metas` back to
-    /// back first if the slot hasn't seen them.
-    /// `zero_indirect`: without drawIndirectCount the whole indirect buffer
-    /// is drawn, so slots the cull leaves unfilled must read as no-op draws.
-    #[allow(clippy::too_many_arguments)]
+    /// Records the cull of every segment against `data`'s frustum into this
+    /// frame slot's draw lists.
+    /// `zero_indirect`: without drawIndirectCount the whole draw list is
+    /// drawn, so slots the cull leaves unfilled must read as no-op draws.
     fn cull(
         &mut self,
         encoder: &rhi::backend::CommandEncoder,
         pipeline: &rhi::backend::ComputePipeline,
         frame: usize,
-        metas: &[Vec<ChunkMeta>],
-        frustum: &[[f32; 4]; 6],
-        anchor: DVec3,
-        eye: DVec3,
+        data: &FrustumData,
         zero_indirect: bool,
     ) {
-        if self.upload_pending > 0 {
-            let mut offset = 0;
-            for meta in metas {
-                let bytes: &[u8] = bytemuck::cast_slice(meta);
-                self.meta_buffers[frame].write_at(offset, bytes);
-                offset += bytes.len();
-            }
-            self.upload_pending -= 1;
-        }
-        let count = metas.iter().map(Vec::len).sum::<usize>() as u32;
-        let frustum_data = FrustumData {
-            planes: *frustum,
-            chunk_count: count,
-            cam_block: anchor.as_ivec3().to_array(),
-            frac: (eye - anchor).as_vec3().to_array(),
-            _pad: 0.0,
-        };
-        self.frustum_buffers[frame].write(bytemuck::bytes_of(&frustum_data));
-        for buffer in [
-            &mut self.count_buffers[frame],
-            &mut self.count_cutout_buffers[frame],
-        ] {
-            buffer.zero();
+        self.frustum_buffers[frame].write(bytemuck::bytes_of(data));
+        for counts in &mut self.counts {
+            counts[frame].zero();
         }
         if zero_indirect {
-            for buffer in [
-                &mut self.indirect_buffers[frame],
-                &mut self.indirect_cutout_buffers[frame],
-            ] {
-                buffer.zero();
+            for draws in &mut self.draws {
+                draws[frame].zero();
             }
         }
         encoder.dispatch(
             pipeline,
             self.cull_sets[frame],
             &[],
-            [count.div_ceil(64), 1, 1],
+            [data.chunk_count.div_ceil(64), 1, 1],
         );
-        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Indirect);
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput);
     }
 
     fn destroy(&mut self, device: &rhi::backend::Device) {
-        for buffers in [
-            &mut self.meta_buffers,
-            &mut self.frustum_buffers,
-            &mut self.indirect_buffers,
-            &mut self.count_buffers,
-            &mut self.indirect_cutout_buffers,
-            &mut self.count_cutout_buffers,
-        ] {
+        util::destroy_buffers(device, &mut self.frustum_buffers);
+        for buffers in self.draws.iter_mut().chain(&mut self.counts) {
             util::destroy_buffers(device, buffers);
         }
         util::destroy_bind_groups(device, self.cull_sets.drain(..));
@@ -2204,60 +2629,86 @@ impl DrawList {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use super::*;
 
-    #[test]
-    fn build_meta_masks_fades_and_sorts_front_to_back() {
-        let now = Instant::now();
-        let near = ChunkPos::new(0, 0);
-        let far = ChunkPos::new(4, 0);
-        let mut chunks = HashMap::new();
-        chunks.insert(near, ChunkAlloc::synthetic(near, -64, [4, 5], now));
-        chunks.insert(
-            far,
-            ChunkAlloc::synthetic(far, -64, [4], now - Duration::from_millis(500)),
-        );
-        // Section 5 of the near column is occluded.
-        let vis = HashMap::from([(near, 1u32 << 4)]);
-        let eye = DVec3::new(8.0, 8.0, 8.0);
-
-        let mut metas = [Vec::new()];
-        build_meta(&chunks, Some(&vis), true, eye, now, &mut metas);
-        let meta = &mut metas[0];
-        sort_meta(meta, eye);
-
-        assert_eq!(meta.len(), 2);
-        assert_eq!(meta[0].origin, [0, 0, 0]);
-        assert_eq!(f32::from_bits(meta[0].visibility), 1.0);
-        assert_eq!(meta[1].origin, [64, 0, 0]);
-        let far_vis = f32::from_bits(meta[1].visibility);
-        assert!((far_vis - 0.5).abs() < 0.01, "far fade {far_vis}");
-
-        build_meta(&chunks, Some(&vis), false, eye, now, &mut metas);
-        assert!(metas[0].iter().all(|m| f32::from_bits(m.visibility) == 1.0));
-
-        build_meta(&chunks, None, false, eye, now, &mut metas);
-        assert_eq!(metas[0].len(), 3);
+    /// Every section's `meta_index` finds its own meta.
+    fn indices_hold(lists: &Lists) {
+        for (slot, column) in lists.columns.iter() {
+            for section in &column.sections {
+                let meta =
+                    lists.segments[section.arena as usize].metas[section.meta_index as usize];
+                assert_eq!(
+                    (meta.column, meta.section),
+                    (slot, section.section_index as u32)
+                );
+            }
+        }
     }
 
     #[test]
-    fn build_meta_lays_arenas_out_back_to_back() {
-        let now = Instant::now();
-        let pos = ChunkPos::new(0, 0);
-        let mut alloc = ChunkAlloc::synthetic(pos, -64, [0, 1, 2], now);
-        alloc.sections[2].arena = 2;
-        let chunks = HashMap::from([(pos, alloc)]);
+    fn lists_keep_their_indices_through_removal_and_sorting() {
+        let mut lists = Lists::default();
+        let near = ChunkPos::new(0, 0);
+        let far = ChunkPos::new(4, 0);
+        lists.list(far, -64, [4, 5, 6], 0);
+        lists.list(near, -64, [4, 5], 0);
+        indices_hold(&lists);
+        assert_eq!(lists.segments[0].metas.len(), 5);
 
-        let mut metas = [Vec::new(), Vec::new(), Vec::new()];
-        build_meta(&chunks, None, false, DVec3::ZERO, now, &mut metas);
+        // The last meta moves into the gap.
+        let dropped = lists.remove_sections(0, |s| s.section_index != 5);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(lists.segments[0].metas.len(), 4);
+        indices_hold(&lists);
 
-        let layout: Vec<Vec<(u32, u32)>> = metas
+        // One step sorts the list front to back and keeps the indices.
+        lists.sort_step(DVec3::new(8.0, 8.0, 8.0));
+        indices_hold(&lists);
+        let origins: Vec<i32> = lists.segments[0]
+            .metas
             .iter()
-            .map(|list| list.iter().map(|m| (m.arena, m.draw_base)).collect())
+            .map(|m| m.origin[0])
             .collect();
-        assert_eq!(layout, [vec![(0, 0), (0, 0)], vec![], vec![(2, 2)]]);
+        assert_eq!(origins, [0, 0, 64, 64]);
+        assert_eq!(lists.sort_at, Some(1));
+        lists.sort_step(DVec3::new(8.0, 8.0, 8.0));
+        assert_eq!(lists.sort_at, None);
+    }
+
+    #[test]
+    fn segments_lie_back_to_back_with_headroom() {
+        let mut lists = Lists::default();
+        let pos = ChunkPos::new(0, 0);
+        lists.list(pos, -64, [0, 1], 0);
+        lists.list(pos, -64, [2], 2);
+        let layout: Vec<(u32, u32, usize)> = lists
+            .segments
+            .iter()
+            .map(|s| (s.base, s.cap, s.metas.len()))
+            .collect();
+        assert_eq!(layout, [(0, 64, 2), (64, 64, 0), (128, 64, 1)]);
+        assert_eq!(lists.slots(), 192);
+
+        // Filling a segment lays them out anew, doubling it.
+        lists.list(pos, -64, 3..66, 0);
+        assert_eq!(lists.segments[0].cap, 128);
+        assert_eq!(lists.segments[2].base, 192);
+        indices_hold(&lists);
+
+        // A frame's pending write covers the slots that changed, cleared
+        // slots included, for each frame slot in flight.
+        let mut writes = Vec::new();
+        lists.write_pending(|offset, metas| writes.push((offset, metas.len())));
+        assert_eq!(writes, [(0, 128), (128 * 80, 64), (192 * 80, 64)]);
+        for _ in 1..MAX_FRAMES_IN_FLIGHT {
+            lists.write_pending(|_, _| {});
+        }
+        lists.remove_sections(0, |s| s.section_index != 2);
+        writes.clear();
+        lists.write_pending(|offset, metas| writes.push((offset, metas.len())));
+        assert_eq!(writes, [(192 * 80, 1)]);
+        lists.write_pending(|offset, metas| writes.push((offset, metas.len())));
+        assert_eq!(writes, [(192 * 80, 1), (192 * 80, 1)]);
     }
 
     fn need(vertices: u64) -> Need {
@@ -2278,18 +2729,21 @@ mod tests {
             (4.0, ChunkPos::new(2, 0), need(100)),
             (16.0, ChunkPos::new(4, 0), need(100)),
         ];
-        let victims = eviction_victims(loaded.into_iter(), 2.0, need(150));
+        let far = vec![(16.0, ChunkPos::new(4, 0)), (9.0, ChunkPos::new(3, 0))];
         assert_eq!(
-            victims,
-            [(16.0, ChunkPos::new(4, 0)), (9.0, ChunkPos::new(3, 0))]
+            eviction_victims(loaded.into_iter(), 2.0, need(150)),
+            (far.clone(), true)
         );
-        // Never one nearer than the column it's for.
-        let victims = eviction_victims(loaded.into_iter(), 8.0, need(1000));
+        // Never one nearer than the column it's for, even when the farther
+        // ones can't free enough.
         assert_eq!(
-            victims,
-            [(16.0, ChunkPos::new(4, 0)), (9.0, ChunkPos::new(3, 0))]
+            eviction_victims(loaded.into_iter(), 8.0, need(1000)),
+            (far, false)
         );
-        assert!(eviction_victims(loaded.into_iter(), 0.0, Need::default()).is_empty());
+        assert_eq!(
+            eviction_victims(loaded.into_iter(), 0.0, Need::default()),
+            (vec![], true)
+        );
     }
 
     fn waiting(dist: f64, x: i32, vertices: u64) -> Waiting {
@@ -2311,17 +2765,36 @@ mod tests {
             free,
             100.0,
             9.0,
+            ARENA_SIZE,
         );
         assert_eq!(retry, [ChunkPos::new(1, 0), ChunkPos::new(2, 0)]);
         assert_eq!(frontier, 100.0);
+        // One coming back for eviction keeps the free room from a farther
+        // one, past the frontier, that would fit it otherwise.
+        let slack = u64::from(ARENA_SIZE.vertices) / FRONTIER_SLACK;
+        let (retry, frontier) = columns_to_retry(
+            [waiting(4.0, 2, slack + 11), waiting(200.0, 9, 1)].into_iter(),
+            (slack + 10, u64::MAX),
+            100.0,
+            300.0,
+            ARENA_SIZE,
+        );
+        assert_eq!(retry, [ChunkPos::new(2, 0)]);
+        assert_eq!(frontier, 100.0);
         // Nothing loaded farther out, so it waits.
-        let (retry, _) = columns_to_retry([waiting(4.0, 2, 500)].into_iter(), free, 100.0, 1.0);
+        let (retry, _) = columns_to_retry(
+            [waiting(4.0, 2, 500)].into_iter(),
+            free,
+            100.0,
+            1.0,
+            ARENA_SIZE,
+        );
         assert!(retry.is_empty());
     }
 
     #[test]
     fn starved_columns_past_the_frontier_need_slack() {
-        let slack = u64::from(ARENA_VERTICES) / FRONTIER_SLACK;
+        let slack = u64::from(ARENA_SIZE.vertices) / FRONTIER_SLACK;
         let free = (slack + 100, u64::MAX);
         let (retry, frontier) = columns_to_retry(
             [
@@ -2333,6 +2806,7 @@ mod tests {
             free,
             16.0,
             f64::INFINITY,
+            ARENA_SIZE,
         );
         // The first fits with the slack left and moves the frontier past it;
         // the second doesn't, and nothing farther comes back.
@@ -2342,15 +2816,10 @@ mod tests {
 
     #[test]
     fn compaction_drains_the_emptiest_once_the_rest_hold_it() {
-        let quarter = ARENA_VERTICES / 4;
-        assert_eq!(arena_to_drain([(0, quarter, 0)].into_iter()), None);
-        assert_eq!(
-            arena_to_drain([(0, quarter * 2, 0), (3, quarter / 2, 0)].into_iter()),
-            Some(3)
-        );
-        assert_eq!(
-            arena_to_drain([(0, quarter * 3, 0), (3, quarter, 0)].into_iter()),
-            None
-        );
+        let quarter = ARENA_SIZE.vertices / 4;
+        let drain = |live: &[(u16, u32, u32)]| arena_to_drain(live.iter().copied(), ARENA_SIZE);
+        assert_eq!(drain(&[(0, quarter, 0)]), None);
+        assert_eq!(drain(&[(0, quarter * 2, 0), (3, quarter / 2, 0)]), Some(3));
+        assert_eq!(drain(&[(0, quarter * 3, 0), (3, quarter, 0)]), None);
     }
 }

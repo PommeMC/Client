@@ -97,7 +97,6 @@ fn main() {
         ("chunk.vert", shaderc::ShaderKind::Vertex),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
-        ("water.vert", shaderc::ShaderKind::Vertex),
         ("water.frag", shaderc::ShaderKind::Fragment),
         ("distant.vert", shaderc::ShaderKind::Vertex),
         ("distant.frag", shaderc::ShaderKind::Fragment),
