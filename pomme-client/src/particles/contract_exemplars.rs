@@ -2,6 +2,7 @@
 //! tests.
 
 use std::any::type_name;
+use std::io;
 use std::rc::Rc;
 
 use glam::DVec3;
@@ -9,7 +10,7 @@ use glam::DVec3;
 use super::particle::{ParticleRef, ParticleTickContext, SingleQuadParticle};
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::render::ParticleView;
-use super::types::{ParticleRegistrationError, ParticleType, SimpleParticleType};
+use super::types::{ParticleType, SimpleParticleType};
 use super::world::ParticleWorld;
 use super::{ParticleEngine, ParticleResources, SpriteParticleRegistration};
 
@@ -30,7 +31,10 @@ pub fn contract_registry_exemplar() -> Result<
 ///
 /// Assumes the independently registered token's `info().name()` is
 /// `minecraft:smoke`. The supplied factory must build the engine from these
-/// SAME registered resources. Neither assumption is proved by the options
+/// SAME registered resources, successfully preparing descriptions/atlas and
+/// applying bindings before spawning. It must establish smoke's binding;
+/// absent JSON leaves the set unbound. Initialization errors propagate.
+/// Neither assumption is proved by the options
 /// schema. The opaque provider supplies all SmokeParticle/BaseAshSmokeParticle
 /// behavior; this example does not implement their math or demonstrate visual
 /// fidelity. Sprite preparation/binding and concrete implementations remain
@@ -43,11 +47,11 @@ pub fn contract_exemplar_smoke<R: ParticleResources, S>(
     world: &dyn ParticleWorld,
     view: &ParticleView<'_>,
     replacement_world: &dyn ParticleWorld,
-    create_engine: impl FnOnce(Rc<R>) -> Box<dyn ParticleEngine<RenderState = S>>,
-) -> Result<(Option<ParticleRef>, S), ParticleRegistrationError> {
-    resources.register_sprite_provider(Rc::clone(&particle_type), registration)?;
+    create_engine: impl FnOnce(Rc<R>) -> io::Result<Box<dyn ParticleEngine<RenderState = S>>>,
+) -> io::Result<(Option<ParticleRef>, S)> {
+    resources.register_sprite_provider(Rc::clone(&particle_type), registration);
     let options = SimpleParticleType::new(particle_type);
-    let mut engine = create_engine(Rc::new(resources));
+    let mut engine = create_engine(Rc::new(resources))?;
     let created = engine.create_particle(world, &options, DVec3::ZERO, DVec3::ZERO);
     let retained = created.as_ref().map(Rc::clone);
     if let Some(particle) = &retained {
