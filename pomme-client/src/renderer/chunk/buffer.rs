@@ -90,6 +90,17 @@ const MIN_SEGMENT: u32 = 64;
 /// Staging buffers in flight: one per frame that may still read one, and one
 /// written while they do.
 const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
+
+/// What an upload made of its batch.
+pub struct Uploaded {
+    /// Per mesh that hit pool exhaustion, the section indices dropped (need
+    /// re-mesh).
+    pub dropped: Vec<(ChunkPos, Vec<i32>)>,
+    /// How many meshes were taken, from the front; the rest didn't fit the
+    /// frame's staging room.
+    pub taken: usize,
+}
+
 /// Columns within this squared X/Z distance of the camera render opaque
 /// immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
@@ -1247,14 +1258,15 @@ impl ChunkBufferStore {
     /// Upload a batch of mesh results, each replacing the sections in its
     /// `mesh.replaced` range. The vertices go to this frame's staging buffer
     /// and the copies into the arenas are recorded as the frame starts, so a
-    /// streaming frame never waits for the GPU; only a batch outgrowing the
-    /// staging buffer is flushed and waited for on the spot. Returns the
-    /// starved sections that may fit now, per column, for re-meshing.
+    /// streaming frame never waits for the GPU: a batch outgrowing the
+    /// staging buffer stops there, and the rest is the caller's to send next
+    /// frame. Also returns the starved sections that may fit now, per column,
+    /// for re-meshing.
     pub fn upload_batch(
         &mut self,
         device: &rhi::backend::Device,
         meshes: &[ChunkMeshData],
-    ) -> Vec<(ChunkPos, Vec<i32>)> {
+    ) -> Uploaded {
         let mut needs_remesh: Vec<(ChunkPos, Vec<i32>)> = Vec::new();
         // Until something changes, the arenas are as full as before and the
         // retry would fail too.
@@ -1262,7 +1274,10 @@ impl ChunkBufferStore {
             self.retry_starved(device, &mut needs_remesh);
         }
         if meshes.is_empty() {
-            return needs_remesh;
+            return Uploaded {
+                dropped: needs_remesh,
+                taken: 0,
+            };
         }
 
         // Sub-allocate an exact-size vertex + index slice for each non-empty
@@ -1333,7 +1348,8 @@ impl ChunkBufferStore {
         }
         let now_ms = self.now_ms();
 
-        for mesh in meshes {
+        let mut taken = meshes.len();
+        for (i, mesh) in meshes.iter().enumerate() {
             // The covered sections this job is authoritative for: reject any where
             // a newer upload (higher epoch) already landed. See
             // `ChunkMeshData::upload_epoch`.
@@ -1379,6 +1395,11 @@ impl ChunkBufferStore {
                     self.retire_sections(mesh.pos, &accepted);
                     self.drop_if_empty(mesh.pos);
                     continue;
+                }
+                let (stg_v, stg_i) = self.staging_used[slot];
+                if i > 0 && (stg_v + v_bytes > staging_half || stg_i + i_bytes > staging_half) {
+                    taken = i;
+                    break;
                 }
             }
 
@@ -1458,8 +1479,9 @@ impl ChunkBufferStore {
                     .iter()
                     .map(|p| p.index_len() as usize * INDEX_SIZE as usize)
                     .sum();
-                // This mesh alone fits a half (checked above), so a flush always
-                // makes room.
+                // Only the batch's first mesh gets here with the half short
+                // (an edit uploaded earlier in the frame); it alone fits a half
+                // (checked above), so a flush always makes room.
                 let (stg_v, stg_i) = self.staging_used[slot];
                 if stg_v + mv > staging_half || stg_i + mi > staging_half {
                     self.flush_now(device);
@@ -1529,7 +1551,10 @@ impl ChunkBufferStore {
         }
 
         self.ensure_meta_capacity(device);
-        needs_remesh
+        Uploaded {
+            dropped: needs_remesh,
+            taken,
+        }
     }
 
     /// `pos`'s column slot, made with its visibility mask if it has none.

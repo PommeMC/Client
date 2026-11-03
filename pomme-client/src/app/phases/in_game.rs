@@ -335,20 +335,23 @@ pub struct GameState {
     pub last_update_phases: crate::benchmark::UpdatePhases,
     /// Which loaded columns need (re)meshing.
     mesh_columns: MeshColumns,
+    /// Meshes that didn't fit the frame's staging buffer, sent first next
+    /// frame.
+    pending_upload: Vec<ChunkMeshData>,
     /// Per-column bitmask of currently-visible section indices (bit `si` set =
-    /// section is in-frustum and not occluded). Computed in
-    /// `update_visibility`.
-    pub vis_mask: HashMap<ChunkPos, u32>,
-    /// Per-section cave-cull visibility (vanilla `VisibilitySet`). Fed by mesh
-    /// results; consumed by the occlusion walk.
-    pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    /// section is in-frustum and not occluded), from the last occlusion walk;
+    /// shared with the renderer.
+    pub vis_mask: Arc<HashMap<ChunkPos, u32>>,
+    /// The occlusion walk thread, holding every section's cave-cull
+    /// visibility (vanilla `VisibilitySet`) as mesh results report it.
+    pub walker: occlusion_graph::Walker,
     /// Per-column bitmask of sections whose mesh is finished and, if it had
     /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
     /// mesh counts too. The level load gate waits on the camera's bit.
     pub compiled: HashMap<ChunkPos, u32>,
-    /// Highest upload epoch each `section_vis` entry was set from; mirrors the
-    /// buffer's per-section geometry gate so a stale bulk can't re-stale an
-    /// edited section's visibility.
+    /// Highest upload epoch each section's visibility was sent from; mirrors
+    /// the buffer's per-section geometry gate so a stale bulk can't re-stale
+    /// an edited section's visibility.
     pub section_vis_epoch: HashMap<(ChunkPos, i32), u64>,
     /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
     /// recomputed each time an occlusion walk completes. Only the F3
@@ -625,14 +628,16 @@ impl GameState {
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
             mesh_columns: MeshColumns::default(),
-            vis_mask: HashMap::new(),
-            section_vis: HashMap::new(),
+            pending_upload: Vec::new(),
+            vis_mask: Arc::default(),
+            walker: occlusion_graph::Walker::spawn(),
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
             last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
-            vis_task: None,
+            vis_walk_pending: false,
+            vis_generation: 0,
             chunk_occlusion_enabled: true,
         }
     }
@@ -1207,13 +1212,21 @@ impl GameState {
     pub fn rebuild_meshes(&mut self) {
         self.reset_mesh_columns();
         self.remesh_all_columns();
-        self.section_vis.clear();
-        self.section_vis_epoch.clear();
-        self.vis_mask.clear();
-        self.vis_tiers.clear();
-        self.vis_task = None;
-        self.vis_valid = false;
+        self.pending_upload.clear();
+        self.forget_visibility();
         self.pending_load_rescan = true;
+    }
+
+    /// Drops every section's visibility and the last walk's result, as when
+    /// the meshes go.
+    pub fn forget_visibility(&mut self) {
+        self.walker.update(occlusion_graph::Update::Clear);
+        self.vis_generation += 1;
+        self.vis_walk_pending = false;
+        self.section_vis_epoch.clear();
+        self.vis_mask = Arc::default();
+        self.vis_tiers.clear();
+        self.vis_valid = false;
     }
 
     /// Marks every loaded column for remeshing (F3+A).
@@ -1303,20 +1316,24 @@ impl GameState {
         self.apply_mesh_upload(renderer, mesh);
     }
 
-    /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-    /// upload them in one coalesced GPU transfer (one fence wait, not one per
-    /// mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
-    /// Shared with the loading phase, which streams the spawn chunks in before
-    /// the game phase takes over.
+    /// Collect the frame's ready meshes, upload as many as fit the frame's
+    /// staging buffer in one coalesced GPU transfer (one fence wait, not one
+    /// per mesh) and apply their CPU-side bookkeeping; the rest go first next
+    /// frame. Shared with the loading phase, which streams the spawn chunks
+    /// in before the game phase takes over.
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
-        let batch = self.drain_meshes();
+        let mut batch = self.drain_meshes();
         let upload_start = std::time::Instant::now();
         renderer.upload_distant(self.distant.drain());
         let (wanted, gone) = renderer.take_distant_requests();
         self.distant.request(wanted, gone);
-        let dropped = renderer.upload_chunk_meshes(&batch);
+        let uploaded = renderer.upload_chunk_meshes(&batch);
+        self.pending_upload = batch.split_off(uploaded.taken);
+        for mesh in &mut batch {
+            self.apply_mesh_bookkeeping(mesh);
+        }
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-        self.clear_dropped_meshed(dropped);
+        self.clear_dropped_meshed(uploaded.dropped);
         // Distant terrain gives way once a column's sections draw, not once
         // they load: the ring loaded around the view waits on its
         // neighbours to compile.
@@ -1327,44 +1344,27 @@ impl GameState {
         }
     }
 
-    /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
-    /// bookkeeping applied.
+    /// The meshes still waiting to upload and then the frame's ready ones,
+    /// stale ones dropped.
     pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
-        let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
-        let mut batch = Vec::with_capacity(results.len());
-        for mut mesh in results {
+        let mut batch = std::mem::take(&mut self.pending_upload);
+        for mesh in self.mesh_dispatcher.drain_results() {
             // Stale meshes count too: worker time spent is worker time spent.
             if let Some(bench) = &mut self.chunk_load_bench {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
             }
-            // Drop a mesh for a load of the chunk that has since unloaded
-            // (uploading it would resurrect a column nothing cleans up). One
-            // from an older generation still uploads: the buffer's epoch gate
-            // keeps it from replacing anything newer, and its sections stay
-            // dirty for the newer job.
-            let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
-                || self.mesh_columns.incarnation(mesh.pos) != Some(mesh.incarnation);
-            if stale {
-                continue;
-            }
-            if let Some(t) = &mesh.timing {
-                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-                tracing::debug!(
-                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                    mesh.pos.x,
-                    mesh.pos.z,
-                    ms(t.started_at - t.enqueued_at),
-                    ms(t.meshed_at - t.started_at),
-                    ms(t.meshed_at.elapsed()),
-                    ms(t.enqueued_at.elapsed()),
-                );
-            }
-            // Taken before the upload so the mesh can move into the batch; the
-            // upload reports back what it had to drop.
-            self.apply_mesh_bookkeeping(&mut mesh);
             batch.push(mesh);
         }
+        // Drop a mesh for a load of the chunk that has since unloaded
+        // (uploading it would resurrect a column nothing cleans up). One
+        // from an older generation still uploads: the buffer's epoch gate
+        // keeps it from replacing anything newer, and its sections stay
+        // dirty for the newer job.
+        batch.retain(|mesh| {
+            self.chunk_store.get_chunk(&mesh.pos).is_some()
+                && self.mesh_columns.incarnation(mesh.pos) == Some(mesh.incarnation)
+        });
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
         batch
     }
@@ -1416,13 +1416,26 @@ impl GameState {
     /// epoch-guarded so a stale result can't overwrite a newer edit's
     /// visibility, and the sections it compiled. The upload can still drop a
     /// section afterwards, which `clear_dropped_meshed` takes back out.
-    fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
+    pub(crate) fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
+        if let Some(t) = &mesh.timing {
+            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+            tracing::debug!(
+                "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                mesh.pos.x,
+                mesh.pos.z,
+                ms(t.started_at - t.enqueued_at),
+                ms(t.meshed_at - t.started_at),
+                ms(t.meshed_at.elapsed()),
+                ms(t.enqueued_at.elapsed()),
+            );
+        }
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
             let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
             if mesh.upload_epoch >= *e {
                 *e = mesh.upload_epoch;
-                self.section_vis.insert((pos, si), vis);
+                self.walker
+                    .update(occlusion_graph::Update::Section { pos, si, vis });
             }
         }
         let meshed = section_bits(mesh.replaced.clone());
@@ -1447,8 +1460,8 @@ impl GameState {
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
         self.apply_mesh_bookkeeping(&mut mesh);
-        let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
-        self.clear_dropped_meshed(dropped);
+        let uploaded = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
+        self.clear_dropped_meshed(uploaded.dropped);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the

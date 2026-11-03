@@ -1381,10 +1381,9 @@ impl Renderer {
         self.frames.wait_all(&self.ctx.device);
     }
 
-    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
-    /// per mesh that hit pool exhaustion, the section indices dropped (need
-    /// re-mesh); empty on success.
-    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
+    /// Upload as many of a batch of chunk meshes as fit the frame's staging
+    /// buffer, in a single coalesced transfer.
+    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::Uploaded {
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }
 

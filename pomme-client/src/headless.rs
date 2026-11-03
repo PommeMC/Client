@@ -244,8 +244,9 @@ fn drive(
         game.rescan_mesh_jobs(chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
-        let batch = game.drain_meshes();
-        for mesh in &batch {
+        let mut batch = game.drain_meshes();
+        for mesh in &mut batch {
+            game.apply_mesh_bookkeeping(mesh);
             let mask = drawn.entry(mesh.pos).or_default();
             *mask &= !section_bits(mesh.replaced.clone());
             *mask |= section_bits(mesh.sections.iter().map(|s| s.section_index));
