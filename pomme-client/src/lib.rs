@@ -25,6 +25,7 @@ mod logging;
 mod mob_effect;
 mod net;
 mod particle;
+pub(crate) mod particles;
 mod physics;
 mod player;
 mod position;
