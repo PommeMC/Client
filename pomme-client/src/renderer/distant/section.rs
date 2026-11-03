@@ -243,8 +243,10 @@ impl VoxelizedSection {
                     self.data
                         [from + (y * 2 + dy) * finer * finer + (z * 2 + dz) * finer + x * 2 + dx]
                 };
-                self.data[to + i] =
-                    states.mip(std::array::from_fn(|c| child(c >> 2, c >> 1 & 1, c & 1)));
+                self.data[to + i] = states.mip(
+                    std::array::from_fn(|c| child(c >> 2, c >> 1 & 1, c & 1)),
+                    level,
+                );
             }
         }
     }

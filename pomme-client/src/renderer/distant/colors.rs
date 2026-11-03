@@ -111,6 +111,10 @@ impl Models for Baking<'_> {
         self.models.info(model).metadata
     }
 
+    fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16 {
+        self.models.fluid_surface(fluid, level, gap)
+    }
+
     fn fluid_model(&self, model: u16) -> u16 {
         self.models.info(model).fluid
     }

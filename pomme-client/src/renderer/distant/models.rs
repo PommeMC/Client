@@ -87,6 +87,11 @@ impl Metadata {
         self.flag(4)
     }
 
+    /// A fluid, or a block holding one.
+    pub fn has_fluid(self) -> bool {
+        self.is_fluid() || self.contains_fluid()
+    }
+
     pub fn culls_same(self) -> bool {
         self.flag(5)
     }
@@ -107,6 +112,10 @@ pub(crate) trait Models {
     fn metadata(&self, model: u16) -> Metadata;
     /// The model of the fluid a model's block holds, for a fluid its own.
     fn fluid_model(&self, model: u16) -> u16;
+    /// A fluid's model with its surface `gap` blocks below the top of a
+    /// level-`level` voxel, inset as at level 0 rather than scaled with the
+    /// voxel; the fluid's own at level 0.
+    fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16;
 }
 
 /// What tints a model's texture: a fixed colour, or the biome's (in the
@@ -137,6 +146,26 @@ impl ModelTint {
             Self::DryFoliage => 2,
             Self::Water => 3,
         }
+    }
+}
+
+/// Moves a fluid model's surface `gap` blocks down into a level-`level`
+/// voxel, keeping the inset below it the level-0 model's in blocks: the top
+/// face's inset, in 64ths of the voxel, and the end of the sides' drawn
+/// texels.
+fn lower_surface(face_data: &mut [u32; 6], level: u8, gap: u8) {
+    let blocks = u32::from(gap);
+    let voxel = 1u32 << level;
+    let top = &mut face_data[1];
+    let inset = (blocks * 64 + (*top >> 16 & 63)) / voxel;
+    *top = *top & !(63 << 16) | inset.min(62) << 16;
+    for side in &mut face_data[2..] {
+        if *side == u32::MAX {
+            continue;
+        }
+        let min_y = *side >> 8 & 0xF;
+        let max_y = (16 * (voxel - blocks) / voxel).saturating_sub(1).max(min_y);
+        *side = *side & !(0xF << 12) | max_y << 12;
     }
 }
 
@@ -207,6 +236,10 @@ pub(crate) struct ModelFactory {
     models: Vec<ModelInfo>,
     /// Tiles baked since the last [`Self::take_tiles`].
     tiles: Vec<ModelTile>,
+    /// Each fluid's record and tile, for its lowered surfaces to copy.
+    fluids: HashMap<u16, (BlockModel, Vec<Vec<u8>>)>,
+    /// [`Self::fluid_surface`]'s models by fluid, level and gap.
+    surfaces: HashMap<(u16, u8, u8), u16>,
 }
 
 impl ModelFactory {
@@ -217,7 +250,39 @@ impl ModelFactory {
             entries: HashMap::new(),
             models: vec![AIR],
             tiles: Vec::new(),
+            fluids: HashMap::new(),
+            surfaces: HashMap::new(),
         }
+    }
+
+    /// [`Models::fluid_surface`].
+    pub fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16 {
+        if level == 0 {
+            return fluid;
+        }
+        if let Some(&id) = self.surfaces.get(&(fluid, level, gap)) {
+            return id;
+        }
+        let Some((record, levels)) = self.fluids.get(&fluid) else {
+            return fluid;
+        };
+        if self.models.len() == CAPACITY {
+            return fluid;
+        }
+        let mut model = *record;
+        lower_surface(&mut model.face_data, level, gap);
+        let id = self.models.len() as u16;
+        self.models.push(ModelInfo {
+            metadata: self.models[usize::from(fluid)].metadata,
+            fluid: id,
+        });
+        self.tiles.push(ModelTile {
+            id,
+            model,
+            levels: levels.clone(),
+        });
+        self.surfaces.insert((fluid, level, gap), id);
+        id
     }
 
     pub fn info(&self, model: u16) -> ModelInfo {
@@ -375,18 +440,19 @@ impl ModelFactory {
             metadata: Metadata(metadata),
             fluid: held_fluid.unwrap_or(id),
         });
-        self.tiles.push(ModelTile {
-            id,
-            model: BlockModel {
-                face_data,
-                flags: u32::from(tint != ModelTint::None)
-                    | u32::from(tint.biome_dependent()) << 1
-                    | u32::from(layer == Layer::Translucent) << 2
-                    | u32::from(flags.shaded) << 3,
-                tint: tint.packed(),
-            },
-            levels: mip_tile(flags.darkened, leaves, faces),
-        });
+        let model = BlockModel {
+            face_data,
+            flags: u32::from(tint != ModelTint::None)
+                | u32::from(tint.biome_dependent()) << 1
+                | u32::from(layer == Layer::Translucent) << 2
+                | u32::from(flags.shaded) << 3,
+            tint: tint.packed(),
+        };
+        let levels = mip_tile(flags.darkened, leaves, faces);
+        if is_fluid {
+            self.fluids.insert(id, (model, levels.clone()));
+        }
+        self.tiles.push(ModelTile { id, model, levels });
         self.entries.insert(entry, id);
         id
     }
@@ -628,6 +694,28 @@ fn linear_to_srgb(linear: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lowering_a_surface_moves_the_top_and_cuts_the_sides() {
+        // A fluid: top inset two texels, sides the full voxel.
+        let water = [u32::MAX, 8 << 16, 0xF0F0, 0xF0F0, 0xF0F0, 0xF0F0];
+        let mut faces = water;
+        lower_surface(&mut faces, 1, 1);
+        // A block down a two-block voxel: (64 + 8) / 2 sixty-fourths.
+        assert_eq!(faces[1] >> 16 & 63, 36);
+        // The sides end at the lower half, texel row 7.
+        assert_eq!(faces[2] >> 12 & 0xF, 7);
+        assert_eq!(faces[0], u32::MAX);
+        let mut faces = water;
+        lower_surface(&mut faces, 4, 15);
+        assert_eq!(faces[1] >> 16 & 63, 60);
+        assert_eq!(faces[2] >> 12 & 0xF, 0);
+        // At the top of a two-block voxel the inset halves and the sides stay.
+        let mut faces = water;
+        lower_surface(&mut faces, 1, 0);
+        assert_eq!(faces[1] >> 16 & 63, 4);
+        assert_eq!(faces[2] >> 12 & 0xF, 15);
+    }
 
     /// Six faces of green with a clear texel at the corner of each.
     fn holey_faces() -> [FaceTexture; 6] {

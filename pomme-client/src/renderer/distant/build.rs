@@ -52,9 +52,13 @@ const SIDES: [[i32; 3]; 6] = [
 ];
 
 pub(crate) struct Factory {
+    /// The level of the section being meshed.
+    level: u8,
     /// Per voxel, its quad without a position, then its model's metadata;
     /// air keeps only its light.
     section: Box<[u64]>,
+    /// Per voxel, [`voxel::gap`].
+    gaps: Box<[u8]>,
     /// The six neighbours' facing slices ([`SIDES`]).
     neighbours: Box<[u64]>,
     /// A bit per x of each row `y * 32 + z`: fully opaque blocks, blocks
@@ -75,7 +79,9 @@ pub(crate) struct Factory {
 impl Factory {
     pub fn new() -> Self {
         Self {
+            level: 0,
             section: vec![0; VOLUME * 2].into(),
+            gaps: vec![0; VOLUME].into(),
             neighbours: vec![UNSEEN; 6 * 1024].into(),
             opaque: Box::new([0; 1024]),
             non_opaque: Box::new([0; 1024]),
@@ -98,6 +104,7 @@ impl Factory {
         models: &mut dyn Models,
     ) -> BuiltSection {
         self.out.clear();
+        self.level = key.level;
         let needed = self.prepare(&section.data, models);
         for (side, offset) in SIDES.iter().enumerate() {
             if needed & 1 << side == 0 {
@@ -189,6 +196,7 @@ impl Factory {
                     };
                     self.section[i * 2] = quad;
                     self.section[i * 2 + 1] = meta.0;
+                    self.gaps[i] = voxel::gap(voxel);
                 }
                 let row = y * 32 + z;
                 self.opaque[row] = opaque;
@@ -211,6 +219,23 @@ impl Factory {
         self.section[i * 2]
     }
 
+    /// Voxel `i`'s quad and metadata as a fluid, at the voxel's surface; a
+    /// block holding one takes the fluid's model and group for the fluid
+    /// passes.
+    fn as_fluid(&self, models: &mut dyn Models, i: usize) -> (u64, Metadata) {
+        let (quad, meta) = (self.quad(i), self.meta(i));
+        if !meta.has_fluid() {
+            return (quad, meta);
+        }
+        let model = ((quad & MODEL) >> QUAD_MODEL_SHIFT) as u16;
+        let fluid = fluid_of(models, model, self.level, self.gaps[i]);
+        let meta = models.metadata(fluid);
+        (
+            quad & !MODEL & !0b110 | u64::from(fluid) << QUAD_MODEL_SHIFT | quad_group(meta),
+            meta,
+        )
+    }
+
     fn meta(&self, i: usize) -> Metadata {
         Metadata(self.section[i * 2 + 1])
     }
@@ -223,6 +248,17 @@ impl Factory {
     /// `axis`'s outer layer on `side`.
     fn across(&self, axis: u8, side: usize, other: usize, index: i32) -> u64 {
         self.neighbour((axis as usize + 1) * 2 + side, other * 32 + index as usize)
+    }
+
+    /// The neighbouring block as the fluid passes see it: a fluid's surface
+    /// model, with the block's own metadata.
+    fn fluid_neighbour(&self, models: &mut dyn Models, voxel: u64) -> (u16, Metadata) {
+        let (model, meta) = Self::neighbour_model(models, voxel);
+        if model != 0 && meta.has_fluid() {
+            (fluid_of(models, model, self.level, voxel::gap(voxel)), meta)
+        } else {
+            (model, meta)
+        }
     }
 
     /// The neighbouring block's model and metadata, 0 for air.
@@ -383,7 +419,7 @@ impl Factory {
                     let (own, next) = Self::pair(index as usize + pidx * 32, step * 32, forward);
                     let quad =
                         (!s.meta(next).face_occludes(axis << 1 | (1 - forward) as u8)).then(|| {
-                            let (quad, meta) = as_fluid(models, s.quad(own), s.meta(own));
+                            let (quad, meta) = s.as_fluid(models, own);
                             apply_light(
                                 u64::from(forward) | quad & !QUAD_LIGHT | s.quad(next) & QUAD_LIGHT,
                                 meta,
@@ -408,11 +444,8 @@ impl Factory {
                 |s, pidx, other, index| {
                     let idx = index as usize + pidx * 32;
                     let voxel = s.across(axis, side, other, index);
-                    let (quad, meta) = as_fluid(models, s.quad(idx), s.meta(idx));
-                    let (mut model, next_meta) = Self::neighbour_model(models, voxel);
-                    if model != 0 && next_meta.contains_fluid() {
-                        model = models.fluid_model(model);
-                    }
+                    let (quad, meta) = s.as_fluid(models, idx);
+                    let (model, next_meta) = s.fluid_neighbour(models, voxel);
                     let culls = model != 0
                         && (meta.culls_same()
                             && u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL
@@ -586,7 +619,7 @@ impl Factory {
                 let forward = (s.opaque[i] | s.fluid[i]) >> index & 1;
                 let (own, next) = Self::pair(index + i * 32, 1, forward);
                 let quad = (!s.meta(next).face_occludes(2 << 1 | (1 - forward) as u8)).then(|| {
-                    let (quad, meta) = as_fluid(models, s.quad(own), s.meta(own));
+                    let (quad, meta) = s.as_fluid(models, own);
                     apply_light(
                         u64::from(forward) | quad & !QUAD_LIGHT | s.quad(next) & QUAD_LIGHT,
                         meta,
@@ -701,15 +734,12 @@ impl Factory {
             |s, i| s.fluid[i],
             |s, models, side, i| {
                 let idx = i * 32 + side * 31;
-                let (quad, meta) = as_fluid(models, s.quad(idx), s.meta(idx));
+                let (quad, meta) = s.as_fluid(models, idx);
                 let voxel = s.neighbour(side, i);
-                let (mut model, next_meta) = Self::neighbour_model(models, voxel);
+                let (model, next_meta) = s.fluid_neighbour(models, voxel);
                 let mut culls = model != 0
                     && (next_meta.is_fully_opaque()
                         || next_meta.face_occludes(2 << 1 | (1 - side) as u8));
-                if model != 0 && next_meta.contains_fluid() {
-                    model = models.fluid_model(model);
-                }
                 culls |= model != 0
                     && meta.culls_same()
                     && u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL;
@@ -845,18 +875,11 @@ fn apply_light(quad: u64, meta: Metadata) -> u64 {
     quad & !BLOCK_LIGHT | light
 }
 
-/// A block holding a fluid takes the fluid's model and group for the fluid
-/// passes.
-fn as_fluid(models: &mut dyn Models, quad: u64, meta: Metadata) -> (u64, Metadata) {
-    if !meta.contains_fluid() {
-        return (quad, meta);
-    }
-    let fluid = models.fluid_model(((quad & MODEL) >> QUAD_MODEL_SHIFT) as u16);
-    let meta = models.metadata(fluid);
-    (
-        quad & !MODEL & !0b110 | u64::from(fluid) << QUAD_MODEL_SHIFT | quad_group(meta),
-        meta,
-    )
+/// The model of the fluid `model`'s block holds, with its surface `gap`
+/// blocks down into a level-`level` voxel.
+fn fluid_of(models: &mut dyn Models, model: u16, level: u8, gap: u8) -> u16 {
+    let fluid = models.fluid_model(model);
+    models.fluid_surface(fluid, level, gap)
 }
 
 /// Whether `face` of a block that's neither opaque nor fluid is drawn against
@@ -939,6 +962,10 @@ mod tests {
 
         fn fluid_model(&self, model: u16) -> u16 {
             if model == 4 { 3 } else { model }
+        }
+
+        fn fluid_surface(&mut self, fluid: u16, _level: u8, _gap: u8) -> u16 {
+            fluid
         }
     }
 
@@ -1044,6 +1071,96 @@ mod tests {
         let mixed = build(&with(&[((5, 6, 7), 2), ((6, 6, 7), 1)]));
         assert_eq!(mixed.quads.iter().filter(|&&q| model(q) == 2).count(), 5);
         assert_eq!(mixed.quads.iter().filter(|&&q| model(q) == 1).count(), 6);
+    }
+
+    /// A [`Stub`] that notes the surfaces asked for.
+    struct Surfaces(Vec<(u16, u8, u8)>);
+
+    impl Models for Surfaces {
+        fn model(&mut self, block: u32) -> u16 {
+            Stub.model(block)
+        }
+
+        fn metadata(&self, model: u16) -> Metadata {
+            Stub.metadata(model)
+        }
+
+        fn fluid_model(&self, model: u16) -> u16 {
+            Stub.fluid_model(model)
+        }
+
+        fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16 {
+            self.0.push((fluid, level, gap));
+            fluid
+        }
+    }
+
+    /// Face 1's quads of `built` as the columns they cover, counted, with
+    /// the quad's two extents taken along x then z, or the other way round.
+    fn top_coverage(built: &BuiltSection, swapped: bool) -> Vec<u32> {
+        let mut cover = vec![0u32; 1024];
+        for &quad in built.quads.iter().filter(|&&q| face(q) == 1) {
+            let (x, _, z) = position(quad);
+            let (mut a, mut b) = ((quad >> 3 & 15) as u32 + 1, (quad >> 7 & 15) as u32 + 1);
+            if swapped {
+                std::mem::swap(&mut a, &mut b);
+            }
+            for dx in 0..a {
+                for dz in 0..b {
+                    cover[((z + dz) * 32 + x + dx) as usize] += 1;
+                }
+            }
+        }
+        cover
+    }
+
+    #[test]
+    fn a_lake_surface_covers_every_column_once() {
+        lake_surface_covers_every_column_once(11);
+    }
+
+    #[test]
+    fn a_lake_surface_at_the_sections_top_covers_every_column_once() {
+        lake_surface_covers_every_column_once(32);
+    }
+
+    fn lake_surface_covers_every_column_once(depth: usize) {
+        let mut lake = WorldSection::unseen();
+        for x in 0..32 {
+            for z in 0..32 {
+                for y in 0..depth {
+                    lake.data[section::index(x, y, z)] = voxel::compose(0x0F, 3, 0);
+                }
+            }
+        }
+        let built = build(&lake);
+        let holes = |swapped| {
+            top_coverage(&built, swapped)
+                .iter()
+                .filter(|&&c| c != 1)
+                .count()
+        };
+        assert!(
+            holes(false) == 0 || holes(true) == 0,
+            "{} / {} columns not covered exactly once",
+            holes(false),
+            holes(true)
+        );
+    }
+
+    #[test]
+    fn a_coarse_fluid_meshes_at_its_surface() {
+        let mut lake = WorldSection::unseen();
+        for x in 0..32 {
+            for z in 0..32 {
+                lake.data[section::index(x, 10, z)] = voxel::compose(0x0F, 3, 0) | 1;
+            }
+        }
+        let mut surfaces = Surfaces(Vec::new());
+        let level_1 = SectionKey { level: 1, ..key() };
+        Factory::new().build(level_1, &lake, |_| None, &mut surfaces);
+        assert!(surfaces.0.contains(&(3, 1, 1)));
+        assert!(surfaces.0.iter().all(|&surface| surface == (3, 1, 1)));
     }
 
     #[test]

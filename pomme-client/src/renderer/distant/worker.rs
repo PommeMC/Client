@@ -243,7 +243,7 @@ pub(crate) fn folder_name(name: &str) -> String {
 /// Where `dimension`'s sections go under `cache`: a folder of their own, so
 /// the column files of earlier builds don't mix in.
 fn dimension_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
-    Some(cache?.join(folder_name(dimension)).join("sections"))
+    Some(cache?.join(folder_name(dimension)).join("sections-v2"))
 }
 
 /// `dimension`'s world, made with its folder under `cache`.

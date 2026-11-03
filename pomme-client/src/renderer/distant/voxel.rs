@@ -9,6 +9,10 @@ const LIGHT_SHIFT: u32 = 56;
 const BLOCK_MASK: u64 = ((1 << 20) - 1) << BLOCK_SHIFT;
 pub(crate) const BIOME_MASK: u64 = 0x1FF << BIOME_SHIFT;
 pub(crate) const LIGHT_MASK: u64 = 0xFF << LIGHT_SHIFT;
+/// A fluid voxel above level 0: how many blocks of air lie between its top
+/// and the fluid's surface, so every level draws the surface on one plane.
+/// A departure: the reference draws a coarse fluid voxel full.
+const GAP_MASK: u64 = 0xF;
 
 /// Block state 0 is air, whatever kind.
 pub(crate) const AIR: u32 = 0;
@@ -34,6 +38,10 @@ pub(crate) fn light(voxel: u64) -> u8 {
     (voxel >> LIGHT_SHIFT) as u8
 }
 
+pub(crate) fn gap(voxel: u64) -> u8 {
+    (voxel & GAP_MASK) as u8
+}
+
 pub(crate) fn with_light(voxel: u64, light: u8) -> u64 {
     voxel & !LIGHT_MASK | u64::from(light) << LIGHT_SHIFT
 }
@@ -44,6 +52,8 @@ pub(crate) fn with_light(voxel: u64, light: u8) -> u64 {
 pub(crate) struct States {
     air: Box<[bool]>,
     opacity: Box<[u8]>,
+    /// Fluids and blocks holding one.
+    fluid: Box<[bool]>,
 }
 
 impl States {
@@ -54,14 +64,20 @@ impl States {
         let air = data
             .clone()
             .map(|data| data.is_ok_and(|data| data.is_air()));
-        let opacity = data.map(|data| match data {
+        let opacity = data.clone().map(|data| match data {
             Ok(data) if data.is_leaves() => 15,
             Ok(data) => data.light_props().dampening,
             Err(_) => 0,
         });
+        let fluid = data.map(|data| {
+            data.is_ok_and(|data| {
+                data.is_fluid_block() || data.fluid().kind != crate::world::block::FluidKind::Empty
+            })
+        });
         Self {
             air: air.collect(),
             opacity: opacity.collect(),
+            fluid: fluid.collect(),
         }
     }
 
@@ -74,6 +90,13 @@ impl States {
         }
     }
 
+    fn is_fluid(&self, voxel: u64) -> bool {
+        self.fluid
+            .get(block_id(voxel) as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     fn opacity(&self, voxel: u64) -> u8 {
         self.opacity
             .get(block_id(voxel) as usize)
@@ -84,8 +107,9 @@ impl States {
     /// Of eight children, indexed `x << 2 | y << 1 | z`, the most opaque
     /// block wins, ties going to the highest index (x, then y, then z). All
     /// air: air lit by the mean of their light, block light rounded down,
-    /// sky up.
-    pub fn mip(&self, children: [u64; 8]) -> u64 {
+    /// sky up. A fluid winner records the gap down to the highest fluid
+    /// surface among the children, in blocks of the level-`level` voxel.
+    pub fn mip(&self, children: [u64; 8], level: u8) -> u64 {
         let best = children
             .iter()
             .enumerate()
@@ -93,7 +117,21 @@ impl States {
             .map(|(i, &child)| (u32::from(self.opacity(child)) << 4 | i as u32, child))
             .max_by_key(|&(score, _)| score);
         if let Some((_, winner)) = best {
-            return winner;
+            if !self.is_fluid(winner) {
+                return winner & !GAP_MASK;
+            }
+            let lowest_gap = |upper: bool| {
+                children
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, &child)| (i >> 1 & 1 == 1) == upper && self.is_fluid(child))
+                    .map(|(_, &child)| gap(child))
+                    .min()
+            };
+            let gap = lowest_gap(true)
+                .or_else(|| lowest_gap(false).map(|gap| gap + (1 << (level - 1))))
+                .unwrap_or(0);
+            return winner & !GAP_MASK | u64::from(gap);
         }
         let lights = children.map(|child| u32::from(light(child)));
         let block = (lights.iter().map(|l| l & 0xF0).sum::<u32>() / 8) & 0xF0;
@@ -125,7 +163,44 @@ mod tests {
         States {
             air: vec![false; opacity.len()].into(),
             opacity: opacity.into(),
+            fluid: vec![false; 4].into(),
         }
+    }
+
+    #[test]
+    fn water_and_waterlogged_blocks_count_as_fluid() {
+        let table = crate::world::block::BlockStateTable::native();
+        let states = States::new(table);
+        let id = |name: &str| u32::from(table.find_state(name, &[]).id());
+        assert!(states.is_fluid(compose(0, id("water"), 0)));
+        assert!(states.is_fluid(compose(0, id("seagrass"), 0)));
+        assert!(!states.is_fluid(compose(0, id("stone"), 0)));
+    }
+
+    #[test]
+    fn a_fluid_winner_records_the_gap_down_to_its_surface() {
+        // States: 1 water, 2 stone.
+        let mut states = states(&[0, 1, 15, 0]);
+        states.fluid = vec![false, true, false, false].into();
+        let (water, air, stone) = (compose(0, 1, 0), compose(0xF, AIR, 0), compose(0, 2, 0));
+        // Water fills the lower half: the surface is a block down at level 1.
+        let mut children = [air; 8];
+        for lower in [0, 1, 4, 5] {
+            children[lower] = water;
+        }
+        let half_full = states.mip(children, 1);
+        assert_eq!(block_id(half_full), 1);
+        assert_eq!(gap(half_full), 1);
+        // At level 2 an upper child at its surface wins over a lower one.
+        let mut children = [air; 8];
+        children[0] = half_full;
+        children[2] = water;
+        assert_eq!(gap(states.mip(children, 2)), 0);
+        children[2] = air;
+        assert_eq!(gap(states.mip(children, 2)), 2 + 1);
+        // Stone over water: no gap.
+        children[7] = stone;
+        assert_eq!(states.mip(children, 2), stone);
     }
 
     #[test]
@@ -136,15 +211,15 @@ mod tests {
         let mut children = [0; 8];
         children[0] = stone;
         children[7] = glass;
-        assert_eq!(states.mip(children), stone, "stone beats glass");
+        assert_eq!(states.mip(children, 1), stone, "stone beats glass");
         children[3] = leaves;
         assert_eq!(
-            states.mip(children),
+            states.mip(children, 1),
             leaves,
             "a tie goes to the higher corner"
         );
         assert_eq!(
-            states.mip([0, 0, 0, 0, 0, 0, 0, glass]),
+            states.mip([0, 0, 0, 0, 0, 0, 0, glass], 1),
             glass,
             "any block beats air"
         );
@@ -160,8 +235,8 @@ mod tests {
             let sky = u8::from(i < 3);
             *child = compose(block | sky, AIR, 0);
         }
-        assert_eq!(light(states.mip(children)), 0x01);
+        assert_eq!(light(states.mip(children, 1)), 0x01);
         // Full sky everywhere stays full.
-        assert_eq!(light(states.mip([compose(0x0F, AIR, 0); 8])), 0x0F);
+        assert_eq!(light(states.mip([compose(0x0F, AIR, 0); 8], 1)), 0x0F);
     }
 }
