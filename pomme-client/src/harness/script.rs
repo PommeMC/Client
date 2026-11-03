@@ -401,10 +401,13 @@ struct FrameSample {
     frame_ms: f32,
     fence_ms: f32,
     gpu: Vec<(&'static str, f32)>,
+    sections: u32,
+    triangles: u32,
 }
 
 /// `samples` summed up: the frame rate, its 1% low, the CPU and GPU-wait
-/// shares of a frame, and the GPU's own time per pass.
+/// shares of a frame, the GPU's own time per pass, and what the chunk draws
+/// covered.
 fn summarize(samples: &[FrameSample]) -> String {
     let mean =
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
@@ -428,7 +431,7 @@ fn summarize(samples: &[FrameSample]) -> String {
         .map(|(name, sum, count)| (name, sum / count as f32))
         .collect();
     format!(
-        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms; gpu {:.2} ms: {}",
+        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms; gpu {:.2} ms: {}; {:.0} sections, {:.0}k triangles",
         samples.len(),
         1000.0 / mean(|s| s.interval_ms),
         1000.0 / low,
@@ -440,6 +443,8 @@ fn summarize(samples: &[FrameSample]) -> String {
             .map(|(name, ms)| format!("{name} {ms:.2}"))
             .collect::<Vec<_>>()
             .join(", "),
+        mean(|s| s.sections as f32),
+        mean(|s| s.triangles as f32) / 1000.0,
     )
 }
 
@@ -519,6 +524,8 @@ impl Script {
                         frame_ms: timings.frame_ms,
                         fence_ms: timings.fence_ms,
                         gpu: timings.gpu.clone(),
+                        sections: timings.sections,
+                        triangles: timings.triangles,
                     });
                 }
                 self.last_frame = Some(now);

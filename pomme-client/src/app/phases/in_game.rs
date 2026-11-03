@@ -2710,6 +2710,7 @@ pub fn update_game(
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
+            triangles_drawn: gfx.renderer.last_timings().triangles,
             occlusion_on: game.chunk_occlusion_enabled,
             mesh_gate: game.vis_valid.then(|| {
                 // Among in-frustum columns: sections we mesh vs sections skipped as

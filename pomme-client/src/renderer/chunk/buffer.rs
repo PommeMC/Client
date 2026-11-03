@@ -79,8 +79,8 @@ const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
 ];
-/// A draw count per arena.
-const COUNTS_SIZE: u64 = (MAX_ARENAS * size_of::<u32>()) as u64;
+/// A draw count per arena, then an index count per arena.
+const COUNTS_SIZE: u64 = (2 * MAX_ARENAS * size_of::<u32>()) as u64;
 const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
 /// Column slots the visibility masks start with room for.
 const INITIAL_COLUMNS: usize = 1 << 14;
@@ -1087,6 +1087,8 @@ pub struct ChunkBufferStore {
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
     last_draw_count: u32,
+    /// Indices the last cull's draws of every layer covered.
+    last_index_count: u32,
 
     /// Monotonic frame counter, bumped once per rendered frame in
     /// `begin_frame`.
@@ -1184,7 +1186,7 @@ impl ChunkBufferStore {
                     rhi::backend::Buffer::new(
                         device,
                         "draw_count_readback",
-                        2 * COUNTS_SIZE,
+                        3 * COUNTS_SIZE,
                         rhi::BufferUsages::COPY_DST,
                         rhi::MemoryLocation::Readback,
                     )
@@ -1197,6 +1199,7 @@ impl ChunkBufferStore {
             cull_layout,
             fade_enabled: false,
             last_draw_count: 0,
+            last_index_count: 0,
             frame_seq: 0,
             pending_free: VecDeque::new(),
         }
@@ -1206,6 +1209,11 @@ impl ChunkBufferStore {
     /// cull). Read back from the GPU count buffer, so it lags a few frames.
     pub fn sections_drawn(&self) -> u32 {
         self.last_draw_count
+    }
+
+    /// Triangles the last cull drew, every layer.
+    pub fn triangles_drawn(&self) -> u32 {
+        self.last_index_count / 3
     }
 
     /// Milliseconds since the store was made, never 0 (no fade).
@@ -2215,10 +2223,21 @@ impl ChunkBufferStore {
         }
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
-        // so its readback holds the previous cull's totals (solid + cutout draws).
-        self.last_draw_count = self.count_readbacks[frame].read(|bytes| {
-            let (counts, _) = bytes.as_chunks::<4>();
-            counts.iter().map(|&count| u32::from_ne_bytes(count)).sum()
+        // so its readback holds the previous cull's totals: per layer, the
+        // draws per arena then the indices per arena.
+        (self.last_draw_count, self.last_index_count) = self.count_readbacks[frame].read(|bytes| {
+            let words: &[u32] = bytemuck::cast_slice(bytes);
+            let (layers, _) = words.as_chunks::<{ 2 * MAX_ARENAS }>();
+            let mut draws = 0;
+            let mut indices = 0;
+            for (layer, counts) in layers.iter().enumerate() {
+                let (per_arena, per_arena_indices) = counts.split_at(MAX_ARENAS);
+                if layer != Layer::Water as usize {
+                    draws += per_arena.iter().sum::<u32>();
+                }
+                indices += per_arena_indices.iter().sum::<u32>();
+            }
+            (draws, indices)
         });
         let data = self.frustum_data(frustum, anchor, eye, true);
         self.camera.cull(
@@ -2230,12 +2249,12 @@ impl ChunkBufferStore {
         );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
         let readback = self.count_readbacks[frame].handle();
-        for (i, count) in [
-            &self.camera.counts[Layer::Solid as usize][frame],
-            &self.camera.counts[Layer::Cutout as usize][frame],
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, count) in self
+            .camera
+            .counts
+            .iter()
+            .map(|counts| &counts[frame])
+            .enumerate()
         {
             encoder.copy_buffer(
                 count.handle(),

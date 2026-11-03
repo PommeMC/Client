@@ -242,6 +242,9 @@ pub struct RenderTimings {
     /// The GPU's own time per pass, from the frame whose fence signalled
     /// last: what finished before each named stamp.
     pub gpu: Vec<(&'static str, f32)>,
+    /// Chunk sections and triangles the last cull drew.
+    pub sections: u32,
+    pub triangles: u32,
     pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
@@ -1957,6 +1960,8 @@ impl Renderer {
                 self.camera_render_position(),
             );
             self.gpu_stamp(&encoder, frame, "cull");
+            self.last_timings.sections = self.chunk_buffers.sections_drawn();
+            self.last_timings.triangles = self.chunk_buffers.triangles_drawn();
         }
 
         let player_team_color = match &mode {

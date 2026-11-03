@@ -99,12 +99,15 @@ layout(set = 0, binding = 8) readonly buffer VisibilityBuf {
 const uint SOLID = 0u;
 const uint CUTOUT = 1u;
 const uint WATER = 2u;
+const uint MAX_ARENAS = 256u;
 
 // Emit one indexed draw covering [first..first+count) for this section into
 // its arena's draws of `layer`. The per-instance attributes (origin + fade)
 // come from meta entry `idx`, routed via first_instance.
 void emit(ChunkMeta m, uint base, uint count, uint first, uint idx, uint layer) {
     if (count == 0u) return;
+    // The arena's index total, after every arena's draw count.
+    uint indices = MAX_ARENAS + m.arena;
     DrawCmd d;
     d.index_count = count;
     d.instance_count = 1u;
@@ -113,10 +116,13 @@ void emit(ChunkMeta m, uint base, uint count, uint first, uint idx, uint layer) 
     d.first_instance = idx;
     if (layer == SOLID) {
         draws[base + atomicAdd(draw_counts[m.arena], 1u)] = d;
+        atomicAdd(draw_counts[indices], count);
     } else if (layer == CUTOUT) {
         cutout_draws[base + atomicAdd(cutout_draw_counts[m.arena], 1u)] = d;
+        atomicAdd(cutout_draw_counts[indices], count);
     } else {
         water_draws[base + atomicAdd(water_draw_counts[m.arena], 1u)] = d;
+        atomicAdd(water_draw_counts[indices], count);
     }
 }
 

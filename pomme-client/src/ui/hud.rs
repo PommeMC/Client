@@ -384,6 +384,7 @@ pub struct DebugInfo<'a> {
     )>,
     pub chunk_count: u32,
     pub sections_drawn: u32,
+    pub triangles_drawn: u32,
     pub occlusion_on: bool,
     /// Mesh-scheduling tiers (visible, margin, hidden) of loaded columns when
     /// the visibility gate is active; `None` while it falls back to meshing
@@ -1650,9 +1651,10 @@ pub fn build_debug_overlay(
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
-            "Sections drawn: {} (occlusion {})",
+            "Sections drawn: {} (occlusion {}), {}k triangles",
             info.sections_drawn,
-            if info.occlusion_on { "on" } else { "off" }
+            if info.occlusion_on { "on" } else { "off" },
+            info.triangles_drawn / 1000
         ),
         match info.mesh_gate {
             Some((vis, margin, hidden)) => {

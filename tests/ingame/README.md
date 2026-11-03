@@ -169,8 +169,9 @@ wait_ms = 1000
 frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # report line gives the frame
                                               # rate, its 1% low, the CPU and
-                                              # GPU-wait share of a frame, and
-                                              # the GPU's own time per pass
+                                              # GPU-wait share of a frame, the
+                                              # GPU's own time per pass, and
+                                              # the sections and triangles drawn
 
 [[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
