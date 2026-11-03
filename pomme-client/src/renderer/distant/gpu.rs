@@ -816,7 +816,13 @@ impl DistantBuffers {
         );
     }
 
-    pub fn bounds(&self) -> &BoundStore {
+    pub fn bound_layout(&self) -> rhi::backend::BindGroupLayout {
+        self.bounds.layout()
+    }
+
+    /// The bound store with the frame's buffer brought up to date.
+    pub fn bounds(&mut self, frame: usize) -> &BoundStore {
+        self.bounds.flush(frame);
         &self.bounds
     }
 
@@ -1175,8 +1181,12 @@ fn place(
 /// stacked sections is one box, whose far faces are the run's.
 pub(crate) struct BoundStore {
     layout: rhi::backend::BindGroupLayout,
-    buffer: rhi::backend::Buffer,
-    group: rhi::backend::BindGroup,
+    /// One per frame in flight, written as its frame records the bound
+    /// pass, so a frame still drawing never reads a moved box.
+    buffers: Vec<rhi::backend::Buffer>,
+    groups: Vec<rhi::backend::BindGroup>,
+    /// Per frame in flight, the slots changed since its buffer was written.
+    dirty: [Option<(u32, u32)>; MAX_FRAMES_IN_FLIGHT],
     capacity: u32,
     /// Each box's section coordinates and its height in sections.
     slots: Vec<[i32; 4]>,
@@ -1188,7 +1198,7 @@ pub(crate) struct BoundStore {
     min_section: i32,
     /// Buffers in-flight frames may still read, by the frame they're free
     /// from.
-    retired: VecDeque<(u64, rhi::backend::Buffer, rhi::backend::BindGroup)>,
+    retired: VecDeque<(u64, Vec<rhi::backend::Buffer>, Vec<rhi::backend::BindGroup>)>,
 }
 
 impl BoundStore {
@@ -1199,11 +1209,12 @@ impl BoundStore {
                 rhi::ShaderStages::VERTEX,
             )],
         );
-        let (buffer, group) = Self::make_buffer(device, layout, BOUND_CAPACITY);
+        let (buffers, groups) = Self::make_buffers(device, layout, BOUND_CAPACITY);
         Self {
             layout,
-            buffer,
-            group,
+            buffers,
+            groups,
+            dirty: [None; MAX_FRAMES_IN_FLIGHT],
             capacity: BOUND_CAPACITY,
             slots: Vec::new(),
             index: HashMap::new(),
@@ -1213,42 +1224,60 @@ impl BoundStore {
         }
     }
 
-    fn make_buffer(
+    fn make_buffers(
         device: &rhi::backend::Device,
         layout: rhi::backend::BindGroupLayout,
         capacity: u32,
-    ) -> (rhi::backend::Buffer, rhi::backend::BindGroup) {
+    ) -> (Vec<rhi::backend::Buffer>, Vec<rhi::backend::BindGroup>) {
         let bytes = u64::from(capacity) * 16;
-        let buffer = rhi::backend::Buffer::new(
-            device,
-            "distant_chunk_bounds",
-            bytes,
-            rhi::BufferUsages::STORAGE,
-            rhi::MemoryLocation::Host,
-        );
-        let group = device.create_bind_group(
-            layout,
-            &[(0, rhi::backend::BindingResource::storage(&buffer, bytes))],
-        );
-        (buffer, group)
+        (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                let buffer = rhi::backend::Buffer::new(
+                    device,
+                    "distant_chunk_bounds",
+                    bytes,
+                    rhi::BufferUsages::STORAGE,
+                    rhi::MemoryLocation::Host,
+                );
+                let group = device.create_bind_group(
+                    layout,
+                    &[(0, rhi::backend::BindingResource::storage(&buffer, bytes))],
+                );
+                (buffer, group)
+            })
+            .unzip()
     }
 
     pub fn layout(&self) -> rhi::backend::BindGroupLayout {
         self.layout
     }
 
-    pub fn group(&self) -> rhi::backend::BindGroup {
-        self.group
+    pub fn group(&self, frame: usize) -> rhi::backend::BindGroup {
+        self.groups[frame]
     }
 
     pub fn count(&self) -> u32 {
         self.slots.len() as u32
     }
 
-    fn write(&mut self, slot: u32) {
-        let slot = slot as usize;
-        self.buffer
-            .write_at(slot * 16, bytemuck::bytes_of(&self.slots[slot]));
+    /// Writes the frame's buffer what changed since it last drew.
+    fn flush(&mut self, frame: usize) {
+        let Some((lo, hi)) = self.dirty[frame].take() else {
+            return;
+        };
+        let (lo, hi) = (lo as usize, (hi as usize).min(self.slots.len()));
+        if lo < hi {
+            self.buffers[frame].write_at(lo * 16, bytemuck::cast_slice(&self.slots[lo..hi]));
+        }
+    }
+
+    fn mark(&mut self, slot: u32) {
+        for dirty in &mut self.dirty {
+            *dirty = Some(match *dirty {
+                Some((lo, hi)) => (lo.min(slot), hi.max(slot + 1)),
+                None => (slot, slot + 1),
+            });
+        }
     }
 
     /// Which of column `pos`'s sections are compiled.
@@ -1344,22 +1373,20 @@ impl BoundStore {
     fn add(&mut self, device: &rhi::backend::Device, frame_seq: u64, key: [i32; 3], height: i32) {
         if self.count() == self.capacity {
             self.capacity *= 2;
-            let (buffer, group) = Self::make_buffer(device, self.layout, self.capacity);
+            let (buffers, groups) = Self::make_buffers(device, self.layout, self.capacity);
             let old = (
                 frame_seq + MAX_FRAMES_IN_FLIGHT as u64,
-                std::mem::replace(&mut self.buffer, buffer),
-                std::mem::replace(&mut self.group, group),
+                std::mem::replace(&mut self.buffers, buffers),
+                std::mem::replace(&mut self.groups, groups),
             );
             self.retired.push_back(old);
-            for slot in 0..self.count() {
-                self.write(slot);
-            }
+            self.dirty = [Some((0, self.count())); MAX_FRAMES_IN_FLIGHT];
         }
         let slot = self.count();
         let [x, y, z] = key;
         self.slots.push([x, y, z, height]);
         self.index.insert(key, slot);
-        self.write(slot);
+        self.mark(slot);
     }
 
     fn remove(&mut self, key: [i32; 3]) {
@@ -1371,7 +1398,7 @@ impl BoundStore {
             self.slots[slot as usize] = last;
             let [x, y, z, _] = last;
             self.index.insert([x, y, z], slot);
-            self.write(slot);
+            self.mark(slot);
         }
     }
 
@@ -1385,16 +1412,31 @@ impl BoundStore {
         while let Some(&(at, ..)) = self.retired.front()
             && at <= frame_seq
         {
-            let (_, buffer, group) = self.retired.pop_front().expect("peeked");
+            let (_, buffers, groups) = self.retired.pop_front().expect("peeked");
+            Self::destroy_buffers(device, buffers, groups);
+        }
+    }
+
+    fn destroy_buffers(
+        device: &rhi::backend::Device,
+        buffers: Vec<rhi::backend::Buffer>,
+        groups: Vec<rhi::backend::BindGroup>,
+    ) {
+        for group in groups {
             group.destroy(device);
+        }
+        for buffer in buffers {
             buffer.destroy(device);
         }
     }
 
     fn destroy(&mut self, device: &rhi::backend::Device) {
         self.free_retired(device, u64::MAX);
-        self.group.destroy(device);
-        std::mem::take(&mut self.buffer).destroy(device);
+        Self::destroy_buffers(
+            device,
+            std::mem::take(&mut self.buffers),
+            std::mem::take(&mut self.groups),
+        );
         self.layout.destroy(device);
     }
 }

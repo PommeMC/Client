@@ -262,7 +262,7 @@ impl DistantPipeline {
         );
         // The view projection and the render distance, once a pass.
         let bound_layout = pipeline_layout(
-            &[camera_layout, buffers.bounds().layout()],
+            &[camera_layout, buffers.bound_layout()],
             push(rhi::ShaderStages::VERTEX, 80),
         );
         let setup_layout = pipeline_layout(&[texture_layout], None);
@@ -663,10 +663,10 @@ impl DistantPipeline {
                 extent,
             },
         );
-        let bounds = buffers.bounds();
+        let bounds = buffers.bounds(frame);
         if bounds.count() > 0 {
             pass.set_pipeline(&self.bound);
-            pass.set_bind_groups(0, &[self.camera_sets[frame], bounds.group()]);
+            pass.set_bind_groups(0, &[self.camera_sets[frame], bounds.group(frame)]);
             let mut push = view_proj.to_cols_array().to_vec();
             push.extend([(render_distance * 16) as f32, 0.0, 0.0, 0.0]);
             pass.set_push_constants(rhi::ShaderStages::VERTEX, 0, bytemuck::cast_slice(&push));
