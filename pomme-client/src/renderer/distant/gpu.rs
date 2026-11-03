@@ -222,6 +222,9 @@ pub(crate) struct DistantBuffers {
     /// Per frame in flight, whether its cleaner readback holds a pass's
     /// keys.
     cleaner_pending: [bool; MAX_FRAMES_IN_FLIGHT],
+    /// Per frame in flight, whether a traversal filled its request readback;
+    /// a frame that skipped the pass leaves the last run's requests there.
+    request_pending: [bool; MAX_FRAMES_IN_FLIGHT],
     /// The buffers the GPU passes keep between frames: the node tree, the
     /// traversal's request queue, queue metadata and scratch queues, the
     /// render list, the nodes' last-drawn frames and the cleaner's output,
@@ -470,6 +473,7 @@ impl DistantBuffers {
             request_readbacks: readbacks("distant_request_readback", REQUESTS_BYTES),
             cleaner_readbacks: readbacks("distant_cleaner_readback", CLEANER_KEYS_BYTES),
             cleaner_pending: [false; MAX_FRAMES_IN_FLIGHT],
+            request_pending: [false; MAX_FRAMES_IN_FLIGHT],
             count_readbacks: readbacks("distant_count_readback", COUNTS_BYTES),
             last_counts: [0; COUNT_WORDS],
             slots: [0; 3],
@@ -712,7 +716,12 @@ impl DistantBuffers {
 
     /// After the traversal: its requests into this frame's readback, read
     /// by [`Self::begin_frame`] once the frame is done.
-    pub fn record_request_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+    pub fn record_request_readback(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+    ) {
+        self.request_pending[frame] = true;
         record_readback(
             encoder,
             &self.requests,
@@ -826,16 +835,18 @@ impl DistantBuffers {
             self.quads.free(section.ptr);
         }
         self.place_waiting();
-        let keys: Vec<u64> = read_words(
-            &mut self.request_readbacks[frame],
-            REQUESTS_BYTES,
-            |words| {
-                let count = (words[0] as usize).min(MAX_REQUESTS as usize);
-                packed_keys(&words[2..2 + count * 2]).collect()
-            },
-        );
-        for key in keys {
-            self.graph.process_request(SectionKey::unpack(key));
+        if std::mem::take(&mut self.request_pending[frame]) {
+            let keys: Vec<u64> = read_words(
+                &mut self.request_readbacks[frame],
+                REQUESTS_BYTES,
+                |words| {
+                    let count = (words[0] as usize).min(MAX_REQUESTS as usize);
+                    packed_keys(&words[2..2 + count * 2]).collect()
+                },
+            );
+            for key in keys {
+                self.graph.process_request(SectionKey::unpack(key));
+            }
         }
         if !self.indirect.count {
             self.last_counts =
