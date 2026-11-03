@@ -1,6 +1,7 @@
 //! CONTRACT SKETCH ONLY: not connected to `crate::particle` or any runtime.
-//! These traits declare proposed Vanilla 26.3 responsibilities; there is no
-//! engine, registry, provider, reload, simulation or renderer implementation.
+//! These traits declare proposed Vanilla 26.3 responsibilities. Type registry
+//! storage is implemented; engine, provider, reload, simulation and renderer
+//! implementations remain deferred.
 //! Leaf values, typed tokens and sealed options erasure are real data/bridges,
 //! not placeholder behavior. The ordinary contract_exemplar needs a caller's
 //! real resource owner/provider/engine factory; none is implemented here.
@@ -35,9 +36,10 @@ use glam::DVec3;
 pub use self::{
     contract_exemplars::{
         ExemplarError, FireworkSpark, contract_exemplar_firework, contract_exemplar_smoke,
+        contract_registry_exemplar,
     },
     particle::{ClientLevel, Particle, ParticleRef, ParticleTickContext, SingleQuadParticle},
-    registry::{ParticleRegistry, ParticleTypeRegistrationError},
+    registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError},
     render::{
         ParticleFacing, ParticleFrustum, ParticleLayer, ParticleLight, ParticleRenderType,
         ParticleView, QuadParticleRenderState,

@@ -7,10 +7,23 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::particle::{ParticleRef, ParticleTickContext, SingleQuadParticle};
+use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::render::ParticleView;
 use super::types::{ParticleRegistrationError, ParticleType, SimpleParticleType};
 use super::world::ParticleWorld;
 use super::{ParticleEngine, ParticleResources, SpriteParticleRegistration};
+
+/// Bootstrap a smoke token for the existing provider-registration exemplars.
+/// Provider resources and the engine remain the caller's responsibility.
+pub fn contract_registry_exemplar() -> Result<
+    (MappedParticleRegistry, Rc<ParticleType<SimpleParticleType>>),
+    ParticleTypeRegistrationError,
+> {
+    let mut registry = MappedParticleRegistry::new();
+    let smoke = registry.register(crate::resources::resource_id!("minecraft:smoke"), false)?;
+    registry.freeze();
+    Ok((registry, smoke))
+}
 
 /// Register a smoke sprite provider, retain an instance across ticks, and
 /// extract an owned snapshot before clearing and switching worlds.
