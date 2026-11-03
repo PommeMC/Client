@@ -1350,7 +1350,7 @@ impl Renderer {
     /// Push the CPU visibility graph's per-column visible-section masks to the
     /// chunk buffer store, which omits occluded sections from the GPU cull,
     /// and to the distant bounds, which follow what it draws.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+    pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
         self.distant_buffers.set_visibility(&self.ctx.device, &vis);
         self.chunk_buffers.set_chunk_visibility(vis);
     }

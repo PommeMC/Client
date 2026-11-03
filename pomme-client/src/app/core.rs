@@ -30,6 +30,7 @@ use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
+use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -517,8 +518,7 @@ impl GameState {
         // The meshes went with the old level, so their bookkeeping
         // has to go too, or the new level's camera section reads as
         // already meshed.
-        self.section_vis.clear();
-        self.section_vis_epoch.clear();
+        self.forget_visibility();
         self.compiled.clear();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
@@ -554,6 +554,7 @@ impl GameState {
             self.block_registry.block_state_table(),
             (pos.x, pos.z),
         );
+        self.walker.update(VisUpdate::Load(pos));
         // The column meshes once its queued light applies (vanilla
         // schedules the rebuild from enableChunkLight, not here).
         queue_light_apply(self, pos, light, true);
@@ -599,12 +600,12 @@ impl GameState {
             });
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
-        self.vis_mask.remove(&pos);
         self.vis_tiers.remove(&pos);
-        for si in 0..self.chunk_store.section_count() {
-            self.section_vis.remove(&(pos, si));
+        let sections = self.chunk_store.section_count();
+        for si in 0..sections {
             self.section_vis_epoch.remove(&(pos, si));
         }
+        self.walker.update(VisUpdate::Unload { pos, sections });
     }
 
     /// Vanilla `handleMovePlayer`. Returns whether the player moved, for the

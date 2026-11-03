@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::offset_of;
+use std::sync::Arc;
 
 use glam::DVec3;
 
@@ -1043,7 +1044,7 @@ pub struct ChunkBufferStore {
     /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
-    chunk_visibility: HashMap<ChunkPos, u32>,
+    chunk_visibility: Arc<HashMap<ChunkPos, u32>>,
     /// The masks by column slot, as the cull reads them, and the frame slots
     /// still to receive them.
     column_visibility: Vec<u32>,
@@ -1158,7 +1159,7 @@ impl ChunkBufferStore {
             draining: None,
             compact_after: 0,
             lists: Lists::default(),
-            chunk_visibility: HashMap::new(),
+            chunk_visibility: Arc::default(),
             column_visibility: Vec::new(),
             visibility_pending: 0,
             meta_buffers,
@@ -2117,7 +2118,7 @@ impl ChunkBufferStore {
     /// Push the CPU visibility graph's per-column visible-section masks.
     /// Columns not present default to fully visible, so the cull only omits
     /// sections the graph proved occluded.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+    pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
         self.chunk_visibility = vis;
         for (slot, column) in self.lists.columns.iter() {
             self.column_visibility[slot as usize] = self

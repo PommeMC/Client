@@ -32,11 +32,10 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
-use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
-use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
+use crate::renderer::chunk::occlusion_graph::{self, section_mask};
 use crate::renderer::distant::gpu::View as DistantView;
 use crate::renderer::entity_model::{lerp, triangle_wave};
 use crate::renderer::pipelines::block_entity;
@@ -359,9 +358,10 @@ pub struct GameState {
     /// Camera 8-block bucket that last triggered an occlusion walk — movement,
     /// not rotation, drives recomputes (vanilla's cadence).
     pub last_vis_cam: (i32, i32, i32),
-    /// In-flight async occlusion walk; its result is applied a few frames
-    /// later.
-    pub vis_task: Option<crossbeam_channel::Receiver<HashMap<ChunkPos, u32>>>,
+    /// Whether a walk is in flight; its result is applied a few frames later.
+    pub vis_walk_pending: bool,
+    /// Bumped when the level is cleared, so an older walk's result is dropped.
+    pub vis_generation: u64,
     /// Runtime toggle for graph-driven chunk occlusion culling (F3+O). When
     /// off, only frustum culling applies (full masks pushed to the
     /// renderer).
@@ -1473,10 +1473,14 @@ impl GameState {
         }
 
         // Apply a finished walk (its result lags a few frames, like vanilla's).
-        let finished = self.vis_task.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(bfs) = finished {
-            self.vis_task = None;
-            self.apply_visibility(renderer, &bfs);
+        if let Some(result) = self.walker.try_result()
+            && result.generation == self.vis_generation
+        {
+            self.vis_walk_pending = false;
+            self.vis_tiers = result.tiers;
+            self.vis_mask = result.masks;
+            self.vis_valid = true;
+            renderer.set_chunk_visibility(result.draw);
         }
 
         // Schedule the next walk on 8-block movement, chunk loads, or an
@@ -1488,86 +1492,22 @@ impl GameState {
             (eye.y / 8.0).floor() as i32,
             (eye.z / 8.0).floor() as i32,
         );
-        if self.vis_task.is_none()
+        if !self.vis_walk_pending
             && (!self.vis_valid || cam_bucket != self.last_vis_cam || loads_happened)
         {
             self.last_vis_cam = cam_bucket;
-            let section_vis = self.section_vis.clone();
-            let min_y = self.chunk_store.min_y();
-            let n = self.chunk_store.section_count();
-            let cam_si = ((eye.y - min_y as f64) / 16.0).floor() as i32;
-            // Bound the walk by the actual loaded radius (a server can stream
-            // terrain past the client render distance).
-            let rd = self
-                .chunk_store
-                .loaded_positions()
-                .map(|p| {
-                    (p.x - player_chunk.x)
-                        .abs()
-                        .max((p.z - player_chunk.z).abs())
-                })
-                .max()
-                .unwrap_or(0);
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            std::thread::spawn(move || {
-                let bfs = occlusion_graph::compute_visible_mask(
-                    &section_vis,
-                    player_chunk,
-                    cam_si,
-                    eye,
-                    min_y,
-                    n,
-                    rd,
-                );
-                let _ = tx.send(bfs);
+            self.vis_walk_pending = true;
+            self.walker.walk(occlusion_graph::Walk {
+                generation: self.vis_generation,
+                cam_col: player_chunk,
+                eye,
+                planes: renderer.frustum_planes(),
+                planes_wide: renderer.frustum_planes_dilated(occlusion_graph::VIS_MARGIN_RADIANS),
+                min_y: self.chunk_store.min_y(),
+                section_count: self.chunk_store.section_count(),
+                occlusion: self.chunk_occlusion_enabled,
             });
-            self.vis_task = Some(rx);
         }
-    }
-
-    /// Combine a finished walk with the current camera frustum into per-column
-    /// draw masks (occluded sections omitted) and tiers, and push them to the
-    /// GPU cull.
-    fn apply_visibility(&mut self, renderer: &mut Renderer, bfs: &HashMap<ChunkPos, u32>) {
-        let planes = renderer.frustum_planes();
-        let planes_wide = renderer.frustum_planes_dilated(VIS_MARGIN_RADIANS);
-        let eye_f = renderer.camera_render_position();
-        let min_y = self.chunk_store.min_y() as f32;
-        let max_y = min_y + self.chunk_store.height() as f32;
-        let full = section_mask(self.chunk_store.section_count());
-
-        let mut tiers = HashMap::new();
-        let mut masks = HashMap::new();
-        for pos in self.chunk_store.loaded_positions() {
-            let near = column_is_near(pos, eye_f);
-            let tier = if near {
-                0
-            } else {
-                column_frustum_tier(pos, eye_f, &planes, &planes_wide, min_y, max_y)
-            };
-            // Near columns always draw fully; otherwise a column draws only the
-            // sections the graph proved occlusion-visible (none => fully hidden).
-            let mask = if near {
-                full
-            } else {
-                bfs.get(&pos).copied().unwrap_or(0)
-            };
-            // A fully-occluded column (no visible section) drops to the hidden tier.
-            let tier = if tier == 0 && mask == 0 { 2 } else { tier };
-            tiers.insert(pos, tier);
-            masks.insert(pos, mask);
-        }
-        self.vis_tiers = tiers;
-        self.vis_mask = masks.clone();
-        self.vis_valid = true;
-
-        // With occlusion off, push full masks (frustum still applies on the GPU).
-        if !self.chunk_occlusion_enabled {
-            for m in masks.values_mut() {
-                *m = full;
-            }
-        }
-        renderer.set_chunk_visibility(masks);
     }
 
     /// Publishes every loaded column's dirty sections to the mesh workers,
@@ -1600,37 +1540,6 @@ impl GameState {
     }
 }
 
-/// Extra FOV (radians) for the tier-1 "about to be seen" margin frustum, so
-/// small camera turns reveal already-meshed terrain instead of a meshing
-/// curtain.
-const VIS_MARGIN_RADIANS: f32 = 0.6;
-
-/// Frustum tier for a column: 0 in view, 1 in the dilated margin, 2 behind the
-/// camera. (Nearby columns are forced to 0 by the caller.)
-fn column_frustum_tier(
-    pos: ChunkPos,
-    eye: glam::DVec3,
-    planes: &[[f32; 4]; 6],
-    planes_wide: &[[f32; 4]; 6],
-    min_y: f32,
-    max_y: f32,
-) -> u8 {
-    // Camera-relative full-height column box, matching how the GPU cull
-    // subtracts the eye before its plane test (cull.comp); f64 first for
-    // precision at extreme coordinates.
-    let dx = (pos.x as f64 * 16.0 - eye.x) as f32;
-    let dz = (pos.z as f64 * 16.0 - eye.z) as f32;
-    let mn = [dx, (min_y as f64 - eye.y) as f32, dz];
-    let mx = [dx + 16.0, (max_y as f64 - eye.y) as f32, dz + 16.0];
-    if aabb_in_frustum(&mn, &mx, planes) {
-        0
-    } else if aabb_in_frustum(&mn, &mx, planes_wide) {
-        1
-    } else {
-        2
-    }
-}
-
 /// Bit for one section index, 0 outside a column's 32 addressable sections (a
 /// camera outside build height resolves to such an index).
 fn section_bit(si: i32) -> u32 {
@@ -1642,26 +1551,6 @@ pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
     indices
         .into_iter()
         .fold(0u32, |mask, si| mask | section_bit(si))
-}
-
-/// Full mask for an `n`-section column (bits `0..n` set).
-fn section_mask(n: i32) -> u32 {
-    if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
-}
-
-/// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
-/// `cull.comp`): true unless the box is fully behind some plane.
-fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool {
-    for p in planes {
-        let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
-            + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }
-            + p[2] * if p[2] >= 0.0 { mx[2] } else { mn[2] }
-            + p[3];
-        if d < 0.0 {
-            return false;
-        }
-    }
-    true
 }
 
 pub enum GameUpdateResult {
@@ -2817,7 +2706,7 @@ pub fn update_game(
                 let n = game.chunk_store.section_count() as u32;
                 let mut visible = 0u32;
                 let mut hidden = 0u32;
-                for (pos, &mask) in &game.vis_mask {
+                for (pos, &mask) in game.vis_mask.iter() {
                     if game.vis_tiers.get(pos).copied().unwrap_or(0) == 0 {
                         let v = mask.count_ones();
                         visible += v;
