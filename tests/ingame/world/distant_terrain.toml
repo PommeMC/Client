@@ -1,8 +1,9 @@
-# Distant Terrain keeps the chunks the server forgets and draws them past the
-# loaded ones: a tower, left 200 blocks behind at Render Distance 2, still
-# shows on the horizon, comes back from disk after going far enough to drop
-# it from memory, and goes with the option. Pomme-only (the vanilla harness
-# has no Distant Terrain), so it fails there by design.
+# Distant Terrain keeps every chunk seen and draws them past the loaded
+# ones: a tower is kept as soon as its chunk is lit, still shows on the
+# horizon when left 200 blocks behind at Render Distance 2, comes back from
+# disk after going far enough to drop it from memory, and goes with the
+# option. Pomme-only (the vanilla harness has no Distant Terrain), so it
+# fails there by design.
 
 [[step]]
 wait_ms = 2000
@@ -25,7 +26,12 @@ expect = { block = "stone", at = [1, -20, 1] }
 [[step]]
 option = { render_distance = 2, distant_terrain = 32 }
 
-# Far enough that the tower's chunks unload, which keeps them.
+# Kept while its chunk is still loaded.
+[[step]]
+expect = { distant_terrain = { at = [1, 1] } }
+timeout_ms = 20000
+
+# Far enough that the tower's chunks unload.
 [[step]]
 chat = "/tp @s 200.5 -50 1.5"
 

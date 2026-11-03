@@ -211,6 +211,8 @@ fn write_block(
         pos.z,
         state,
     );
+    game.edited_columns
+        .insert(crate::position::ChunkPos::containing(pos));
     dirty_sections_for_block(
         priority_remesh,
         pos.x,
@@ -451,12 +453,16 @@ impl GameState {
         }
     }
 
-    /// Keeps every loaded column as distant terrain of the current
-    /// dimension.
-    pub fn keep_loaded_columns(&self) {
-        for pos in self.chunk_store.loaded_positions() {
-            self.distant
-                .capture(&self.dimension, pos, &self.chunk_store);
+    /// Keeps `pos`'s column as distant terrain of the current dimension.
+    pub fn keep_column(&self, pos: crate::position::ChunkPos) {
+        self.distant
+            .capture(&self.dimension, pos, &self.chunk_store);
+    }
+
+    /// Keeps the columns edited since the distant terrain took them.
+    pub fn keep_edited_columns(&mut self) {
+        for pos in std::mem::take(&mut self.edited_columns) {
+            self.keep_column(pos);
         }
     }
 
@@ -504,7 +510,7 @@ impl GameState {
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
         // The old level's columns stay as its distant terrain; the name
         // still names it until `DimensionName`.
-        self.keep_loaded_columns();
+        self.keep_edited_columns();
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
         self.light_engine = crate::world::light::LightWorker::spawn(
             height,
@@ -595,8 +601,8 @@ impl GameState {
 
     /// The caller removes the column's mesh.
     pub fn unload_chunk(&mut self, pos: crate::position::ChunkPos) {
-        self.distant
-            .capture(&self.dimension, pos, &self.chunk_store);
+        self.keep_column(pos);
+        self.edited_columns.remove(&pos);
         self.chunk_store.unload_chunk(&pos);
         self.block_entity_anim.drop_chunk(pos.x, pos.z);
         self.light_engine.chunk_unloaded((pos.x, pos.z));

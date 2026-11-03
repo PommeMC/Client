@@ -156,8 +156,8 @@ impl DistantTerrain {
         self.view.is_some()
     }
 
-    /// Keeps `pos`'s column of `chunks` as distant terrain of `dimension`,
-    /// before the chunk goes.
+    /// Keeps `pos`'s column of `chunks` as distant terrain of `dimension`:
+    /// once lit, and again before it goes.
     pub fn capture(&self, dimension: &str, pos: ChunkPos, chunks: &ChunkStore) {
         if !self.enabled() {
             return;
@@ -190,11 +190,14 @@ impl DistantTerrain {
 
     /// Where the player is and how far to keep, in chunks; 0 stops keeping
     /// new chunks.
-    pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) {
+    /// Returns whether this turned distant terrain on, so the caller can
+    /// hand over the columns lit while it was off.
+    pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) -> bool {
         if chunks == 0 {
             self.view = None;
-            return;
+            return false;
         }
+        let turned_on = self.view.is_none();
         let view = View {
             dimension: dimension.into(),
             x,
@@ -210,6 +213,7 @@ impl DistantTerrain {
             self.view = Some(view.clone());
             let _ = self.jobs.send(Job::View(view));
         }
+        turned_on
     }
 
     pub fn drain(&self) -> impl Iterator<Item = DistantUpdate> + '_ {
@@ -330,6 +334,10 @@ impl Worker {
             if self.last_save.elapsed() >= SAVE_EVERY {
                 self.save();
             }
+        }
+        // The columns kept on the way out were sent before the stop.
+        for capture in captures.try_iter() {
+            self.capture(capture);
         }
         self.save();
     }

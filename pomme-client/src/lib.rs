@@ -273,11 +273,12 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
     }
+    let code = app.chunk_bench_exit_code();
     #[cfg(feature = "test-harness")]
-    if let Some(code) = app.harness_exit_code() {
-        std::process::exit(code);
-    }
-    if let Some(code) = app.chunk_bench_exit_code() {
+    let code = app.harness_exit_code().or(code);
+    // Dropped first, so what the game keeps on the way out gets written.
+    drop(app);
+    if let Some(code) = code {
         std::process::exit(code);
     }
 }

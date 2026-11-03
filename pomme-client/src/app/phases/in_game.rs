@@ -149,9 +149,11 @@ pub struct GameState {
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
     pub mesh_dispatcher: MeshDispatcher,
-    /// The chunks the server has forgotten, kept to draw past the loaded
-    /// ones.
+    /// Every chunk seen, kept to draw past the loaded ones.
     pub(crate) distant: crate::renderer::distant::worker::DistantTerrain,
+    /// Columns with blocks changed since `distant` took them, taken again
+    /// on the way out.
+    pub edited_columns: HashSet<ChunkPos>,
     /// Whether the server is this process, which the pause menu labels.
     pub singleplayer: bool,
     pub paused: bool,
@@ -373,10 +375,10 @@ pub struct GameState {
 }
 
 impl Drop for GameState {
-    /// The columns still loaded stay as distant terrain, written to disk as
+    /// The edited columns stay as distant terrain, written to disk as
     /// `distant` drops.
     fn drop(&mut self) {
-        self.keep_loaded_columns();
+        self.keep_edited_columns();
     }
 }
 
@@ -527,6 +529,7 @@ impl GameState {
             player_prev_walk_speed: 0.0,
             mesh_dispatcher,
             distant,
+            edited_columns: HashSet::new(),
             singleplayer,
             paused: false,
             dead: false,
@@ -1260,6 +1263,7 @@ impl GameState {
         }
         let mut bumped: Vec<ChunkPos> = Vec::new();
         for &(x, z) in &dirty.columns {
+            self.keep_column(ChunkPos::new(x, z));
             for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
                 if self.chunk_store.get_chunk(&p).is_some() && !bumped.contains(&p) {
                     bumped.push(p);
@@ -4342,12 +4346,16 @@ pub fn update_game(
     } else {
         0
     };
-    game.distant.set_view(
+    if game.distant.set_view(
         &game.dimension,
         game.player.position.x,
         game.player.position.z,
         distant_terrain,
-    );
+    ) {
+        for pos in game.chunk_store.loaded_positions() {
+            game.keep_column(pos);
+        }
+    }
     gfx.renderer
         .set_distant_view((distant_terrain > 0).then(|| DistantView {
             dimension: game.dimension.as_str().into(),
