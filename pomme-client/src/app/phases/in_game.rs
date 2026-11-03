@@ -2731,6 +2731,7 @@ pub fn update_game(
             screen_w: gfx.renderer.screen_width(),
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {
+                gpu: gfx.renderer.last_timings().gpu.clone(),
                 pace_ms: gfx.renderer.last_timings().pace_ms,
                 frame_ms: gfx.renderer.last_timings().frame_ms,
                 fence_ms: gfx.renderer.last_timings().fence_ms,

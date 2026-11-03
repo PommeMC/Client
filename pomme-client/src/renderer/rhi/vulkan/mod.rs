@@ -2084,6 +2084,112 @@ impl Frames {
     }
 }
 
+/// GPU timestamps between a frame's passes: one set of queries per frame in
+/// flight, read back once that frame's fence has signalled.
+pub struct GpuTimer {
+    pool: vk::QueryPool,
+    /// Nanoseconds per tick.
+    period: f32,
+    per_frame: u32,
+    /// Each frame's stamps, named by what finished before them.
+    written: [Vec<&'static str>; MAX_FRAMES_IN_FLIGHT],
+}
+
+impl GpuTimer {
+    /// None where the graphics queue has no timestamps.
+    pub fn new(ctx: &Context, per_frame: u32) -> Option<Self> {
+        let families = ctx.physical_device.get_queue_family_properties();
+        if families
+            .get(ctx.graphics_family as usize)
+            .is_none_or(|family| family.timestamp_valid_bits == 0)
+        {
+            return None;
+        }
+        let pool = ctx
+            .device
+            .raw
+            .create_query_pool(
+                &vk::QueryPoolCreateInfo {
+                    query_type: vk::QueryType::Timestamp,
+                    query_count: per_frame * MAX_FRAMES_IN_FLIGHT as u32,
+                    ..Default::default()
+                },
+                None,
+            )
+            .ok()?;
+        Some(Self {
+            pool,
+            period: ctx.physical_device.get_properties().limits.timestamp_period,
+            per_frame,
+            written: Default::default(),
+        })
+    }
+
+    fn base(&self, frame: usize) -> u32 {
+        frame as u32 * self.per_frame
+    }
+
+    /// Resets the frame's queries and stamps its start.
+    pub fn begin_frame(&mut self, encoder: &CommandEncoder, frame: usize) {
+        encoder
+            .cmd
+            .reset_query_pool(self.pool, self.base(frame), self.per_frame);
+        self.written[frame].clear();
+        self.stamp(encoder, frame, "begin");
+    }
+
+    /// Stamps the end of `what`: the moment everything recorded so far is
+    /// done.
+    pub fn stamp(&mut self, encoder: &CommandEncoder, frame: usize, what: &'static str) {
+        let index = self.written[frame].len() as u32;
+        if index >= self.per_frame {
+            return;
+        }
+        encoder.cmd.write_timestamp(
+            vk::PipelineStageFlags::BottomOfPipe,
+            self.pool,
+            self.base(frame) + index,
+        );
+        self.written[frame].push(what);
+    }
+
+    /// The frame's stamps as milliseconds since the one before each, once
+    /// its fence signalled; empty while the results aren't in.
+    pub fn read(&self, device: &Device, frame: usize) -> Vec<(&'static str, f32)> {
+        let names = &self.written[frame];
+        let mut ticks = vec![0u64; names.len()];
+        if names.len() < 2
+            || device
+                .raw
+                .get_query_pool_results(
+                    self.pool,
+                    self.base(frame),
+                    names.len() as u32,
+                    bytemuck::cast_slice_mut(&mut ticks),
+                    size_of::<u64>() as u64,
+                    vk::QueryResultFlags::Type64,
+                )
+                .is_err()
+        {
+            return Vec::new();
+        }
+        ticks
+            .windows(2)
+            .zip(names.iter().skip(1))
+            .map(|(pair, &name)| {
+                (
+                    name,
+                    pair[1].wrapping_sub(pair[0]) as f32 * self.period / 1e6,
+                )
+            })
+            .collect()
+    }
+
+    pub fn destroy(&mut self, device: &Device) {
+        device.raw.destroy_query_pool(self.pool, None);
+    }
+}
+
 /// The queues a frame is submitted and presented on.
 #[derive(Clone, Copy)]
 struct Queues {

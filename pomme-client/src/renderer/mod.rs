@@ -239,6 +239,9 @@ pub struct MenuSkin {
 
 #[derive(Default, Clone)]
 pub struct RenderTimings {
+    /// The GPU's own time per pass, from the frame whose fence signalled
+    /// last: what finished before each named stamp.
+    pub gpu: Vec<(&'static str, f32)>,
     pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
@@ -301,6 +304,7 @@ pub struct Renderer {
     distant_buffers: distant::gpu::DistantBuffers,
     distant_pipeline: pipelines::distant::DistantPipeline,
     frames: rhi::backend::Frames,
+    gpu_timer: Option<rhi::backend::GpuTimer>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
     /// The native window is gone (Android backgrounded the app), and with it
@@ -540,6 +544,7 @@ impl Renderer {
             &atlas.uv_map,
             &render_assets,
         );
+        let gpu_timer = rhi::backend::GpuTimer::new(&ctx, 16);
 
         Ok(Self {
             ctx,
@@ -581,6 +586,7 @@ impl Renderer {
             distant_buffers,
             distant_pipeline,
             frames,
+            gpu_timer,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
             suspended: false,
@@ -1090,6 +1096,17 @@ impl Renderer {
     #[inline]
     pub const fn last_timings(&self) -> &RenderTimings {
         &self.last_timings
+    }
+
+    fn gpu_stamp(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        what: &'static str,
+    ) {
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.stamp(encoder, frame, what);
+        }
     }
 
     pub fn update_camera(
@@ -1864,6 +1881,11 @@ impl Renderer {
         let t_fence = std::time::Instant::now();
         self.frames.wait(&self.ctx.device)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
+        self.last_timings.gpu = self
+            .gpu_timer
+            .as_ref()
+            .map(|timer| timer.read(&self.ctx.device, frame))
+            .unwrap_or_default();
 
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
@@ -1912,10 +1934,14 @@ impl Renderer {
         }
 
         let encoder = self.frames.begin(&self.ctx.device)?;
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.begin_frame(&encoder, frame);
+        }
         self.atlas.record_animation_upload(&encoder, frame);
         self.distant_buffers.record_model_upload(&encoder, frame);
         self.distant_buffers.record_uploads(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
+        self.gpu_stamp(&encoder, frame, "uploads");
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 
@@ -1930,6 +1956,7 @@ impl Renderer {
                 self.camera.anchor(),
                 self.camera_render_position(),
             );
+            self.gpu_stamp(&encoder, frame, "cull");
         }
 
         let player_team_color = match &mode {
@@ -2149,6 +2176,7 @@ impl Renderer {
                             fog_distance,
                         );
                     }
+                    self.gpu_stamp(&encoder, frame, "sky");
                     let t_cull = std::time::Instant::now();
                     // A pack that failed to build leaves its vertex format until
                     // the next frame remeshes; skip those.
@@ -2169,6 +2197,7 @@ impl Renderer {
                         self.moving_block_buffers.draw(&pass, frame, true);
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
+                    self.gpu_stamp(&encoder, frame, "terrain");
 
                     let eye = self.camera_render_position();
                     let distant = self.distant_draws(*distant_terrain);
@@ -2209,6 +2238,8 @@ impl Renderer {
                             (*distant_terrain * 16) as f32,
                         );
                     }
+
+                    self.gpu_stamp(&encoder, frame, "distant");
 
                     let anchor = self.camera.anchor();
 
@@ -2263,6 +2294,8 @@ impl Renderer {
                         particles,
                     );
 
+                    self.gpu_stamp(&encoder, frame, "entities");
+
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
                     // but doesn't write depth.
@@ -2271,6 +2304,7 @@ impl Renderer {
                         self.chunk_buffers
                             .draw_indirect(&pass, frame, Layer::Water, View::Camera);
                     }
+                    self.gpu_stamp(&encoder, frame, "water");
 
                     // Clouds draw after opaque world geometry (so terrain occludes
                     // them) and before weather, depth-tested against the scene.
@@ -2297,6 +2331,7 @@ impl Renderer {
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
                     }
+                    self.gpu_stamp(&encoder, frame, "clouds");
                     cull_ms
                 };
 
@@ -2363,6 +2398,8 @@ impl Renderer {
                     }
                 }
 
+                self.gpu_stamp(&encoder, frame, "hand");
+
                 // Vanilla blits the outline after the hand, before the GUI.
                 if self.entity_renderer.has_outlines() || self.item_entity_pipeline.has_outlines() {
                     pass.end();
@@ -2386,6 +2423,8 @@ impl Renderer {
                     pass = self.resume_frame_pass(&encoder, image_index);
                     self.post_effects.finish(&mut pass);
                 }
+
+                self.gpu_stamp(&encoder, frame, "post");
 
                 let (blurred_pass, vbase, overlay) = self.draw_until_blur(
                     &encoder,
@@ -2479,6 +2518,7 @@ impl Renderer {
 
         pass.end();
         self.swapchain.ready_to_present(&encoder, image_index);
+        self.gpu_stamp(&encoder, frame, "hud");
 
         // The image is ready to present; grab it first if F2 was pressed.
         self.screenshot.record_if_armed(
@@ -2882,6 +2922,9 @@ impl Drop for Renderer {
         self.gui_item_atlas.destroy(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
 
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.destroy(&self.ctx.device);
+        }
         self.frames.destroy(&self.ctx.device);
 
         self.swapchain.destroy(&self.ctx);

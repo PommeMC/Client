@@ -400,10 +400,11 @@ struct FrameSample {
     interval_ms: f32,
     frame_ms: f32,
     fence_ms: f32,
+    gpu: Vec<(&'static str, f32)>,
 }
 
-/// `samples` summed up: the frame rate, its 1% low, and the CPU and GPU-wait
-/// shares of a frame.
+/// `samples` summed up: the frame rate, its 1% low, the CPU and GPU-wait
+/// shares of a frame, and the GPU's own time per pass.
 fn summarize(samples: &[FrameSample]) -> String {
     let mean =
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
@@ -411,13 +412,34 @@ fn summarize(samples: &[FrameSample]) -> String {
     intervals.sort_by(f32::total_cmp);
     let slowest = &intervals[intervals.len() - intervals.len().div_ceil(100)..];
     let low = slowest.iter().sum::<f32>() / slowest.len() as f32;
+    // Per pass, in the order the frame stamps them.
+    let mut passes: Vec<(&str, f32, u32)> = Vec::new();
+    for &(name, ms) in samples.iter().flat_map(|s| &s.gpu) {
+        match passes.iter_mut().find(|pass| pass.0 == name) {
+            Some(pass) => {
+                pass.1 += ms;
+                pass.2 += 1;
+            }
+            None => passes.push((name, ms, 1)),
+        }
+    }
+    let passes: Vec<(&str, f32)> = passes
+        .into_iter()
+        .map(|(name, sum, count)| (name, sum / count as f32))
+        .collect();
     format!(
-        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms",
+        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms; gpu {:.2} ms: {}",
         samples.len(),
         1000.0 / mean(|s| s.interval_ms),
         1000.0 / low,
         mean(|s| s.frame_ms),
         mean(|s| s.fence_ms),
+        passes.iter().map(|(_, ms)| ms).sum::<f32>(),
+        passes
+            .iter()
+            .map(|(name, ms)| format!("{name} {ms:.2}"))
+            .collect::<Vec<_>>()
+            .join(", "),
     )
 }
 
@@ -496,6 +518,7 @@ impl Script {
                         interval_ms: (now - last).as_secs_f32() * 1000.0,
                         frame_ms: timings.frame_ms,
                         fence_ms: timings.fence_ms,
+                        gpu: timings.gpu.clone(),
                     });
                 }
                 self.last_frame = Some(now);
