@@ -1,10 +1,10 @@
-//! CONTRACT SKETCH ONLY: not connected to `crate::particle` or any runtime.
-//! These traits declare proposed Vanilla 26.3 responsibilities. Type registry
-//! storage is implemented; engine, provider, reload, simulation and renderer
-//! implementations remain deferred.
+//! Isolated Vanilla 26.3 particle layer, not connected to `crate::particle`.
+//! Type/provider storage and CPU description/sprite binding are implemented.
+//! Concrete providers, engine, simulation, atlas sources and GPU/runtime
+//! adoption remain deferred.
 //! Leaf values, typed tokens and sealed options erasure are real data/bridges,
 //! not placeholder behavior. The ordinary contract_exemplar needs a caller's
-//! real resource owner/provider/engine factory; none is implemented here.
+//! real provider and initializing engine factory.
 //!
 //! Foundation files hold identity, sprites, world queries and extraction
 //! values; particle.rs keeps instance/spawn recursion together. This module
@@ -20,6 +20,7 @@ mod contract_exemplars;
 mod particle;
 mod registry;
 mod render;
+mod resources;
 mod sprites;
 mod types;
 mod world;
@@ -44,14 +45,14 @@ pub use self::{
         ParticleFacing, ParticleFrustum, ParticleLayer, ParticleLight, ParticleRenderType,
         ParticleView, QuadParticleRenderState,
     },
-    sprites::{ParticleDescription, PreparedParticleDescriptions, SpriteSet},
+    resources::MappedParticleResources,
+    sprites::{ParticleAtlasSprites, ParticleDescription, PreparedParticleDescriptions, SpriteSet},
     types::{
-        ParticleLimit, ParticleOptions, ParticleRegistrationError, ParticleType, ParticleTypeInfo,
-        SimpleParticleType, TypedParticleOptions,
+        ParticleLimit, ParticleOptions, ParticleType, ParticleTypeInfo, SimpleParticleType,
+        TypedParticleOptions,
     },
     world::ParticleWorld,
 };
-use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::resources::ResourceManager;
 
 /// Typed options, nullable construction, explicit engine RNG. Auxiliary values
@@ -77,8 +78,7 @@ pub trait SpriteParticleRegistration<O: TypedParticleOptions> {
 }
 
 /// Private, object-safe registry/engine collaboration, not a plug-in API.
-/// Only contracts are declared: storage and the checked adapter implementation
-/// remain deferred. No generic O is recovered from an erased options object.
+/// Storage and checked adapters are private to the resource owner.
 mod provider_erasure {
     use super::{DVec3, ParticleOptions, ParticleRef, ParticleWorld};
 
@@ -120,28 +120,32 @@ pub trait ParticleResources {
     /// Associate an already established ParticleType<O> with its matching
     /// provider, retaining that token and specializing the checked erased
     /// adapter for O. Never mint a type or supply type metadata here.
-    /// Reject duplicate provider bindings by particle_type.info().name(),
-    /// regardless of O or registration form; never silently replace a binding.
-    /// Canonical type names belong to the independent ParticleRegistry owner,
-    /// not this owner's provider duplicate check.
+    /// Replace by particle_type.info().name(), warning with both caller
+    /// locations, regardless of O or registration form. Preserve any
+    /// existing sprite set. Canonical type names belong to the independent
+    /// ParticleRegistry owner, not this owner's provider replacement
+    /// policy.
+    #[track_caller]
     fn register<O: TypedParticleOptions>(
         &mut self,
         particle_type: Rc<ParticleType<O>>,
         provider: Rc<dyn ParticleProvider<O>>,
-    ) -> Result<(), ParticleRegistrationError>;
+    );
 
-    /// Rust spelling of Vanilla's second register overload. After the same
-    /// duplicate-name check as register (before calling the factory), create
-    /// a stable unbound SpriteSet indexed by particle_type.info().name(). Call
+    /// Rust spelling of Vanilla's second register overload. Create a new
+    /// stable unbound SpriteSet indexed by particle_type.info().name(). Call
     /// registration.create immediately with that set, then bind the returned
     /// provider to the supplied token using the same checked erased adapter.
     /// Later apply calls rebind the SAME set without recreating the provider
-    /// or engine. Type bootstrap is independent of this form too.
+    /// or engine. Replacement warns as register does. The factory must not
+    /// select sprites: binding must precede particle creation, and an absent
+    /// description does not bind a set. Type bootstrap is independent.
+    #[track_caller]
     fn register_sprite_provider<O: TypedParticleOptions>(
         &mut self,
         particle_type: Rc<ParticleType<O>>,
         registration: &dyn SpriteParticleRegistration<O>,
-    ) -> Result<(), ParticleRegistrationError>;
+    );
 
     /// Lookup by registered name AND schema, not just TypeId. None means an
     /// unknown name; a known name with the wrong schema is an invariant error.
@@ -172,15 +176,16 @@ pub trait ParticleResources {
     /// through the callback, then privately rebind the SAME sprite sets against
     /// the completed atlas. Provider identity survives. Empty descriptions and
     /// missing referenced sprites use the missing region. Absent descriptions
-    /// leave sets unbound in this Rust proposal, never stale atlas copies (not
-    /// Vanilla's unverified absent-JSON fallback). Consumers cannot extract old
+    /// leave previous contents unchanged (including initially unbound sets).
+    /// Consumers cannot extract old
     /// retained particles/requeue them without refreshing their cached sprites.
     /// This does not upload atlases or promise transactional all-resource
-    /// reload.
+    /// reload. Prepare and atlas realization must both succeed first; do not
+    /// change registrations between prepare and apply on this same owner.
     fn apply(
         &self,
         prepared: PreparedParticleDescriptions,
-        atlas: &AtlasUVMap,
+        atlas: &ParticleAtlasSprites,
         clear_particles: &mut dyn FnMut(),
     );
 }
@@ -269,8 +274,10 @@ pub trait ParticleEngine {
 
 /// Compile-checked, ordinary usage sketch, not a test or a runtime engine.
 /// The supplied factory must build its engine from these SAME registered
-/// resources; the callback expresses ownership flow, not a registry equality
-/// proof. The resource owner, provider and engine implementations are deferred.
+/// resources, successfully preparing descriptions/atlas and applying bindings
+/// before spawning. It must establish the binding of any sprite-backed type it
+/// uses; absent descriptions do not initialize sets. Initialization errors are
+/// propagated. This is a factory precondition, not an implemented engine.
 /// The caller supplies particle_type from ParticleRegistry::register.
 /// For the sprite-factory form, replace ParticleResources::register with
 /// resources.register_sprite_provider(Rc::clone(&particle_type), registration):
@@ -280,12 +287,12 @@ pub fn contract_exemplar<R: ParticleResources, S>(
     particle_type: Rc<ParticleType<SimpleParticleType>>,
     world: &dyn ParticleWorld,
     provider: Rc<dyn ParticleProvider<SimpleParticleType>>,
-    create_engine: impl FnOnce(Rc<R>) -> Box<dyn ParticleEngine<RenderState = S>>,
-) -> Result<Option<ParticleRef>, ParticleRegistrationError> {
+    create_engine: impl FnOnce(Rc<R>) -> io::Result<Box<dyn ParticleEngine<RenderState = S>>>,
+) -> io::Result<Option<ParticleRef>> {
     // A provider for a different options schema cannot bind to this token.
-    resources.register::<SimpleParticleType>(Rc::clone(&particle_type), provider)?;
+    resources.register::<SimpleParticleType>(Rc::clone(&particle_type), provider);
     let options = SimpleParticleType::new(particle_type);
-    let mut engine: Box<dyn ParticleEngine<RenderState = S>> = create_engine(Rc::new(resources));
+    let mut engine: Box<dyn ParticleEngine<RenderState = S>> = create_engine(Rc::new(resources))?;
     // &options implicitly coerces to &dyn ParticleOptions.
     // options.get_type().name() selects the registered provider.
     // register::<SimpleParticleType>() requires a

@@ -23,6 +23,10 @@ pub(crate) struct ResourceOrigin {
 /// namespace characters and case-preserving ASCII path characters. Storage
 /// resolution belongs to the source adapter.
 /// Deterministic namespace-then-path ordering does not imply pack priority.
+/// COMPAT: Future path comparison normalization could use separate storage,
+/// preserving original spelling for case-sensitive filesystem/asset lookup.
+/// Normalization and case policy remain undecided; do not lowercase lookup
+/// paths.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ResourceId {
     namespace: Cow<'static, str>,
