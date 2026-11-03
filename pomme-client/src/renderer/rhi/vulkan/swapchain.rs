@@ -81,15 +81,10 @@ impl Swapchain {
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
         } else {
-            // MoltenVK's Mailbox stays synced to the display refresh, so on
-            // Apple only Immediate (displaySyncEnabled = NO) truly uncaps;
-            // elsewhere Mailbox is preferred (uncapped and tear-free).
-            let prefer = if cfg!(target_vendor = "apple") {
-                [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
-            } else {
-                [vk::PresentModeKHR::Mailbox, vk::PresentModeKHR::Immediate]
-            };
-            prefer
+            // Vanilla's vsync off is an immediate swap (`glfwSwapInterval(0)`):
+            // uncapped, tearing allowed. Mailbox stands in where Immediate is
+            // missing.
+            [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
                 .into_iter()
                 .find(|m| present_modes.contains(m))
                 .unwrap_or(vk::PresentModeKHR::Fifo)
