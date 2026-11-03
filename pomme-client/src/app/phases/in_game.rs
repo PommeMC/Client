@@ -118,9 +118,10 @@ impl OpenContainer {
 
 pub struct GameState {
     pub chunk_store: ChunkStore,
-    /// Client-side light engine (vanilla `LevelLightEngine`); recreated with
-    /// the chunk store on dimension changes, drained once per tick.
-    pub light_engine: crate::world::light::LevelLightEngine,
+    /// The light thread (vanilla `LevelLightEngine`, run off the game
+    /// thread); recreated with the chunk store on dimension changes, polled
+    /// once per frame.
+    pub light_engine: crate::world::light::LightWorker,
     /// Set by [`Self::update_light`] when chunk-load light marked columns
     /// dirty; consumed by the visibility refresh as its new-loads signal.
     pub pending_load_rescan: bool,
@@ -484,10 +485,11 @@ impl GameState {
             distant_cache,
         );
         Self {
-            light_engine: crate::world::light::LevelLightEngine::new(
+            light_engine: crate::world::light::LightWorker::spawn(
                 chunk_store.height(),
                 chunk_store.min_y(),
                 true,
+                block_registry.block_state_table(),
             ),
             pending_load_rescan: false,
             chunk_store,
@@ -1252,11 +1254,7 @@ impl GameState {
     /// loads, individual lit sections remesh as edits.
     pub fn update_light(&mut self) {
         let mut dirty = crate::world::light::LightDirty::default();
-        self.light_engine.poll_and_run(
-            &mut self.chunk_store,
-            self.block_registry.block_state_table(),
-            &mut dirty,
-        );
+        self.light_engine.poll(&mut self.chunk_store, &mut dirty);
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }

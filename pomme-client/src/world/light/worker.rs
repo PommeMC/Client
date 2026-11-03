@@ -1,0 +1,283 @@
+//! The light thread. Vanilla's client runs `LevelLightEngine` on the render
+//! thread; here it runs on its own, as vanilla's server engine does
+//! (`ThreadedLevelLightEngine`), fed the same calls in the same order and
+//! publishing the same sections. A departure for frame time: a burst of
+//! chunk loads or unloads lights off the game thread instead of inside one
+//! frame. Block edits still light within their frame when the thread is
+//! idle, which it is unless such a burst is in progress: the game thread
+//! waits a moment for them.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use azalea_block::BlockState;
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use parking_lot::RwLock;
+
+use super::world::LightWorld;
+use super::{LevelLightEngine, LightDirty, LightPos, LightTask};
+use crate::world::block::BlockStateTable;
+use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
+
+/// How long the game thread waits for a block edit's light before it draws
+/// the frame without it.
+const EDIT_WAIT: Duration = Duration::from_millis(2);
+
+enum Message {
+    Task(LightTask),
+    ChunkLoaded {
+        pos: (i32, i32),
+        chunk: Arc<RwLock<Chunk>>,
+    },
+    ChunkUnloaded((i32, i32)),
+    BlockChanged {
+        pos: LightPos,
+        old: BlockState,
+        new: BlockState,
+        empty_flip: Option<bool>,
+    },
+    BlockDirty(LightPos),
+}
+
+/// One run's outcome: the columns whose light changed, and what to remesh.
+struct Report {
+    /// Messages handled so far, so the game thread knows an edit's light is
+    /// in.
+    handled: u64,
+    columns: Vec<((i32, i32), Arc<ChunkLightData>)>,
+    dirty: LightDirty,
+}
+
+/// The thread's columns, and which changed since the last report.
+#[derive(Default)]
+pub(crate) struct LightMap {
+    columns: HashMap<(i32, i32), Arc<ChunkLightData>>,
+    touched: HashSet<(i32, i32)>,
+}
+
+impl LightMap {
+    pub fn get_mut(&mut self, column: (i32, i32)) -> Option<&mut Arc<ChunkLightData>> {
+        let data = self.columns.get_mut(&column)?;
+        self.touched.insert(column);
+        Some(data)
+    }
+
+    pub fn insert(&mut self, column: (i32, i32), data: ChunkLightData) {
+        self.columns.insert(column, Arc::new(data));
+        self.touched.insert(column);
+    }
+
+    pub fn remove(&mut self, column: (i32, i32)) {
+        self.columns.remove(&column);
+        self.touched.remove(&column);
+    }
+
+    fn take_touched(&mut self) -> Vec<((i32, i32), Arc<ChunkLightData>)> {
+        self.touched
+            .drain()
+            .filter_map(|column| Some((column, Arc::clone(self.columns.get(&column)?))))
+            .collect()
+    }
+}
+
+/// The game thread's handle: what it tells the engine, and what it learnt
+/// back.
+pub(crate) struct LightWorker {
+    tx: Sender<Message>,
+    rx: Receiver<Report>,
+    sent: u64,
+    /// The message count an edit's light is waited for up to.
+    awaited: Option<u64>,
+    /// Columns whose light is on (vanilla `lightOnInColumn`).
+    light_on: HashSet<(i32, i32)>,
+    has_sky: bool,
+    section_count: i32,
+}
+
+impl LightWorker {
+    pub fn spawn(
+        height: u32,
+        min_y: i32,
+        has_sky: bool,
+        block_state_table: BlockStateTable,
+    ) -> Self {
+        let (tx, messages) = crossbeam_channel::unbounded();
+        let (reports, rx) = crossbeam_channel::unbounded();
+        let engine = LevelLightEngine::new(height, min_y, has_sky);
+        std::thread::Builder::new()
+            .name("chunk-light".into())
+            .spawn(move || {
+                run(
+                    engine,
+                    LightWorld::new(block_state_table, min_y),
+                    &messages,
+                    &reports,
+                )
+            })
+            .expect("failed to spawn the light thread");
+        Self {
+            tx,
+            rx,
+            sent: 0,
+            awaited: None,
+            light_on: HashSet::new(),
+            has_sky,
+            section_count: (height / 16) as i32,
+        }
+    }
+
+    /// Whether the dimension has sky light.
+    pub fn has_sky(&self) -> bool {
+        self.has_sky
+    }
+
+    pub fn light_section_count(&self) -> usize {
+        (self.section_count + 2) as usize
+    }
+
+    /// Vanilla `LevelLightEngine.lightOnInColumn`: the column's light has been
+    /// applied, in both layers the dimension has. Vanilla's renderer requires
+    /// it of a section's whole 3x3 neighbourhood before the section may first
+    /// compile (`SectionUpdateTracker.hasAllNeighbors`).
+    pub fn light_on_in_column(&self, column: (i32, i32)) -> bool {
+        self.light_on.contains(&column)
+    }
+
+    fn send(&mut self, message: Message) {
+        self.sent += 1;
+        let _ = self.tx.send(message);
+    }
+
+    pub fn queue_task(&mut self, task: LightTask) {
+        self.send(Message::Task(task));
+    }
+
+    /// A chunk column arrived: its blocks for the engine to read, before any
+    /// task about it.
+    pub fn chunk_loaded(&mut self, pos: (i32, i32), chunk: Arc<RwLock<Chunk>>) {
+        self.send(Message::ChunkLoaded { pos, chunk });
+    }
+
+    /// Vanilla `queueLightRemoval`, and the sky sources go with the chunk.
+    pub fn chunk_unloaded(&mut self, pos: (i32, i32)) {
+        self.send(Message::ChunkUnloaded(pos));
+    }
+
+    /// Vanilla `LevelChunk.setBlockState`'s light hooks, with the block
+    /// already written to the chunk.
+    pub fn block_changed(
+        &mut self,
+        pos: LightPos,
+        old: BlockState,
+        new: BlockState,
+        empty_flip: Option<bool>,
+    ) {
+        self.send_edit(Message::BlockChanged {
+            pos,
+            old,
+            new,
+            empty_flip,
+        });
+    }
+
+    /// Relight hook for positions mutated without old-state tracking (the
+    /// player-prediction paths, which apply and roll back edits internally).
+    pub fn block_dirty(&mut self, x: i32, y: i32, z: i32) {
+        self.send_edit(Message::BlockDirty(LightPos::new(x, y, z)));
+    }
+
+    /// An edit's light is waited for, so it lands in the edit's frame.
+    fn send_edit(&mut self, message: Message) {
+        self.send(message);
+        self.awaited = Some(self.sent);
+    }
+
+    /// Takes in what the thread lit since the last call: the columns' light
+    /// into the store, for the meshers, and the remesh scope into `out`.
+    /// Waits briefly for an edit's light, so it lands in the edit's frame.
+    pub fn poll(&mut self, store: &mut ChunkStore, out: &mut LightDirty) {
+        let mut apply = |this: &mut Self, report: Report| {
+            for (column, data) in report.columns {
+                // A column unloaded meanwhile keeps nothing.
+                if store
+                    .get_chunk(&crate::position::ChunkPos::new(column.0, column.1))
+                    .is_some()
+                {
+                    store.light_data.insert(column, data);
+                }
+            }
+            for (column, on) in &report.dirty.enabled {
+                if *on {
+                    this.light_on.insert(*column);
+                } else {
+                    this.light_on.remove(column);
+                }
+            }
+            out.sections.extend(report.dirty.sections);
+            out.columns.extend(report.dirty.columns);
+            if this.awaited.is_some_and(|seq| report.handled >= seq) {
+                this.awaited = None;
+            }
+        };
+        while let Ok(report) = self.rx.try_recv() {
+            apply(self, report);
+        }
+        let deadline = std::time::Instant::now() + EDIT_WAIT;
+        while self.awaited.is_some() {
+            match self.rx.recv_deadline(deadline) {
+                Ok(report) => apply(self, report),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.awaited = None;
+                }
+            }
+        }
+    }
+}
+
+/// Ends when the game drops its [`LightWorker`].
+fn run(
+    mut engine: LevelLightEngine,
+    mut world: LightWorld,
+    messages: &Receiver<Message>,
+    reports: &Sender<Report>,
+) {
+    let mut light_data = LightMap::default();
+    let mut handled = 0u64;
+    for first in messages {
+        let mut out = LightDirty::default();
+        for message in std::iter::once(first).chain(messages.try_iter()) {
+            handled += 1;
+            match message {
+                Message::Task(task) => engine.queue_task(task),
+                Message::ChunkLoaded { pos, chunk } => {
+                    world.insert(pos, chunk);
+                    engine.on_chunk_loaded(&world, pos, &mut light_data);
+                }
+                Message::ChunkUnloaded(pos) => {
+                    world.remove(pos);
+                    light_data.remove(pos);
+                    engine.on_chunk_unloaded(pos);
+                    engine.queue_task(LightTask::Remove { pos });
+                }
+                Message::BlockChanged {
+                    pos,
+                    old,
+                    new,
+                    empty_flip,
+                } => engine.on_block_changed(&world, pos, old, new, empty_flip),
+                Message::BlockDirty(pos) => engine.on_block_dirty(&world, pos),
+            }
+        }
+        engine.run(&world, &mut light_data, &mut out);
+        let report = Report {
+            handled,
+            columns: light_data.take_touched(),
+            dirty: out,
+        };
+        if reports.send(report).is_err() {
+            break;
+        }
+    }
+}

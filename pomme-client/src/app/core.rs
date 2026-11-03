@@ -506,7 +506,12 @@ impl GameState {
         // still names it until `DimensionName`.
         self.keep_loaded_columns();
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
-        self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
+        self.light_engine = crate::world::light::LightWorker::spawn(
+            height,
+            min_y,
+            has_skylight,
+            self.block_registry.block_state_table(),
+        );
         // The old level's block entities, moving blocks among them.
         self.block_entity_anim = Default::default();
         self.position_set = false;
@@ -552,11 +557,9 @@ impl GameState {
             tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
             return;
         }
-        self.light_engine.on_chunk_loaded(
-            &mut self.chunk_store,
-            self.block_registry.block_state_table(),
-            (pos.x, pos.z),
-        );
+        if let Some(chunk) = self.chunk_store.get_chunk(&pos) {
+            self.light_engine.chunk_loaded((pos.x, pos.z), chunk);
+        }
         self.walker.update(VisUpdate::Load(pos));
         // The column meshes once its queued light applies (vanilla
         // schedules the rebuild from enableChunkLight, not here).
@@ -596,11 +599,7 @@ impl GameState {
             .capture(&self.dimension, pos, &self.chunk_store);
         self.chunk_store.unload_chunk(&pos);
         self.block_entity_anim.drop_chunk(pos.x, pos.z);
-        self.light_engine.on_chunk_unloaded((pos.x, pos.z));
-        self.light_engine
-            .queue_task(crate::world::light::LightTask::Remove {
-                pos: (pos.x, pos.z),
-            });
+        self.light_engine.chunk_unloaded((pos.x, pos.z));
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
         self.vis_tiers.remove(&pos);
@@ -2588,13 +2587,7 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
-                        game.light_engine.on_block_dirty(
-                            &game.chunk_store,
-                            game.block_registry.block_state_table(),
-                            b.x,
-                            b.y,
-                            b.z,
-                        );
+                        game.light_engine.block_dirty(b.x, b.y, b.z);
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
@@ -3704,13 +3697,7 @@ impl AppCore {
                 // Light lands in this frame's update_light, matching vanilla's
                 // prediction timing (setBlockState queues; the per-frame
                 // ClientLevel.update drains).
-                game.light_engine.on_block_dirty(
-                    &game.chunk_store,
-                    game.block_registry.block_state_table(),
-                    b.x,
-                    b.y,
-                    b.z,
-                );
+                game.light_engine.block_dirty(b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
             // One span per column so each column builds its mesh snapshot
