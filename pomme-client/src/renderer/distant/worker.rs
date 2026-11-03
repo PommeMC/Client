@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::RwLock;
 
 use super::build::{BuiltSection, Factory};
@@ -33,6 +33,11 @@ const SAVE_EVERY: Duration = Duration::from_secs(60);
 /// How long a section a capture changed waits for more before it's meshed
 /// again, so a burst of captures meshes it once.
 const SETTLE: Duration = Duration::from_millis(250);
+/// How long the thread takes in captures before it meshes a batch, so a
+/// join's flood of chunks doesn't hold up the meshes the traversal is
+/// waiting on. The reference ingests and meshes on separate services; this
+/// thread does both, a slice of each in turn.
+const CAPTURE_SLICE: Duration = Duration::from_millis(8);
 /// The sides a change reaches ([`super::world::Changed::sides`]), as
 /// neighbour offsets.
 const SIDES: [[i32; 3]; 6] = [
@@ -44,14 +49,18 @@ const SIDES: [[i32; 3]; 6] = [
     [0, 0, 1],
 ];
 
+/// A chunk to keep, before it goes.
+struct Capture {
+    dimension: Arc<str>,
+    pos: ChunkPos,
+    chunk: Arc<RwLock<Chunk>>,
+    light: Option<Arc<ChunkLightData>>,
+    min_y: i32,
+}
+
+/// Everything else the game tells the thread, taken before any capture
+/// since the renderer's requests are what's on screen.
 enum Job {
-    Capture {
-        dimension: Arc<str>,
-        pos: ChunkPos,
-        chunk: Arc<RwLock<Chunk>>,
-        light: Option<Arc<ChunkLightData>>,
-        min_y: i32,
-    },
     Colors(Arc<DistantColors>),
     View(View),
     /// Sections the renderer wants meshed, and kept meshed as they change.
@@ -87,6 +96,7 @@ pub(crate) struct DistantUpdate {
 /// write what's unsaved.
 pub(crate) struct DistantTerrain {
     jobs: Sender<Job>,
+    captures: Sender<Capture>,
     updates: Receiver<DistantUpdate>,
     thread: Option<JoinHandle<()>>,
     /// The last view sent, so small moves don't flood the thread.
@@ -100,13 +110,15 @@ pub(crate) struct DistantTerrain {
 impl DistantTerrain {
     pub fn new(colors: Arc<DistantColors>, cache_root: Option<PathBuf>) -> Self {
         let (jobs, job_rx) = crossbeam_channel::unbounded();
+        let (captures, capture_rx) = crossbeam_channel::unbounded();
         let (update_tx, updates) = crossbeam_channel::unbounded();
         let thread = std::thread::Builder::new()
             .name("distant-terrain".into())
-            .spawn(move || Worker::new(colors, update_tx).run(&job_rx))
+            .spawn(move || Worker::new(colors, update_tx).run(&job_rx, &capture_rx))
             .expect("failed to spawn the distant terrain thread");
         Self {
             jobs,
+            captures,
             updates,
             thread: Some(thread),
             view: None,
@@ -153,7 +165,7 @@ impl DistantTerrain {
         let Some(chunk) = chunks.get_chunk(&pos) else {
             return;
         };
-        let _ = self.jobs.send(Job::Capture {
+        let _ = self.captures.send(Capture {
             dimension: dimension.into(),
             pos,
             chunk,
@@ -282,22 +294,37 @@ impl Worker {
         }
     }
 
-    fn run(mut self, jobs: &Receiver<Job>) {
+    fn run(mut self, jobs: &Receiver<Job>, captures: &Receiver<Capture>) {
         'run: loop {
             let wait = match self.dirty.values().min() {
                 Some(ready) => ready.saturating_duration_since(Instant::now()),
                 None => SAVE_EVERY.saturating_sub(self.last_save.elapsed()),
             };
-            let first = match jobs.recv_timeout(wait) {
-                Ok(job) => Some(job),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => break,
-            };
-            for job in first.into_iter().chain(jobs.try_iter()) {
+            // Sleeps until there's something to do: a job, a capture, a
+            // section ready to mesh or a save due.
+            crossbeam_channel::select! {
+                recv(jobs) -> job => match job {
+                    Ok(Job::Stop) | Err(_) => break 'run,
+                    Ok(job) => self.handle(job),
+                },
+                recv(captures) -> capture => match capture {
+                    Ok(capture) => self.capture(capture),
+                    Err(_) => break 'run,
+                },
+                default(wait) => {}
+            }
+            for job in jobs.try_iter() {
                 if matches!(job, Job::Stop) {
                     break 'run;
                 }
                 self.handle(job);
+            }
+            let slice = Instant::now();
+            for capture in captures.try_iter() {
+                self.capture(capture);
+                if slice.elapsed() >= CAPTURE_SLICE {
+                    break;
+                }
             }
             self.mesh_nearest();
             if self.last_save.elapsed() >= SAVE_EVERY {
@@ -314,47 +341,55 @@ impl Worker {
         self.last_save = Instant::now();
     }
 
-    fn handle(&mut self, job: Job) {
-        match job {
-            Job::Capture {
-                dimension,
-                pos,
-                chunk,
-                light,
-                min_y,
-            } => {
-                let chunk = chunk.read();
-                let changed = world(&mut self.worlds, self.cache.as_deref(), &dimension)
-                    .ingest_chunk(&self.states, pos, &chunk, light.as_deref(), min_y);
-                if self
-                    .view
-                    .as_ref()
-                    .is_none_or(|view| view.dimension != dimension)
-                {
-                    return;
-                }
-                // The section and, across the sides the change reached, the
-                // neighbours meshed against it.
-                let ready = Instant::now() + SETTLE;
-                for change in changed {
-                    let key = change.key;
-                    let neighbours = SIDES
-                        .iter()
-                        .enumerate()
-                        .filter(|&(side, _)| change.sides & 1 << side != 0)
-                        .map(|(_, [dx, dy, dz])| SectionKey {
-                            x: key.x + dx,
-                            y: key.y + dy,
-                            z: key.z + dz,
-                            ..key
-                        });
-                    for key in std::iter::once(key).chain(neighbours) {
-                        if self.meshed.contains(&key) {
-                            self.dirty.entry(key).or_insert(ready);
-                        }
-                    }
+    /// Writes a chunk into its dimension's sections and marks the meshed
+    /// sections it changed, and their neighbours across the sides the
+    /// change reached, for meshing again.
+    fn capture(&mut self, capture: Capture) {
+        let Capture {
+            dimension,
+            pos,
+            chunk,
+            light,
+            min_y,
+        } = capture;
+        let chunk = chunk.read();
+        let changed = world(&mut self.worlds, self.cache.as_deref(), &dimension).ingest_chunk(
+            &self.states,
+            pos,
+            &chunk,
+            light.as_deref(),
+            min_y,
+        );
+        if self
+            .view
+            .as_ref()
+            .is_none_or(|view| view.dimension != dimension)
+        {
+            return;
+        }
+        let ready = Instant::now() + SETTLE;
+        for change in changed {
+            let key = change.key;
+            let neighbours = SIDES
+                .iter()
+                .enumerate()
+                .filter(|&(side, _)| change.sides & 1 << side != 0)
+                .map(|(_, [dx, dy, dz])| SectionKey {
+                    x: key.x + dx,
+                    y: key.y + dy,
+                    z: key.z + dz,
+                    ..key
+                });
+            for key in std::iter::once(key).chain(neighbours) {
+                if self.meshed.contains(&key) {
+                    self.dirty.entry(key).or_insert(ready);
                 }
             }
+        }
+    }
+
+    fn handle(&mut self, job: Job) {
+        match job {
             Job::Colors(colors) => {
                 if !colors.same_models(&self.colors) {
                     // Ids start over; the new tiles overwrite the old.
