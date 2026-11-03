@@ -122,13 +122,6 @@ impl TypedParticleOptions for SimpleParticleType {
     }
 }
 
-/// Client provider registration rejects duplicate names across both forms even
-/// if their schemas differ; it must not replace an existing provider binding.
-/// This is not a global type-registry uniqueness error.
-pub enum ParticleRegistrationError {
-    DuplicateProviderRegistration(ResourceId),
-}
-
 /// Value-equal quota key, distinct from render-group capacity and world policy.
 /// Equal numeric limits share a count, matching Vanilla's ParticleLimit record
 /// and value-keyed quota map. Vanilla's SPORE_BLOSSOM limit is 1000.

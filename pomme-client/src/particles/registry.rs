@@ -7,7 +7,7 @@ use std::rc::Rc;
 use super::types::{ParticleType, ParticleTypeInfo, TypedParticleOptions};
 use crate::resources::ResourceId;
 
-/// Type bootstrap failures, distinct from duplicate client provider bindings.
+/// Type bootstrap failures; client provider replacement is independent.
 pub enum ParticleTypeRegistrationError {
     DuplicateName(ResourceId),
     Frozen,
