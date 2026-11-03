@@ -3,7 +3,10 @@
 // One iteration of the walk down the node tree, a level at a time. Each
 // listed node is frustum and Hi-Z tested; a node still larger on screen than
 // the split size steps into its children (or asks for them), the rest draw.
-// The nodes pushed for the next iteration size its dispatch.
+// Nodes hidden by the Hi-Z or just outside the view are walked and asked for
+// all the same, only not drawn, so what a turn or a climb brings into view
+// is already at the detail it needs (a departure: the reference walks only
+// what it draws). The nodes pushed for the next iteration size its dispatch.
 
 #define LOCAL_SIZE_BITS 5
 #define LOCAL_SIZE (1 << LOCAL_SIZE_BITS)
@@ -19,7 +22,8 @@ layout(local_size_x = LOCAL_SIZE) in;
 #define RENDER_LIST_ACCESS
 #include "distant_section.glsl"
 
-// The nodes whose children the CPU should make, by packed key.
+// The nodes whose children the CPU should make, by packed key, after their
+// count and the count of those out of sight among them.
 layout(set = 0, binding = 1, std430) restrict buffer RequestQueue {
     uvec2 request_index;
     uvec2 request_queue[];
@@ -133,17 +137,19 @@ bool test_plane(vec4 plane, vec3 base, float size) {
     return dot(plane.xyz, base + mix(vec3(size), vec3(0.0), lessThan(plane.xyz, vec3(0.0)))) >= -plane.w;
 }
 
-bool outside_frustum(vec3 base, float size) {
-    return !(test_plane(frustum[0], base, size) && test_plane(frustum[1], base, size)
-        && test_plane(frustum[2], base, size) && test_plane(frustum[3], base, size)
-        && test_plane(frustum[4], base, size));
+bool outside_frustum(vec4 planes[6], vec3 base, float size) {
+    return !(test_plane(planes[0], base, size) && test_plane(planes[1], base, size)
+        && test_plane(planes[2], base, size) && test_plane(planes[3], base, size)
+        && test_plane(planes[4], base, size));
 }
 
 // The node's box projected, its screen bounds and the summed area of its
-// faces.
+// faces; whether it lies outside the view, and outside the wider view that
+// is still requested.
 vec3 min_bb = vec3(0.0);
 vec3 max_bb = vec3(0.0);
 bool frustum_culled = false;
+bool request_culled = false;
 float screen_size = 0.0;
 
 // The node's corner relative to the camera's section, and to the camera.
@@ -163,9 +169,11 @@ vec3 to_screen(vec4 clip) {
 
 void setup_screenspace(Node node) {
     vec3 base = section_relative(node);
+    vec3 eye_base = base - camera_sub_pos;
     float size = float(32 << node.level);
-    frustum_culled = outside_frustum(base - camera_sub_pos, size);
-    if (frustum_culled) {
+    frustum_culled = outside_frustum(frustum, eye_base, size);
+    request_culled = frustum_culled && outside_frustum(request_frustum, eye_base, size);
+    if (request_culled) {
         return;
     }
     vec4 P000 = distant_view_proj * vec4(base, 1.0);
@@ -238,14 +246,19 @@ bool should_descend() {
 }
 
 // Asks the CPU for the node's children, once per node and up to the frame's
-// request limit.
-void add_request(inout Node node) {
-    if (!has_requested(node) && request_index.x < request_limit) {
-        uint index = atomicAdd(request_index.x, 1u);
-        if (index < MAX_REQUESTS) {
-            request_queue[index] = node.raw_pos;
-            mark_requested(node);
-        }
+// request limit; nodes out of sight get at most a third of it, so what is in
+// view refines first.
+void add_request(inout Node node, bool visible) {
+    if (has_requested(node) || request_index.x >= request_limit) {
+        return;
+    }
+    if (!visible && atomicAdd(request_index.y, 1u) >= request_limit / 3u) {
+        return;
+    }
+    uint index = atomicAdd(request_index.x, 1u);
+    if (index < MAX_REQUESTS) {
+        request_queue[index] = node.raw_pos;
+        mark_requested(node);
     }
 }
 
@@ -289,26 +302,29 @@ bool within_render_distance(Node node) {
 
 void traverse(inout Node node) {
     setup_screenspace(node);
-    if (frustum_culled || culled_by_hiz()) {
+    if (request_culled) {
         return;
     }
+    bool visible = !frustum_culled && !culled_by_hiz();
     if (node.level != 0u && should_descend()) {
         if (has_children(node)) {
             enqueue_children(node);
         } else {
-            add_request(node);
+            add_request(node, visible);
             // Drawn meanwhile when wholly within reach, with a buffer room of
             // 16 cubed.
             vec3 far = furthest_point(section_relative(node) - camera_sub_pos, float(32 << node.level));
-            if (far.x * far.x + far.z * far.z + 16.0 * 16.0 * 16.0 <= render_distance) {
+            if (visible && far.x * far.x + far.z * far.z + 16.0 * 16.0 * 16.0 <= render_distance) {
                 enqueue_render(node);
             }
         }
     } else if (has_mesh(node)) {
-        enqueue_render(node);
+        if (visible) {
+            enqueue_render(node);
+        }
     } else {
         // Wanted but not meshed yet: ask, and draw the children meanwhile.
-        add_request(node);
+        add_request(node, visible);
         if (node.level != 0u) {
             enqueue_children(node);
         }

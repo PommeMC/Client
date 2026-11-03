@@ -32,11 +32,16 @@ const DEPTH: rhi::TextureFormat = rhi::TextureFormat::Depth32Float;
 const HIZ: rhi::TextureFormat = rhi::TextureFormat::R32Float;
 /// A node is split while it covers more than this many pixels squared.
 const SUBDIVISION_SIZE: f32 = 64.0;
+/// How much wider than the view, in radians of field of view, the traversal
+/// requests meshes: terrain beside the view refines before a turn shows it.
+/// The chunk mesher schedules by the same margin. A departure: the reference
+/// requests only what it draws.
+const REQUEST_MARGIN_RADIANS: f32 = 0.6;
 
 /// The scene uniform (`distant_section.glsl`): the distant view projection
 /// moved by the camera's position within its 32-block section, that section,
 /// the frame, whether the occlusion pass was skipped, and the traversal's
-/// inputs.
+/// inputs, the frustum it draws within and the wider one it requests within.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SceneUniform {
@@ -52,6 +57,7 @@ struct SceneUniform {
     render_distance: f32,
     _pad: [u32; 3],
     frustum: [[f32; 4]; 6],
+    request_frustum: [[f32; 4]; 6],
 }
 
 const SCENE_BYTES: u64 = size_of::<SceneUniform>() as u64;
@@ -629,6 +635,9 @@ impl DistantPipeline {
             render_distance: buffers.render_distance_sq(),
             _pad: [0; 3],
             frustum: Camera::planes_from_view_projection(view_proj),
+            request_frustum: Camera::planes_from_view_projection(
+                camera.distant_view_projection_dilated(DISTANT_FAR, REQUEST_MARGIN_RADIANS),
+            ),
         }));
         let draw = buffers.draw_buffers();
         let (counts, translucent, queue_meta) = (

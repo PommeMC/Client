@@ -593,6 +593,13 @@ impl Camera {
         )
     }
 
+    /// [`Self::distant_view_projection`] with the field of view widened by
+    /// `extra_radians` (clamped below 180°): what is about to come into view.
+    pub fn distant_view_projection_dilated(&self, far: f32, extra_radians: f32) -> Mat4 {
+        let fov = (self.fov_radians(self.render_partial_tick) + extra_radians).min(2.96);
+        self.view_projection_with_planes(fov, DISTANT_NEAR, far)
+    }
+
     fn view_projection_with_planes(&self, fov: f32, near: f32, far: f32) -> Mat4 {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();

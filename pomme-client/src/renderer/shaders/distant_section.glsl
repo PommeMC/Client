@@ -7,7 +7,8 @@
 // occlusion pass was skipped (cmdgen then keeps visibility itself); then
 // the traversal's: the Hi-Z's base size (width << 16 | height), the screen
 // area a node splits at, the render list's and the frame's request queue's
-// room, the render distance squared in blocks, and the frustum planes.
+// room, the render distance squared in blocks, the frustum planes, and those
+// of the wider view meshes are requested within.
 #ifdef SCENE_BINDING
 layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform {
     mat4 distant_view_proj;
@@ -21,6 +22,7 @@ layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform 
     uint request_limit;
     float render_distance;
     vec4 frustum[6];
+    vec4 request_frustum[6];
 };
 #endif
 
