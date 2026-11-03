@@ -1,8 +1,8 @@
 //! Isolated Vanilla 26.3 particle layer, not connected to `crate::particle`.
 //! Type/provider storage and CPU description/sprite binding are implemented.
 //! Scoped level queries reuse the existing collision and lighting services.
-//! Concrete providers, engine, simulation, atlas sources and GPU/runtime
-//! adoption remain deferred.
+//! Concrete Smoke simulation and its sprite provider are implemented; engine,
+//! atlas sources and GPU/runtime adoption remain deferred.
 //! Leaf values, typed tokens and sealed options erasure are real data/bridges,
 //! not placeholder behavior. The ordinary contract_exemplar needs a caller's
 //! real provider and initializing engine factory.
@@ -23,6 +23,7 @@ mod particle;
 mod registry;
 mod render;
 mod resources;
+mod smoke;
 mod sprites;
 mod types;
 mod world;
@@ -48,6 +49,7 @@ pub use self::{
         ParticleView, QuadParticleRenderState,
     },
     resources::MappedParticleResources,
+    smoke::{SmokeParticle, SmokeProvider},
     sprites::{ParticleAtlasSprites, ParticleDescription, PreparedParticleDescriptions, SpriteSet},
     types::{
         ParticleLimit, ParticleOptions, ParticleType, ParticleTypeInfo, SimpleParticleType,
@@ -59,7 +61,7 @@ use crate::resources::ResourceManager;
 
 /// Typed options, nullable construction, explicit engine RNG. Auxiliary values
 /// are provider-defined doubles, not universally a velocity. Instances may
-/// later own independent random streams; this argument is the creation stream.
+/// own independent random streams; this argument is the engine creation stream.
 pub trait ParticleProvider<O: TypedParticleOptions> {
     fn create_particle(
         &self,
