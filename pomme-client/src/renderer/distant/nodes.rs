@@ -291,10 +291,14 @@ impl NodeGraph {
                 .sum::<usize>()
     }
 
-    /// The records to write to the node buffer, by id, since last time.
-    pub fn take_dirty(&mut self) -> Vec<(u32, [u32; 4])> {
-        let dirty: Vec<u32> = self.dirty.drain().collect();
-        dirty.into_iter().map(|id| (id, self.record(id))).collect()
+    /// Up to `limit` of the records to write to the node buffer, by id,
+    /// since last time; the rest wait for the next call.
+    pub fn take_dirty(&mut self, limit: usize) -> Vec<(u32, [u32; 4])> {
+        let taken: Vec<u32> = self.dirty.iter().copied().take(limit).collect();
+        for id in &taken {
+            self.dirty.remove(id);
+        }
+        taken.into_iter().map(|id| (id, self.record(id))).collect()
     }
 
     /// A node's record: the key, the mesh under the flags' low byte (bit 0 a
@@ -1011,6 +1015,19 @@ mod tests {
     }
 
     #[test]
+    fn dirty_records_past_the_limit_wait_for_the_next_take() {
+        let mut graph = NodeGraph::new();
+        let other = SectionKey { x: 1, ..top() };
+        graph.set_roots(&HashSet::from([top(), other]));
+        let mut uploader = uploader();
+        graph.process_geometry_result(built(top(), 4, 0b101), &mut uploader);
+        graph.process_geometry_result(built(other, 4, 0b101), &mut uploader);
+        assert_eq!(graph.take_dirty(1).len(), 1);
+        assert_eq!(graph.take_dirty(usize::MAX).len(), 1);
+        assert!(graph.take_dirty(usize::MAX).is_empty());
+    }
+
+    #[test]
     fn a_root_is_requested_then_becomes_a_top_level_leaf() {
         let mut graph = NodeGraph::new();
         graph.set_roots(&HashSet::from([top()]));
@@ -1019,7 +1036,7 @@ mod tests {
         graph.process_geometry_result(built(top(), 4, 0b101), &mut uploader());
         assert_eq!(graph.in_flight(), 0);
         assert_eq!(graph.top_ids(), &[0]);
-        let dirty = graph.take_dirty();
+        let dirty = graph.take_dirty(usize::MAX);
         let (id, record) = dirty[0];
         assert_eq!(id, 0);
         let key = top().pack();
@@ -1033,22 +1050,22 @@ mod tests {
         graph.set_roots(&HashSet::from([top()]));
         graph.process_geometry_result(built(top(), 4, 0b0000_0101), &mut upload);
         graph.watch.clear();
-        graph.take_dirty();
+        graph.take_dirty(usize::MAX);
 
         graph.process_request(top());
         let children: Vec<SectionKey> = [0, 2].map(|i| child_key(top(), i)).to_vec();
         assert_eq!(graph.watch, children);
         // The request shows on the GPU as the flag, so it isn't asked again.
-        let (_, record) = graph.take_dirty()[0];
+        let (_, record) = graph.take_dirty(usize::MAX)[0];
         assert_eq!(record[2] >> 24, 1);
         graph.process_request(top());
-        assert!(graph.take_dirty().is_empty());
+        assert!(graph.take_dirty(usize::MAX).is_empty());
 
         graph.process_geometry_result(built(children[0], 0, 0), &mut upload);
         assert_eq!(graph.in_flight(), 1);
         graph.process_geometry_result(built(children[1], 3, 0b1), &mut upload);
         assert_eq!(graph.in_flight(), 0);
-        let records: HashMap<u32, [u32; 4]> = graph.take_dirty().into_iter().collect();
+        let records: HashMap<u32, [u32; 4]> = graph.take_dirty(usize::MAX).into_iter().collect();
         let parent = records[&0];
         assert_eq!(parent[2] & 0xFF_FFFF, 101);
         // Two children from id 1, all leaves, no request.
@@ -1069,7 +1086,7 @@ mod tests {
         graph.process_request(top());
         graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
         graph.watch.clear();
-        graph.take_dirty();
+        graph.take_dirty(usize::MAX);
 
         graph.set_roots(&HashSet::new());
         assert!(graph.entries.is_empty());
@@ -1079,7 +1096,7 @@ mod tests {
         let mut freed = graph.freed.clone();
         freed.sort_unstable();
         assert_eq!(freed, vec![101, 102]);
-        let records = graph.take_dirty();
+        let records = graph.take_dirty(usize::MAX);
         assert!(records.iter().all(|&(_, record)| record == [u32::MAX; 4]));
     }
 
@@ -1095,13 +1112,13 @@ mod tests {
         let reset = |id| id | VISIBILITY_RESET_BIT;
         assert_eq!(graph.visibility_sets, HashSet::from([reset(0), reset(1)]));
         graph.watch.clear();
-        graph.take_dirty();
+        graph.take_dirty(usize::MAX);
 
         // An inner node: its mesh goes, its children stay.
         graph.remove_node_geometry(top());
         assert_eq!(graph.freed, vec![101]);
         assert_eq!(graph.unwatch, vec![top()]);
-        let (_, record) = graph.take_dirty()[0];
+        let (_, record) = graph.take_dirty(usize::MAX)[0];
         assert_eq!(record[2] & 0xFF_FFFF, NULL);
         assert_eq!(graph.entries[&top()], Entry::Inner(0));
 
@@ -1136,13 +1153,13 @@ mod tests {
         graph.process_geometry_result(built(top(), 4, 0b100), &mut upload);
         graph.process_request(top());
         graph.process_geometry_result(built(child_key(top(), 2), 2, 0), &mut upload);
-        graph.take_dirty();
+        graph.take_dirty(usize::MAX);
 
         // The root re-meshed with a new child before the old one.
         graph.process_geometry_result(built(top(), 4, 0b101), &mut upload);
         assert_eq!(graph.in_flight(), 1);
         graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
-        let records: HashMap<u32, [u32; 4]> = graph.take_dirty().into_iter().collect();
+        let records: HashMap<u32, [u32; 4]> = graph.take_dirty(usize::MAX).into_iter().collect();
         let Entry::Inner(root) = graph.entries[&top()] else {
             panic!("root is inner");
         };

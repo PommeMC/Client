@@ -652,9 +652,10 @@ impl DistantBuffers {
             );
             encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::ShaderRead);
         }
+        // What fits the list; the rest of the nodes wait for the next frame.
         records.extend(
             self.graph
-                .take_dirty()
+                .take_dirty(SCATTER_RECORDS.saturating_sub(records.len()))
                 .into_iter()
                 .map(|(id, record)| (id | NODE_SCATTER_BIT, record)),
         );
