@@ -1,5 +1,6 @@
 //! Isolated Vanilla 26.3 particle layer, not connected to `crate::particle`.
 //! Type/provider storage and CPU description/sprite binding are implemented.
+//! Scoped level queries reuse the existing collision and lighting services.
 //! Concrete providers, engine, simulation, atlas sources and GPU/runtime
 //! adoption remain deferred.
 //! Leaf values, typed tokens and sealed options erasure are real data/bridges,
@@ -17,6 +18,7 @@
 )]
 
 mod contract_exemplars;
+mod level;
 mod particle;
 mod registry;
 mod render;
