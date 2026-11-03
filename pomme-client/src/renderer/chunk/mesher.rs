@@ -11,7 +11,7 @@ use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::shaderpack::block_ids::{BlockIds, PackBlockIds};
 use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
-use crate::world::block::{BlockStateData, BlockStateTable, FluidKind};
+use crate::world::block::{BlockStateData, BlockStateTable, FaceMask, FluidKind};
 use crate::world::chunk;
 use crate::world::chunk::{ChunkRing, ChunkStore, SectionBlocks};
 
@@ -1597,6 +1597,16 @@ impl BlockSlice {
     }
 }
 
+impl ChunkStoreSnapshot {
+    /// Whether the block at `pos` draws its face toward `direction`
+    /// ([`should_render_face`] against the neighbour there).
+    fn face_shown(&self, pos: [i32; 3], direction: Direction) -> bool {
+        let offset = direction.offset();
+        let neighbour = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]];
+        should_render_face(self.state_data(pos), self.state_data(neighbour), direction)
+    }
+}
+
 impl LightSource for ChunkStoreSnapshot {
     fn state_data(&self, [x, y, z]: [i32; 3]) -> &BlockStateData {
         self.block_state_table
@@ -1990,7 +2000,6 @@ fn emit_block_model(
             state,
             baked.quads.iter(),
             snapshot,
-            registry,
             uv_map,
             bx,
             by,
@@ -2003,7 +2012,6 @@ fn emit_block_model(
             state,
             quads.iter().copied(),
             snapshot,
-            registry,
             uv_map,
             bx,
             by,
@@ -2011,10 +2019,10 @@ fn emit_block_model(
         );
     } else if let Some(textures) = registry.get_textures(state) {
         emit_cube_faces(
-            sink, model_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
+            sink, model_pos, state, textures, snapshot, uv_map, bx, by, bz,
         );
     } else {
-        emit_missing_cube(sink, model_pos, snapshot, registry, uv_map, bx, by, bz);
+        emit_missing_cube(sink, model_pos, snapshot, uv_map, bx, by, bz);
         return false;
     }
     true
@@ -2078,7 +2086,6 @@ fn emit_quads<'q>(
     state: azalea_block::BlockState,
     quads: impl Iterator<Item = &'q crate::world::block::model::BakedQuad> + Clone,
     snapshot: &ChunkStoreSnapshot,
-    registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
     bx: i32,
     by: i32,
@@ -2090,12 +2097,11 @@ fn emit_quads<'q>(
         .is_some_and(|quad| quad.ambient_occlusion);
     let smooth = smooth_lighting(snapshot, state, first_ao);
     for quad in quads {
-        if let Some(cullface) = quad.cullface {
-            let offset = cullface.offset();
-            let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-            if registry.occludes_neighbor(neighbor) {
-                continue;
-            }
+        if quad
+            .cullface
+            .is_some_and(|cullface| !snapshot.face_shown([bx, by, bz], cullface))
+        {
+            continue;
         }
 
         let region = uv_map.region(quad.texture);
@@ -2128,7 +2134,6 @@ fn emit_cube_faces(
     state: BlockState,
     textures: &crate::world::block::render_assets::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
-    registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
     bx: i32,
     by: i32,
@@ -2138,9 +2143,7 @@ fn emit_cube_faces(
     let smooth = smooth_lighting(snapshot, state, true);
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
-        let offset = dir.offset();
-        let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-        if registry.occludes_neighbor(neighbor) {
+        if !snapshot.face_shown([bx, by, bz], *dir) {
             continue;
         }
 
@@ -2228,6 +2231,62 @@ const MAX_FLUID_HEIGHT: f32 = 8.0 / 9.0;
 /// `FluidRenderer`'s `offs` anti-z-fighting inset.
 const FLUID_INSET: f32 = 0.001;
 
+/// A block's occlusion shape on one of its faces (vanilla
+/// `BlockStateBase.getFaceOcclusionShape`): the full face, nothing, or the
+/// generated 16x16 mask.
+enum FaceShape {
+    Full,
+    Empty,
+    Mask(&'static FaceMask),
+}
+
+fn face_occlusion_shape(block_state_data: &BlockStateData, direction: Direction) -> FaceShape {
+    if block_state_data.is_air() || !block_state_data.light_props().can_occlude {
+        return FaceShape::Empty;
+    }
+    match block_state_data.light_props().face_occlusion {
+        Some(masks) => {
+            let mask = &masks[direction as usize];
+            if mask.iter().all(|&row| row == 0xFFFF) {
+                FaceShape::Full
+            } else if mask.iter().all(|&row| row == 0) {
+                FaceShape::Empty
+            } else {
+                FaceShape::Mask(mask)
+            }
+        }
+        // TODO: masks are only dumped for useShapeForLightOcclusion states, so
+        // other partial occlusion shapes (fence posts, chests) count as empty.
+        None if block_state_data.outline_boxes().is_none() => FaceShape::Full,
+        None => FaceShape::Empty,
+    }
+}
+
+/// Vanilla `Block.shouldRenderFace`: a quad facing `direction` is drawn
+/// unless the neighbour's facing occlusion shape covers it, or the block
+/// skips rendering against its own kind (`skipRendering`).
+fn should_render_face(
+    block_state_data: &BlockStateData,
+    neighbour: &BlockStateData,
+    direction: Direction,
+) -> bool {
+    let occluder = match face_occlusion_shape(neighbour, direction.opposite()) {
+        FaceShape::Full => return false,
+        FaceShape::Empty => None,
+        FaceShape::Mask(mask) => Some(mask),
+    };
+    if block_state_data.culls_same() && block_state_data.id() == neighbour.id() {
+        return false;
+    }
+    match (face_occlusion_shape(block_state_data, direction), occluder) {
+        (FaceShape::Mask(shape), Some(occluder)) => shape
+            .iter()
+            .zip(occluder)
+            .any(|(own, theirs)| own & !theirs != 0),
+        _ => true,
+    }
+}
+
 fn same_fluid(block_state_data: &BlockStateData, kind: FluidKind) -> bool {
     block_state_data.fluid().kind == kind
 }
@@ -2239,23 +2298,17 @@ fn fluid_face_occluded_by_state(
     direction: Direction,
     height: f32,
 ) -> bool {
-    let props = block_state_data.light_props();
-    if !props.can_occlude {
-        return false;
-    }
-    let full_row = |v: usize| match props.face_occlusion {
-        Some(masks) => masks[direction.opposite() as usize][v] == 0xFFFF,
-        // TODO: masks are only dumped for useShapeForLightOcclusion states, so
-        // other partial occlusion shapes (fence posts, chests) count as empty.
-        None => block_state_data.outline_boxes().is_none(),
-    };
     let rows = match direction {
         // `Shapes.blockOccludes` needs the fluid box to reach the top boundary.
         Direction::Up if (height - 1.0).abs() > 1.0e-7 => return false,
         Direction::Up | Direction::Down => 16,
         _ => ((height.clamp(0.0, 1.0) * 16.0).ceil() as usize).min(16),
     };
-    (0..rows).all(full_row)
+    match face_occlusion_shape(block_state_data, direction.opposite()) {
+        FaceShape::Full => true,
+        FaceShape::Empty => false,
+        FaceShape::Mask(mask) => mask[..rows].iter().all(|&row| row == 0xFFFF),
+    }
 }
 
 fn fluid_face_occluded_by_self(block_state_data: &BlockStateData, direction: Direction) -> bool {
@@ -2633,7 +2686,6 @@ fn emit_missing_cube(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
     snapshot: &ChunkStoreSnapshot,
-    registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
     bx: i32,
     by: i32,
@@ -2641,9 +2693,7 @@ fn emit_missing_cube(
 ) {
     let missing = uv_map.missing_region();
     for dir in &CUBE_FACE_DIRS {
-        let offset = dir.offset();
-        let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-        if registry.occludes_neighbor(neighbor) {
+        if !snapshot.face_shown([bx, by, bz], *dir) {
             continue;
         }
 
@@ -2755,6 +2805,52 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
         face_positions(dir, from, to),
         face_uvs(dir, from, to, None, None),
     )
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::should_render_face;
+    use crate::world::block::BlockStateTable;
+    use crate::world::block::model::Direction;
+
+    #[test]
+    fn faces_hide_as_vanilla_should_render_face_decides() {
+        let table = BlockStateTable::native();
+        let state =
+            |name, props: &[(&str, &str)]| table.block_state_data(table.find_state(name, props));
+        let stone = state("stone", &[]);
+        let ice = state("ice", &[]);
+        let glass = state("glass", &[]);
+        let one_layer = state("snow", &[("layers", "1")]);
+        let three_layers = state("snow", &[("layers", "3")]);
+        let bottom_slab = state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        let fence = state("oak_fence", &[("waterlogged", "false")]);
+        let air = state("air", &[]);
+
+        // A full occluding neighbour hides the face; air and glass don't.
+        assert!(!should_render_face(stone, stone, Direction::North));
+        assert!(should_render_face(stone, air, Direction::North));
+        assert!(should_render_face(stone, glass, Direction::North));
+        // Half-transparent blocks skip their own kind only.
+        assert!(!should_render_face(ice, ice, Direction::North));
+        assert!(should_render_face(ice, glass, Direction::North));
+        assert!(should_render_face(glass, ice, Direction::North));
+        // Partial shapes compare their face masks: equal snow layers hide
+        // each other's sides, a taller one shows above a shorter one, and
+        // a slab's full bottom hides the block below's top.
+        assert!(!should_render_face(one_layer, one_layer, Direction::East));
+        assert!(!should_render_face(
+            one_layer,
+            three_layers,
+            Direction::East
+        ));
+        assert!(should_render_face(three_layers, one_layer, Direction::East));
+        assert!(should_render_face(one_layer, air, Direction::Up));
+        assert!(!should_render_face(stone, bottom_slab, Direction::Up));
+        assert!(should_render_face(stone, bottom_slab, Direction::North));
+        // No masks for a fence post: its neighbours' faces stay.
+        assert!(should_render_face(stone, fence, Direction::North));
+    }
 }
 
 #[cfg(test)]

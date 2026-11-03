@@ -1,0 +1,54 @@
+# Faces between blocks of a kind: ice beside ice, and snow layers beside
+# snow layers of the same height, hide each other's sides as vanilla's
+# shouldRenderFace decides. From straight above the sides are edge-on, and
+# any left in the mesh alias into dark lines across the sheet.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 0 -61 0 15 -61 15 minecraft:ice"
+
+[[step]]
+chat = "/fill 16 -60 0 31 -60 15 minecraft:snow[layers=1]"
+
+[[step]]
+expect = { block = "ice", at = [15, -61, 15] }
+
+[[step]]
+expect = { block = "snow", at = [31, -60, 15] }
+
+[[step]]
+chat = "/tp @s 16.5 0 8.5 0 90"
+
+[[step]]
+expect = { player = { position = [16.5, 0.0, 8.5] } }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "above"
+
+[[step]]
+chat = "/fill 16 -60 0 31 -60 15 minecraft:air"
+
+[[step]]
+chat = "/fill 0 -61 0 15 -61 15 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [15, -61, 15] }
