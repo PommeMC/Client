@@ -601,8 +601,10 @@ impl GameState {
         self.compiled.remove(&pos);
         self.vis_mask.remove(&pos);
         self.vis_tiers.remove(&pos);
-        self.section_vis.retain(|(p, _), _| *p != pos);
-        self.section_vis_epoch.retain(|(p, _), _| *p != pos);
+        for si in 0..self.chunk_store.section_count() {
+            self.section_vis.remove(&(pos, si));
+            self.section_vis_epoch.remove(&(pos, si));
+        }
     }
 
     /// Vanilla `handleMovePlayer`. Returns whether the player moved, for the
