@@ -53,7 +53,6 @@ pub use winit::platform::android::activity::AndroidApp;
 
 use crate::app::App;
 pub use crate::args::{LAUNCH_FILE, LaunchArgs};
-#[cfg(target_os = "android")]
 pub use crate::logging::install_panic_hook;
 use crate::user::UserData;
 

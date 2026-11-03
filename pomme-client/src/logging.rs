@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
@@ -14,7 +15,8 @@ pub fn init(log_dir: &Path) -> Option<WorkerGuard> {
     if let Err(e) = rotate(log_dir) {
         eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
     }
-    let file_appender = tracing_appender::rolling::never(log_dir, "latest.log");
+    let _ = LOG_FILE.set(log_dir.join(LATEST_LOG));
+    let file_appender = tracing_appender::rolling::never(log_dir, LATEST_LOG);
     // The default queues 128k lines up front (~4 MB); a file write keeps up
     // with far fewer, and a full queue drops lines rather than blocking.
     let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
@@ -42,17 +44,38 @@ pub fn init(log_dir: &Path) -> Option<WorkerGuard> {
     Some(guard)
 }
 
-/// Panics to the log. Android drops stderr, so one before logging starts goes
-/// straight to logcat.
-#[cfg(target_os = "android")]
+const LATEST_LOG: &str = "latest.log";
+/// The log file, for the panic hook.
+static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Panics to the log, written on the spot: the abort that follows one
+/// (`app::state_slot`) never lets the log's writer thread get to it, and a
+/// release build has no console for the default hook's message. Android
+/// drops stderr, so one before logging starts goes straight to logcat.
 pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = LOG_FILE.get() {
+            let line = format!(
+                "{} PANIC {info}
+",
+                chrono::Utc::now().to_rfc3339()
+            );
+            let _ = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+        }
         if tracing::dispatcher::has_been_set() {
             tracing::error!("{info}");
-        } else {
+        }
+        #[cfg(target_os = "android")]
+        if !tracing::dispatcher::has_been_set() {
             let logcat = tracing_subscriber::registry().with(console_layer());
             tracing::subscriber::with_default(logcat, || tracing::error!("{info}"));
         }
+        default_hook(info);
     }));
 }
 
@@ -70,7 +93,7 @@ where
 const MAX_LOG_FILES: usize = 5;
 
 fn rotate(log_dir: &Path) -> std::io::Result<()> {
-    let latest = log_dir.join("latest.log");
+    let latest = log_dir.join(LATEST_LOG);
     if !latest.exists() {
         return Ok(());
     }
@@ -119,5 +142,23 @@ fn cleanup_old_logs(log_dir: &Path) {
 
     for entry in &gz_files[..gz_files.len() - MAX_LOG_FILES] {
         let _ = std::fs::remove_file(entry.path());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_lands_in_the_log() {
+        let dir = std::env::temp_dir().join("pomme-panic-hook-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join(LATEST_LOG);
+        let _ = std::fs::remove_file(&log);
+        let _ = LOG_FILE.set(log.clone());
+        install_panic_hook();
+        let _ = std::panic::catch_unwind(|| panic!("the message under test"));
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(written.contains("PANIC") && written.contains("the message under test"));
     }
 }
