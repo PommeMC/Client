@@ -1181,7 +1181,7 @@ impl BufferUse {
                 vk::PipelineStageFlags::Transfer,
             ),
             Self::StorageWrite => (
-                vk::AccessFlags::ShaderWrite,
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
             ),
             Self::DrawInput => (

@@ -32,7 +32,7 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
-use crate::renderer::chunk::buffer::column_is_near;
+use crate::renderer::chunk::buffer::{column_is_near, section_bit};
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
@@ -1662,12 +1662,6 @@ fn column_frustum_tier(
     } else {
         2
     }
-}
-
-/// Bit for one section index, 0 outside a column's 32 addressable sections (a
-/// camera outside build height resolves to such an index).
-fn section_bit(si: i32) -> u32 {
-    if (0..32).contains(&si) { 1u32 << si } else { 0 }
 }
 
 /// The bits for several section indices.
@@ -4522,10 +4516,10 @@ pub fn update_game(
             })
             .collect();
         renders.sort_by_key(|&(camera, _)| !camera);
-        let camera = renders.iter().filter(|&&(camera, _)| camera).count();
+        let camera_len = renders.iter().filter(|&&(camera, _)| camera).count();
         (
             renders.into_iter().map(|(_, render)| render).collect(),
-            camera,
+            camera_len,
         )
     };
 
@@ -4649,7 +4643,7 @@ pub fn update_game(
         &item_renders,
         crate::renderer::BlockEntityList {
             items: &block_entity_renders,
-            camera: camera_block_entities,
+            camera_len: camera_block_entities,
         },
         &particle_quads,
         &weather_columns,

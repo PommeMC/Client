@@ -236,6 +236,7 @@ pub struct MenuSkin {
 #[derive(Default, Clone)]
 pub struct RenderTimings {
     pub pace_ms: f32,
+    /// Encoding a world frame, the shader pack's passes included.
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -2035,6 +2036,7 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
+        let frame_start = std::time::Instant::now();
         if let RenderMode::World { particles, .. } = &mode {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
@@ -2050,8 +2052,6 @@ impl Renderer {
 
         let sw = self.swapchain.extent.width as f32;
         let sh = self.swapchain.extent.height as f32;
-
-        let frame_start = std::time::Instant::now();
 
         match &mode {
             RenderMode::World {

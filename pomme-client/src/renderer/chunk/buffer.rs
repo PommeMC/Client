@@ -117,6 +117,24 @@ pub fn column_is_near(pos: ChunkPos, eye: DVec3) -> bool {
     column_dist_sq(pos, eye) < NEARBY_DIST_SQ as f64
 }
 
+/// Bit for one section index, 0 outside a column's 32 addressable sections (a
+/// camera outside build height resolves to such an index).
+pub(crate) fn section_bit(si: i32) -> u32 {
+    if (0..32).contains(&si) { 1u32 << si } else { 0 }
+}
+
+/// A section's `uploaded_ms` as it uploads at `now_ms`: 0 (no fade) when
+/// `shown`, else from its first upload without geometry, if it had one.
+fn fade_from(shown: bool, bare_ms: Option<u32>, now_ms: u32) -> u32 {
+    if shown { 0 } else { bare_ms.unwrap_or(now_ms) }
+}
+
+/// Whether a section uploaded at `uploaded_ms` has faded in to vanilla's 0.3
+/// (`LevelExtractor.CHUNK_VISIBILITY_THRESHOLD`) by `now_ms`.
+fn block_entities_faded_in(uploaded_ms: u32, now_ms: u32) -> bool {
+    uploaded_ms == 0 || now_ms.saturating_sub(uploaded_ms) * 10 >= FADE_MS * 3
+}
+
 /// The column `eye` is in.
 fn eye_column(eye: DVec3) -> ChunkPos {
     ChunkPos::containing(BlockPos::containing(eye))
@@ -142,8 +160,8 @@ fn column_dist_sq(pos: ChunkPos, eye: DVec3) -> f64 {
 }
 
 /// A section's entry in the draw lists (`cull.comp`'s `ChunkMeta`): what the
-/// cull needs to test and draw it, static from its upload on but for
-/// `visibility`, which the cull writes each frame.
+/// cull needs to test and draw it. The cull writes `visibility` each frame;
+/// compaction rewrites where the geometry sits.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ChunkMeta {
@@ -330,6 +348,10 @@ struct FrustumData {
     arena_len: [[u32; 4]; MAX_ARENAS / 4],
 }
 
+// The sizes `cull.comp` lays these out at.
+const _: () = assert!(size_of::<ChunkMeta>() == 80);
+const _: () = assert!(size_of::<FrustumData>() == 2192);
+
 /// The columns with uploaded sections, each in a slot the visibility masks
 /// and the metas refer to it by.
 #[derive(Default)]
@@ -350,11 +372,14 @@ pub(crate) struct Column {
 }
 
 impl Column {
-    /// Each section with its vertex and index slice lengths.
-    fn slice_lens(&self) -> impl Iterator<Item = (i32, SliceLens)> + '_ {
-        self.sections
-            .iter()
-            .map(|s| (s.section_index, (s.vtx_len, s.idx_len)))
+    /// What the column takes, for eviction to weigh; the largest single
+    /// slice doesn't matter there, so it's left at 0.
+    fn need(&self) -> Need {
+        Need {
+            vertices: self.vertices,
+            indices: self.indices,
+            ..Need::default()
+        }
     }
 }
 
@@ -716,7 +741,7 @@ pub(crate) struct SectionAlloc {
     origin: [i32; 3],
     arena: u16,
     first_index: u32,
-    /// Opaque index count (the GPU-culled draw); water is excluded.
+    /// Opaque index count; water's follow.
     index_count: u32,
     /// Leading indices belonging to the solid (no-discard) pass; the rest are
     /// cutout.
@@ -738,6 +763,11 @@ pub(crate) struct SectionAlloc {
 }
 
 impl SectionAlloc {
+    /// The section with its vertex and index slice lengths.
+    fn lens(&self) -> (i32, SliceLens) {
+        (self.section_index, (self.vtx_len, self.idx_len))
+    }
+
     fn slice(&self) -> Slice {
         Slice::new(
             self.arena,
@@ -1385,6 +1415,10 @@ pub struct ChunkBufferStore {
     eye: Option<DVec3>,
     /// What `uploaded_ms` counts from.
     epoch: std::time::Instant,
+    /// The `uploaded_ms` of sections meshed without geometry, by column:
+    /// vanilla stamps every compiled section, and fades its block entities
+    /// in from then.
+    bare_uploads: HashMap<ChunkPos, Vec<(i32, u32)>>,
 
     compute_pipeline: rhi::backend::ComputePipeline,
     compute_layout: rhi::backend::PipelineLayout,
@@ -1488,6 +1522,7 @@ impl ChunkBufferStore {
             chunk_visibility: HashMap::new(),
             column_visibility: Vec::new(),
             visibility_pending: 0,
+            bare_uploads: HashMap::new(),
             meta_buffers,
             visibility_buffers,
             max_meta: INITIAL_META,
@@ -1780,6 +1815,17 @@ impl ChunkBufferStore {
             // Remember which sections were present so a re-meshed one swaps
             // instantly while a freshly revealed one still fades in.
             let was_present = self.retire_sections(mesh.pos, &accepted);
+            for &si in &accepted {
+                if !plans.iter().any(|p| p.section_index == si)
+                    && self.bare_upload_ms(mesh.pos, si).is_none()
+                {
+                    let ms = self.upload_ms(mesh.pos, si, &was_present, now_ms);
+                    self.bare_uploads
+                        .entry(mesh.pos)
+                        .or_default()
+                        .push((si, ms));
+                }
+            }
             if plans.is_empty() {
                 // Every accepted section is now empty.
                 self.drop_if_empty(mesh.pos);
@@ -1836,6 +1882,7 @@ impl ChunkBufferStore {
 
             let column = self.column_slot(mesh.pos);
             for p in &plans {
+                let uploaded_ms = self.upload_ms(mesh.pos, p.section_index, &was_present, now_ms);
                 let section = SectionAlloc {
                     section_index: p.section_index,
                     aabb: p.aabb,
@@ -1848,13 +1895,7 @@ impl ChunkBufferStore {
                     idx_len: p.index_len,
                     vertex_offset: p.vtx_off as i32,
                     vtx_len: p.vertex_count,
-                    // A re-meshed section swaps instantly; a freshly revealed
-                    // one fades in, once the first cull has run.
-                    uploaded_ms: if was_present.contains(&p.section_index) || !self.fade_enabled {
-                        0
-                    } else {
-                        now_ms
-                    },
+                    uploaded_ms,
                     epoch: mesh.upload_epoch,
                     meta_index: 0,
                 };
@@ -1883,11 +1924,28 @@ impl ChunkBufferStore {
         }
     }
 
+    /// [`fade_from`] for `pos`'s section `si`: shown at once when re-meshed
+    /// or uploaded before the first cull.
+    fn upload_ms(&self, pos: ChunkPos, si: i32, was_present: &HashSet<i32>, now_ms: u32) -> u32 {
+        fade_from(
+            was_present.contains(&si) || !self.fade_enabled,
+            self.bare_upload_ms(pos, si),
+            now_ms,
+        )
+    }
+
+    fn bare_upload_ms(&self, pos: ChunkPos, si: i32) -> Option<u32> {
+        let sections = self.bare_uploads.get(&pos)?;
+        sections.iter().find(|&&(s, _)| s == si).map(|&(_, ms)| ms)
+    }
+
     /// `pos`'s column slot, made with its visibility mask if it has none.
     fn column_slot(&mut self, pos: ChunkPos) -> u32 {
         let slot = self.lists.columns.slot_or_insert(pos) as usize;
         if self.column_visibility.len() <= slot {
+            // The buffers may still hold a mask from before a clear.
             self.column_visibility.resize(slot + 1, u32::MAX);
+            self.visibility_pending = MAX_FRAMES_IN_FLIGHT as u32;
         }
         let mask = self.chunk_visibility.get(&pos).copied().unwrap_or(u32::MAX);
         if self.column_visibility[slot] != mask {
@@ -2092,14 +2150,11 @@ impl ChunkBufferStore {
             return;
         };
         let dist = column_dist_sq(pos, eye);
-        let loaded = self.lists.columns.iter().map(|(_, column)| {
-            let taken = Need {
-                vertices: column.vertices,
-                indices: column.indices,
-                ..Need::default()
-            };
-            (column_dist_sq(column.pos, eye), column.pos, taken)
-        });
+        let loaded = self
+            .lists
+            .columns
+            .iter()
+            .map(|(_, column)| (column_dist_sq(column.pos, eye), column.pos, column.need()));
         let (victims, freed) = eviction_victims(loaded, dist, need, self.free_room());
         let can_defragment = self.can_defragment();
         self.waiting
@@ -2117,21 +2172,27 @@ impl ChunkBufferStore {
 
     /// Drops `pos`'s mesh, starving the column until there's room for it.
     fn evict(&mut self, pos: ChunkPos) {
-        if let Some(column) = self.take_column(pos) {
-            let sections: Vec<_> = column.slice_lens().collect();
+        let sections: Vec<_> = self
+            .take_column(pos)
+            .iter()
+            .map(SectionAlloc::lens)
+            .collect();
+        if !sections.is_empty() {
             self.report_starved(pos, sections.iter().map(|&(si, _)| si));
             self.waiting.evicted(pos, sections);
         }
     }
 
-    /// Drops `pos`'s column from the draw lists and retires its slices.
-    fn take_column(&mut self, pos: ChunkPos) -> Option<Column> {
-        let slot = self.lists.columns.slot(&pos)?;
+    /// Drops `pos`'s column from the draw lists and retires its slices,
+    /// returning its sections.
+    fn take_column(&mut self, pos: ChunkPos) -> Vec<SectionAlloc> {
+        let Some(slot) = self.lists.columns.slot(&pos) else {
+            return Vec::new();
+        };
         let dropped = self.lists.remove_sections(slot, |_| false);
         self.retire_slices(dropped.iter().map(SectionAlloc::slice));
-        let mut column = self.lists.columns.remove(&pos)?;
-        column.sections = dropped;
-        Some(column)
+        self.lists.columns.remove(&pos);
+        dropped
     }
 
     /// Hands the starved columns that could fit now back for re-meshing, as
@@ -2408,6 +2469,7 @@ impl ChunkBufferStore {
     pub fn remove(&mut self, pos: &ChunkPos) {
         self.waiting.forget(*pos);
         self.take_column(*pos);
+        self.bare_uploads.remove(pos);
     }
 
     /// Drops every mesh and, for a new format, the arenas, remade at its
@@ -2459,6 +2521,7 @@ impl ChunkBufferStore {
     pub fn clear(&mut self) {
         self.lists.clear();
         self.column_visibility.clear();
+        self.bare_uploads.clear();
         for arena in self.arenas.iter_mut().flatten() {
             arena.vertices.reset();
             arena.indices.reset();
@@ -2533,7 +2596,11 @@ impl ChunkBufferStore {
             .iter()
             .flat_map(|(_, c)| &c.sections)
             .map(SectionAlloc::slice);
-        let retired = self.pending_free.iter().map(|&(_, slice)| slice);
+        let retired = self
+            .pending_free
+            .iter()
+            .map(|&(_, slice)| slice)
+            .chain(self.moved_from.iter().copied());
         for slice in live.chain(retired) {
             let Some([vertex, index]) = ranges
                 .get_mut(slice.arena as usize)
@@ -2566,28 +2633,23 @@ impl ChunkBufferStore {
         self.lists.columns.len() as u32
     }
 
-    /// Whether `pos`'s section `section` shows its block entities: drawn by
-    /// the camera's cull and faded in to vanilla's 0.3
-    /// (`LevelExtractor.CHUNK_VISIBILITY_THRESHOLD`). A section without
-    /// geometry has no fade here, so its block entities show at once.
+    /// Whether `pos`'s section `section` shows its block entities: not
+    /// occluded and faded in (see [`block_entities_faded_in`]). Unlike
+    /// vanilla's `visibleSections`, off-screen sections pass too, and the
+    /// GPU clips what they draw.
     pub fn shows_block_entities(&self, pos: ChunkPos, section: i32) -> bool {
-        let visible = self.chunk_visibility.get(&pos).is_none_or(|mask| {
-            u32::try_from(section)
-                .ok()
-                .and_then(|s| 1u32.checked_shl(s))
-                .is_some_and(|bit| mask & bit != 0)
-        });
-        let faded_in = |sec: &SectionAlloc| {
-            sec.uploaded_ms == 0
-                || self.now_ms().saturating_sub(sec.uploaded_ms) * 10 >= FADE_MS * 3
-        };
-        visible
-            && self
-                .lists
-                .columns
-                .get(&pos)
-                .and_then(|column| column.sections.iter().find(|s| s.section_index == section))
-                .is_none_or(faded_in)
+        let visible = self
+            .chunk_visibility
+            .get(&pos)
+            .is_none_or(|mask| mask & section_bit(section) != 0);
+        let uploaded_ms = self
+            .lists
+            .columns
+            .get(&pos)
+            .and_then(|column| column.sections.iter().find(|s| s.section_index == section))
+            .map(|s| s.uploaded_ms)
+            .or_else(|| self.bare_upload_ms(pos, section));
+        visible && uploaded_ms.is_none_or(|ms| block_entities_faded_in(ms, self.now_ms()))
     }
 
     /// Push the CPU visibility graph's per-column visible-section masks.
@@ -2726,6 +2788,8 @@ impl ChunkBufferStore {
             return;
         }
         let data = self.frustum_data(frustum, anchor, eye, false);
+        // Both culls write the sections' fade.
+        encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::StorageWrite);
         let shadow = self.shadow.get_or_insert_with(|| {
             DrawList::new(
                 device,
@@ -3258,6 +3322,23 @@ mod tests {
         assert_eq!(lists.sort_at, Some(1));
         lists.sort_step(DVec3::new(8.0, 8.0, 8.0));
         assert_eq!(lists.sort_at, None);
+    }
+
+    #[test]
+    fn block_entities_wait_for_their_section_to_fade_to_three_tenths() {
+        assert!(block_entities_faded_in(0, 5));
+        assert!(!block_entities_faded_in(1000, 1299));
+        assert!(block_entities_faded_in(1000, 1300));
+    }
+
+    #[test]
+    fn a_section_fades_from_its_first_upload() {
+        // Re-meshed, or uploaded before the first cull: no fade.
+        assert_eq!(fade_from(true, Some(500), 2000), 0);
+        // Freshly revealed.
+        assert_eq!(fade_from(false, None, 2000), 2000);
+        // Meshed without geometry first: keeps fading from then.
+        assert_eq!(fade_from(false, Some(500), 2000), 500);
     }
 
     #[test]

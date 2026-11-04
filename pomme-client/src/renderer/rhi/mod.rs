@@ -191,6 +191,7 @@ impl<Texture> TextureTransition<Texture> {
 pub enum BufferUse {
     CopySrc,
     CopyDst,
+    /// A compute shader's storage writes; as a destination, its reads too.
     StorageWrite,
     /// A draw's inputs: its indirect command, vertices and indices.
     DrawInput,
