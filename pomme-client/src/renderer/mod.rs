@@ -1366,6 +1366,7 @@ impl Renderer {
 
     /// Upload a batch of chunk meshes in a single coalesced transfer.
     pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::ChunkUploads {
+        self.chunk_buffers.set_eye(self.camera_render_position());
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }
 

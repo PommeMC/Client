@@ -156,9 +156,10 @@ deterministic = true                          # holds flicker, particles,
 [[step]]
 chunk_arenas = { vertices = 65536, max = 1 }  # chunk arenas this small, this
                                               # many at most, so a small render
-                                              # distance fills them; a new size
-                                              # remeshes everything (no-op on
-                                              # vanilla)
+                                              # distance fills them; a new size,
+                                              # or a cap under the arenas there
+                                              # are, remeshes everything (no-op
+                                              # on vanilla)
 
 [[step]]
 wait_ms = 1000

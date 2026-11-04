@@ -20,7 +20,7 @@ option = { render_distance = 4 }
 chunk_arenas = { vertices = 32768, max = 3 }
 
 [[step]]
-expect = { terrain = "settled" }
+expect = { terrain = "evicted" }
 timeout_ms = 30000
 
 [[step]]
@@ -31,7 +31,7 @@ chat = "/tp @s 800.5 -60 800.5 0 20"
 wait_ms = 8000
 
 [[step]]
-expect = { terrain = "settled" }
+expect = { terrain = "evicted" }
 timeout_ms = 30000
 
 [[step]]
