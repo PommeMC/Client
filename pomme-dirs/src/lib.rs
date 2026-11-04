@@ -1,5 +1,4 @@
-//! Pomme's data folder, shared by the client and the launcher so both find
-//! the same files:
+//! Pomme's data folder:
 //!
 //! ```text
 //! <root>/
@@ -9,7 +8,7 @@
 //!   bedrock/<tag>/        Bedrock's resource pack, for the Bedrock theme
 //!   profiles/<name>/      options, servers, saves, packs and mods
 //!   cache/<version>/      rebuildable, safe to delete
-//!   launcher/             launcher-only state
+//!   launcher/             left by the old launcher
 //! ```
 
 use std::path::{Path, PathBuf};

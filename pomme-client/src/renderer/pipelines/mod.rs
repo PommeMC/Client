@@ -1,4 +1,5 @@
 pub mod block_entity;
+pub mod block_outline;
 pub mod block_overlay;
 pub mod book_preview;
 pub mod chunk;

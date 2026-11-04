@@ -1,0 +1,80 @@
+# Shift-clicking the creative inventory tab's trash slot empties the whole
+# inventory: hotbar, main, armour and offhand.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:stone 5"
+
+[[step]]
+chat = "/item replace entity @s inventory.0 with minecraft:dirt 7"
+
+[[step]]
+chat = "/item replace entity @s armor.head with minecraft:iron_helmet"
+
+[[step]]
+chat = "/item replace entity @s weapon.offhand with minecraft:shield"
+
+[[step]]
+expect = { slot = 45, item = "shield" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+hover = { tab = "inventory" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "creative", tab = "inventory" }
+
+[[step]]
+screenshot = "full"
+
+[[step]]
+hover = { trash = true }
+
+[[step]]
+modifiers = { shift = true }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+modifiers = {}
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+[[step]]
+expect = { slot = 9, item = "air" }
+
+[[step]]
+expect = { slot = 5, item = "air" }
+
+[[step]]
+expect = { slot = 45, item = "air" }
+
+[[step]]
+screenshot = "emptied"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/gamemode survival"

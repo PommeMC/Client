@@ -42,6 +42,7 @@ struct StepFile {
     click: Option<Click>,
     creative_set_slot: Option<CreativeSetSlot>,
     look_at: Option<[f64; 3]>,
+    modifiers: Option<protocol::Modifiers>,
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
@@ -230,9 +231,10 @@ struct BiomeExpect {
     at: [i32; 3],
 }
 
-/// `settled`: every loaded column meshed, and the chunk pools' ranges
+/// `settled`: every loaded column meshed, and the chunk arenas' ranges
 /// consistent (vanilla's `hasRenderedAllSections`). `compacted`: that, with
-/// no chunk arena left to drain or free.
+/// no chunk arena left to drain or free. `evicted`: settled, with far
+/// columns waiting for room and the eye's own column drawn.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TerrainExpect {
@@ -297,6 +299,9 @@ impl StepFile {
         }
         if let Some(at) = self.look_at {
             steps.push(Step::Run(Command::LookAt { at }));
+        }
+        if let Some(modifiers) = self.modifiers {
+            steps.push(Step::Run(Command::Modifiers(modifiers)));
         }
         if let Some(button) = self.mouse_down {
             steps.push(Step::Run(Command::MouseDown { button }));
@@ -763,19 +768,23 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             )
         }
         Expect::Terrain(TerrainExpect { terrain }) => {
-            let compacted = match terrain.as_str() {
-                "settled" => false,
-                "compacted" => true,
+            let (compacted, evicted) = match terrain.as_str() {
+                "settled" => (false, false),
+                "compacted" => (true, false),
+                "evicted" => (false, true),
                 _ => return Err(format!("unknown terrain state {terrain}")),
             };
             if let Some(pos) = game.first_unmeshed_column() {
                 return Err(format!("{pos:?} isn't meshed yet"));
             }
             if let Some(pos) = gfx.renderer.starved_chunk_column() {
-                return Err(format!("{pos:?}'s mesh doesn't fit the chunk pools"));
+                return Err(format!("{pos:?}'s mesh doesn't fit the chunk arenas"));
             }
             if let Some(overlap) = gfx.renderer.chunk_slice_overlap() {
                 return Err(overlap);
+            }
+            if evicted {
+                gfx.renderer.chunk_arenas_evicted()?;
             }
             ensure(
                 !compacted || !gfx.renderer.chunk_arenas_compacting(),
@@ -985,5 +994,23 @@ mod tests {
         assert!(err("[[step]]\ncaht = \"a\"").contains("unknown field"));
         assert!(err("[[step]]\nexpect = { slot = 1, itme = \"a\" }").contains("did not match"));
         assert!(err("[[step]]\noption = { main_hand = \"up\" }").contains("unknown variant"));
+    }
+
+    #[test]
+    fn frame_times_parse_and_sum_up_with_the_slowest_hundredth() {
+        let steps = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
+        assert_eq!(steps, [Step::FrameTimes(Duration::from_secs(5))]);
+        // 198 frames of 10 ms and 2 of 50 ms: the 1% low is the slowest 2.
+        let samples: Vec<FrameSample> = (0..200)
+            .map(|i| FrameSample {
+                interval_ms: if i < 2 { 50.0 } else { 10.0 },
+                frame_ms: 1.0,
+                fence_ms: 0.5,
+            })
+            .collect();
+        assert_eq!(
+            summarize(&samples),
+            "200 frames: 96.2 fps, 1% low 20.0 fps; cpu 1.00 ms, gpu wait 0.50 ms"
+        );
     }
 }

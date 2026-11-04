@@ -275,6 +275,13 @@ pub struct SectionMesh {
     pub water_indices: Vec<u32>,
 }
 
+impl SectionMesh {
+    /// Opaque then water indices, which share one slice.
+    pub fn index_len(&self) -> u32 {
+        (self.indices.len() + self.water_indices.len()) as u32
+    }
+}
+
 /// Per-section meshing accumulator: one shared vertex pool plus separate
 /// solid, cutout, and water index lists. Finalized into a [`SectionMesh`]
 /// with solid and cutout concatenated solid-first; water stays separate for

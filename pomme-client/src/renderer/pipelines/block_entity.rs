@@ -29,6 +29,21 @@ pub struct BlockEntityRenderInfo {
     pub light: LightLevels,
 }
 
+/// The block entities to draw, the first `camera` of them the ones the
+/// camera sees. The shadow pass draws them all, as the camera's occlusion
+/// doesn't hide a shadow.
+#[derive(Clone, Copy, Default)]
+pub struct BlockEntityList<'a> {
+    pub items: &'a [BlockEntityRenderInfo],
+    pub camera: usize,
+}
+
+impl<'a> BlockEntityList<'a> {
+    pub fn camera(self) -> &'a [BlockEntityRenderInfo] {
+        &self.items[..self.camera]
+    }
+}
+
 struct TextureSlot {
     texture: rhi::backend::Texture,
     set: rhi::backend::BindGroup,

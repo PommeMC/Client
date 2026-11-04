@@ -32,11 +32,11 @@ use crate::player::inventory::item_resource_name;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
-use crate::world::block::BlockStateTable;
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
 use crate::world::block::render_assets::BlockRenderView;
 use crate::world::block::sound::block_sounds_for_id;
+use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::chunk::ChunkStore;
 
 const DESTROY_COOLDOWN: u32 = 5;
@@ -865,7 +865,7 @@ impl InteractionState {
             },
             seq: self.seq,
         }));
-        // TODO: other interactive blocks (brewing stand, dispenser, ...)
+        // TODO: other interactive blocks (brewing stand, crafter, ...)
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
             let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -1585,6 +1585,20 @@ fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn)
     UseResult::Success { swing: true }
 }
 
+/// Vanilla `showAsInteractableInSpectatorMode`: the block has a menu
+/// provider (`getMenuProvider`) or is a portal.
+pub(crate) fn interactable_in_spectator(block_state_data: &BlockStateData) -> bool {
+    match block_state_data.id() {
+        "lectern" => block_state_data.properties().get("has_book") == Some("true"),
+        "chest" | "trapped_chest" | "barrel" | "furnace" | "blast_furnace" | "smoker"
+        | "hopper" | "dispenser" | "dropper" | "brewing_stand" | "beacon" | "crafter"
+        | "crafting_table" | "anvil" | "chipped_anvil" | "damaged_anvil" | "cartography_table"
+        | "enchanting_table" | "grindstone" | "loom" | "smithing_table" | "stonecutter"
+        | "nether_portal" | "end_portal" | "end_gateway" => true,
+        id => id.ends_with("shulker_box") || id.ends_with("copper_chest"),
+    }
+}
+
 /// Whether right-clicking this block opens a menu we render (so the use
 /// click is consumed: no block placement, no item use).
 fn opens_menu(id: &str) -> bool {
@@ -1598,6 +1612,9 @@ fn opens_menu(id: &str) -> bool {
             | "trapped_chest"
             | "ender_chest"
             | "barrel"
+            | "hopper"
+            | "dispenser"
+            | "dropper"
     ) || id.ends_with("shulker_box")
         || id.ends_with("anvil")
 }

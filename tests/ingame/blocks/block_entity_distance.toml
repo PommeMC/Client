@@ -1,0 +1,50 @@
+# Block entities draw only within 64 blocks of the camera (vanilla
+# `BlockEntityRenderer.shouldRender`): of two piles of ender chests, the
+# one about 60 blocks out draws and the one about 70 out doesn't, though
+# both stand in loaded, drawn chunks.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 58 -60 -6 60 -58 -4 minecraft:ender_chest"
+
+[[step]]
+chat = "/fill 68 -60 4 70 -58 6 minecraft:ender_chest"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 -90 0"
+
+[[step]]
+expect = { block = "ender_chest", at = [70, -58, 6] }
+
+[[step]]
+deterministic = true
+
+[[step]]
+look_at = [64.0, -59.0, 0.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "piles"
+
+[[step]]
+chat = "/fill 58 -60 -6 60 -58 -4 minecraft:air"
+
+[[step]]
+chat = "/fill 68 -60 4 70 -58 6 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

@@ -7,10 +7,9 @@ use std::time::Instant;
 
 use azalea_inventory::ItemStack;
 
-use super::common::FONT_SIZE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
-    push_cursor_stack, push_panel_offset, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, centred_title_x,
+    push_clipped_sprite, push_cursor_stack, push_panel_offset, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -105,9 +104,7 @@ pub fn build_furnace(
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
     let panel = push_furnace_background(elements, screen_w, screen_h, gs, variant, data, x_offset);
-    // Vanilla centers the furnace title: (imageWidth - font.width(title)) / 2.
-    let title_x = ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor();
-    panel.label(elements, title_x, 6.0, title);
+    panel.label(elements, centred_title_x(title, text_width_fn), 6.0, title);
     panel.label(elements, 8.0, 72.0, "Inventory");
 
     let mut ctx = SlotCtx::new(

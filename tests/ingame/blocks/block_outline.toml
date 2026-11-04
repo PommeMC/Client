@@ -1,0 +1,155 @@
+# The targeted block's outline: a black line around its outline shape,
+# collinear edges merged (no seam across the stair's two boxes, one line
+# along the fence's post and arm). F1 hides it; in spectator only blocks
+# with a menu show it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/gamerule send_command_feedback false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s -150.5 -60 -151.5 0 0"
+
+[[step]]
+expect = { player = { position = [-150.5, -60.0, -151.5] } }
+
+[[step]]
+expect = { terrain = "settled" }
+
+# The server loads the chunks around the new position a moment after.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+chat = "/setblock -150 -60 -148 minecraft:stone"
+
+[[step]]
+chat = "/setblock -152 -60 -148 minecraft:oak_stairs[facing=east]"
+
+[[step]]
+chat = "/setblock -154 -60 -148 minecraft:oak_fence[west=true]"
+
+[[step]]
+chat = "/setblock -148 -60 -148 minecraft:oak_slab"
+
+[[step]]
+chat = "/setblock -155 -60 -148 minecraft:oak_fence[east=true]"
+
+[[step]]
+chat = "/setblock -146 -60 -148 minecraft:chest"
+
+[[step]]
+expect = { block = "chest", at = [-146, -60, -148] }
+
+[[step]]
+expect = { block = "stone", at = [-150, -60, -148] }
+
+[[step]]
+expect = { terrain = "settled" }
+
+[[step]]
+look_at = [-149.5, -59.6, -147.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "stone"
+
+[[step]]
+look_at = [-151.5, -59.6, -147.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "stairs"
+
+[[step]]
+look_at = [-153.5, -59.6, -147.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "fence"
+
+[[step]]
+look_at = [-147.5, -59.6, -147.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "slab"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "hidden"
+
+[[step]]
+press = { action = "key.toggleGui" }
+
+[[step]]
+chat = "/gamemode spectator"
+
+# In reach of the chest.
+[[step]]
+chat = "/tp @s -145.5 -60 -151.5"
+
+[[step]]
+expect = { player = { position = [-145.5, -60.0, -151.5] } }
+
+[[step]]
+look_at = [-145.5, -59.6, -147.5]
+
+# Lets the screenshot lines in chat fade off the crosshair, which spectators
+# see on the chest.
+[[step]]
+wait_ms = 10500
+
+[[step]]
+screenshot = "spectator_chest"
+
+[[step]]
+chat = "/tp @s -150.5 -60 -151.5"
+
+[[step]]
+expect = { player = { position = [-150.5, -60.0, -151.5] } }
+
+[[step]]
+look_at = [-149.5, -59.6, -147.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "spectator_stone"
+
+[[step]]
+chat = "/fill -155 -60 -148 -146 -60 -148 minecraft:air"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule send_command_feedback true"
+
+[[step]]
+chat = "/gamerule advance_time true"

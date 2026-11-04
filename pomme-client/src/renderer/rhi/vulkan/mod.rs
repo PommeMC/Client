@@ -291,6 +291,8 @@ pub struct BufferHandle(vk::Buffer);
 pub struct Buffer {
     raw: vk::Buffer,
     allocation: Allocation,
+    /// The size asked for; the allocation may be larger.
+    size: u64,
 }
 
 impl Buffer {
@@ -315,18 +317,17 @@ impl Buffer {
         Self::create(device, label, size, usage, location, false)
     }
 
-    /// Like [`Self::new`], in memory of its own, which goes back to the
+    /// Like [`Self::try_new`], in memory of its own, which goes back to the
     /// driver when the buffer is destroyed instead of staying in a shared
     /// block.
-    pub fn dedicated(
+    pub fn try_dedicated(
         device: &Device,
         label: &str,
         size: u64,
         usage: BufferUsages,
         location: MemoryLocation,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::create(device, label, size, usage, location, true)
-            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     fn create(
@@ -369,7 +370,11 @@ impl Buffer {
                 return Err(error);
             }
         };
-        let mut buffer = Self { raw, allocation };
+        let mut buffer = Self {
+            raw,
+            allocation,
+            size,
+        };
         if let Err(error) = unsafe {
             device.raw.bind_buffer_memory(
                 raw,
@@ -413,7 +418,7 @@ impl Buffer {
     }
 
     pub fn size(&self) -> u64 {
-        self.allocation.size()
+        self.size
     }
 
     /// Reads a [`MemoryLocation::Readback`] buffer; the caller has already

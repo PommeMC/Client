@@ -47,9 +47,16 @@ pub struct InputState {
     /// Ctrl held by a harness `press`, for one frame.
     #[cfg(feature = "test-harness")]
     harness_ctrl: bool,
+    /// Shift held by harness `modifiers` until the next.
+    #[cfg(feature = "test-harness")]
+    harness_shift: bool,
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
+    /// The key a harness `press` released last frame, for the in-game release
+    /// handling.
+    #[cfg(feature = "test-harness")]
+    harness_released: Option<KeyCode>,
     /// Harness `text` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_text: Option<String>,
@@ -178,7 +185,11 @@ impl InputState {
             #[cfg(feature = "test-harness")]
             harness_ctrl: false,
             #[cfg(feature = "test-harness")]
+            harness_shift: false,
+            #[cfg(feature = "test-harness")]
             harness_press: None,
+            #[cfg(feature = "test-harness")]
+            harness_released: None,
             #[cfg(feature = "test-harness")]
             harness_text: None,
             mouse_delta: (0.0, 0.0),
@@ -695,10 +706,12 @@ impl InputState {
         #[cfg(feature = "test-harness")]
         {
             self.harness_ctrl = false;
+            self.harness_released = None;
             if let Some((code, ctrl)) = self.harness_press.take() {
                 self.harness_ctrl = ctrl;
                 self.on_key(code, ElementState::Pressed, false);
                 self.on_key(code, ElementState::Released, false);
+                self.harness_released = Some(code);
             }
         }
         self.up_pressed = false;
@@ -737,6 +750,12 @@ impl InputState {
     #[cfg(feature = "test-harness")]
     pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
         self.harness_press = Some((code, ctrl));
+    }
+
+    /// The key a harness `press` released, once.
+    #[cfg(feature = "test-harness")]
+    pub fn take_harness_release(&mut self) -> Option<KeyCode> {
+        self.harness_released.take()
     }
 
     /// Types `text` into the focused field on the next frame, as the
@@ -961,7 +980,16 @@ impl InputState {
     }
 
     pub fn shift_held(&self) -> bool {
+        #[cfg(feature = "test-harness")]
+        if self.harness_shift {
+            return true;
+        }
         self.modifiers.state().shift_key()
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub fn hold_harness_shift(&mut self, held: bool) {
+        self.harness_shift = held;
     }
 
     pub fn ctrl_held(&self) -> bool {

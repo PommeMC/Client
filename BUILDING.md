@@ -6,11 +6,10 @@
 pomme-client/         # Minecraft client (Rust, Vulkan)
 pomme-android/        # Android entry point and APK project (see its README)
 pomme-ios/            # iOS entry point and Xcode project (see its README)
-pomme-auth/           # Microsoft sign-in, shared by the client and launcher
-pomme-install/        # Downloads a version's assets and Pomme's own releases, shared by the client and launcher
-pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
+pomme-auth/           # Microsoft sign-in
+pomme-install/        # Downloads a version's assets and Pomme's own releases
 pomme-protocol/       # Per-version protocol data and wire encoding
-pomme-dirs/           # The data folder layout the client and launcher share
+pomme-dirs/           # The data folder layout
 pomme-block/          # Data-free stand-in for azalea-block; block tables are Pomme's own
 pomme-singleplayer/   # Runs SteelMC in-process as the integrated server
 pomme-gpu-allocator/  # Vendored fork of the gpu-allocator crate
@@ -21,8 +20,7 @@ tools/                # protogen, blockgen, stategen, and the OpenAL fetch scrip
 
 The client is a standalone app: it signs in with a Microsoft account,
 downloads a version's assets on first start, and release builds keep
-themselves up to date. The launcher is being retired; it can still start the
-client with launch arguments.
+themselves up to date.
 
 Before building, you must have [just](https://github.com/casey/just) installed.
 The Rust toolchain is pinned in `rust-toolchain.toml`; rustup picks it up.
@@ -57,15 +55,6 @@ Otherwise:
 
 ```bash
 just client-build --release
-```
-
-## Building the launcher
-
-Requires [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/).
-
-```bash
-pnpm install
-just launcher-build --release
 ```
 
 ## Running
@@ -114,16 +103,9 @@ just client-dev -- --width 1280 --height 720
 
 They only apply on desktop, and don't change saved settings or fullscreen.
 
-### Launcher
-
-```bash
-pnpm install
-just launcher-dev
-```
-
 ### Data folder
 
-The client and launcher share one per-user folder: `%LOCALAPPDATA%\Pomme` on
+The client keeps its files in one per-user folder: `%LOCALAPPDATA%\Pomme` on
 Windows, `~/Library/Application Support/Pomme` on macOS and
 `~/.local/share/pomme` on Linux. An older `.pomme` folder is moved into it on
 first launch.
@@ -134,7 +116,7 @@ minecraft/versions/   each version's json, jar and extracted assets
 pomme-assets/         Pomme's branded assets
 profiles/<name>/      options, servers, saves, screenshots, logs, mods, packs
 cache/<version>/      rebuildable; safe to delete
-launcher/             launcher-only settings, installations and client builds
+launcher/             left by the old launcher: its settings, installations and client builds
 ```
 
 ### Android
@@ -154,6 +136,5 @@ Run `just` with no arguments to list every recipe. The common ones:
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
 - `just bench [filter]`: headless CPU benchmarks of the mesher, fade rebuild and cave culling
 - `just chunk-bench [rd]`: times loading every chunk in render distance `rd` (16 by default) with no window or GPU, in a fixed-seed world or a server passed after the distance, e.g. `just chunk-bench 16 --quick-access-multiplayer dev.pomme.rs`; `just chunk-bench-windowed` runs it in the window for frame times. Results go to `chunk_load.json` in the game folder
-- `just launcher-dev` / `just launcher-build`: run or bundle the launcher
-- `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
+- `just client-pre-pr`: the fmt, clippy, and test checks CI enforces
 - `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)

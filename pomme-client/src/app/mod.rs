@@ -384,6 +384,7 @@ impl App {
         // A test window rarely has focus, so it must not pause on losing it.
         if harness.is_some() {
             self.core.pause_on_lost_focus = false;
+            self.core.test_window = true;
         }
         self.harness = harness;
         self
@@ -429,6 +430,19 @@ impl App {
     }
 }
 
+fn is_user_input(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_)
+            | WindowEvent::Ime(_)
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Touch(_)
+    )
+}
+
 /// The game window, born in the persisted display mode: the swapchain is
 /// sized from `inner_size()` before the window is shown, so switching after
 /// creation would leave it built for the windowed size.
@@ -453,6 +467,7 @@ fn create_window(
         .with_title("Pomme")
         .with_fullscreen(core.display_mode.fullscreen_for(monitor))
         .with_visible(cfg!(mobile))
+        .with_active(!core.test_window)
         .with_window_icon(window_icon);
     if cfg!(not(mobile)) {
         window_attrs = window_attrs.with_inner_size(core.window_size);
@@ -611,6 +626,11 @@ impl ApplicationHandler for App {
                 WindowEvent::CloseRequested => event_loop.exit(),
                 _ => {}
             }
+            return;
+        }
+        // The harness drives a test window's input itself; the desktop's
+        // mouse and keys passing over it mustn't steer a script.
+        if self.core.test_window && is_user_input(&event) {
             return;
         }
         let binding_capture = self.core.menu.binding_capture_active()
@@ -899,37 +919,8 @@ impl ApplicationHandler for App {
                                 }
                             } else if !event.state.is_pressed()
                                 && let Some(code) = key
-                                && (self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::DebugModifier, code)
-                                    || self
-                                        .core
-                                        .input
-                                        .key_bindings
-                                        .matches_key(Action::ToggleOverlay, code))
                             {
-                                // Overlay toggles on F3 release, unless a chord
-                                // consumed it; runs in every in-game sub-state.
-                                let overlay = self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::ToggleOverlay, code);
-                                let modifier_held =
-                                    self.core.input.action_held(Action::DebugModifier);
-                                let modifier = self
-                                    .core
-                                    .input
-                                    .key_bindings
-                                    .matches_key(Action::DebugModifier, code);
-                                game.handle_f3_release(
-                                    overlay,
-                                    modifier,
-                                    modifier_held,
-                                    &connection,
-                                );
+                                game.on_key_released(code, &self.core.input, &connection);
                             }
 
                             AppPhase::InGame {
@@ -1048,6 +1039,9 @@ impl ApplicationHandler for App {
                 // change, so a quick refocus (under the pause-on-lost-focus
                 // delay) re-issues the grab.
                 self.core.invalidate_cursor_grab_state();
+                if !focused && let Some(gfx) = self.phase.gfx_mut() {
+                    self.core.suspend_cursor_grab(&gfx.window);
+                }
                 if focused {
                     match self.phase.get_mut() {
                         AppPhase::Setup { .. } => {}
@@ -1294,6 +1288,7 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
+            && !self.core.test_window
             && self.core.input.is_cursor_captured()
             && self.world_has_pointer()
         {

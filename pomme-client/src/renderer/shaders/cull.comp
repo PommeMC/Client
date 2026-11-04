@@ -2,7 +2,8 @@
 
 layout(local_size_x = 64) in;
 
-// Vanilla's section fade (`SectionRenderDispatcher` fade-in) and near radius.
+// Vanilla's section fade (`SectionRenderDispatcher` fade-in) and near radius,
+// as `chunk/buffer.rs` has them.
 const float FADE_MS = 1000.0;
 const float NEARBY_DIST_SQ = 768.0;
 

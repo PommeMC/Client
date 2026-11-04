@@ -149,9 +149,90 @@ pub(crate) fn outline_shape_holding_data(
     }
 }
 
+/// Vanilla `VoxelShape.forAllEdges`: the edges of the boxes' union, each
+/// run of collinear cell edges merged into one line, as block-local
+/// `(start, end)` pairs. Ports `DiscreteVoxelShape.forAllAxisEdges` over the
+/// grid the boxes' bounds cut.
+pub fn outline_edges(boxes: &[LocalBox]) -> Vec<([f64; 3], [f64; 3])> {
+    let coords: [Vec<f64>; 3] = std::array::from_fn(|axis| {
+        let mut c: Vec<f64> = boxes.iter().flat_map(|b| [b[axis], b[axis + 3]]).collect();
+        c.sort_by(f64::total_cmp);
+        c.dedup_by(|a, b| (*a - *b).abs() < 1.0e-7);
+        c
+    });
+    let size = coords.each_ref().map(|c| c.len().saturating_sub(1) as i32);
+    let full = |cell: [i32; 3]| {
+        (0..3).all(|k| (0..size[k]).contains(&cell[k]))
+            && boxes.iter().any(|b| {
+                (0..3).all(|k| {
+                    let mid = (coords[k][cell[k] as usize] + coords[k][cell[k] as usize + 1]) / 2.0;
+                    b[k] < mid && mid < b[k + 3]
+                })
+            })
+    };
+    let point = |i: [i32; 3]| std::array::from_fn(|k| coords[k][i[k] as usize]);
+
+    let mut edges = Vec::new();
+    // `AxisCycle` NONE, FORWARD and BACKWARD by their inverse: `xyz[k]` is
+    // `abc[source[k]]`.
+    for source in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
+        let to_xyz = |abc: [i32; 3]| source.map(|s| abc[s]);
+        let mut abc_size = [0; 3];
+        for k in 0..3 {
+            abc_size[source[k]] = size[k];
+        }
+        for a in 0..=abc_size[0] {
+            for b in 0..=abc_size[1] {
+                let mut last_start = None;
+                for c in 0..=abc_size[2] {
+                    let mut full_sectors = 0;
+                    let mut odd_sectors = 0;
+                    for da in 0..=1 {
+                        for db in 0..=1 {
+                            if full(to_xyz([a + da - 1, b + db - 1, c])) {
+                                full_sectors += 1;
+                                odd_sectors ^= da ^ db;
+                            }
+                        }
+                    }
+                    if full_sectors == 1
+                        || full_sectors == 3
+                        || full_sectors == 2 && odd_sectors == 0
+                    {
+                        last_start.get_or_insert(c);
+                    } else if let Some(start) = last_start.take() {
+                        edges.push((point(to_xyz([a, b, start])), point(to_xyz([a, b, c]))));
+                    }
+                }
+            }
+        }
+    }
+    edges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_edges_merge_as_vanilla_does() {
+        assert_eq!(outline_edges(FULL_CUBE_SHAPE).len(), 12);
+        assert_eq!(outline_edges(&[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]).len(), 12);
+        // A bottom stair: an L-shaped prism, with no seam where its boxes meet.
+        let stair = [
+            [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],
+            [0.0, 0.5, 0.5, 1.0, 1.0, 1.0],
+        ];
+        let edges = outline_edges(&stair);
+        assert_eq!(edges.len(), 18);
+        assert!(!edges.contains(&([0.0, 0.5, 0.5], [0.0, 0.5, 1.0])));
+        // Two boxes side by side make one box: the shared face's edges merge.
+        let halves = [
+            [0.0, 0.0, 0.0, 0.5, 1.0, 1.0],
+            [0.5, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ];
+        assert_eq!(outline_edges(&halves).len(), 12);
+    }
 
     #[test]
     fn held_item_fills_light_and_scaffolding_outlines() {
