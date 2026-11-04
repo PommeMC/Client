@@ -628,11 +628,21 @@ impl Texture {
         }
     }
 
-    /// One level of a texture made with several.
+    /// One level of the texture; a texture made with one level is its whole
+    /// view.
     pub fn mip_handle(&self, level: u32) -> TextureHandle {
         TextureHandle {
             image: self.raw,
-            view: self.mip_views[level as usize],
+            view: match self.mip_views.get(level as usize) {
+                Some(&view) => view,
+                None => {
+                    assert!(
+                        self.mip_views.is_empty() && level == 0,
+                        "no mip level {level}"
+                    );
+                    self.view
+                }
+            },
         }
     }
 

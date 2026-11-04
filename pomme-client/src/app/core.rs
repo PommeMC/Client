@@ -691,11 +691,11 @@ impl GameState {
         correction.is_some()
     }
 
+    /// Vanilla `Options.setServerRenderDistance`, from the login and
+    /// `SetChunkCacheRadius`; clamped to the chunk grid.
     pub fn set_server_view_distance(&mut self, distance: u32) {
         tracing::info!("Server view distance: {distance}");
-        if let Some(d) = server_view_distance_update(distance, self.last_render_distance) {
-            self.server_render_distance = d;
-        }
+        self.server_render_distance = distance.min(crate::world::chunk::MAX_VIEW_DISTANCE);
     }
 }
 
@@ -4033,17 +4033,6 @@ fn sync_player_attribute_mirrors(player: &mut LocalPlayer, dirty: impl Fn(Attrib
     }
 }
 
-/// New `server_render_distance` for a server view-distance announcement, or
-/// `None` to keep the current one. Some servers announce min(our request,
-/// server max); an echo of our own request carries no cap information and
-/// would ratchet the render distance slider down, so only a differing value
-/// counts. It can't be an echo above the request: any such value is the
-/// server's actual view distance, including later reductions.
-fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
-    let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
-    (announced != last_request).then_some(announced)
-}
-
 /// LOD level for a column: full detail within `detail` chunks (the Chunk
 /// Detail setting), half resolution to twice that, quarter beyond. Off keeps
 /// every column at full detail.
@@ -4128,7 +4117,7 @@ mod tests {
         CHUNK_PACKET_BUDGET, CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY,
         MENU_REPEAT_INTERVAL, RepeatStepper, accepted_player_chat_tag, cursor_step, death_route,
         player_input_state, resolve_corrected_look, resolve_head_profile,
-        resolve_player_position_correction, server_view_distance_update, serverbound_player_input,
+        resolve_player_position_correction, serverbound_player_input,
         sync_living_attribute_mirrors, sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
@@ -4476,20 +4465,6 @@ mod tests {
             serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, false));
         assert!(pressed.sprint);
         assert!(!released.sprint);
-    }
-
-    #[test]
-    fn server_view_distance_updates() {
-        // Echo of our own request carries no cap information.
-        assert_eq!(server_view_distance_update(12, 12), None);
-        // Below the request: min(request, cap) revealed the server cap.
-        assert_eq!(server_view_distance_update(10, 12), Some(10));
-        // Above the request: the server's actual view distance, including a
-        // reduction from an earlier higher announcement.
-        assert_eq!(server_view_distance_update(64, 12), Some(64));
-        assert_eq!(server_view_distance_update(20, 12), Some(20));
-        // Wire values past the chunk grid's extent clamp to it.
-        assert_eq!(server_view_distance_update(300, 12), Some(128));
     }
 
     #[test]
