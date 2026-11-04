@@ -430,6 +430,19 @@ impl App {
     }
 }
 
+fn is_user_input(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_)
+            | WindowEvent::Ime(_)
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Touch(_)
+    )
+}
+
 /// The game window, born in the persisted display mode: the swapchain is
 /// sized from `inner_size()` before the window is shown, so switching after
 /// creation would leave it built for the windowed size.
@@ -613,6 +626,11 @@ impl ApplicationHandler for App {
                 WindowEvent::CloseRequested => event_loop.exit(),
                 _ => {}
             }
+            return;
+        }
+        // The harness drives a test window's input itself; the desktop's
+        // mouse and keys passing over it mustn't steer a script.
+        if self.core.test_window && is_user_input(&event) {
             return;
         }
         let binding_capture = self.core.menu.binding_capture_active()
@@ -1270,6 +1288,7 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
+            && !self.core.test_window
             && self.core.input.is_cursor_captured()
             && self.world_has_pointer()
         {
