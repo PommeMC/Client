@@ -1401,9 +1401,9 @@ impl GameState {
         *self.compiled.entry(pos).or_default() |= meshed;
     }
 
-    /// Sections dropped on pool exhaustion were retired from the buffer; mark
-    /// them dirty again so the next rescan re-enqueues them, and clear their
-    /// compiled bit, since nothing of them reached the GPU.
+    /// Sections the upload hands back, waiting for room or with room come
+    /// free for them: mark them dirty again so the next rescan re-enqueues
+    /// them, and clear their compiled bit so they mesh anew.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
             let retired = section_bits(sections);
