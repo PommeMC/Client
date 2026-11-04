@@ -8,9 +8,9 @@ use glam::DVec3;
 
 use super::render::{ParticleLight, ParticleRenderType};
 use super::single_quad_particle::SingleQuadParticle;
-use super::types::{ParticleLimit, ParticleOptions};
-use super::world::ParticleWorld;
+use super::types::ParticleLimit;
 use crate::physics::aabb::Aabb;
+use crate::world::level::LevelContext;
 
 /// Proposed Java-reference bridge, not a final storage/performance framework.
 /// Clones retain the SAME mutable allocation after enqueue, quota rejection or
@@ -32,10 +32,10 @@ pub trait Particle: Any {
     /// Rust trait-object bridge for the quad group; Some for SingleQuads,
     /// None for other groups. Does not require every Particle to be a quad.
     fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle>;
-    fn tick(&mut self, context: &mut dyn ParticleTickContext);
+    fn tick(&mut self, context: &mut LevelContext<'_>);
     /// Rust spelling of `move`; applies this instance's collision/physics
     /// rules.
-    fn move_by(&mut self, world: &dyn ParticleWorld, displacement: DVec3);
+    fn move_by(&mut self, world: &LevelContext<'_>, displacement: DVec3);
     fn remove(&mut self);
     fn is_alive(&self) -> bool;
     fn get_group(&self) -> ParticleRenderType;
@@ -54,49 +54,7 @@ pub trait Particle: Any {
     fn scale(&mut self, factor: f32);
     fn has_physics(&self) -> bool;
     fn set_has_physics(&mut self, enabled: bool);
-    fn get_light_coords(&self, world: &dyn ParticleWorld, partial_tick: f32) -> ParticleLight;
-}
-
-/// Proposed ClientLevel particle service, NOT an implementation on the existing
-/// LevelContext. Block callbacks would request options here rather than retain
-/// emitter handles; no block/runtime integration is part of this sketch.
-pub trait ClientLevel: ParticleWorld {
-    /// Settings/distance policy precedes construction. Effective override is
-    /// caller flag OR type flag. Otherwise distance <=32 and calculated
-    /// settings decide; always_show improves MINIMAL odds, not guaranteed
-    /// visibility. Return is void, unlike direct engine creation. Policy
-    /// RNG is level-owned.
-    fn add_particle(
-        &mut self,
-        options: &dyn ParticleOptions,
-        override_limiter: bool,
-        always_show: bool,
-        position: DVec3,
-        auxiliary: DVec3,
-    );
-}
-
-/// Borrow bridge for ticking: scoped world queries + level policy + direct
-/// engine spawning. Implementations split provider/RNG/pending/quota access
-/// from active-group storage before borrowing a ticking ParticleRef. They must
-/// never reborrow that active instance or expose the active groups here.
-/// Level-policy services must use this split spawn path too, not recursively
-/// borrow the whole engine. Settings/camera policy wiring is deferred.
-pub trait ParticleTickContext: ClientLevel {
-    /// Construct NOW through the provider, add, and return that same
-    /// allocation, including on quota rejection. A child can be
-    /// downcast/mutated immediately; only group activation waits until the
-    /// engine's final pending drain. Missing provider or provider decline
-    /// yields None, not admission failure.
-    fn create_particle(
-        &mut self,
-        options: &dyn ParticleOptions,
-        position: DVec3,
-        auxiliary: DVec3,
-    ) -> Option<ParticleRef>;
-    /// Direct engine add: bypass level policy, enforce quota and queue
-    /// identity.
-    fn add(&mut self, particle: ParticleRef);
+    fn get_light_coords(&self, world: &LevelContext<'_>, partial_tick: f32) -> ParticleLight;
 }
 
 pub(super) fn bounds_at(position: DVec3, width: f32, height: f32) -> Aabb {

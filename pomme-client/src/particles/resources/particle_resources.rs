@@ -9,16 +9,170 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::particle::ParticleRef;
-use super::provider_erasure::{ErasedParticleProvider, ParticleDispatchError};
-use super::sprites::{
-    MutableSpriteSet, ParticleAtlasSprites, ParticleDescription, PreparedParticleDescriptions,
-    SpriteSet,
-};
-use super::types::{ParticleOptions, ParticleType, ParticleTypeInfo, TypedParticleOptions};
-use super::world::ParticleWorld;
-use super::{ParticleProvider, ParticleResources, SpriteParticleRegistration};
+pub(crate) use self::provider_erasure::{ErasedParticleProvider, ParticleDispatchError};
+use super::super::particle::ParticleRef;
+use super::super::particle_provider::ParticleProvider;
+use super::super::types::{ParticleOptions, ParticleType, ParticleTypeInfo, TypedParticleOptions};
+use super::particle_description::{ParticleDescription, PreparedParticleDescriptions};
+use super::sprite_set::{MutableSpriteSet, SpriteSet};
+use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::resources::{ResourceContent, ResourceId, ResourceManager};
+use crate::util::random_source::RandomSource;
+use crate::world::level::LevelContext;
+
+/// Typed sprite-provider factory, matching Vanilla's private
+/// SpriteParticleRegistration<T>. Called immediately during client provider
+/// registration, not during spawning or reload. The provider retains the
+/// supplied stable set; this crate-scoped sketch is not a public plug-in SPI.
+pub trait SpriteParticleRegistration<O: TypedParticleOptions> {
+    fn create(&self, sprite_set: Rc<dyn SpriteSet>) -> Rc<dyn ParticleProvider<O>>;
+}
+
+/// Private, object-safe registry/engine collaboration, not a plug-in API.
+/// Storage and checked adapters are private to the resource owner.
+mod provider_erasure {
+    use glam::DVec3;
+
+    use crate::particles::particle::ParticleRef;
+    use crate::particles::types::ParticleOptions;
+    use crate::util::random_source::RandomSource;
+    use crate::world::level::LevelContext;
+
+    /// Binding/schema failures are invariants, never nullable construction.
+    pub enum ParticleDispatchError {
+        ResourceNameMismatch,
+        OptionsSchemaMismatch,
+    }
+
+    /// Registration must build an adapter specialized for its O, retaining the
+    /// exact supplied type token and Rc<dyn ParticleProvider<O>>. Before
+    /// calling the typed provider, compare resource names and schema
+    /// TypeIds, then use options.as_any().downcast_ref::<O>(); return the
+    /// corresponding error if any check fails. Never unchecked-cast,
+    /// dispatch by schema alone, or map an invariant failure to None. The
+    /// sealed options blanket impl ties the reported schema to the actual
+    /// payload; registry bindings still require these runtime checks,
+    /// including when options come from another owner.
+    pub trait ErasedParticleProvider {
+        fn create_particle(
+            &self,
+            options: &dyn ParticleOptions,
+            world: &mut LevelContext<'_>,
+            position: DVec3,
+            auxiliary: DVec3,
+            random: &RandomSource,
+        ) -> Result<Option<ParticleRef>, ParticleDispatchError>;
+    }
+}
+
+/// Owns client provider bindings and stable sprite sets, not type creation.
+/// ParticleType tokens are established by ParticleRegistry::register, so
+/// packet/data/server identity does not depend on client provider registration.
+/// Generic registration and typed lookup deliberately make this trait
+/// non-object-safe; providers, options and narrow engine access remain usable
+/// as trait objects. No codecs, wire registry, asset cache or external
+/// extension framework is supplied.
+pub trait ParticleResources {
+    /// Associate an already established ParticleType<O> with its matching
+    /// provider, retaining that token and specializing the checked erased
+    /// adapter for O. Never mint a type or supply type metadata here.
+    /// Replace by particle_type.info().name(), warning with both caller
+    /// locations, regardless of O or registration form. Preserve any
+    /// existing sprite set. Canonical type names belong to the independent
+    /// ParticleRegistry owner, not this owner's provider replacement
+    /// policy.
+    #[track_caller]
+    fn register<O: TypedParticleOptions>(
+        &mut self,
+        particle_type: Rc<ParticleType<O>>,
+        provider: Rc<dyn ParticleProvider<O>>,
+    );
+
+    /// Rust spelling of Vanilla's second register overload. Create a new
+    /// stable unbound SpriteSet indexed by particle_type.info().name(). Call
+    /// registration.create immediately with that set, then bind the returned
+    /// provider to the supplied token using the same checked erased adapter.
+    /// Later apply calls rebind the SAME set without recreating the provider
+    /// or engine. Replacement warns as register does. The factory must not
+    /// select sprites: binding must precede particle creation, and an absent
+    /// description does not bind a set. Type bootstrap is independent.
+    #[track_caller]
+    fn register_sprite_provider<O: TypedParticleOptions>(
+        &mut self,
+        particle_type: Rc<ParticleType<O>>,
+        registration: &dyn SpriteParticleRegistration<O>,
+    );
+
+    /// Lookup by registered name AND schema, not just TypeId. None means an
+    /// unknown name; a known name with the wrong schema is an invariant error.
+    fn get_provider<O: TypedParticleOptions>(
+        &self,
+        particle_type: &ParticleType<O>,
+    ) -> Result<Option<&dyn ParticleProvider<O>>, provider_erasure::ParticleDispatchError>;
+
+    /// The engine can use this with erased options.get_type(), then invoke the
+    /// checked adapter without knowing O. Validate name/schema at lookup too.
+    fn get_provider_erased(
+        &self,
+        particle_type: &ParticleTypeInfo,
+    ) -> Result<
+        Option<&dyn provider_erasure::ErasedParticleProvider>,
+        provider_erasure::ParticleDispatchError,
+    >;
+
+    fn get_sprite_set(&self, particle_type: &ParticleTypeInfo) -> Option<Rc<dyn SpriteSet>>;
+
+    /// Discover/parse ordered descriptions using the selected resource manager.
+    /// Ignore names without registered sprite sets. Return owned CPU data
+    /// before atlas preparation; parse/I/O failures are not producer
+    /// admission errors.
+    fn prepare(&self, resources: &dyn ResourceManager) -> io::Result<PreparedParticleDescriptions>;
+
+    /// At the caller's existing GPU-safe reload boundary: clear engine state
+    /// through the callback, then privately rebind the SAME sprite sets against
+    /// the completed atlas. Provider identity survives. Empty descriptions and
+    /// missing referenced sprites use the missing region. Absent descriptions
+    /// leave previous contents unchanged (including initially unbound sets).
+    /// Consumers cannot extract old
+    /// retained particles/requeue them without refreshing their cached sprites.
+    /// This does not upload atlases or promise transactional all-resource
+    /// reload. Prepare and atlas realization must both succeed first; do not
+    /// change registrations between prepare and apply on this same owner.
+    fn apply(
+        &self,
+        prepared: PreparedParticleDescriptions,
+        atlas: &ParticleAtlasSprites,
+        clear_particles: &mut dyn FnMut(),
+    );
+}
+
+/// Read-only logical sprites successfully realized by the atlas owner, plus its
+/// real missing tile. Description references do not determine atlas membership.
+/// Full independent atlas-source interpretation and GPU upload belong to phase
+/// 7.
+/// COMPAT: Parsing defers to ResourceId, not Vanilla's stricter namespace/case
+/// rules. Its rejection of Vanilla's legal empty sprite paths is accepted.
+pub struct ParticleAtlasSprites {
+    sprites: BTreeMap<ResourceId, AtlasRegion>,
+    missing_region: AtlasRegion,
+}
+
+impl ParticleAtlasSprites {
+    pub fn new(sprites: BTreeMap<ResourceId, AtlasRegion>, missing_region: AtlasRegion) -> Self {
+        Self {
+            sprites,
+            missing_region,
+        }
+    }
+
+    pub fn get(&self, id: &ResourceId) -> Option<AtlasRegion> {
+        self.sprites.get(id).copied()
+    }
+
+    pub fn missing_region(&self) -> AtlasRegion {
+        self.missing_region
+    }
+}
 
 trait Entry {
     fn info(&self) -> &ParticleTypeInfo;
@@ -68,10 +222,10 @@ impl<O: TypedParticleOptions> ErasedParticleProvider for Binding<O> {
     fn create_particle(
         &self,
         options: &dyn ParticleOptions,
-        world: &dyn ParticleWorld,
+        world: &mut LevelContext<'_>,
         position: DVec3,
         auxiliary: DVec3,
-        random: &mut fastrand::Rng,
+        random: &RandomSource,
     ) -> Result<Option<ParticleRef>, ParticleDispatchError> {
         check_type(self.info(), options.get_type())?;
         let options = options
