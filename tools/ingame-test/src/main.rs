@@ -209,7 +209,7 @@ fn run_version(
     // folders, so it runs alone rather than racing the others' installs.
     let dir = worker_dir(0);
     let mut server = Server::start(&java, &jar.jar, &dir)?;
-    run(first, &mut server, &dir.join("client"))?;
+    run(first, &mut server, &client_dir(&dir)?)?;
 
     let queue = Mutex::new(rest.iter());
     let mut first_server = Some(server);
@@ -221,18 +221,10 @@ fn run_version(
                 let server = first_server.take();
                 scope.spawn(move || -> Result<(), String> {
                     let dir = worker_dir(n);
-                    let mut server = match server {
-                        Some(server) => server,
-                        None => Server::start(java, jar, &dir)?,
+                    let (mut server, game_dir) = match server {
+                        Some(server) => (server, dir.join("client")),
+                        None => (Server::start(java, jar, &dir)?, client_dir(&dir)?),
                     };
-                    let game_dir = dir.join("client");
-                    // The world is fresh each run, so the distant terrain
-                    // kept of the last one is stale.
-                    let distant = game_dir.join("distant_terrain");
-                    if distant.exists() {
-                        std::fs::remove_dir_all(&distant)
-                            .map_err(|e| format!("{}: {e}", distant.display()))?;
-                    }
                     loop {
                         let next = queue.lock().unwrap().next();
                         let Some(script) = next else {
@@ -430,6 +422,18 @@ fn java(major: u32) -> Result<PathBuf, String> {
 fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind((HOST, 0)).map_err(|e| e.to_string())?;
     Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
+}
+
+/// The client folder in worker `dir`, readied for this run's first script:
+/// the world is fresh each run, so the distant terrain kept of the last one
+/// is stale.
+fn client_dir(dir: &Path) -> Result<PathBuf, String> {
+    let client = dir.join("client");
+    let distant = client.join("distant_terrain");
+    if distant.exists() {
+        std::fs::remove_dir_all(&distant).map_err(|e| format!("{}: {e}", distant.display()))?;
+    }
+    Ok(client)
 }
 
 /// A fresh flat world, offline, with the test player opped.

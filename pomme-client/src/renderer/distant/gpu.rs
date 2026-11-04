@@ -946,7 +946,7 @@ impl DistantBuffers {
                 |words| {
                     words
                         .chunks(4)
-                        .map(|pick| (pick[2], packed_keys(&pick[..2]).next().expect("a key")))
+                        .map(|pick| (pick[2], u64::from(pick[0]) << 32 | u64::from(pick[1])))
                         .collect()
                 },
             );

@@ -83,6 +83,17 @@ impl CaptureQueue {
         Some((column.0, capture))
     }
 
+    /// Puts back a capture taken off, unless a newer one of its column came
+    /// since.
+    fn requeue(&mut self, dimension: Arc<str>, capture: Capture) {
+        if !self
+            .latest
+            .contains_key(&(Arc::clone(&dimension), capture.pos))
+        {
+            self.push(dimension, capture);
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
@@ -173,7 +184,7 @@ impl DistantTerrain {
                 for thread in earlier {
                     let _ = thread.join();
                 }
-                Worker::new(colors, update_tx, in_memory).run(&job_rx, &wake_rx, &queue);
+                Worker::new(colors, update_tx, queue, in_memory).run(&job_rx, &wake_rx);
             })
             .expect("failed to spawn the distant terrain thread");
         Self {
@@ -292,8 +303,10 @@ impl DistantTerrain {
         turned_on
     }
 
-    /// Writes what's unsaved now, for when the app may be ended without
-    /// dropping the game (Android in the background).
+    /// Has the thread, once it reaches this among its jobs, take in every
+    /// capture queued and write everything unsaved, for when the app may
+    /// be ended without dropping the game (Android in the background).
+    /// Returns at once.
     pub fn flush(&self) {
         let _ = self.jobs.send(Job::Flush);
     }
@@ -480,14 +493,18 @@ impl Store {
         });
     }
 
-    /// On stopping: what's unsaved first, then the columns kept on the way
-    /// out, in an order that reads each section about once however many
-    /// there are, written as they go.
-    fn finish(&mut self, states: &States, captures: &Mutex<CaptureQueue>) {
-        self.save();
+    /// Takes in every queued capture, in an order that reads each section
+    /// about once however many there are, then writes what's unsaved,
+    /// writing as it goes too. A capture under a folder not switched to yet
+    /// goes back in the queue.
+    fn take_all(&mut self, states: &States, captures: &Mutex<CaptureQueue>) {
         let mut backlog: Vec<_> = std::iter::from_fn(|| next(captures)).collect();
         backlog.sort_by_key(|(_, capture)| ingest_order(capture.pos));
         for (dimension, capture) in backlog {
+            if capture.generation > self.generation {
+                captures.lock().requeue(dimension, capture);
+                continue;
+            }
             self.ingest(states, &dimension, capture);
             if self.last_save.elapsed() >= SAVE_EVERY_STOPPING {
                 self.save();
@@ -503,6 +520,7 @@ struct Worker {
     states: States,
     factory: Factory,
     updates: Sender<DistantUpdate>,
+    captures: Arc<Mutex<CaptureQueue>>,
     store: Store,
     view: Option<View>,
     /// Sections to mesh, each from when.
@@ -514,13 +532,19 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(colors: Arc<DistantColors>, updates: Sender<DistantUpdate>, in_memory: bool) -> Self {
+    fn new(
+        colors: Arc<DistantColors>,
+        updates: Sender<DistantUpdate>,
+        captures: Arc<Mutex<CaptureQueue>>,
+        in_memory: bool,
+    ) -> Self {
         Self {
             states: States::new(colors.table()),
             colors,
             models: ModelFactory::new(),
             factory: Factory::new(),
             updates,
+            captures,
             store: Store::new(in_memory),
             view: None,
             dirty: HashMap::new(),
@@ -529,7 +553,8 @@ impl Worker {
         }
     }
 
-    fn run(mut self, jobs: &Receiver<Job>, wake: &Receiver<()>, captures: &Mutex<CaptureQueue>) {
+    fn run(mut self, jobs: &Receiver<Job>, wake: &Receiver<()>) {
+        let captures = Arc::clone(&self.captures);
         loop {
             let wait = sleep_for(
                 !captures.lock().is_empty(),
@@ -546,7 +571,7 @@ impl Worker {
             if stop || self.take_jobs(jobs) {
                 break;
             }
-            let stop = take_slice(captures, CAPTURE_SLICE, |dimension, capture| {
+            let stop = take_slice(&captures, CAPTURE_SLICE, |dimension, capture| {
                 // A capture under a newer folder was queued after the job
                 // switching to it.
                 let stop = capture.generation != self.store.generation && self.take_jobs(jobs);
@@ -561,7 +586,9 @@ impl Worker {
                 self.store.save();
             }
         }
-        self.store.finish(&self.states, captures);
+        // What's unsaved first, then the columns kept on the way out.
+        self.store.save();
+        self.store.take_all(&self.states, &captures);
     }
 
     /// Handles the jobs waiting; whether one was the stop.
@@ -651,7 +678,7 @@ impl Worker {
                     self.remesh_all();
                 }
             }
-            Some(Job::Flush) => self.store.save(),
+            Some(Job::Flush) => self.store.take_all(&self.states, &self.captures),
         }
         false
     }
@@ -808,26 +835,41 @@ mod tests {
     }
 
     #[test]
-    fn the_backlog_on_the_way_out_is_taken_in_and_written() {
-        let dir = temp_dir("finish");
+    fn a_flush_takes_in_the_queued_captures_before_writing() {
+        let dir = temp_dir("flush");
         let (states, mut store) = (states(), Store::new(false));
         store.set_cache(Some(dir.clone()), 0);
         let captures = Mutex::new(CaptureQueue::default());
         for x in [6, 0, 2] {
             captures.lock().push("overworld".into(), lit(x, 0));
         }
-        store.finish(&states, &captures);
-        assert!(captures.lock().is_empty());
+        // Queued after a switch the thread hasn't reached: kept for it.
+        captures.lock().push("overworld".into(), lit(10, 1));
+        store.take_all(&states, &captures);
         for x in [6, 0, 2] {
             assert!(file(&dir, x).exists());
         }
+        assert!(!file(&dir, 10).exists());
+        let left: Vec<i32> = std::iter::from_fn(|| next(&captures))
+            .map(|(_, capture)| capture.pos.x)
+            .collect();
+        assert_eq!(left, [10]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn waiting_for_no_stopped_threads_returns_at_once() {
+    fn waiting_joins_a_stopping_thread_once_it_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        STOPPING.lock().push(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag.store(true, Ordering::SeqCst);
+        }));
         let start = Instant::now();
         wait_for_stopped(Duration::from_secs(30));
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(done.load(Ordering::SeqCst));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(STOPPING.lock().is_empty());
     }
 }

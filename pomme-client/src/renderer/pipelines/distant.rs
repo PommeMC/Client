@@ -57,6 +57,9 @@ struct SceneUniform {
     face_shade: [[f32; 4]; 2],
 }
 
+// std140: the frustums from byte 112, the shades last.
+const _: () = assert!(size_of::<SceneUniform>() == 336);
+
 const SCENE_BYTES: u64 = size_of::<SceneUniform>() as u64;
 const CAMERA_BYTES: u64 = size_of::<CameraUniform>() as u64;
 

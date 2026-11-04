@@ -7,8 +7,9 @@
 // all the same, only not drawn, so what a turn or a climb brings into view
 // is already at the detail it needs (a departure: the reference walks only
 // what it draws). The nodes pushed for the next iteration size its dispatch:
-// a workgroup per 32 of them, capped at the queue's room (another departure:
-// the reference adds a workgroup per push and writes past a full queue).
+// a workgroup per 1 << TRAVERSAL_GROUP_BITS of them, capped at the queue's
+// room (another departure: the reference adds a workgroup per push and
+// writes past a full queue).
 
 #define OUT_OF_BOUNDS 0xFFFFFFFFu
 

@@ -153,6 +153,7 @@ fn leave_world(
     drop(connection);
     core.audio.stop_all_sounds();
     core.return_to_menu(&mut gfx);
+    core.carried_ticks = 0;
 
     match world {
         Some(world) => {

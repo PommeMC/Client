@@ -226,6 +226,13 @@ impl<T> Requests<T> {
     }
 }
 
+/// A freed node id: the node whose record pointed at it, none for a
+/// top-level node, and its level.
+struct Retired {
+    parent: Option<u32>,
+    level: u8,
+}
+
 pub(crate) struct NodeGraph {
     nodes: Vec<Option<Node>>,
     ids: IdSet,
@@ -246,6 +253,9 @@ pub(crate) struct NodeGraph {
     /// Nodes placed whose record [`Self::take_dirty`] hasn't given yet; the
     /// GPU still holds whatever their ids held before.
     unwritten: HashSet<u32>,
+    /// Freed ids whose all-ones record [`Self::take_dirty`] hasn't given yet,
+    /// kept from the free ids till then.
+    retired: HashMap<u32, Retired>,
     /// Ids allocated ([`VISIBILITY_RESET_BIT`]) or freed, for the cleaner's
     /// last-drawn frames.
     pub visibility_sets: HashSet<u32>,
@@ -271,6 +281,7 @@ impl NodeGraph {
             // From 1, so `written_through`'s `first - 1` can't underflow.
             marks: 1,
             unwritten: HashSet::new(),
+            retired: HashMap::new(),
             visibility_sets: HashSet::new(),
             watch: Vec::new(),
             unwatch: Vec::new(),
@@ -300,17 +311,12 @@ impl NodeGraph {
     /// made with the free, or through the top-level ids, rewritten each
     /// frame.
     pub fn written_through(&self) -> u64 {
-        self.oldest_live_change(|_| true)
-            .map_or(self.marks, |first| first - 1)
-    }
-
-    /// The first mark among the live records still changed and `waiting`.
-    fn oldest_live_change(&self, waiting: impl Fn(u32) -> bool) -> Option<u64> {
         self.dirty
             .iter()
-            .filter(|&(&id, _)| self.nodes[id as usize].is_some() && waiting(id))
+            .filter(|&(&id, _)| self.nodes[id as usize].is_some())
             .map(|(_, &mark)| mark)
             .min()
+            .map_or(self.marks, |first| first - 1)
     }
 
     /// Whether `id` holds the node at `key`.
@@ -343,15 +349,16 @@ impl NodeGraph {
     /// lacks; the rest wait for a later call. A node whose mesh is `pending`
     /// (its section record not yet written) waits, and so does a parent
     /// until its children's records go, so the finest levels go first. A
-    /// freed id waits for the live records changed by its free (its old
-    /// parent's), then goes back to the free ids.
+    /// freed id waits for its old parent's record, changed with the free
+    /// (a top-level one for nothing: the top-level ids are rewritten each
+    /// frame), then goes back to the free ids.
     pub fn take_dirty(
         &mut self,
         limit: usize,
         pending: impl Fn(u32) -> bool,
     ) -> Vec<(u32, [u32; 4])> {
         let level = |id: u32| self.nodes[id as usize].as_ref().map(|node| node.key.level);
-        let (mut live, freed): (Vec<u32>, Vec<u32>) =
+        let (mut live, mut freed): (Vec<u32>, Vec<u32>) =
             self.dirty.keys().partition(|&&id| level(id).is_some());
         live.sort_unstable_by_key(|&id| level(id));
         let mut taken = HashSet::new();
@@ -370,19 +377,29 @@ impl NodeGraph {
                 taken.insert(id);
             }
         }
-        let waiting = self.oldest_live_change(|id| !taken.contains(&id));
-        let room = limit - taken.len();
-        taken.extend(
-            freed
-                .into_iter()
-                .filter(|id| waiting.is_none_or(|first| self.dirty[id] < first))
-                .take(room),
-        );
+        // Coarsest first, so a freed parent goes before its freed children.
+        freed.sort_unstable_by_key(|id| std::cmp::Reverse(self.retired[id].level));
+        for id in freed {
+            if taken.len() == limit {
+                break;
+            }
+            // Its old parent's record, changed with the free, not yet out.
+            let parent_waits = self.retired[&id].parent.is_some_and(|parent| {
+                !taken.contains(&parent)
+                    && self
+                        .dirty
+                        .get(&parent)
+                        .is_some_and(|&mark| mark <= self.dirty[&id])
+            });
+            if !parent_waits {
+                taken.insert(id);
+            }
+        }
         let mut records = Vec::with_capacity(taken.len());
         for id in taken {
             self.dirty.remove(&id);
             self.unwritten.remove(&id);
-            if self.nodes[id as usize].is_none() {
+            if self.retired.remove(&id).is_some() {
                 self.ids.free(id);
             }
             records.push((id, self.record(id)));
@@ -425,11 +442,12 @@ impl NodeGraph {
 
     /// `id` no longer holds a node: its all-ones record is written, and the
     /// id reused, only after its old parent's record, changed with it.
-    fn retire(&mut self, id: u32) {
+    fn retire(&mut self, id: u32, parent: Option<u32>, level: u8) {
         self.nodes[id as usize] = None;
         self.unwritten.remove(&id);
         self.track(id, false);
         self.dirty.insert(id, self.marks);
+        self.retired.insert(id, Retired { parent, level });
     }
 
     /// `id` was allocated or freed, so the cleaner's last-drawn frame for it
@@ -520,7 +538,7 @@ impl NodeGraph {
                 self.top_index.insert(moved, index);
             }
         }
-        self.remove_recursive(key, false);
+        self.remove_recursive(key, None, false);
     }
 
     /// The worker meshed `key`; `upload` places the quads and gives their
@@ -688,7 +706,7 @@ impl NodeGraph {
                     node.children = Children::Empty;
                     node.child_count = 8;
                     for child in set_bits(rem) {
-                        self.remove_recursive(child_key(key, child), false);
+                        self.remove_recursive(child_key(key, child), Some(id), false);
                     }
                 } else {
                     let new_count = remaining.count_ones();
@@ -698,9 +716,9 @@ impl NodeGraph {
                     let kept = set_bits(old_existence);
                     for (previous, child) in (old_ptr..).zip(kept) {
                         if rem & 1 << child != 0 {
-                            self.remove_recursive(child_key(key, child), false);
+                            self.remove_recursive(child_key(key, child), Some(id), false);
                         } else {
-                            all_leaf &= self.move_node(previous, next);
+                            all_leaf &= self.move_node(previous, next, id);
                             next += 1;
                         }
                     }
@@ -743,7 +761,7 @@ impl NodeGraph {
 
     /// Moves the node at `from` to the free id `to`, keeping its entry;
     /// whether it is a leaf.
-    fn move_node(&mut self, from: u32, to: u32) -> bool {
+    fn move_node(&mut self, from: u32, to: u32, parent: u32) -> bool {
         // Only children move, so `to` needn't join `unwritten`, which keeps
         // top-level ids out of the traversal.
         debug_assert!(
@@ -753,7 +771,7 @@ impl NodeGraph {
         let node = self.nodes[from as usize].take().expect("a live node");
         let key = node.key;
         self.nodes[to as usize] = Some(node);
-        self.retire(from);
+        self.retire(from, Some(parent), key.level);
         self.track(to, true);
         let entry = self.entries.get_mut(&key).expect("a node's entry");
         let (Entry::Leaf(id) | Entry::Inner(id)) = entry else {
@@ -766,8 +784,9 @@ impl NodeGraph {
     }
 
     /// Removes `key` and everything under it; with `only_children`, the node
-    /// itself stays as a childless leaf.
-    fn remove_recursive(&mut self, key: SectionKey, only_children: bool) {
+    /// itself stays as a childless leaf. `parent` is the node whose record
+    /// points at `key`'s, none for a top-level node.
+    fn remove_recursive(&mut self, key: SectionKey, parent: Option<u32>, only_children: bool) {
         let entry = if only_children {
             self.entries.get(&key).copied()
         } else {
@@ -788,7 +807,7 @@ impl NodeGraph {
                 }
                 if let Entry::Inner(_) = entry {
                     for child in set_bits(child_existence) {
-                        self.remove_recursive(child_key(key, child), false);
+                        self.remove_recursive(child_key(key, child), Some(id), false);
                     }
                     if let Children::At(ptr) = self.node(id).children {
                         debug_assert!(
@@ -806,7 +825,7 @@ impl NodeGraph {
                 } else {
                     let mesh = self.node(id).mesh;
                     self.free_mesh(mesh);
-                    self.retire(id);
+                    self.retire(id, parent, key.level);
                     self.unwatch.push(key);
                 }
             }
@@ -929,7 +948,7 @@ impl NodeGraph {
                     if request.mask & 1 << child != 0 {
                         fill(self, next, child);
                     } else {
-                        self.move_node(previous, next);
+                        self.move_node(previous, next, parent_id);
                         previous += 1;
                     }
                 }
@@ -1004,7 +1023,7 @@ impl NodeGraph {
                 if self.node(parent).mesh == Mesh::Null {
                     self.process_request(parent_key);
                 } else {
-                    self.remove_recursive(parent_key, true);
+                    self.remove_recursive(parent_key, None, true);
                     self.entries.insert(parent_key, Entry::Leaf(parent));
                 }
             }
@@ -1171,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn freed_records_wait_for_every_live_one() {
+    fn a_freed_root_goes_while_another_record_waits() {
         let mut graph = NodeGraph::new();
         let mut upload = uploader();
         let other = SectionKey { x: 1, ..top() };
@@ -1180,14 +1199,67 @@ mod tests {
         graph.process_geometry_result(built(other, 4, 0), &mut upload);
         graph.take_all();
 
-        // One root goes while the other's new mesh is pending.
+        // One root goes while the other's new mesh is pending: nothing
+        // points at a root's record, so it goes at once.
         graph.set_roots(&HashSet::from([top()]));
         graph.process_geometry_result(built(top(), 4, 0), &mut upload);
-        assert!(graph.take_dirty(usize::MAX, |mesh| mesh == 103).is_empty());
-        let taken: HashMap<u32, [u32; 4]> = graph.take_all().into_iter().collect();
-        assert_eq!(taken.len(), 2);
-        assert_eq!(taken[&0][2] & 0xFF_FFFF, 103);
-        assert_eq!(taken[&1], [u32::MAX; 4]);
+        let taken = graph.take_dirty(usize::MAX, |mesh| mesh == 103);
+        assert_eq!(taken, [(1, [u32::MAX; 4])]);
+        assert_eq!(graph.take_all()[0].1[2] & 0xFF_FFFF, 103);
+    }
+
+    #[test]
+    fn freed_ids_wait_only_on_their_old_parent_and_the_limit() {
+        let mut graph = NodeGraph::new();
+        let mut upload = uploader();
+        let other = SectionKey { x: 1, ..top() };
+        graph.set_roots(&HashSet::from([top(), other]));
+        graph.process_geometry_result(built(top(), 4, 0b11), &mut upload);
+        graph.process_geometry_result(built(other, 4, 0), &mut upload);
+        graph.process_request(top());
+        graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
+        graph.process_geometry_result(built(child_key(top(), 1), 2, 0), &mut upload);
+        graph.take_all();
+        assert_eq!(graph.entries[&top()], Entry::Inner(0));
+
+        // The other root waits on its new mesh (105); the first drops child
+        // 1, so its block (2, 3) is remade at 4.
+        graph.process_geometry_result(built(other, 4, 0), &mut upload);
+        graph.process_geometry_result(built(top(), 4, 0b01), &mut upload);
+        let ids = |records: Vec<(u32, [u32; 4])>| {
+            let mut ids: Vec<u32> = records.into_iter().map(|(id, _)| id).collect();
+            ids.sort_unstable();
+            ids
+        };
+        // The limit leaves no room for the freed ids.
+        assert_eq!(ids(graph.take_dirty(2, |mesh| mesh == 105)), [0, 4]);
+        // Their parent written, they go though the other root still waits.
+        assert_eq!(
+            ids(graph.take_dirty(usize::MAX, |mesh| mesh == 105)),
+            [2, 3]
+        );
+        assert_eq!(ids(graph.take_all()), [1]);
+    }
+
+    #[test]
+    fn a_pick_whose_id_moved_or_was_freed_is_stale() {
+        let mut graph = NodeGraph::new();
+        let mut upload = uploader();
+        graph.set_roots(&HashSet::from([top()]));
+        graph.process_geometry_result(built(top(), 4, 0b11), &mut upload);
+        graph.process_request(top());
+        let [first, second] = [0, 1].map(|i| child_key(top(), i));
+        graph.process_geometry_result(built(first, 2, 0), &mut upload);
+        graph.process_geometry_result(built(second, 2, 0), &mut upload);
+        assert!(graph.holds(1, first) && graph.holds(2, second));
+        assert!(!graph.holds(1, second));
+
+        // The second child goes and the first moves to 3.
+        graph.process_geometry_result(built(top(), 4, 0b01), &mut upload);
+        assert!(!graph.holds(1, first));
+        assert!(!graph.holds(2, second));
+        assert!(graph.holds(3, first));
+        assert!(!graph.holds(CLEANER_SENTINEL, top()));
     }
 
     #[test]
