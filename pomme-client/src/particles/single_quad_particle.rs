@@ -4,9 +4,9 @@ use glam::Quat;
 
 use super::particle::Particle;
 use super::render::{ParticleFacing, ParticleLayer, ParticleView, QuadParticleRenderState};
-use super::sprites::SpriteSet;
-use super::world::ParticleWorld;
+use super::resources::sprite_set::SpriteSet;
 use crate::renderer::chunk::atlas::AtlasRegion;
+use crate::world::level::LevelContext;
 
 /// Only quad instances implement this; non-quad groups are not forced through
 /// sprite rendering. Base defaults and concrete tick/physics behavior are
@@ -32,7 +32,7 @@ pub trait SingleQuadParticle: Particle {
     /// not render work, and does not split the simulated particle's identity.
     fn extract(
         &self,
-        world: &dyn ParticleWorld,
+        world: &LevelContext<'_>,
         view: &ParticleView<'_>,
         output: &mut Vec<QuadParticleRenderState>,
     );
@@ -45,7 +45,7 @@ pub(super) fn randomized_quad_size(random: &mut fastrand::Rng) -> f32 {
 pub(super) fn extract_camera_quad(
     particle: &dyn SingleQuadParticle,
     previous_roll: f32,
-    world: &dyn ParticleWorld,
+    world: &LevelContext<'_>,
     view: &ParticleView<'_>,
     output: &mut Vec<QuadParticleRenderState>,
 ) {
