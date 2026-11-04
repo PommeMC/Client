@@ -16,15 +16,22 @@ use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 pub const SLOT_RESULT: u16 = 45;
+/// The 3x3 grid's slots, 0..9.
+pub const GRID_SLOTS: usize = 9;
 const SLOT_MAIN_BASE: u16 = 9;
 const SLOT_HOTBAR_BASE: u16 = 36;
 /// `CrafterMenu.isPowered`'s data index; 0..9 are the slots' disabled flags.
 const DATA_POWERED: usize = 9;
 
-/// The disabled grid slots in `data` (vanilla `isSlotDisabled`: a flag of 1).
+/// Vanilla `isSlotDisabled`: grid slot `slot`'s flag in `data` is 1.
+pub fn slot_disabled(data: &[i16], slot: usize) -> bool {
+    data[slot] == 1
+}
+
+/// The disabled grid slots in `data`, bit `i` for slot `i`.
 pub fn disabled_slots(data: &[i16]) -> u16 {
-    (0..9)
-        .filter(|&i| data[i] == 1)
+    (0..GRID_SLOTS)
+        .filter(|&i| slot_disabled(data, i))
         .fold(0, |mask, i| mask | 1 << i)
 }
 
@@ -60,7 +67,7 @@ pub fn build_crafter(
 
     let mut ctx = SlotCtx::new(elements, &panel, cursor, kind, slots, cursor_item, drag);
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
-    for num in 0..9u16 {
+    for num in 0..GRID_SLOTS as u16 {
         let x = 26.0 + (num % 3) as f32 * SLOT_STRIDE;
         let y = 17.0 + (num / 3) as f32 * SLOT_STRIDE;
         if disabled & 1 << num != 0 {
@@ -93,7 +100,7 @@ pub fn build_crafter(
 
     // An enabled empty grid slot under an empty cursor offers to disable it.
     if let Some(num) = hovered
-        && num < 9
+        && usize::from(num) < GRID_SLOTS
         && disabled & 1 << num == 0
         && cursor_item.is_empty()
         && item(num).is_empty()

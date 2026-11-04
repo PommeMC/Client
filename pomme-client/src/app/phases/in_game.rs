@@ -233,6 +233,8 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
+    /// The hand cursor is up for a hovered crafter grid slot.
+    pub crafter_pointer: bool,
     /// The selected entry of a bundle in (menu id, slot). Vanilla keeps it on
     /// the stack but never sends it, so a server update of the slot drops it.
     pub bundle_selection: Option<(i32, u16, i32)>,
@@ -575,6 +577,7 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
+            crafter_pointer: false,
             bundle_selection: None,
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
@@ -2285,6 +2288,8 @@ fn crafter_slot_clicked(
     use azalea_inventory::operations::{ClickOperation, PickupClick};
     use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
 
+    use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
+
     let Some(c) = &mut game.open_container else {
         return;
     };
@@ -2296,10 +2301,10 @@ fn crafter_slot_clicked(
             PickupClick::Left { slot: Some(s) } | PickupClick::Right { slot: Some(s) },
         ) => {
             let s = usize::from(*s);
-            if s >= 9 || !c.slots[s].is_empty() {
+            if s >= GRID_SLOTS || !c.slots[s].is_empty() {
                 return;
             }
-            if c.data[s] == 1 {
+            if slot_disabled(&c.data, s) {
                 (s, true)
             } else if game.cursor_item.is_empty() {
                 (s, false)
@@ -2309,7 +2314,7 @@ fn crafter_slot_clicked(
         }
         ClickOperation::Swap(swap) => {
             let s = usize::from(swap.source_slot);
-            if s >= 9 || !c.slots[s].is_empty() || c.data[s] != 1 {
+            if s >= GRID_SLOTS || !c.slots[s].is_empty() || !slot_disabled(&c.data, s) {
                 return;
             }
             // `Inventory.getItem(buttonNum)`: the hotbar, or 40 for the
@@ -3586,6 +3591,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
+    let mut crafter_pointer = false;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let raw_left = core.input.left_just_pressed();
@@ -3960,6 +3966,13 @@ pub fn update_game(
         }
 
         close_inventory = clicked_outside;
+        // `CrafterScreen.extractSlot`: the hand over a grid slot, whose area
+        // is the slot's hover area.
+        crafter_pointer = game
+            .open_container
+            .as_ref()
+            .is_some_and(|c| c.screen == ContainerScreen::Crafter)
+            && hovered.is_some_and(|s| usize::from(s) < crate::ui::crafter::GRID_SLOTS);
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
         let is_bundle_slot = |game: &GameState, slot: u16| {
@@ -4230,16 +4243,17 @@ pub fn update_game(
         &text_events,
     );
 
+    if crafter_pointer != game.crafter_pointer {
+        game.crafter_pointer = crafter_pointer;
+        gfx.window
+            .set_cursor(crate::ui::common::cursor_icon(crafter_pointer));
+    }
+
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
-        let icon = if game
+        let link = game
             .chat
-            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
-        {
-            winit::window::CursorIcon::Pointer
-        } else {
-            winit::window::CursorIcon::Default
-        };
-        gfx.window.set_cursor(icon);
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
+        gfx.window.set_cursor(crate::ui::common::cursor_icon(link));
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat

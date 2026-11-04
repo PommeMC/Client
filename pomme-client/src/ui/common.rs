@@ -420,6 +420,16 @@ pub fn push_item_count(
     });
 }
 
+/// The hand over something clickable (vanilla `CursorTypes.POINTING_HAND`),
+/// else the arrow.
+pub fn cursor_icon(pointer: bool) -> winit::window::CursorIcon {
+    if pointer {
+        winit::window::CursorIcon::Pointer
+    } else {
+        winit::window::CursorIcon::Default
+    }
+}
+
 pub fn hit_test(cursor: (f32, f32), rect: [f32; 4]) -> bool {
     cursor.0 >= rect[0]
         && cursor.0 < rect[0] + rect[2]

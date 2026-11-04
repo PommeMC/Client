@@ -105,6 +105,14 @@ impl ContainerKind {
         matches!(self, Self::Player).then_some(45)
     }
 
+    /// Slots whose `mayPlace` needs server data: the brewing stand's
+    /// ingredient (`brewing_reagent` set, 26.2's `PotionBrewing`) and fuel
+    /// (`brewing_fuel` component, 26.2's tag). A click putting a new item
+    /// there isn't predicted, so a refused one doesn't show for a round trip.
+    fn unpredicted_place(self, s: usize) -> bool {
+        matches!((self, s), (Self::BrewingStand, 3 | 4))
+    }
+
     /// Per-slot stack limit where a menu overrides the item's own maximum
     /// (vanilla `Slot::getMaxStackSize`): the enchanting item slot and the
     /// brewing stand's bottle slots hold one.
@@ -213,9 +221,6 @@ impl ContainerKind {
                     | ItemKind::LingeringPotion
                     | ItemKind::GlassBottle
             ),
-            // TODO: the ingredient (`brewing_reagent` set, 26.2's
-            // `PotionBrewing`) and fuel (`brewing_fuel` component, 26.2's tag)
-            // slots accept anything here, like the furnace fuel slot.
             (Self::Crafter { disabled }, 0..=8) => disabled & (1 << s) == 0,
             (Self::Crafter { .. }, 45) => false,
             (Self::Player, 5..=8) => {
@@ -278,6 +283,7 @@ pub fn apply_click(
         return Vec::new();
     }
     let mut menu = kind.build_menu(slots);
+    let (carried, selection) = (cursor.clone(), bundle.selection);
     apply_op(kind, &mut menu, cursor, op, creative, bundle);
 
     let mut changed = Vec::new();
@@ -286,9 +292,18 @@ pub fn apply_click(
         let Some(after) = menu.slot(i) else {
             continue;
         };
-        if after != before {
-            changed.push((i as u16, after.clone()));
+        if after == before {
+            continue;
         }
+        if kind.unpredicted_place(i) && !after.is_empty() && !same_item(before, after) {
+            *cursor = carried;
+            *bundle = BundleClick {
+                selection,
+                sound: None,
+            };
+            return Vec::new();
+        }
+        changed.push((i as u16, after.clone()));
     }
     changed
 }
@@ -995,6 +1010,18 @@ mod quick_move_tests {
         let mut cursor = ItemStack::new(ItemKind::Stone, 3);
         let changed = left_click(kind, &slots, &mut cursor, 0);
         assert!(changed.is_empty());
+
+        // A new item in the ingredient or fuel slot waits for the server, which
+        // knows what they take; topping up what's there is predicted.
+        let changed = left_click(kind, &slots, &mut cursor, 4);
+        assert!(changed.is_empty());
+        assert_eq!(cursor.count(), 3);
+        let mut topped = slots.clone();
+        topped[4] = ItemStack::new(ItemKind::BlazePowder, 1);
+        let mut cursor = ItemStack::new(ItemKind::BlazePowder, 2);
+        let changed = left_click(kind, &topped, &mut cursor, 4);
+        assert_eq!(changed, vec![(4, ItemStack::new(ItemKind::BlazePowder, 3))]);
+        assert!(cursor.is_empty());
 
         // The menu's own slots shift-click into the player inventory, hotbar
         // end first.
