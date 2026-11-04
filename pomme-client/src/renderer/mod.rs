@@ -1302,7 +1302,7 @@ impl Renderer {
     /// See [`ChunkBufferStore::starved_column`].
     #[cfg(feature = "test-harness")]
     pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
-        self.chunk_buffers.starved_column()
+        self.chunk_buffers.starved_column(&self.ctx.device)
     }
 
     /// See [`ChunkBufferStore::compacting`].
@@ -1358,9 +1358,9 @@ impl Renderer {
         self.frames.wait_all(&self.ctx.device);
     }
 
-    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
-    /// per mesh that hit pool exhaustion, the section indices dropped (need
-    /// re-mesh); empty on success.
+    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns
+    /// the sections handed back for re-meshing, per column: those waiting
+    /// for room, or with room come free for them.
     pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }

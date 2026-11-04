@@ -368,7 +368,7 @@ struct FrustumData {
 /// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
 /// `first_index`/`index_count` are the section's index slice and
 /// `vertex_offset` its vertex slice base, both in `arena`; `vtx_len` is the
-/// slice length, kept so the slices can be returned to the arena on removal.
+/// slice length, for what the column needs and for compaction.
 /// `uploaded_at` drives the per-section fade so editing one section never
 /// re-fades the rest of the column.
 pub(crate) struct SectionAlloc {
@@ -400,15 +400,11 @@ pub(crate) struct SectionAlloc {
 
 impl SectionAlloc {
     fn slice(&self) -> Slice {
-        Slice {
-            arena: self.arena,
-            vertex_offset: self.vertex_offset as u32,
-            #[cfg(feature = "test-harness")]
-            vertex_len: self.vtx_len,
-            first_index: self.first_index,
-            #[cfg(feature = "test-harness")]
-            index_len: self.idx_len,
-        }
+        Slice::new(
+            self.arena,
+            (self.vertex_offset as u32, self.vtx_len),
+            (self.first_index, self.idx_len),
+        )
     }
 }
 
@@ -474,6 +470,26 @@ struct Slice {
     first_index: u32,
     #[cfg(feature = "test-harness")]
     index_len: u32,
+}
+
+impl Slice {
+    /// A slice of `arena`, its vertices and indices each as (offset, length).
+    #[cfg_attr(not(feature = "test-harness"), allow(unused_variables))]
+    fn new(
+        arena: u16,
+        (vertex_offset, vertex_len): (u32, u32),
+        (first_index, index_len): (u32, u32),
+    ) -> Self {
+        Self {
+            arena,
+            vertex_offset,
+            #[cfg(feature = "test-harness")]
+            vertex_len,
+            first_index,
+            #[cfg(feature = "test-harness")]
+            index_len,
+        }
+    }
 }
 
 /// What a column's sections take: in total, and the largest one's slices.
@@ -592,8 +608,9 @@ impl Waitlist {
         }
     }
 
-    /// `pos`'s `sections` were placed: they wait no longer.
-    fn placed(&mut self, pos: ChunkPos, sections: &HashSet<i32>) {
+    /// `pos`'s `sections` were placed, or dropped for good: they wait no
+    /// longer.
+    fn stop_waiting(&mut self, pos: ChunkPos, sections: &HashSet<i32>) {
         let Some(starved) = self.columns.get_mut(&pos) else {
             return;
         };
@@ -813,6 +830,8 @@ pub struct ChunkBufferStore {
     /// The frame before which no arena is added, after the driver had no
     /// memory for one.
     add_arena_after: u64,
+    /// Arena adds the driver failed in a row, each doubling the wait.
+    add_arena_failures: u32,
 
     chunks: HashMap<ChunkPos, ChunkAlloc>,
     /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
@@ -920,6 +939,7 @@ impl ChunkBufferStore {
             drain_queue: Vec::new(),
             compact_after: 0,
             add_arena_after: 0,
+            add_arena_failures: 0,
             chunks: HashMap::new(),
             chunk_visibility: HashMap::new(),
             camera_meta: Vec::new(),
@@ -1029,15 +1049,11 @@ impl ChunkBufferStore {
             }
 
             fn slice(&self) -> Slice {
-                Slice {
-                    arena: self.arena,
-                    vertex_offset: self.vtx_off,
-                    #[cfg(feature = "test-harness")]
-                    vertex_len: self.vertex_count,
-                    first_index: self.idx_off,
-                    #[cfg(feature = "test-harness")]
-                    index_len: self.index_len(),
-                }
+                Slice::new(
+                    self.arena,
+                    (self.vtx_off, self.vertex_count),
+                    (self.idx_off, self.index_len()),
+                )
             }
         }
 
@@ -1107,6 +1123,7 @@ impl ChunkBufferStore {
                     );
                     self.retire_sections(mesh.pos, &accepted);
                     self.drop_if_empty(mesh.pos);
+                    self.waiting.stop_waiting(mesh.pos, &accepted);
                     continue;
                 }
             }
@@ -1156,7 +1173,7 @@ impl ChunkBufferStore {
                     ],
                 });
             }
-            // Nothing to place, so nothing to wait for.
+            // A column with nothing to place doesn't wait.
             if no_room && need.vertices > 0 {
                 // Never drawn, so these go straight back.
                 for p in &plans {
@@ -1173,7 +1190,7 @@ impl ChunkBufferStore {
                 continue;
             }
 
-            self.waiting.placed(mesh.pos, &accepted);
+            self.waiting.stop_waiting(mesh.pos, &accepted);
             // Remember which sections were present so a re-meshed one swaps
             // instantly while a freshly revealed one still fades in.
             let was_present = self.retire_sections(mesh.pos, &accepted);
@@ -1349,10 +1366,26 @@ impl ChunkBufferStore {
                 return Some(found);
             }
         }
-        if !self.can_add_arena(device) || !self.add_arena(device) {
-            return None;
+        if self.revive_arena() || (self.can_add_arena(device) && self.add_arena(device)) {
+            return alloc(self);
         }
-        alloc(self)
+        None
+    }
+
+    /// Takes back an arena doomed for being empty, which still holds its
+    /// share of the budget, returning whether there was one.
+    fn revive_arena(&mut self) -> bool {
+        let Some(arena) = self
+            .arenas
+            .iter_mut()
+            .flatten()
+            .find(|a| a.doomed.is_some())
+        else {
+            return false;
+        };
+        arena.doomed = None;
+        self.refresh_alloc_order();
+        true
     }
 
     /// Whether one more arena fits the budget of the heaps arenas go in:
@@ -1382,13 +1415,18 @@ impl ChunkBufferStore {
     }
 
     /// Adds an arena, returning whether it did. When the driver has no
-    /// memory for one, none is added for a while, so columns starve and
-    /// evict instead.
+    /// memory for one, none is added for a while, longer each time, so
+    /// columns starve and evict instead.
     fn add_arena(&mut self, device: &rhi::backend::Device) -> bool {
         let arena = match Arena::new(device, self.use_staging, self.format, self.arena_size) {
-            Ok(arena) => arena,
+            Ok(arena) => {
+                self.add_arena_failures = 0;
+                arena
+            }
             Err(error) => {
-                self.add_arena_after = self.frame_seq + BACKOFF_FRAMES;
+                self.add_arena_after =
+                    self.frame_seq + (BACKOFF_FRAMES << self.add_arena_failures.min(6));
+                self.add_arena_failures += 1;
                 tracing::warn!("{error}; no chunk arena added for a while");
                 return false;
             }
@@ -1836,13 +1874,15 @@ impl ChunkBufferStore {
     }
 
     /// A column not drawing its newest mesh, or none, for lack of room,
-    /// nearer than the eviction frontier: one that should fit.
+    /// nearer than the eviction frontier or with an arena to add for it: one
+    /// that should fit.
     #[cfg(feature = "test-harness")]
-    pub fn starved_column(&self) -> Option<ChunkPos> {
+    pub fn starved_column(&self, device: &rhi::backend::Device) -> Option<ChunkPos> {
+        let can_add = self.can_add_arena(device);
         self.waiting
             .columns
             .keys()
-            .find(|&&pos| !self.waiting.beyond(pos, self.eye))
+            .find(|&&pos| can_add || !self.waiting.beyond(pos, self.eye))
             .copied()
     }
 
@@ -1927,7 +1967,7 @@ impl ChunkBufferStore {
         eye: DVec3,
     ) {
         let column = |eye| ChunkPos::containing(BlockPos::containing(eye));
-        if !self.waiting.is_empty() && self.eye.is_some_and(|last| column(last) != column(eye)) {
+        if !self.waiting.is_empty() && self.eye.is_none_or(|last| column(last) != column(eye)) {
             self.retry_due = true;
         }
         self.eye = Some(eye);
@@ -2870,9 +2910,9 @@ mod tests {
         waiting.starve(pos, [0, 1], need(10));
         waiting.pull_frontier(0.0);
         waiting.fragmented.insert(pos);
-        waiting.placed(pos, &HashSet::from([0]));
+        waiting.stop_waiting(pos, &HashSet::from([0]));
         assert!(waiting.is_fragmented());
-        waiting.placed(pos, &HashSet::from([1]));
+        waiting.stop_waiting(pos, &HashSet::from([1]));
         assert!(waiting.is_empty());
         assert!(!waiting.is_fragmented());
         assert_eq!(waiting.frontier_sq, f64::INFINITY);
