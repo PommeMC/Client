@@ -31,7 +31,7 @@ impl Assets {
     ) -> Result<Self, String> {
         if !dirs.jar_assets_dir.is_dir() {
             return Err(format!(
-                "no {version} assets at {} (launch {version} once through the launcher to download them)",
+                "no {version} assets at {} (run the client on {version} once to download them)",
                 dirs.jar_assets_dir.display()
             ));
         }

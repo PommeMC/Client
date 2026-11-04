@@ -1,19 +1,17 @@
-//! Microsoft account sign-in for Minecraft: the token from either sign-in
-//! flow is exchanged through Xbox Live for a Minecraft access token, and the
+//! Microsoft account sign-in for Minecraft: the device-code sign-in's token
+//! is exchanged through Xbox Live for a Minecraft access token, and the
 //! account and its refresh token are kept in a [`SecretStore`].
 //!
 //! Every call takes the HTTP client to use, so the client can pass one that
 //! trusts Android's CA store.
 
 mod device_code;
-mod pkce;
 mod store;
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use device_code::{DeviceCode, device_code_sign_in};
-pub use pkce::pkce_sign_in;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "keyring")]
 pub use store::KeyringStore;
@@ -27,7 +25,6 @@ const ACCOUNTS_KEY: &str = "minecraft-accounts";
 const REFRESH_KEY: &str = "minecraft-refresh-tokens";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct AuthAccount {
     pub username: String,
     pub uuid: String,

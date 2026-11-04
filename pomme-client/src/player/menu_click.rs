@@ -24,6 +24,8 @@ pub enum ContainerKind {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Hopper,
+    Dispenser,
 }
 
 impl ContainerKind {
@@ -34,6 +36,8 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
             Self::Enchantment => 38,
+            Self::Hopper => 41,
+            Self::Dispenser => 45,
         }
     }
 
@@ -46,6 +50,8 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
             Self::Enchantment => 2,
+            Self::Hopper => 5,
+            Self::Dispenser => 9,
         }
     }
 
@@ -59,7 +65,12 @@ impl ContainerKind {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
             Self::Anvil => Some(2),
-            Self::Furnace | Self::Chest { .. } | Self::ShulkerBox | Self::Enchantment => None,
+            Self::Furnace
+            | Self::Chest { .. }
+            | Self::ShulkerBox
+            | Self::Enchantment
+            | Self::Hopper
+            | Self::Dispenser => None,
         }
     }
 
@@ -139,6 +150,14 @@ impl ContainerKind {
             Self::Enchantment => Menu::Enchantment {
                 item: ItemStack::Empty,
                 lapis: ItemStack::Empty,
+                player: SlotList::default(),
+            },
+            Self::Hopper => Menu::Hopper {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Dispenser => Menu::Generic3x3 {
+                contents: SlotList::default(),
                 player: SlotList::default(),
             },
         };
@@ -603,7 +622,10 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             break;
         }
         match kind {
-            ContainerKind::Chest { .. } | ContainerKind::ShulkerBox => {
+            ContainerKind::Chest { .. }
+            | ContainerKind::ShulkerBox
+            | ContainerKind::Hopper
+            | ContainerKind::Dispenser => {
                 let split = kind.inv_start();
                 if s < split {
                     move_item_stack_to(kind, menu, s, split..menu.len(), true);
@@ -834,5 +856,29 @@ mod bundle_tests {
         );
         assert_eq!(cursor.as_present().map(|d| d.kind), Some(ItemKind::Stone));
         assert_eq!(click.selection, Some((10, 0)));
+    }
+}
+
+#[cfg(test)]
+mod quick_move_tests {
+    use super::*;
+
+    #[test]
+    fn hopper_and_dispenser_shift_clicks_cross_at_the_player_inventory() {
+        for kind in [ContainerKind::Hopper, ContainerKind::Dispenser] {
+            let last = kind.slot_count() - 1;
+            let mut slots = vec![ItemStack::Empty; kind.slot_count()];
+            slots[0] = ItemStack::new(ItemKind::Stone, 5);
+            let mut menu = kind.build_menu(&slots);
+
+            // Contents fill the player inventory from the end of the hotbar.
+            quick_move(kind, &mut menu, 0);
+            assert!(menu.slot(0).is_some_and(ItemStack::is_empty));
+            assert_eq!(menu.slot(last).map(ItemStack::count), Some(5));
+
+            // The player inventory fills the contents from the first slot.
+            quick_move(kind, &mut menu, last);
+            assert_eq!(menu.slot(0).map(ItemStack::count), Some(5));
+        }
     }
 }

@@ -64,8 +64,6 @@ impl MainMenu {
         }));
     }
 
-    /// Signing out on desktop also signs the launcher out, which shares the
-    /// store.
     pub(crate) fn forget_account(&self, uuid: &uuid::Uuid) {
         crate::account::forget(&*self.account_store, uuid);
     }

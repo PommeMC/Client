@@ -622,6 +622,7 @@ pub fn build_hud(
     experience_progress: f32,
     bar: ContextualBarKind<'_>,
     game_mode: u8,
+    spectator_crosshair: bool,
     hotbar: &[ItemStack],
     offhand: &ItemStack,
     main_hand_right: bool,
@@ -640,10 +641,8 @@ pub fn build_hud(
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
-    // Vanilla also shows the crosshair in spectator when looking at a menu
-    // provider, and hides it for the F3 3D-crosshair entry; neither concept
-    // exists here yet.
-    if first_person && game_mode != 3 {
+    // TODO: vanilla also hides it for the F3 3D-crosshair entry.
+    if first_person && (game_mode != 3 || spectator_crosshair) {
         build_crosshair(elements, cx, cy, gs, attack);
     }
 
@@ -1672,7 +1671,7 @@ pub fn build_debug_overlay(
         left_lines.push(format!("Face: {:?}", face));
     }
 
-    push_debug_lines(elements, &left_lines, pad, pad, fs, true, text_width_fn);
+    push_debug_lines(elements, left_lines, pad, pad, fs, true, text_width_fn);
 
     let mut right_lines: Vec<String> = vec![
         info.vulkan_version.to_string(),
@@ -1693,7 +1692,7 @@ pub fn build_debug_overlay(
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(
         elements,
-        &right_lines,
+        right_lines,
         right_x,
         pad,
         fs,
@@ -1704,7 +1703,7 @@ pub fn build_debug_overlay(
 
 fn push_debug_lines(
     elements: &mut Vec<MenuElement>,
-    lines: &[String],
+    lines: Vec<String>,
     x: f32,
     start_y: f32,
     fs: f32,
@@ -1712,7 +1711,7 @@ fn push_debug_lines(
     text_width_fn: TextWidthFn,
 ) {
     let line_h = fs * 1.25;
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in lines.into_iter().enumerate() {
         if line.is_empty() {
             continue;
         }
@@ -1720,12 +1719,12 @@ fn push_debug_lines(
         let tx = if left_align {
             x
         } else {
-            x - text_width_fn(line, fs)
+            x - text_width_fn(&line, fs)
         };
         elements.push(MenuElement::Text {
             x: tx,
             y,
-            text: line.clone(),
+            text: line,
             scale: fs,
             color: WHITE,
             centered: false,
