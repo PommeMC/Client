@@ -1,8 +1,8 @@
 //! Isolated Vanilla 26.3 particle layer, not connected to `crate::particle`.
 //! Type/provider storage and CPU description/sprite binding are implemented.
 //! Scoped level queries reuse the existing collision and lighting services.
-//! Concrete Smoke simulation and its sprite provider are implemented; engine,
-//! atlas sources and GPU/runtime adoption remain deferred.
+//! Concrete Smoke and Flame simulations and sprite providers are implemented;
+//! engine, atlas sources and GPU/runtime adoption remain deferred.
 //! Leaf values, typed tokens and sealed options erasure are real data/bridges,
 //! not placeholder behavior. The ordinary contract_exemplar needs a caller's
 //! real provider and initializing engine factory.
@@ -18,11 +18,13 @@
 )]
 
 mod contract_exemplars;
+mod flame;
 mod level;
 mod particle;
 mod registry;
 mod render;
 mod resources;
+mod single_quad_particle;
 mod smoke;
 mod sprites;
 mod types;
@@ -39,16 +41,18 @@ use glam::DVec3;
 )]
 pub use self::{
     contract_exemplars::{
-        ExemplarError, FireworkSpark, contract_exemplar_firework, contract_exemplar_smoke,
-        contract_registry_exemplar,
+        ExemplarError, FireworkSpark, contract_exemplar_firework, contract_exemplar_flame,
+        contract_exemplar_smoke, contract_registry_exemplar,
     },
-    particle::{ClientLevel, Particle, ParticleRef, ParticleTickContext, SingleQuadParticle},
+    flame::{FlameParticle, FlameProvider},
+    particle::{ClientLevel, Particle, ParticleRef, ParticleTickContext},
     registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError},
     render::{
         ParticleFacing, ParticleFrustum, ParticleLayer, ParticleLight, ParticleRenderType,
         ParticleView, QuadParticleRenderState,
     },
     resources::MappedParticleResources,
+    single_quad_particle::SingleQuadParticle,
     smoke::{SmokeParticle, SmokeProvider},
     sprites::{ParticleAtlasSprites, ParticleDescription, PreparedParticleDescriptions, SpriteSet},
     types::{

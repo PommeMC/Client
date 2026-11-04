@@ -6,15 +6,11 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::render::{
-    ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
-    QuadParticleRenderState,
-};
-use super::sprites::SpriteSet;
+use super::render::{ParticleLight, ParticleRenderType};
+use super::single_quad_particle::SingleQuadParticle;
 use super::types::{ParticleLimit, ParticleOptions};
 use super::world::ParticleWorld;
 use crate::physics::aabb::Aabb;
-use crate::renderer::chunk::atlas::AtlasRegion;
 
 /// Proposed Java-reference bridge, not a final storage/performance framework.
 /// Clones retain the SAME mutable allocation after enqueue, quota rejection or
@@ -61,36 +57,6 @@ pub trait Particle: Any {
     fn get_light_coords(&self, world: &dyn ParticleWorld, partial_tick: f32) -> ParticleLight;
 }
 
-/// Only quad instances implement this; non-quad groups are not forced through
-/// sprite rendering. Base defaults and concrete tick/physics behavior are
-/// deferred.
-pub trait SingleQuadParticle: Particle {
-    fn get_sprite(&self) -> AtlasRegion;
-    fn set_sprite(&mut self, sprite: AtlasRegion);
-    /// Explicit opt-in by concrete tick code; not automatic base ticking.
-    fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet);
-    fn get_uv(&self) -> [f32; 4];
-    fn get_color(&self) -> [f32; 3];
-    fn set_color(&mut self, color: [f32; 3]);
-    fn get_alpha(&self) -> f32;
-    fn set_alpha(&mut self, alpha: f32);
-    fn get_roll(&self) -> f32;
-    fn set_roll(&mut self, roll: f32);
-    fn get_facing(&self) -> ParticleFacing;
-    fn get_quad_size(&self, partial_tick: f32) -> f32;
-    fn get_layer(&self) -> ParticleLayer;
-    /// Read-only simulation access; append zero or more owned quad entries to
-    /// the group's frame output, preserving existing entries. A delayed Shriek
-    /// emits none; an active Shriek or Vibration emits two. This is extraction,
-    /// not render work, and does not split the simulated particle's identity.
-    fn extract(
-        &self,
-        world: &dyn ParticleWorld,
-        view: &ParticleView<'_>,
-        output: &mut Vec<QuadParticleRenderState>,
-    );
-}
-
 /// Proposed ClientLevel particle service, NOT an implementation on the existing
 /// LevelContext. Block callbacks would request options here rather than retain
 /// emitter handles; no block/runtime integration is part of this sketch.
@@ -131,4 +97,41 @@ pub trait ParticleTickContext: ClientLevel {
     /// Direct engine add: bypass level policy, enforce quota and queue
     /// identity.
     fn add(&mut self, particle: ParticleRef);
+}
+
+pub(super) fn bounds_at(position: DVec3, width: f32, height: f32) -> Aabb {
+    let half_width = f64::from(width / 2.0);
+    Aabb::new(
+        DVec3::new(position.x - half_width, position.y, position.z - half_width),
+        DVec3::new(
+            position.x + half_width,
+            position.y + f64::from(height),
+            position.z + half_width,
+        ),
+    )
+}
+
+pub(super) fn resized_bounds(bounds: Aabb, width: f32, height: f32) -> Aabb {
+    let min = DVec3::new(
+        (bounds.min.x + bounds.max.x - f64::from(width)) / 2.0,
+        bounds.min.y,
+        (bounds.min.z + bounds.max.z - f64::from(width)) / 2.0,
+    );
+    Aabb::new(
+        min,
+        min + DVec3::new(f64::from(width), f64::from(height), f64::from(width)),
+    )
+}
+
+pub(super) fn randomized_motion(random: &mut fastrand::Rng, auxiliary: DVec3) -> DVec3 {
+    let mut velocity = DVec3::new(
+        auxiliary.x + f64::from((random.f32() * 2.0 - 1.0) * 0.4),
+        auxiliary.y + f64::from((random.f32() * 2.0 - 1.0) * 0.4),
+        auxiliary.z + f64::from((random.f32() * 2.0 - 1.0) * 0.4),
+    );
+    let speed = f64::from((random.f32() + random.f32() + 1.0) * 0.15);
+    // Java promotes these float constants after the f32 random arithmetic.
+    velocity = velocity / velocity.length() * speed * f64::from(0.4_f32);
+    velocity.y += f64::from(0.1_f32);
+    velocity
 }

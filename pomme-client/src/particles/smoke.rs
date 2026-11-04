@@ -4,13 +4,16 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use glam::{DVec3, Quat};
+use glam::DVec3;
 
-use super::particle::{Particle, ParticleRef, ParticleTickContext, SingleQuadParticle};
+use super::particle::{
+    Particle, ParticleRef, ParticleTickContext, bounds_at, randomized_motion, resized_bounds,
+};
 use super::render::{
     ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
     QuadParticleRenderState,
 };
+use super::single_quad_particle::{SingleQuadParticle, extract_camera_quad, randomized_quad_size};
 use super::sprites::SpriteSet;
 use super::types::{ParticleLimit, SimpleParticleType};
 use super::world::ParticleWorld;
@@ -48,16 +51,8 @@ impl SmokeParticle {
         let mut random = fastrand::Rng::new();
         // The base lifetime is overwritten, but its draw still precedes motion.
         let _base_lifetime = (4.0 / (random.f32() * 0.9 + 0.1)) as u32;
-        let mut velocity = DVec3::new(
-            f64::from((random.f32() * 2.0 - 1.0) * 0.4),
-            f64::from((random.f32() * 2.0 - 1.0) * 0.4),
-            f64::from((random.f32() * 2.0 - 1.0) * 0.4),
-        );
-        let speed = f64::from((random.f32() + random.f32() + 1.0) * 0.15);
-        // Java promotes these float constants after the f32 random arithmetic.
-        velocity = velocity / velocity.length() * speed * f64::from(0.4_f32);
-        velocity.y += f64::from(0.1_f32);
-        let mut quad_size = 0.1 * (random.f32() * 0.5 + 0.5) * 2.0;
+        let mut velocity = randomized_motion(&mut random, DVec3::ZERO);
+        let mut quad_size = randomized_quad_size(&mut random);
         velocity = velocity * f64::from(0.1_f32) + auxiliary;
         let color = [random.f32() * 0.3; 3];
         quad_size *= 0.75 * scale;
@@ -67,7 +62,7 @@ impl SmokeParticle {
             position,
             previous_position: position,
             velocity,
-            bounds: Self::bounds_at(position, 0.2, 0.2),
+            bounds: bounds_at(position, 0.2, 0.2),
             width: 0.2,
             height: 0.2,
             removed: false,
@@ -86,18 +81,6 @@ impl SmokeParticle {
         };
         particle.sprite = particle.sprites.get(particle.age, particle.lifetime);
         particle
-    }
-
-    fn bounds_at(position: DVec3, width: f32, height: f32) -> Aabb {
-        let half_width = f64::from(width / 2.0);
-        Aabb::new(
-            DVec3::new(position.x - half_width, position.y, position.z - half_width),
-            DVec3::new(
-                position.x + half_width,
-                position.y + f64::from(height),
-                position.z + half_width,
-            ),
-        )
     }
 }
 
@@ -193,7 +176,7 @@ impl Particle for SmokeParticle {
 
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
-        self.bounds = Self::bounds_at(position, self.width, self.height);
+        self.bounds = bounds_at(position, self.width, self.height);
     }
 
     fn get_previous_pos(&self) -> DVec3 {
@@ -232,15 +215,7 @@ impl Particle for SmokeParticle {
         if width != self.width || height != self.height {
             self.width = width;
             self.height = height;
-            let min = DVec3::new(
-                (self.bounds.min.x + self.bounds.max.x - f64::from(width)) / 2.0,
-                self.bounds.min.y,
-                (self.bounds.min.z + self.bounds.max.z - f64::from(width)) / 2.0,
-            );
-            self.bounds = Aabb::new(
-                min,
-                min + DVec3::new(f64::from(width), f64::from(height), f64::from(width)),
-            );
+            self.bounds = resized_bounds(self.bounds, width, height);
         }
     }
 
@@ -329,23 +304,7 @@ impl SingleQuadParticle for SmokeParticle {
         view: &ParticleView<'_>,
         output: &mut Vec<QuadParticleRenderState>,
     ) {
-        let mut rotation = view.rotation;
-        if self.roll != 0.0 {
-            let roll = self.previous_roll + view.partial_tick * (self.roll - self.previous_roll);
-            rotation *= Quat::from_rotation_z(roll);
-        }
-        let position = self.previous_position
-            + (self.position - self.previous_position) * f64::from(view.partial_tick)
-            - view.position;
-        output.push(QuadParticleRenderState {
-            position: position.as_vec3(),
-            rotation,
-            size: self.get_quad_size(view.partial_tick),
-            uv: self.get_uv(),
-            color: [self.color[0], self.color[1], self.color[2], self.alpha],
-            light: self.get_light_coords(world, view.partial_tick),
-            layer: self.get_layer(),
-        });
+        extract_camera_quad(self, self.previous_roll, world, view, output);
     }
 }
 
