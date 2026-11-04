@@ -530,9 +530,10 @@ struct Waitlist {
     /// back out as room frees, and is gone once nothing waits, so a column
     /// arriving after an unload or a teleport tries for room first.
     frontier_sq: f64,
-    /// A column inside the frontier has room in total but no gap that holds
-    /// its largest section, and nothing farther to evict: only compaction,
-    /// packing an arena's sections into the others' gaps, makes it room.
+    /// A column has room in total but no gaps that hold its sections, and
+    /// nothing farther to evict: only compaction, packing an arena's
+    /// sections into the others' gaps, makes it room. Kept until nothing
+    /// waits.
     fragmented: bool,
 }
 
@@ -778,6 +779,9 @@ pub struct ChunkBufferStore {
     alloc_order: Vec<u16>,
     /// The arena compaction is emptying, kept out of allocation.
     draining: Option<u16>,
+    /// The drain started for [`Waitlist::fragmented`] room, not to shrink
+    /// the total.
+    defragmenting: bool,
     /// Columns that had sections in the draining arena when compaction
     /// started and may still have some, so each frame moves the next ones
     /// without rescanning every column.
@@ -887,6 +891,7 @@ impl ChunkBufferStore {
             retry_due: false,
             alloc_order: Vec::new(),
             draining: None,
+            defragmenting: false,
             drain_queue: Vec::new(),
             compact_after: 0,
             chunks: HashMap::new(),
@@ -1403,6 +1408,9 @@ impl ChunkBufferStore {
             .iter()
             .map(|(&p, alloc)| (column_dist_sq(p, eye), p, alloc.need()));
         let (victims, freed) = eviction_victims(loaded, dist, need, self.free_room());
+        if freed && victims.is_empty() {
+            self.waiting.fragmented = true;
+        }
         let frontier = match victims.last() {
             Some(&(nearest, _)) if freed => nearest,
             _ => dist,
@@ -1466,7 +1474,7 @@ impl ChunkBufferStore {
             self.arena_size,
         );
         self.waiting.frontier_sq = frontier_sq;
-        self.waiting.fragmented = fragmented;
+        self.waiting.fragmented |= fragmented;
         for (pos, claim) in retry {
             if let Some(sections) = self.waiting.hand_back(pos, claim) {
                 out.push((pos, sections));
@@ -1575,6 +1583,7 @@ impl ChunkBufferStore {
     /// Leaves the draining arena to allocation again.
     fn stop_draining(&mut self) {
         self.draining = None;
+        self.defragmenting = false;
         self.drain_queue.clear();
     }
 
@@ -1592,11 +1601,17 @@ impl ChunkBufferStore {
     /// Not while columns are starved: they want the room, and the arena it
     /// frees would only be added back for them. Unless the room is
     /// [`Waitlist::fragmented`]: then the emptiest drains at any fill into
-    /// the others' gaps, and stays whole for them.
+    /// the others' gaps, and stays whole for them. If the others have no
+    /// gaps to take it, it backs off and tries again later.
     fn compact(&mut self, device: &rhi::backend::Device) {
-        if !self.waiting.is_empty() && !self.waiting.fragmented {
-            self.stop_draining();
-            return;
+        if !self.waiting.fragmented {
+            if !self.waiting.is_empty() {
+                self.stop_draining();
+                return;
+            }
+            if self.defragmenting {
+                self.stop_draining();
+            }
         }
         if self.frame_seq < self.compact_after {
             return;
@@ -1609,6 +1624,7 @@ impl ChunkBufferStore {
                 };
                 tracing::debug!("Compacting chunk arena {id}");
                 self.draining = Some(id);
+                self.defragmenting = self.waiting.fragmented;
                 // Nothing lands in it while it drains, so these are all.
                 self.drain_queue = self
                     .chunks
@@ -2604,6 +2620,11 @@ mod tests {
             eviction_victims(loaded.into_iter(), 8.0, need(1000), (800, u64::MAX)),
             (far, true)
         );
+        // Nothing farther, but room in total: what failed was the gaps.
+        assert_eq!(
+            eviction_victims(loaded.into_iter(), 16.0, need(100), (100, u64::MAX)),
+            (vec![], true)
+        );
         assert_eq!(
             eviction_victims(loaded.into_iter(), 0.0, Need::default(), (0, 0)),
             (vec![], true)
@@ -2803,13 +2824,17 @@ mod tests {
         assert!(waiting.is_empty());
         assert!(!waiting.beyond(far, eye));
 
-        // An unload of the last one drops it too, claim and all.
+        // An unload of the last one drops it too, claim, fragmentation and
+        // all.
         waiting.starve(near, [0], need(10));
         waiting.pull_frontier(0.0);
+        waiting.fragmented = true;
         waiting.hand_back(near, true);
+        assert!(waiting.fragmented);
         waiting.forget(near);
         assert!(waiting.is_empty());
         assert!(!waiting.beyond(far, eye));
+        assert!(!waiting.fragmented);
 
         waiting.starve(far, [0], need(10));
         waiting.pull_frontier(0.0);
