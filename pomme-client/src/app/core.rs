@@ -452,7 +452,19 @@ impl GameState {
                 .recreate_for_version(self.block_registry.owned_render_view());
             self.sync_distant_colors();
             self.set_distant_cache_key();
+            self.respawn_light(self.light_engine.has_sky());
         }
+    }
+
+    /// A fresh light engine for the chunk store's level, reading the current
+    /// block table.
+    fn respawn_light(&mut self, has_sky: bool) {
+        self.light_engine = crate::world::light::LightWorker::spawn(
+            self.chunk_store.height(),
+            self.chunk_store.min_y(),
+            has_sky,
+            self.block_registry.block_state_table(),
+        );
     }
 
     /// Distant terrain stores block states and biomes by id, so it keeps
@@ -524,12 +536,7 @@ impl GameState {
         // still names it until `DimensionName`.
         self.keep_edited_columns();
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
-        self.light_engine = crate::world::light::LightWorker::spawn(
-            height,
-            min_y,
-            has_skylight,
-            self.block_registry.block_state_table(),
-        );
+        self.respawn_light(has_skylight);
         // The old level's block entities, moving blocks among them.
         self.block_entity_anim = Default::default();
         self.position_set = false;
@@ -979,6 +986,9 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    /// Ticks the loading screen handed to the game phase: the join tick, which
+    /// sent `player_loaded`, and the rest of its frame's.
+    pub carried_ticks: u32,
     menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
@@ -1151,6 +1161,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            carried_ticks: 0,
             menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             deferred_quick_play: None,
@@ -1859,6 +1870,7 @@ impl AppCore {
                         tracing::info!("Connected to server");
                         // Ticks restart from zero with the play state.
                         self.tick_accumulator = 0.0;
+                        self.carried_ticks = 0;
                         *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");

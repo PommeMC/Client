@@ -3,7 +3,9 @@
 // The listed nodes' last render frame set to now (bit 31 of the id: just
 // allocated) or cleared (freed).
 
-layout(local_size_x = 128) in;
+#include "distant_consts.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
 
 layout(set = 0, binding = 0, std430) writeonly restrict buffer LastRenderFrame {
     uint last_render_frame[];
@@ -24,5 +26,6 @@ void main() {
         return;
     }
     uint id = ids[i];
-    last_render_frame[id & 0x7FFFFFFFu] = (id & 0x80000000u) != 0u ? set_to : 0xFFFFFFFFu;
+    bool reset = (id & VISIBILITY_RESET_BIT) != 0u;
+    last_render_frame[id & ~VISIBILITY_RESET_BIT] = reset ? set_to : 0xFFFFFFFFu;
 }

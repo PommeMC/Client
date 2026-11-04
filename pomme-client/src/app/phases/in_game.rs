@@ -2424,107 +2424,26 @@ pub(super) fn ticks_to_run(accumulator: &mut f32) -> u32 {
     owed.min(10)
 }
 
-pub fn update_game(
+/// Runs a frame's client ticks, between vanilla `Minecraft.runTick`'s packet
+/// processing and its `level.update()`.
+fn run_ticks(
     core: &mut AppCore,
-    dt: f32,
-    raw_dt: f32,
     gfx: &mut Gfx,
     connection: &ConnectionHandle,
     game: &mut GameState,
-) -> GameUpdateResult {
-    // Snapshot last frame's phase timings before this frame overwrites them: they
-    // align with `raw_dt`, which measures the previous frame's full duration.
-    let frame_start = std::time::Instant::now();
-    let prev_phases = game.last_update_phases;
-
-    // Position the audio listener at the player's head and push current
-    // volumes before draining sound packets this frame.
-    let listener_pos = game.player.eye_pos();
-    core.audio.set_listener(
-        listener_pos,
-        game.player.look_dir.y_rot_deg(),
-        game.player.look_dir.x_rot_deg(),
-    );
-    core.audio
-        .update_entity_sound_position(game.player.entity_id, game.player.position);
-    core.audio.set_volumes(core.menu.category_volumes());
-    core.audio.set_subtitles_enabled(core.menu.show_subtitles);
-
-    gfx.renderer.set_vsync(core.menu.vsync);
-    gfx.renderer
-        .set_menu_blur_radius(core.menu.menu_background_blurriness);
-    game.chat.set_options(core.menu.chat_options);
-
-    // Vanilla pauseIfInactive: losing OS focus for more than half a second
-    // with no screen open pauses the game, which also releases the cursor
-    // (otherwise a system overlay like Win-key search opens over a still
-    // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
-    if core.pause_on_lost_focus
-        && core
-            .unfocused_since
-            .is_some_and(|t| t.elapsed().as_millis() > 500)
-        && game.input_live()
-        && !game.dead
-    {
-        game.paused = true;
-        game.pause_screen = PauseScreen::Main;
-        core.apply_cursor_grab(&gfx.window, Some(game));
-    }
-
-    #[cfg(feature = "test-harness")]
-    if let Some(code) = core.input.take_harness_release() {
-        game.on_key_released(code, &core.input, connection);
-    }
-
-    // Added before the drain, which takes every packet when a tick is owed.
-    core.tick_accumulator += dt;
-    let disconnect_reason =
-        core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
-    if let Some(reason) = disconnect_reason {
-        return GameUpdateResult::Disconnected { reason };
-    }
-
-    game.chat.tick();
-    for mark in game.chat.take_chat_marks() {
-        connection.packet_tx.mark_chat(mark);
-    }
-
-    game.drain_and_upload_meshes(&mut gfx.renderer);
-
-    // Sky time ticks unconditionally so it keeps flowing in menus.
-    core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
-    while core.time_tick_accumulator >= TICK_RATE {
-        game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
-        game.clocks.tick(game.sky_state.game_time);
-        game.sync_day_time();
-        game.sample_biomes(gfx.renderer.camera_render_position());
-        game.environment_probe.tick(game.resolve_environment());
-        core.time_tick_accumulator -= TICK_RATE;
-    }
-
-    if game.input_live() && game.chunk_load_bench.is_none() {
-        gfx.renderer.update_camera(
-            &mut core.input,
-            dt,
-            core.menu.sensitivity,
-            core.menu.invert_mouse_x,
-            core.menu.invert_mouse_y,
-        );
-    }
-
-    // Menus never pause the simulation; tick_physics substitutes neutral input.
-    let ticks = ticks_to_run(&mut core.tick_accumulator);
+    ticks: u32,
+) {
     // Vanilla `Minecraft.runTick` ticks textures once per frame that runs any
     // ticks, before them.
     // TODO: vanilla also skips this while singleplayer is paused and under
     // `/tick freeze` (`isLevelRunningNormally`); pomme tracks neither yet.
-    let ticked = ticks > 0;
-    if ticked {
-        if game.deterministic {
-            gfx.renderer.hold_texture_animations();
-        } else {
-            gfx.renderer.tick_texture_animations();
-        }
+    if ticks == 0 {
+        return;
+    }
+    if game.deterministic {
+        gfx.renderer.hold_texture_animations();
+    } else {
+        gfx.renderer.tick_texture_animations();
     }
     for _ in 0..ticks {
         game.tick_count = game.tick_count.wrapping_add(1);
@@ -2616,13 +2535,109 @@ pub fn update_game(
         }
         AppCore::send_client_tick_end(connection);
     }
-    if ticked {
-        gfx.renderer.tick_lightmap(lightmap_info(
-            game,
-            core.menu.brightness,
-            sky_partial_tick(core),
-        ));
+    gfx.renderer.tick_lightmap(lightmap_info(
+        game,
+        core.menu.brightness,
+        sky_partial_tick(core),
+    ));
+}
+
+pub fn update_game(
+    core: &mut AppCore,
+    dt: f32,
+    raw_dt: f32,
+    gfx: &mut Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) -> GameUpdateResult {
+    // Snapshot last frame's phase timings before this frame overwrites them: they
+    // align with `raw_dt`, which measures the previous frame's full duration.
+    let frame_start = std::time::Instant::now();
+    let prev_phases = game.last_update_phases;
+
+    // Position the audio listener at the player's head and push current
+    // volumes before draining sound packets this frame.
+    let listener_pos = game.player.eye_pos();
+    core.audio.set_listener(
+        listener_pos,
+        game.player.look_dir.y_rot_deg(),
+        game.player.look_dir.x_rot_deg(),
+    );
+    core.audio
+        .update_entity_sound_position(game.player.entity_id, game.player.position);
+    core.audio.set_volumes(core.menu.category_volumes());
+    core.audio.set_subtitles_enabled(core.menu.show_subtitles);
+
+    gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer
+        .set_menu_blur_radius(core.menu.menu_background_blurriness);
+    game.chat.set_options(core.menu.chat_options);
+
+    // Vanilla pauseIfInactive: losing OS focus for more than half a second
+    // with no screen open pauses the game, which also releases the cursor
+    // (otherwise a system overlay like Win-key search opens over a still
+    // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
+    if core.pause_on_lost_focus
+        && core
+            .unfocused_since
+            .is_some_and(|t| t.elapsed().as_millis() > 500)
+        && game.input_live()
+        && !game.dead
+    {
+        game.paused = true;
+        game.pause_screen = PauseScreen::Main;
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
+
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_release() {
+        game.on_key_released(code, &core.input, connection);
+    }
+
+    // The ticks the loading screen handed over finish before any packet is
+    // handled, as vanilla's join tick does.
+    let carried = std::mem::take(&mut core.carried_ticks);
+    run_ticks(core, gfx, connection, game, carried);
+
+    // Added before the drain, which takes every packet when a tick is owed.
+    core.tick_accumulator += dt;
+    let disconnect_reason =
+        core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
+    if let Some(reason) = disconnect_reason {
+        return GameUpdateResult::Disconnected { reason };
+    }
+
+    game.chat.tick();
+    for mark in game.chat.take_chat_marks() {
+        connection.packet_tx.mark_chat(mark);
+    }
+
+    game.drain_and_upload_meshes(&mut gfx.renderer);
+
+    // Sky time ticks unconditionally so it keeps flowing in menus.
+    core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
+    while core.time_tick_accumulator >= TICK_RATE {
+        game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
+        game.clocks.tick(game.sky_state.game_time);
+        game.sync_day_time();
+        game.sample_biomes(gfx.renderer.camera_render_position());
+        game.environment_probe.tick(game.resolve_environment());
+        core.time_tick_accumulator -= TICK_RATE;
+    }
+
+    if game.input_live() && game.chunk_load_bench.is_none() {
+        gfx.renderer.update_camera(
+            &mut core.input,
+            dt,
+            core.menu.sensitivity,
+            core.menu.invert_mouse_x,
+            core.menu.invert_mouse_y,
+        );
+    }
+
+    // Menus never pause the simulation; tick_physics substitutes neutral input.
+    let ticks = ticks_to_run(&mut core.tick_accumulator);
+    run_ticks(core, gfx, connection, game, ticks);
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.

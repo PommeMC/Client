@@ -221,6 +221,9 @@ fn distant_consts_glsl() -> String {
         ("TEMPORAL_DRAWS", TEMPORAL_DRAWS),
         ("TRANSLUCENT_OFFSET", TRANSLUCENT_OFFSET),
         ("TEMPORAL_OFFSET", TEMPORAL_OFFSET),
+        ("NODE_SCATTER_BIT", NODE_SCATTER_BIT),
+        ("VISIBILITY_RESET_BIT", VISIBILITY_RESET_BIT),
+        ("SEEN_BEFORE_BIT", SEEN_BEFORE_BIT),
     ];
     let plain = [
         ("CLEANER_OUTPUT", u64::from(CLEANER_OUTPUT)),
@@ -229,6 +232,10 @@ fn distant_consts_glsl() -> String {
         ("COUNTS_TRANSLUCENT", COUNTS_TRANSLUCENT),
         ("COUNTS_TEMPORAL", COUNTS_TEMPORAL),
         ("COUNTS_CULL_DRAW", COUNTS_CULL_DRAW),
+        ("LIST_GROUP", u64::from(LIST_GROUP)),
+        ("TRAVERSAL_GROUP_BITS", u64::from(TRAVERSAL_GROUP_BITS)),
+        ("CLEANER_SORT_THREADS", u64::from(CLEANER_SORT_THREADS)),
+        ("CLEANER_SORT_ELEMS", u64::from(CLEANER_SORT_ELEMS)),
     ];
     let mut glsl = String::from("#ifndef DISTANT_CONSTS_GLSL\n#define DISTANT_CONSTS_GLSL\n");
     for (name, value) in uints {

@@ -35,3 +35,17 @@ pub const COUNTS_OPAQUE: u64 = 12;
 pub const COUNTS_TRANSLUCENT: u64 = 16;
 pub const COUNTS_TEMPORAL: u64 = 20;
 pub const COUNTS_CULL_DRAW: u64 = 24;
+/// The workgroup of the passes over a list, an invocation per entry.
+pub const LIST_GROUP: u32 = 128;
+/// The traversal's workgroup, a power of two.
+pub const TRAVERSAL_GROUP_BITS: u32 = 5;
+/// The cleaner's sort: invocations a workgroup, and nodes each covers.
+pub const CLEANER_SORT_THREADS: u32 = 64;
+pub const CLEANER_SORT_ELEMS: u32 = 8;
+/// A scatter index with this bit lands in the node buffer.
+pub const NODE_SCATTER_BIT: u32 = 1 << 31;
+/// A visibility-set id with this bit was allocated, without it freed.
+pub const VISIBILITY_RESET_BIT: u32 = 1 << 31;
+/// A section's visibility word: the frame the occlusion pass last saw it,
+/// with this bit when it saw it the frame before too.
+pub const SEEN_BEFORE_BIT: u32 = 1 << 31;

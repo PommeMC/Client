@@ -262,16 +262,18 @@ impl VoxelizedSection {
     }
 }
 
-/// A column's light at vanilla section `section_y`: `block << 4 | sky`, 0
-/// without data.
+/// A column's light at vanilla section `section_y`: `block << 4 | sky`, read
+/// as the game reads it. A departure: the reference reads each section's
+/// stored layers raw, a missing one as dark, and takes an air section with
+/// neither layer as unlit air. Sections above a column's highest sky layer
+/// store none, so faces bordering them would draw dark where the game shows
+/// open sky; here they read 15, and a missing layer below defers up to the
+/// next stored one, as the game's sky light does.
 pub(crate) fn light_of(
-    light: Option<&ChunkLightData>,
+    light: &ChunkLightData,
     section_y: i32,
 ) -> impl Fn(usize, usize, usize) -> u8 + '_ {
     move |x, y, z| {
-        let Some(light) = light else {
-            return 0;
-        };
         let (x, y, z) = (x as i32, section_y * 16 + y as i32, z as i32);
         light.get_block_light(x, y, z) << 4 | light.get_sky_light(x, y, z)
     }

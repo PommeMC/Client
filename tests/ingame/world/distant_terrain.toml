@@ -1,9 +1,8 @@
 # Distant Terrain keeps every chunk seen and draws them past the loaded
 # ones: a tower is kept as soon as its chunk is lit, still shows on the
-# horizon when left 200 blocks behind at Render Distance 2, comes back from
-# disk after going far enough to drop it from memory, and goes with the
-# option. Pomme-only (the vanilla harness has no Distant Terrain), so it
-# fails there by design.
+# horizon when left 200 blocks behind at Render Distance 2, comes back
+# after leaving the view, and goes with the option. Pomme-only (the vanilla
+# harness has no Distant Terrain), so it fails there by design.
 
 [[step]]
 wait_ms = 2000
@@ -47,8 +46,7 @@ look_at = [1.5, -40.0, 1.5]
 expect = { distant_terrain = { at = [1, 1] } }
 timeout_ms = 20000
 
-# Past the view and the margin kept in memory (32 + 64 chunks), which
-# writes the tower's sections to disk and drops them.
+# Past the view (32 chunks), which drops the tower's sections.
 [[step]]
 chat = "/tp @s 3000.5 -50 1.5"
 

@@ -226,6 +226,13 @@ fn run_version(
                         None => Server::start(java, jar, &dir)?,
                     };
                     let game_dir = dir.join("client");
+                    // The world is fresh each run, so the distant terrain
+                    // kept of the last one is stale.
+                    let distant = game_dir.join("distant_terrain");
+                    if distant.exists() {
+                        std::fs::remove_dir_all(&distant)
+                            .map_err(|e| format!("{}: {e}", distant.display()))?;
+                    }
                     loop {
                         let next = queue.lock().unwrap().next();
                         let Some(script) = next else {

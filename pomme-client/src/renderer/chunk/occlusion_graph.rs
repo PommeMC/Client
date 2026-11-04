@@ -537,6 +537,9 @@ pub struct Walker {
     rx: Receiver<Visibility>,
 }
 
+/// The thread only ends early by panicking; the game goes down with it.
+const THREAD_GONE: &str = "the chunk occlusion thread panicked";
+
 impl Walker {
     pub fn spawn() -> Self {
         let (tx, messages) = crossbeam_channel::unbounded();
@@ -549,15 +552,17 @@ impl Walker {
     }
 
     pub fn update(&self, update: Update) {
-        let _ = self.tx.send(Message::Update(update));
+        self.tx.send(Message::Update(update)).expect(THREAD_GONE);
     }
 
     pub fn walk(&self, walk: Walk) {
-        let _ = self.tx.send(Message::Walk(Box::new(walk)));
+        self.tx
+            .send(Message::Walk(Box::new(walk)))
+            .expect(THREAD_GONE);
     }
 
     pub fn try_result(&self) -> Option<Visibility> {
-        self.rx.try_recv().ok()
+        crate::util::try_recv_live(&self.rx, THREAD_GONE)
     }
 }
 
@@ -694,6 +699,15 @@ mod tests {
             section_count: 8,
             occlusion: true,
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "occlusion thread panicked")]
+    fn a_dead_thread_takes_the_game_down() {
+        let (tx, _messages) = crossbeam_channel::unbounded();
+        let (results, rx) = crossbeam_channel::unbounded::<Visibility>();
+        drop(results);
+        Walker { tx, rx }.try_result();
     }
 
     #[test]

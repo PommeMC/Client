@@ -31,9 +31,6 @@ layout(set = 3, binding = 0) readonly buffer Positions {
 layout(location = 0) flat out uvec3 v_data;
 layout(location = 1) out vec2 v_uv;
 
-// Vanilla's directional shade (the overworld's cardinal lighting), by face.
-const float FACE_SHADE[6] = float[](0.5, 1.0, 0.8, 0.8, 0.6, 0.6);
-
 uint field(uvec2 quad, uint bits, uint shift) {
     uint word = shift < 32u ? quad.x : quad.y;
     return (word >> (shift & 31u)) & ((1u << bits) - 1u);
@@ -88,14 +85,14 @@ void main() {
     flags |= (uint(size.x) - 1u) << 8u | (uint(size.y) - 1u) << 12u;
     flags |= model_id << 16u;
 
-    // The quad's light (block high, sky low) through the lightmap, shaded per
-    // face for models that take directional shade; the model's tint, constant or
-    // by the quad's biome.
+    // The quad's light (block high, sky low) through the lightmap, shaded by
+    // the dimension's cardinal lighting: per face for models that take
+    // directional shade, as an up face otherwise; the model's tint, constant
+    // or by the quad's biome.
     uint light = field(quad, 8u, 55u);
     vec3 lit = sample_lightmap(vec2(float(light >> 4u), float(light & 0xFu)) * 16.0).rgb;
-    if ((model.flags & MODEL_SHADED) != 0u) {
-        lit *= FACE_SHADE[face];
-    }
+    uint shade_face = (model.flags & MODEL_SHADED) != 0u ? face : 1u;
+    lit *= face_shade[shade_face >> 2u][shade_face & 3u];
     uint tint = model.tint;
     if ((model.flags & MODEL_BIOME_TINT) != 0u) {
         tint = tints[tint * TINT_BIOMES + field(quad, 9u, 46u)];

@@ -9,9 +9,9 @@ use azalea_block::BlockState;
 use super::bakery::{Bakery, FaceTexture, MODEL_TEXTURE_SIZE, TEXELS};
 use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::renderer::chunk::mesher::int_to_rgb;
-use crate::world::block::FluidKind;
 use crate::world::block::model::Direction;
 use crate::world::block::render_assets::{BlockRenderView, Tint};
+use crate::world::block::{BlockStateData, FluidKind};
 
 const SIZE: usize = MODEL_TEXTURE_SIZE;
 /// Mip levels of a face texture: 16, 8, 4 and 2 texels.
@@ -116,7 +116,9 @@ pub(crate) trait Models {
     fn fluid_model(&self, model: u16) -> u16;
     /// A fluid's model with its surface `gap` blocks below the top of a
     /// level-`level` voxel, inset as at level 0 rather than scaled with the
-    /// voxel; the fluid's own at level 0.
+    /// voxel; the fluid's own at level 0. Fluid never faces fluid, so where
+    /// a neighbouring column's surface sits lower the higher one shows no
+    /// side between the two heights, inside a section or across a seam.
     fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16;
 }
 
@@ -401,14 +403,12 @@ impl ModelFactory {
             .iter()
             .any(|&a| depths[a].is_none() && depths[a + 1].is_none());
         let biome_coloured = self.biome_coloured(tint, held_fluid);
-        // Only a block culling its own kind on every side counts.
-        let culls_same = Direction::VALUES.iter().all(|&dir| data.culls_same(dir));
         let mut metadata = u64::from(biome_coloured)
             | u64::from(layer == Layer::Translucent) << 1
             | u64::from(double_sided) << 2
             | u64::from(!is_fluid && data.fluid().kind != FluidKind::Empty) << 3
             | u64::from(is_fluid) << 4
-            | u64::from(culls_same) << 5;
+            | u64::from(culls_same(data)) << 5;
         let mut fully_opaque = true;
         let mut face_data = [u32::MAX; 6];
         // Highest face first, so each shifts into place.
@@ -424,10 +424,7 @@ impl ModelFactory {
             let written = written_pixel_count(texture, check) as f32;
             let covers_block = min_x == 0 && min_y == 0 && max_x == SIZE - 1 && max_y == SIZE - 1;
             metadata |= u64::from(covers_block) << 1;
-            let occludes = layer != Layer::Translucent
-                // A face drawn far in from its side doesn't hide the next block.
-                && offset < 0.1
-                && written / TEXELS as f32 > 0.9;
+            let occludes = face_occludes(layer, is_fluid, face, offset, written);
             metadata |= u64::from(occludes);
             fully_opaque &= occludes;
             metadata |= u64::from(offset < 0.3) << 2;
@@ -472,6 +469,23 @@ impl ModelFactory {
         self.entries.insert(entry, id);
         id
     }
+}
+
+/// Whether a block culls its own kind: only one that does on every side.
+fn culls_same(data: &BlockStateData) -> bool {
+    Direction::VALUES.iter().all(|&dir| data.culls_same(dir))
+}
+
+/// Whether face `face` (`written` texels drawn, `offset` in from its side)
+/// hides the block it touches: not when translucent, drawn far in from its
+/// side, or mostly clear. A fluid's top and sides never do: they end at
+/// `FluidRenderer`'s 8/9 in the reference, short of occluding, where ours
+/// are drawn full height ([`super::bakery`]'s `fluid_quads`).
+fn face_occludes(layer: Layer, is_fluid: bool, face: usize, offset: f32, written: f32) -> bool {
+    layer != Layer::Translucent
+        && !(is_fluid && face != 0)
+        && offset < 0.1
+        && written / TEXELS as f32 > 0.9
 }
 
 fn to_bytes(rgb: [f32; 3]) -> [u8; 3] {
@@ -744,6 +758,25 @@ mod tests {
         assert!(!factory.biome_coloured(ModelTint::None, Some(0)));
         assert!(!factory.biome_coloured(ModelTint::Constant([1, 2, 3]), None));
         assert!(factory.biome_coloured(ModelTint::Foliage, Some(0)));
+    }
+
+    #[test]
+    fn a_fluid_occludes_only_below_so_is_never_fully_opaque() {
+        let full = TEXELS as f32;
+        let occluding: Vec<usize> = (0..6)
+            .filter(|&face| face_occludes(Layer::Solid, true, face, 0.0, full))
+            .collect();
+        assert_eq!(occluding, [0]);
+        assert!((0..6).all(|face| face_occludes(Layer::Solid, false, face, 0.0, full)));
+    }
+
+    #[test]
+    fn only_blocks_culling_their_kind_on_every_side_cull_same() {
+        let table = crate::world::block::BlockStateTable::native();
+        let culls = |name| culls_same(table.block_state_data(table.first_state_of(name).unwrap()));
+        assert!(culls("glass") && culls("water"));
+        // Mangrove roots skip their own kind only above and below.
+        assert!(!culls("mangrove_roots") && !culls("stone"));
     }
 
     /// Six faces of green with a clear texel at the corner of each.

@@ -26,6 +26,9 @@ use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 /// the frame without it.
 const EDIT_WAIT: Duration = Duration::from_millis(2);
 
+/// The thread only ends early by panicking; the game goes down with it.
+const THREAD_GONE: &str = "the light thread panicked";
+
 enum Message {
     Task(LightTask),
     ChunkLoaded {
@@ -153,7 +156,7 @@ impl LightWorker {
 
     fn send(&mut self, message: Message) {
         self.sent += 1;
-        let _ = self.tx.send(message);
+        self.tx.send(message).expect(THREAD_GONE);
     }
 
     pub fn queue_task(&mut self, task: LightTask) {
@@ -237,7 +240,7 @@ impl LightWorker {
                 this.awaited = None;
             }
         };
-        while let Ok(report) = self.rx.try_recv() {
+        while let Some(report) = crate::util::try_recv_live(&self.rx, THREAD_GONE) {
             apply(self, report);
         }
         let deadline = std::time::Instant::now() + EDIT_WAIT;
@@ -245,9 +248,7 @@ impl LightWorker {
             match self.rx.recv_deadline(deadline) {
                 Ok(report) => apply(self, report),
                 Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.awaited = None;
-                }
+                Err(RecvTimeoutError::Disconnected) => panic!("{THREAD_GONE}"),
             }
         }
     }
@@ -365,6 +366,14 @@ mod tests {
         assert_eq!(out.columns, [column]);
         assert!(worker.light_on_in_column(column));
         assert!(worker.unloaded.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "light thread panicked")]
+    fn a_dead_thread_takes_the_game_down() {
+        let (mut worker, _messages, reports) = worker();
+        drop(reports);
+        worker.poll(&mut ChunkStore::new(2), &mut LightDirty::default());
     }
 
     #[test]

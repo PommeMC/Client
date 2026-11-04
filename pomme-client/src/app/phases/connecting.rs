@@ -1,4 +1,3 @@
-use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
@@ -70,8 +69,8 @@ pub fn update_connecting(
                     // Vanilla closes `LevelLoadingScreen` on the same tick that
                     // sends `player_loaded`, and the local player then ticks
                     // (and moves) later in it. Hand this tick and the rest to
-                    // the game phase unspent so they play out there.
-                    core.tick_accumulator += (ticks - done) as f32 * TICK_RATE;
+                    // the game phase, which runs them before handling packets.
+                    core.carried_ticks = ticks - done;
                     return ConnectingUpdateResult::JoinGame;
                 }
                 AppCore::send_client_tick_end(connection);

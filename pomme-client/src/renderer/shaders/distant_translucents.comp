@@ -3,8 +3,6 @@
 // The translucent draws placed by their distance bucket's prefix sum, so the
 // list runs far to near.
 
-layout(local_size_x = 128) in;
-
 #define DISTANT_SET 0
 #define SCENE_BINDING 0
 #define DRAW_BUFFER_BINDING 1
@@ -13,6 +11,8 @@ layout(local_size_x = 128) in;
 #define RENDER_LIST_BINDING 4
 #define TRANSLUCENT_DATA_BINDING 5
 #include "distant_section.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
 
 void main() {
     if (gl_GlobalInvocationID.x >= min(translucent_draw_count, TRANSLUCENT_DRAWS)) {

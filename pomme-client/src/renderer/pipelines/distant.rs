@@ -13,9 +13,10 @@ use crate::renderer::chunk::buffer::DrawCommand;
 use crate::renderer::chunk::occlusion_graph::VIS_MARGIN_RADIANS;
 use crate::renderer::distant::gpu::{
     CLEANER_IDS_BYTES, CLEANER_KEYS_BYTES, COUNTS_BYTES, COUNTS_CULL_DRAW, CUBE_FIRST_INDEX,
-    DISTANT_FAR, DRAWS_BYTES, DistantBuffers, NODE_VISIBILITY_BYTES, POSITIONS_BYTES,
+    DISTANT_FAR, DRAWS_BYTES, DistantBuffers, LIST_GROUP, NODE_VISIBILITY_BYTES, POSITIONS_BYTES,
     QUEUE_META_BYTES, RENDER_LIST_BYTES, REQUESTS_BYTES, Region, SCRATCH_BYTES, SECTIONS_BYTES,
-    TOP_IDS_BYTES, TRANSLUCENT_BUCKETS, TRANSLUCENT_BYTES, VISIBILITY_BYTES, VISIBILITY_SETS_BYTES,
+    TOP_IDS_BYTES, TRANSLUCENT_BUCKETS, TRANSLUCENT_BYTES, TRAVERSAL_GROUP, VISIBILITY_BYTES,
+    VISIBILITY_SETS_BYTES,
 };
 use crate::renderer::distant::nodes::NODE_BYTES;
 use crate::renderer::distant::section::LEVELS;
@@ -24,6 +25,7 @@ use crate::renderer::rhi::TextureUse;
 use crate::renderer::rhi::backend::TextureTransition;
 use crate::renderer::util::{storage_binding, uniform_binding};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
+use crate::world::block::model::{CardinalLighting, Direction};
 
 /// Distant terrain's image: plain RGBA8, lit as the quads draw.
 const FORMAT: rhi::TextureFormat = rhi::TextureFormat::Rgba8Unorm;
@@ -52,6 +54,7 @@ struct SceneUniform {
     render_distance: f32,
     frustum: [[f32; 4]; 6],
     request_frustum: [[f32; 4]; 6],
+    face_shade: [[f32; 4]; 2],
 }
 
 const SCENE_BYTES: u64 = size_of::<SceneUniform>() as u64;
@@ -437,8 +440,8 @@ impl DistantPipeline {
         }
     }
 
-    /// The swapchain changed: the blit draws into it, and the targets
-    /// follow its size.
+    /// The swapchain's formats changed: the blit draws into it. The targets
+    /// go with [`Self::drop_targets`], which every swapchain rebuild calls.
     pub fn rebuild(
         &mut self,
         device: &rhi::backend::Device,
@@ -446,7 +449,6 @@ impl DistantPipeline {
     ) {
         self.blit.destroy(device);
         self.blit = create_blit_pipeline(device, swapchain, self.blit_layout);
-        self.drop_targets(device);
     }
 
     /// The swapchain was remade, its depth with it even at the same size:
@@ -591,7 +593,7 @@ impl DistantPipeline {
     /// frame's opaque draws into the image, the Hi-Z from its depth, the
     /// cleaner's passes, the traversal picking this frame's sections, the
     /// occlusion pass over them, this frame's draw list, and the newly seen
-    /// and translucent draws.
+    /// and translucent draws, shaded by the dimension's `cardinal_lighting`.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -604,6 +606,7 @@ impl DistantPipeline {
         render_distance: u32,
         frame_depth: rhi::backend::TextureHandle,
         extent: rhi::Extent,
+        cardinal_lighting: CardinalLighting,
     ) {
         self.ensure_targets(device, extent, frame_depth, buffers);
         let targets = self.targets.as_ref().expect("made above");
@@ -635,6 +638,7 @@ impl DistantPipeline {
             request_frustum: Camera::planes_from_view_projection(
                 camera.distant_view_projection_dilated(DISTANT_FAR, VIS_MARGIN_RADIANS),
             ),
+            face_shade: face_shade(cardinal_lighting),
         }));
         let draw = buffers.draw_buffers();
         let (counts, translucent, queue_meta) = (
@@ -818,7 +822,7 @@ impl DistantPipeline {
                 &self.visibility_set.pipeline,
                 self.visibility_set.set(frame),
                 bytemuck::bytes_of(&[sets, frame_id]),
-                [sets.div_ceil(128), 1, 1],
+                [sets.div_ceil(LIST_GROUP), 1, 1],
             );
             encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage);
         }
@@ -917,7 +921,7 @@ impl DistantPipeline {
                 &self.traversal,
                 targets.traversal_set(frame, Iteration::First),
                 &0u32.to_le_bytes(),
-                [top_count.div_ceil(32), 1, 1],
+                [top_count.div_ceil(TRAVERSAL_GROUP), 1, 1],
             );
         }
         for iteration in 1..u32::from(LEVELS) {
@@ -1106,6 +1110,12 @@ impl DistantPipeline {
     }
 }
 
+/// `distant.vert`'s shade by face, in [`Direction::VALUES`] order.
+fn face_shade(lighting: CardinalLighting) -> [[f32; 4]; 2] {
+    let [down, up, north, south, west, east] = Direction::VALUES.map(|dir| lighting.by_face(dir));
+    [[down, up, north, south], [west, east, 0.0, 0.0]]
+}
+
 /// A `texture` loaded by `load` and kept after the pass.
 fn depth_attachment(
     texture: rhi::backend::TextureHandle,
@@ -1276,4 +1286,20 @@ fn create_blit_pipeline(
         Some(rhi::DepthState::WRITE),
         Some(rhi::BlendState::TRANSLUCENT),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nether_shades_down_faces_as_up_ones() {
+        let [first, rest] = face_shade(CardinalLighting::NETHER);
+        assert_eq!(first, [0.9, 0.9, 0.8, 0.8]);
+        assert_eq!(rest[..2], [0.6, 0.6]);
+        assert_eq!(
+            face_shade(CardinalLighting::DEFAULT)[0],
+            [0.5, 1.0, 0.8, 0.8]
+        );
+    }
 }

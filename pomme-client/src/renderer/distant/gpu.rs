@@ -3,7 +3,7 @@
 //! each frame to pick which to draw, the requests it sends back, and the
 //! draw list the GPU builds from that pick.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use glam::DVec3;
@@ -14,7 +14,7 @@ use super::models::{
     ATLAS_COLUMNS, ATLAS_ROWS, BlockModel, CAPACITY, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT,
     TILE_WIDTH,
 };
-use super::nodes::{NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
+use super::nodes::{NODE_BYTES, NodeGraph};
 use super::section::{LEVELS, SIDE, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
@@ -29,15 +29,18 @@ pub(crate) mod consts {
 }
 
 use consts::{
-    CLEANER_OUTPUT, CLEANER_SENTINEL, MAX_NODES, OPAQUE_DRAWS, QUADS_PER_DRAW, TEMPORAL_DRAWS,
+    CLEANER_OUTPUT, CLEANER_SENTINEL, CLEANER_SORT_ELEMS, CLEANER_SORT_THREADS, MAX_NODES,
+    NODE_SCATTER_BIT, OPAQUE_DRAWS, QUADS_PER_DRAW, SEEN_BEFORE_BIT, TEMPORAL_DRAWS,
     TEMPORAL_OFFSET, TRANSLUCENT_DRAWS, TRANSLUCENT_OFFSET,
 };
 pub(crate) use consts::{
-    COUNTS_CULL_DRAW, COUNTS_OPAQUE, COUNTS_TEMPORAL, COUNTS_TRANSLUCENT, MAX_LISTED, MAX_REQUESTS,
-    TRANSLUCENT_BUCKETS,
+    COUNTS_CULL_DRAW, COUNTS_OPAQUE, COUNTS_TEMPORAL, COUNTS_TRANSLUCENT, LIST_GROUP, MAX_LISTED,
+    MAX_REQUESTS, TRANSLUCENT_BUCKETS,
 };
 
 const _: () = assert!(consts::LEVELS == LEVELS as u32);
+/// The traversal's workgroup.
+pub(crate) const TRAVERSAL_GROUP: u32 = 1 << consts::TRAVERSAL_GROUP_BITS;
 
 /// The arena's size: an eighth of the device's memory, within these bounds.
 const MAX_ARENA_BYTES: u64 = 512 << 20;
@@ -104,9 +107,13 @@ pub(crate) const TOP_IDS_BYTES: u64 = MAX_ROOTS as u64 * 4;
 pub(crate) const NODE_VISIBILITY_BYTES: u64 = MAX_NODES as u64 * 4;
 /// The cleaner's output: the ids it picks, then their keys.
 pub(crate) const CLEANER_IDS_BYTES: u64 = CLEANER_OUTPUT as u64 * 4;
-pub(crate) const CLEANER_KEYS_BYTES: u64 = CLEANER_OUTPUT as u64 * 8;
-/// Nodes a workgroup of the cleaner's sort covers (64 threads of 8).
-const CLEANER_SORT_GROUP: u32 = 512;
+/// Per pick its key and its id (a `uvec4`), so a pick whose id now holds
+/// another node is dropped (a departure: the reference reads back keys
+/// alone, which after a dimension change can name a new node at the same
+/// coordinates).
+pub(crate) const CLEANER_KEYS_BYTES: u64 = CLEANER_OUTPUT as u64 * 16;
+/// Nodes a workgroup of the cleaner's sort covers.
+const CLEANER_SORT_GROUP: u32 = CLEANER_SORT_THREADS * CLEANER_SORT_ELEMS;
 /// Visibility sets a frame's list holds.
 const MAX_VISIBILITY_SETS: usize = 1 << 16;
 pub(crate) const VISIBILITY_SETS_BYTES: u64 = MAX_VISIBILITY_SETS as u64 * 4;
@@ -265,6 +272,12 @@ pub(crate) struct DistantBuffers {
     models: rhi::backend::Buffer,
     /// Biome tints by kind, then biome.
     tints: rhi::backend::Buffer,
+    /// Models and tints waiting for [`Self::record_model_upload`], which
+    /// copies them in through `model_staging` so no frame in flight sees
+    /// them change.
+    pending_models: BTreeMap<u16, BlockModel>,
+    pending_tints: Option<Vec<u32>>,
+    model_staging: Vec<rhi::backend::Buffer>,
     /// Tiles waiting for [`Self::record_model_upload`].
     pending_tiles: VecDeque<ModelTile>,
     tile_staging: Vec<rhi::backend::Buffer>,
@@ -305,15 +318,6 @@ impl DistantBuffers {
             },
         );
         let atlas = model_atlas.handle();
-        let host_storage = |name, bytes| {
-            rhi::backend::Buffer::new(
-                device,
-                name,
-                bytes,
-                rhi::BufferUsages::STORAGE,
-                rhi::MemoryLocation::Host,
-            )
-        };
         let device_buffer = |name, bytes, usage| {
             rhi::backend::Buffer::new(
                 device,
@@ -366,8 +370,8 @@ impl DistantBuffers {
         let positions = device_buffer("distant_draw_positions", POSITIONS_BYTES, storage);
         let visibility = device_buffer("distant_visibility", VISIBILITY_BYTES, storage);
         let translucent = device_buffer("distant_translucent_draws", TRANSLUCENT_BYTES, storage);
-        let models = host_storage("distant_block_models", MODELS_BYTES);
-        let tints = host_storage("distant_biome_tints", TINTS_BYTES);
+        let models = device_buffer("distant_block_models", MODELS_BYTES, storage);
+        let tints = device_buffer("distant_biome_tints", TINTS_BYTES, storage);
         device.submit(|encoder| {
             encoder.transition_textures(&[atlas_transition(
                 atlas,
@@ -387,6 +391,8 @@ impl DistantBuffers {
             encoder.fill_buffer(visibility.handle(), 0, VISIBILITY_BYTES, 0);
             encoder.fill_buffer(counts.handle(), 0, COUNTS_BYTES, 0);
             encoder.fill_buffer(render_list.handle(), 0, 4, 0);
+            encoder.fill_buffer(models.handle(), 0, MODELS_BYTES, 0);
+            encoder.fill_buffer(tints.handle(), 0, TINTS_BYTES, 0);
         });
         // The model atlas's sampler: nearest within a level, linear between
         // the tiles' mip levels.
@@ -509,6 +515,13 @@ impl DistantBuffers {
             models,
             tints,
             pending_tiles: VecDeque::new(),
+            pending_models: BTreeMap::new(),
+            pending_tints: None,
+            model_staging: per_frame(
+                MODELS_BYTES + TINTS_BYTES,
+                rhi::BufferUsages::COPY_SRC,
+                "distant_model_data_staging",
+            ),
             tile_staging: per_frame(
                 (TILE_BYTES * TILES_PER_FRAME) as u64,
                 rhi::BufferUsages::COPY_SRC,
@@ -561,7 +574,7 @@ impl DistantBuffers {
 
     /// The frame's id as the GPU passes see it.
     pub fn frame_id(&self) -> u32 {
-        self.frame_seq as u32 & 0x7FFF_FFFF
+        self.frame_seq as u32 & !SEEN_BEFORE_BIT
     }
 
     /// The render distance squared, in blocks.
@@ -578,9 +591,10 @@ impl DistantBuffers {
         ((room * room * f64::from(MAX_REQUESTS)).ceil() as u32).min(MAX_REQUESTS)
     }
 
-    /// Writes the waiting model tiles into the atlas, as many as fit this
-    /// frame's staging.
+    /// Writes the changed models and tints, then the waiting model tiles
+    /// into the atlas, as many as fit this frame's staging.
     pub fn record_model_upload(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        self.record_model_data(encoder, frame);
         if self.pending_tiles.is_empty() {
             return;
         }
@@ -620,6 +634,43 @@ impl DistantBuffers {
             rhi::TextureUse::CopyDst,
             rhi::TextureUse::ShaderRead,
         )]);
+    }
+
+    /// The changed models, then the tints, through `frame`'s staging.
+    fn record_model_data(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        let models = std::mem::take(&mut self.pending_models);
+        let tints = self.pending_tints.take();
+        if models.is_empty() && tints.is_none() {
+            return;
+        }
+        let staging = &mut self.model_staging[frame];
+        let model_bytes = size_of::<BlockModel>();
+        let mut copies = Vec::with_capacity(models.len());
+        for (i, (id, model)) in models.iter().enumerate() {
+            staging.write_at(i * model_bytes, bytemuck::bytes_of(model));
+            copies.push(rhi::BufferCopy {
+                src_offset: (i * model_bytes) as u64,
+                dst_offset: (usize::from(*id) * model_bytes) as u64,
+                size: model_bytes as u64,
+            });
+        }
+        encoder.transition_buffers(rhi::BufferUse::ShaderRead, rhi::BufferUse::CopyDst);
+        if !copies.is_empty() {
+            encoder.copy_buffer(staging.handle(), self.models.handle(), &copies);
+        }
+        if let Some(tints) = tints {
+            staging.write_at(MODELS_BYTES as usize, bytemuck::cast_slice(&tints));
+            encoder.copy_buffer(
+                staging.handle(),
+                self.tints.handle(),
+                &[rhi::BufferCopy {
+                    src_offset: MODELS_BYTES,
+                    dst_offset: 0,
+                    size: TINTS_BYTES,
+                }],
+            );
+        }
+        encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::ShaderRead);
     }
 
     /// Carries the pending sections up, their quads into the arena through
@@ -702,7 +753,7 @@ impl DistantBuffers {
             &self.scatter.pipeline,
             self.scatter.set(frame),
             &count.to_le_bytes(),
-            [count.div_ceil(128), 1, 1],
+            [count.div_ceil(LIST_GROUP), 1, 1],
         );
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
@@ -723,7 +774,7 @@ impl DistantBuffers {
         let count = top.len() as u32;
         self.top_ids[frame].write_at(0, bytemuck::cast_slice(&top));
         let mut meta = [[0u32, 1, 1, 0]; LEVELS as usize];
-        meta[0] = [count.div_ceil(32), 1, 1, count];
+        meta[0] = [count.div_ceil(TRAVERSAL_GROUP), 1, 1, count];
         self.queue_meta_staging[frame].write_at(0, bytemuck::cast_slice(&meta));
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::DrawInput, rhi::BufferUse::CopyDst),
@@ -889,13 +940,21 @@ impl DistantBuffers {
                 });
         }
         if std::mem::take(&mut self.cleaner_pending[frame]) {
-            let keys: Vec<u64> = read_words(
+            let picks: Vec<(u32, u64)> = read_words(
                 &mut self.cleaner_readbacks[frame],
                 CLEANER_KEYS_BYTES,
-                |words| packed_keys(words).filter(|&key| key != u64::MAX).collect(),
+                |words| {
+                    words
+                        .chunks(4)
+                        .map(|pick| (pick[2], packed_keys(&pick[..2]).next().expect("a key")))
+                        .collect()
+                },
             );
-            for key in keys {
-                self.graph.remove_node_geometry(SectionKey::unpack(key));
+            for (id, key) in picks {
+                let key = SectionKey::unpack(key);
+                if self.graph.holds(id, key) {
+                    self.graph.remove_node_geometry(key);
+                }
             }
             self.free_released();
         }
@@ -928,6 +987,7 @@ impl DistantBuffers {
     /// draws until new roots' records are written, so the meshes go free.
     pub fn clear(&mut self) {
         self.list_frame = None;
+        self.cleaner_pending = [false; MAX_FRAMES_IN_FLIGHT];
         self.waiting.clear();
         self.graph.clear();
         self.free_released();
@@ -988,13 +1048,10 @@ impl DistantBuffers {
                 continue;
             }
             if let Some(tints) = update.tints {
-                self.tints.write_at(0, bytemuck::cast_slice(&tints));
+                self.pending_tints = Some(tints);
             }
             for tile in update.tiles {
-                self.models.write_at(
-                    usize::from(tile.id) * size_of::<BlockModel>(),
-                    bytemuck::bytes_of(&tile.model),
-                );
+                self.pending_models.insert(tile.id, tile.model);
                 self.pending_tiles.push_back(tile);
             }
             for section in update.sections {
@@ -1155,6 +1212,7 @@ impl DistantBuffers {
             &mut self.cleaner_readbacks,
             &mut self.count_readbacks,
             &mut self.tile_staging,
+            &mut self.model_staging,
         ] {
             util::destroy_buffers(device, buffers);
         }

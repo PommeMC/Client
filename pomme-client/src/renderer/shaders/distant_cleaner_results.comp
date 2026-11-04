@@ -1,10 +1,11 @@
 #version 450
 
 // The sorted ids become their nodes' keys for the CPU (all ones for a freed
-// node), each node's last render frame pushed 60 frames ahead so it isn't
-// picked again at once. The sentinel the output started filled with keeps
-// its frame (a departure: the reference pushes it too, and as frames pass
-// its stale frame bars every node drawn since from the sort).
+// node) beside the ids, which the CPU checks still hold those nodes; each
+// node's last render frame pushed 60 frames ahead so it isn't picked again
+// at once. The sentinel the output started filled with keeps its frame (a
+// departure: the reference pushes it too, and as frames pass its stale frame
+// bars every node drawn since from the sort).
 
 #include "distant_consts.glsl"
 
@@ -21,7 +22,7 @@ layout(set = 0, binding = 1, std430) readonly restrict buffer NodeData {
 };
 
 layout(set = 0, binding = 2, std430) writeonly restrict buffer Output {
-    uvec2 output_keys[OUTPUT_SIZE];
+    uvec4 output_keys[OUTPUT_SIZE];
 };
 
 layout(set = 0, binding = 3, std430) writeonly restrict buffer LastRenderFrame {
@@ -35,7 +36,8 @@ layout(push_constant) uniform ResultsPc {
 void main() {
     uint id = min_vis_ids[gl_LocalInvocationID.x];
     uvec4 node = nodes[id];
-    output_keys[gl_LocalInvocationID.x] = node == uvec4(0xFFFFFFFFu) ? uvec2(0xFFFFFFFFu) : node.xy;
+    uvec2 key = node == uvec4(0xFFFFFFFFu) ? uvec2(0xFFFFFFFFu) : node.xy;
+    output_keys[gl_LocalInvocationID.x] = uvec4(key, id, 0u);
     if (id != CLEANER_SENTINEL) {
         last_render_frame[id] = frame_id + 60u;
     }

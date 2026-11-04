@@ -6,8 +6,6 @@
 // this frame's opaque pass drew last frame's list; translucent sections
 // counted into distance buckets for distant_translucents.comp.
 
-layout(local_size_x = 128) in;
-
 #define DISTANT_SET 0
 #define SCENE_BINDING 0
 #define DRAW_BUFFER_BINDING 1
@@ -18,6 +16,8 @@ layout(local_size_x = 128) in;
 #define POSITION_BINDING 6
 #define TRANSLUCENT_DATA_BINDING 7
 #include "distant_section.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
 
 void main() {
     uint draw_id = gl_GlobalInvocationID.x;
@@ -32,11 +32,11 @@ void main() {
     uint seen = visibility_data[section_id];
     if (occlusion_skipped != 0u) {
         // No occlusion pass: every listed section counts as seen.
-        seen = (frame_id & 0x7FFFFFFFu) | (uint((seen & 0x7FFFFFFFu) == frame_id - 1u) << 31u);
+        seen = seen_now(seen);
         visibility_data[section_id] = seen;
     }
-    bool should_render = (seen & 0x7FFFFFFFu) == frame_id;
-    bool render_temporally = (seen & 0x80000000u) == 0u;
+    bool should_render = (seen & ~SEEN_BEFORE_BIT) == frame_id;
+    bool render_temporally = (seen & SEEN_BEFORE_BIT) == 0u;
     if (!should_render) {
         return;
     }

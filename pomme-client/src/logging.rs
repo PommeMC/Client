@@ -55,31 +55,32 @@ static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let path = LOG_FILE.get();
-        if let Some(path) = path {
-            let line = format!(
-                "{} PANIC {info}
-",
-                chrono::Utc::now().to_rfc3339()
-            );
-            let _ = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(path)
-                .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
-        }
-        // Written to the file above, the default hook prints it on desktop;
-        // Android drops stderr, so logcat still needs it.
-        if tracing::dispatcher::has_been_set() && (path.is_none() || cfg!(target_os = "android")) {
-            tracing::error!("{info}");
-        }
-        #[cfg(target_os = "android")]
-        if !tracing::dispatcher::has_been_set() {
-            let logcat = tracing_subscriber::registry().with(console_layer());
-            tracing::subscriber::with_default(logcat, || tracing::error!("{info}"));
-        }
+        log_panic(info);
         default_hook(info);
     }));
+}
+
+fn log_panic(info: &std::panic::PanicHookInfo) {
+    let path = LOG_FILE.get();
+    if let Some(path) = path {
+        let line = format!("{} PANIC {info}\n", chrono::Utc::now().to_rfc3339());
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+    }
+    // The default hook prints it to stderr, which Android drops, so logcat
+    // gets it alone: the global dispatch would write the file a second time.
+    #[cfg(target_os = "android")]
+    {
+        let logcat = tracing_subscriber::registry().with(console_layer());
+        tracing::subscriber::with_default(logcat, || tracing::error!("{info}"));
+    }
+    #[cfg(not(target_os = "android"))]
+    if path.is_none() && tracing::dispatcher::has_been_set() {
+        tracing::error!("{info}");
+    }
 }
 
 /// Stdout, or logcat on Android, which drops stdout.
@@ -154,14 +155,33 @@ mod tests {
 
     #[test]
     fn panic_lands_in_the_log() {
-        let dir = std::env::temp_dir().join("pomme-panic-hook-test");
-        let _ = std::fs::create_dir_all(&dir);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "pomme-panic-hook-test-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join(LATEST_LOG);
-        let _ = std::fs::remove_file(&log);
-        let _ = LOG_FILE.set(log.clone());
-        install_panic_hook();
+        LOG_FILE.set(log.clone()).unwrap();
+
+        // Process-wide while it runs; the previous hook comes back after.
+        let previous = std::sync::Arc::new(std::panic::take_hook());
+        let chained = std::sync::Arc::clone(&previous);
+        std::panic::set_hook(Box::new(move |info| {
+            log_panic(info);
+            chained(info);
+        }));
         let _ = std::panic::catch_unwind(|| panic!("the message under test"));
+        drop(std::panic::take_hook());
+        if let Ok(previous) = std::sync::Arc::try_unwrap(previous) {
+            std::panic::set_hook(previous);
+        }
+
         let written = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(written.contains("PANIC") && written.contains("the message under test"));
     }
 }

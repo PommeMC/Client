@@ -28,6 +28,5 @@ void main() {
 
     v_id = sid;
     // Whether the pass saw it last frame, for the temporal draws.
-    uint previous = visibility_data[sid] & 0x7FFFFFFFu;
-    v_value = (frame_id & 0x7FFFFFFFu) | (uint(previous == frame_id - 1u) << 31u);
+    v_value = seen_now(visibility_data[sid]);
 }

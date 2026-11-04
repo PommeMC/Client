@@ -16,7 +16,7 @@ use super::colors::DistantColors;
 use super::models::{ModelFactory, ModelTile};
 use super::section::{SectionKey, WorldSection};
 use super::voxel::States;
-use super::world::{World, ingest_order};
+use super::world::{Changed, World, ingest_order};
 use crate::position::ChunkPos;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
@@ -83,6 +83,10 @@ impl CaptureQueue {
         Some((column.0, capture))
     }
 
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
     fn clear(&mut self) {
         self.order.clear();
         self.latest.clear();
@@ -109,6 +113,8 @@ enum Job {
         dir: Option<PathBuf>,
         generation: u32,
     },
+    /// Writes what's unsaved.
+    Flush,
     /// Writes what's unsaved and ends the thread.
     Stop,
 }
@@ -186,7 +192,9 @@ impl DistantTerrain {
     /// Keeps sections under the cache root, in a folder for the block
     /// states of table `slot` and the server's `biomes`, since the voxels
     /// store both by id. Captures still queued under another folder are
-    /// dropped.
+    /// dropped rather than written to it: the table they were read with may
+    /// already be the next one's (the colours switch first), and the game
+    /// captures its columns again under the new folder as they load.
     pub fn set_cache_key(
         &mut self,
         slot: usize,
@@ -284,6 +292,12 @@ impl DistantTerrain {
         turned_on
     }
 
+    /// Writes what's unsaved now, for when the app may be ended without
+    /// dropping the game (Android in the background).
+    pub fn flush(&self) {
+        let _ = self.jobs.send(Job::Flush);
+    }
+
     pub fn drain(&self) -> impl Iterator<Item = DistantUpdate> + '_ {
         self.updates.try_iter()
     }
@@ -307,7 +321,8 @@ impl Drop for DistantTerrain {
 /// so a thread cut off loses only what it hadn't written yet.
 pub(crate) fn wait_for_stopped(timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    for thread in std::mem::take(&mut *STOPPING.lock()) {
+    let threads = std::mem::take(&mut *STOPPING.lock());
+    for thread in threads {
         while !thread.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -339,21 +354,147 @@ fn dimension_dir(cache: Option<&Path>, dimension: &str) -> Option<PathBuf> {
     Some(cache?.join(folder_name(dimension)).join("sections-v2"))
 }
 
-/// `dimension`'s world, made with its folder under `cache`, or kept in
-/// memory only when no folder will come.
-fn world<'a>(
-    worlds: &'a mut HashMap<Arc<str>, World>,
-    cache: Option<&Path>,
-    in_memory: bool,
-    dimension: &Arc<str>,
-) -> &'a mut World {
-    worlds.entry(Arc::clone(dimension)).or_insert_with(|| {
-        if in_memory {
-            World::in_memory()
-        } else {
-            World::new(dimension_dir(cache, dimension))
+/// How long the thread may sleep: not at all with captures queued, else
+/// until the next section is ready to mesh or the next save is due.
+fn sleep_for(queued: bool, next_ready: Option<Instant>, last_save: Instant) -> Duration {
+    if queued {
+        return Duration::ZERO;
+    }
+    match next_ready {
+        Some(ready) => ready.saturating_duration_since(Instant::now()),
+        None => SAVE_EVERY.saturating_sub(last_save.elapsed()),
+    }
+}
+
+/// Takes queued captures through `take` for up to `slice`; whether `take`
+/// asked to stop.
+fn take_slice(
+    captures: &Mutex<CaptureQueue>,
+    slice: Duration,
+    mut take: impl FnMut(Arc<str>, Capture) -> bool,
+) -> bool {
+    let start = Instant::now();
+    while let Some((dimension, capture)) = next(captures) {
+        if take(dimension, capture) {
+            return true;
         }
-    })
+        if start.elapsed() >= slice {
+            break;
+        }
+    }
+    false
+}
+
+/// The thread's kept sections: a world per dimension and where they're
+/// written.
+struct Store {
+    worlds: HashMap<Arc<str>, World>,
+    cache: Option<PathBuf>,
+    /// Whether there's no cache root, so no folder will ever come.
+    in_memory: bool,
+    /// `cache`'s [`DistantTerrain::generation`].
+    generation: u32,
+    last_save: Instant,
+}
+
+impl Store {
+    fn new(in_memory: bool) -> Self {
+        Self {
+            worlds: HashMap::new(),
+            cache: None,
+            in_memory,
+            generation: 0,
+            last_save: Instant::now(),
+        }
+    }
+
+    /// `dimension`'s world, made with its folder under the cache, or kept
+    /// in memory only when no folder will come.
+    fn world(&mut self, dimension: &Arc<str>) -> &mut World {
+        let (cache, in_memory) = (self.cache.as_deref(), self.in_memory);
+        self.worlds.entry(Arc::clone(dimension)).or_insert_with(|| {
+            if in_memory {
+                World::in_memory()
+            } else {
+                World::new(dimension_dir(cache, dimension))
+            }
+        })
+    }
+
+    /// Writes a chunk into its dimension's sections; `None` for a capture
+    /// from an earlier folder, dropped.
+    fn ingest(
+        &mut self,
+        states: &States,
+        dimension: &Arc<str>,
+        capture: Capture,
+    ) -> Option<Vec<Changed>> {
+        if capture.generation != self.generation {
+            return None;
+        }
+        // Copied so the game's thread can write the chunk while it's taken
+        // in, which may read sections from disk.
+        let sections = capture.chunk.read().sections.clone();
+        Some(self.world(dimension).ingest_chunk(
+            states,
+            capture.pos,
+            &sections,
+            capture.light.as_deref(),
+            capture.min_y,
+        ))
+    }
+
+    fn save(&mut self) {
+        for world in self.worlds.values_mut() {
+            world.flush();
+        }
+        self.last_save = Instant::now();
+    }
+
+    /// Keeps sections in `dir` from now on. Returns whether the sections
+    /// held were another folder's, written there and let go.
+    fn set_cache(&mut self, dir: Option<PathBuf>, generation: u32) -> bool {
+        let switched = self.cache.is_some();
+        if switched {
+            self.save();
+            self.worlds.clear();
+        } else {
+            for (dimension, world) in &mut self.worlds {
+                world.set_dir(dimension_dir(dir.as_deref(), dimension));
+            }
+        }
+        self.cache = dir;
+        self.generation = generation;
+        switched
+    }
+
+    /// Writes and lets go of every dimension's sections but `dimension`'s,
+    /// keeping those with nowhere to be written yet.
+    fn keep_only(&mut self, dimension: &str) {
+        self.worlds.retain(|kept, world| {
+            if **kept == *dimension {
+                return true;
+            }
+            world.flush();
+            !world.is_saved()
+        });
+    }
+
+    /// On stopping: what's unsaved first, then the columns kept on the way
+    /// out, in an order that reads each section about once however many
+    /// there are, written as they go.
+    fn finish(&mut self, states: &States, captures: &Mutex<CaptureQueue>) {
+        self.save();
+        let mut backlog: Vec<_> = std::iter::from_fn(|| next(captures)).collect();
+        backlog.sort_by_key(|(_, capture)| ingest_order(capture.pos));
+        for (dimension, capture) in backlog {
+            self.ingest(states, &dimension, capture);
+            if self.last_save.elapsed() >= SAVE_EVERY_STOPPING {
+                self.save();
+            }
+        }
+        self.save();
+    }
 }
 
 struct Worker {
@@ -362,14 +503,7 @@ struct Worker {
     states: States,
     factory: Factory,
     updates: Sender<DistantUpdate>,
-    /// Per dimension, its sections.
-    worlds: HashMap<Arc<str>, World>,
-    cache: Option<PathBuf>,
-    /// Whether there's no cache root, so no folder will ever come.
-    in_memory: bool,
-    /// `cache`'s [`DistantTerrain::generation`].
-    generation: u32,
-    last_save: Instant,
+    store: Store,
     view: Option<View>,
     /// Sections to mesh, each from when.
     dirty: HashMap<SectionKey, Instant>,
@@ -387,11 +521,7 @@ impl Worker {
             models: ModelFactory::new(),
             factory: Factory::new(),
             updates,
-            worlds: HashMap::new(),
-            cache: None,
-            in_memory,
-            generation: 0,
-            last_save: Instant::now(),
+            store: Store::new(in_memory),
             view: None,
             dirty: HashMap::new(),
             meshed: HashSet::new(),
@@ -400,66 +530,43 @@ impl Worker {
     }
 
     fn run(mut self, jobs: &Receiver<Job>, wake: &Receiver<()>, captures: &Mutex<CaptureQueue>) {
-        'run: loop {
-            let wait = match self.dirty.values().min() {
-                Some(ready) => ready.saturating_duration_since(Instant::now()),
-                None => SAVE_EVERY.saturating_sub(self.last_save.elapsed()),
-            };
+        loop {
+            let wait = sleep_for(
+                !captures.lock().is_empty(),
+                self.dirty.values().min().copied(),
+                self.store.last_save,
+            );
             // Sleeps until there's something to do: a job, a capture, a
             // section ready to mesh or a save due.
-            crossbeam_channel::select! {
-                recv(jobs) -> job => if self.handle(job.ok()) {
-                    break 'run;
-                },
-                recv(wake) -> _ => {}
-                default(wait) => {}
+            let stop = crossbeam_channel::select! {
+                recv(jobs) -> job => self.handle(job.ok()),
+                recv(wake) -> _ => false,
+                default(wait) => false,
+            };
+            if stop || self.take_jobs(jobs) {
+                break;
             }
-            if self.take_jobs(jobs) {
-                break 'run;
-            }
-            let slice = Instant::now();
-            while let Some((dimension, capture)) = next(captures) {
+            let stop = take_slice(captures, CAPTURE_SLICE, |dimension, capture| {
                 // A capture under a newer folder was queued after the job
                 // switching to it.
-                let stop = capture.generation != self.generation && self.take_jobs(jobs);
+                let stop = capture.generation != self.store.generation && self.take_jobs(jobs);
                 self.capture(&dimension, capture);
-                if stop {
-                    break 'run;
-                }
-                if slice.elapsed() >= CAPTURE_SLICE {
-                    break;
-                }
+                stop
+            });
+            if stop {
+                break;
             }
             self.mesh_nearest();
-            if self.last_save.elapsed() >= SAVE_EVERY {
-                self.save();
+            if self.store.last_save.elapsed() >= SAVE_EVERY {
+                self.store.save();
             }
         }
-        // What's unsaved first, then the columns kept on the way out, which
-        // were queued before the stop, in an order that reads each section
-        // about once however many there are.
-        self.save();
-        let mut backlog: Vec<_> = std::iter::from_fn(|| next(captures)).collect();
-        backlog.sort_by_key(|(_, capture)| ingest_order(capture.pos));
-        for (dimension, capture) in backlog {
-            self.capture(&dimension, capture);
-            if self.last_save.elapsed() >= SAVE_EVERY_STOPPING {
-                self.save();
-            }
-        }
-        self.save();
+        self.store.finish(&self.states, captures);
     }
 
     /// Handles the jobs waiting; whether one was the stop.
     fn take_jobs(&mut self, jobs: &Receiver<Job>) -> bool {
         jobs.try_iter().any(|job| self.handle(Some(job)))
-    }
-
-    fn save(&mut self) {
-        for world in self.worlds.values_mut() {
-            world.flush();
-        }
-        self.last_save = Instant::now();
     }
 
     /// Meshes every section the renderer holds again.
@@ -470,28 +577,11 @@ impl Worker {
 
     /// Writes a chunk into its dimension's sections and marks the meshed
     /// sections it changed, and their neighbours across the sides the
-    /// change reached, for meshing again. A capture from an earlier folder
-    /// is dropped.
+    /// change reached, for meshing again.
     fn capture(&mut self, dimension: &Arc<str>, capture: Capture) {
-        if capture.generation != self.generation {
+        let Some(changed) = self.store.ingest(&self.states, dimension, capture) else {
             return;
-        }
-        // Copied so the game's thread can write the chunk while it's taken
-        // in, which may read sections from disk.
-        let sections = capture.chunk.read().sections.clone();
-        let changed = world(
-            &mut self.worlds,
-            self.cache.as_deref(),
-            self.in_memory,
-            dimension,
-        )
-        .ingest_chunk(
-            &self.states,
-            capture.pos,
-            &sections,
-            capture.light.as_deref(),
-            capture.min_y,
-        );
+        };
         if self
             .view
             .as_ref()
@@ -538,15 +628,7 @@ impl Worker {
                     self.meshed.clear();
                     self.dirty.clear();
                 }
-                // Other dimensions' sections are written and let go, but
-                // for those with nowhere to be written yet.
-                self.worlds.retain(|dimension, world| {
-                    if *dimension == view.dimension {
-                        return true;
-                    }
-                    world.flush();
-                    !world.is_saved()
-                });
+                self.store.keep_only(&view.dimension);
                 self.view = Some(view);
             }
             Some(Job::Request(keys)) => {
@@ -563,22 +645,13 @@ impl Worker {
                 }
             }
             Some(Job::Cache { dir, generation }) => {
-                if self.cache.is_some() {
-                    // Another server's or registry's sections: written to
-                    // their folder and forgotten, and what the renderer
-                    // holds meshed again from the new one.
-                    self.save();
-                    self.worlds.clear();
+                if self.store.set_cache(dir, generation) {
+                    // What the renderer holds, meshed again from the new
+                    // folder.
                     self.remesh_all();
-                } else {
-                    // Sections kept before there was a folder go in it.
-                    for (dimension, world) in &mut self.worlds {
-                        world.set_dir(dimension_dir(dir.as_deref(), dimension));
-                    }
                 }
-                self.cache = dir;
-                self.generation = generation;
             }
+            Some(Job::Flush) => self.store.save(),
         }
         false
     }
@@ -608,12 +681,7 @@ impl Worker {
                 .then(b.level.cmp(&a.level))
         });
         nearest.truncate(MESHES_PER_BATCH);
-        let world = world(
-            &mut self.worlds,
-            self.cache.as_deref(),
-            self.in_memory,
-            &view.dimension,
-        );
+        let world = self.store.world(&view.dimension);
         let mut sections = Vec::with_capacity(nearest.len());
         let unseen = WorldSection::unseen();
         for key in nearest {
@@ -642,6 +710,8 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::distant::world::tests::{column, temp_dir};
+    use crate::world::block::BlockStateTable;
 
     fn capture(x: i32, generation: u32) -> Capture {
         Capture {
@@ -651,6 +721,30 @@ mod tests {
             min_y: 0,
             generation,
         }
+    }
+
+    /// A capture of a lit four-section column, stone at the bottom.
+    fn lit(x: i32, generation: u32) -> Capture {
+        let (sections, light) = column(Some(15));
+        let mut chunk = Chunk::empty(sections.len());
+        chunk.sections = sections.into();
+        Capture {
+            chunk: Arc::new(RwLock::new(chunk)),
+            light: light.map(Arc::new),
+            ..capture(x, generation)
+        }
+    }
+
+    fn states() -> States {
+        States::new(BlockStateTable::native())
+    }
+
+    /// The level-0 section file of column `x`'s bottom section in `dir`.
+    fn file(dir: &Path, x: i32) -> PathBuf {
+        let SectionKey { level, x, y, z } = SectionKey::of_vanilla(0, x, 0, 0);
+        dimension_dir(Some(dir), "overworld")
+            .expect("a cache dir")
+            .join(format!("{level}.{x}.{y}.{z}.bin"))
     }
 
     #[test]
@@ -665,5 +759,75 @@ mod tests {
             .map(|(_, c)| (c.pos.x, c.generation))
             .collect();
         assert_eq!(popped, [(1, 3), (2, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn captures_past_a_slice_drain_without_another_wake() {
+        let captures = Mutex::new(CaptureQueue::default());
+        for x in 0..3 {
+            captures.lock().push("overworld".into(), lit(x * 2, 0));
+        }
+        let (states, mut store) = (states(), Store::new(true));
+        let mut slices = 0;
+        // The run loop with no wake left: it sleeps only as long as
+        // `sleep_for` says.
+        while sleep_for(!captures.lock().is_empty(), None, Instant::now()).is_zero() {
+            take_slice(&captures, Duration::ZERO, |dimension, capture| {
+                store.ingest(&states, &dimension, capture);
+                false
+            });
+            slices += 1;
+        }
+        assert_eq!(slices, 3, "one capture per slice");
+        let world = store.world(&"overworld".into());
+        for x in 0..3 {
+            assert!(world.get(SectionKey::of_vanilla(0, x * 2, 0, 0)).is_some());
+        }
+        assert!(sleep_for(false, None, Instant::now()) > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_cache_switch_writes_the_old_folder_and_drops_its_captures() {
+        let (old, new) = (temp_dir("old"), temp_dir("new"));
+        let (states, mut store) = (states(), Store::new(false));
+        let overworld: Arc<str> = "overworld".into();
+        store.set_cache(Some(old.clone()), 0);
+        assert!(store.ingest(&states, &overworld, lit(0, 0)).is_some());
+
+        assert!(store.set_cache(Some(new.clone()), 1), "another folder's");
+        assert!(file(&old, 0).exists(), "written to the old folder");
+        assert!(store.worlds.is_empty());
+        assert!(store.ingest(&states, &overworld, lit(4, 0)).is_none());
+        assert!(store.ingest(&states, &overworld, lit(8, 1)).is_some());
+        store.save();
+        assert!(!file(&new, 4).exists() && !file(&old, 4).exists());
+        assert!(file(&new, 8).exists());
+        for dir in [old, new] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_backlog_on_the_way_out_is_taken_in_and_written() {
+        let dir = temp_dir("finish");
+        let (states, mut store) = (states(), Store::new(false));
+        store.set_cache(Some(dir.clone()), 0);
+        let captures = Mutex::new(CaptureQueue::default());
+        for x in [6, 0, 2] {
+            captures.lock().push("overworld".into(), lit(x, 0));
+        }
+        store.finish(&states, &captures);
+        assert!(captures.lock().is_empty());
+        for x in [6, 0, 2] {
+            assert!(file(&dir, x).exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn waiting_for_no_stopped_threads_returns_at_once() {
+        let start = Instant::now();
+        wait_for_stopped(Duration::from_secs(30));
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

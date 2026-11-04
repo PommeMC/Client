@@ -10,17 +10,16 @@
 // a workgroup per 32 of them, capped at the queue's room (another departure:
 // the reference adds a workgroup per push and writes past a full queue).
 
-#define LOCAL_SIZE_BITS 5
-#define LOCAL_SIZE (1 << LOCAL_SIZE_BITS)
 #define OUT_OF_BOUNDS 0xFFFFFFFFu
-
-layout(local_size_x = LOCAL_SIZE) in;
 
 #define DISTANT_SET 0
 #define SCENE_BINDING 0
 #define RENDER_LIST_BINDING 2
 #define RENDER_LIST_ACCESS
 #include "distant_section.glsl"
+
+#define LOCAL_SIZE (1 << TRAVERSAL_GROUP_BITS)
+layout(local_size_x = LOCAL_SIZE) in;
 
 // The nodes whose children the CPU should make, by packed key, after their
 // count and the count of those out of sight among them.
@@ -116,13 +115,19 @@ uint current_node() {
 uint push_index;
 
 uint workgroups(uint nodes) {
-    return (min(nodes, MAX_LISTED) + LOCAL_SIZE - 1u) >> LOCAL_SIZE_BITS;
+    return (min(nodes, MAX_LISTED) + LOCAL_SIZE - 1u) >> TRAVERSAL_GROUP_BITS;
 }
 
 // Room for `count` nodes in the next iteration, its dispatch grown by the
 // workgroups they add; the pushes' ranges tile the queue, so the sizes sum
 // to its workgroups.
 void push_nodes_init(uint count) {
+    // A coarser node than the iteration expects (a record not yet rewritten)
+    // has no next iteration to push to.
+    if (queue_index + 1u >= LEVELS) {
+        push_index = MAX_LISTED;
+        return;
+    }
     uint index = atomicAdd(queue_meta[queue_index + 1u].w, count);
     uint added = workgroups(index + count) - workgroups(index);
     if (added != 0u) {

@@ -10,7 +10,8 @@
 // the traversal's: the Hi-Z's base size (width << 16 | height), the screen
 // area a node splits at, the frame's request queue's room, the render
 // distance squared in blocks, the frustum planes, and those
-// of the wider view meshes are requested within.
+// of the wider view meshes are requested within; last the dimension's shade
+// per face (down, up, north, south, then west, east).
 #ifdef SCENE_BINDING
 layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform {
     mat4 distant_view_proj;
@@ -24,6 +25,7 @@ layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform 
     float render_distance;
     vec4 frustum[6];
     vec4 request_frustum[6];
+    vec4 face_shade[2];
 };
 #endif
 
@@ -84,6 +86,15 @@ struct DrawCommand {
 const uint OPAQUE_END = OPAQUE_DRAWS;
 const uint TRANSLUCENT_END = TRANSLUCENT_OFFSET + TRANSLUCENT_DRAWS;
 const uint TEMPORAL_END = TEMPORAL_OFFSET + TEMPORAL_DRAWS;
+
+#ifdef SCENE_BINDING
+// A section's visibility word for being seen this frame: the frame, and
+// whether `previous` was last frame.
+uint seen_now(uint previous) {
+    bool before = (previous & ~SEEN_BEFORE_BIT) == frame_id - 1u;
+    return (frame_id & ~SEEN_BEFORE_BIT) | (before ? SEEN_BEFORE_BIT : 0u);
+}
+#endif
 
 // The shared cube indices give a box corner's bits: x, y, z.
 vec3 cube_corner(uint vertex) {

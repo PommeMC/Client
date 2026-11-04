@@ -500,6 +500,12 @@ impl ApplicationHandler for App {
         if let Some(install) = &mut self.install {
             install.suspend();
         }
+        // Android may kill a suspended app without dropping anything.
+        if let AppPhase::Connecting { game, .. } | AppPhase::InGame { game, .. } =
+            self.phase.get_mut()
+        {
+            game.distant.flush();
+        }
         if let Some(gfx) = self.phase.gfx_mut() {
             gfx.renderer.suspend();
         }

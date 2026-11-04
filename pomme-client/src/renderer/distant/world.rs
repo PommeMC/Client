@@ -40,8 +40,7 @@ pub(crate) struct World {
     unsaved: HashSet<SectionKey>,
     /// Sections `dir` has no file for.
     absent: HashSet<SectionKey>,
-    /// Never given a folder, so sections leave memory unwritten rather
-    /// than wait for one.
+    /// Never to be given a folder, so nothing it holds waits to be written.
     in_memory: bool,
 }
 
@@ -73,11 +72,10 @@ impl World {
     }
 
     /// Gives a world kept without a folder its folder: what it holds is
-    /// written there at the next flush.
+    /// written there as it's evicted or flushed.
     pub fn set_dir(&mut self, dir: Option<PathBuf>) {
         self.dir = dir;
         self.absent.clear();
-        self.evict();
     }
 
     fn path(&self, key: SectionKey) -> Option<PathBuf> {
@@ -134,12 +132,9 @@ impl World {
     }
 
     /// Drops the least recently used sections past the cache's size,
-    /// writing those unsaved first. Without a folder yet everything stays
-    /// until there is one.
+    /// writing those unsaved first. Without a folder they go unwritten: what
+    /// waits for one is bounded by the cache like the rest.
     fn evict(&mut self) {
-        if self.dir.is_none() && !self.in_memory {
-            return;
-        }
         while self.sections.len() > self.capacity {
             let Some((_, key)) = self.used.pop_first() else {
                 break;
@@ -209,19 +204,20 @@ impl World {
         light: Option<&ChunkLightData>,
         min_y: i32,
     ) -> Vec<Changed> {
-        let lit = light.is_some_and(|light| has_light(light, sections.len()));
-        if !lit && sections.iter().any(|section| section.block_count != 0) {
+        let light = light.filter(|light| has_light(light, sections.len()));
+        if light.is_none() && sections.iter().any(|section| section.block_count != 0) {
             return Vec::new();
         }
         let mut changed = Vec::new();
         for (i, section) in sections.iter().enumerate() {
             let section_y = i as i32 + min_y.div_euclid(16);
             let mut update = VoxelizedSection::new(pos.x, section_y, pos.z);
-            if lit {
-                update.convert(states, section, section::light_of(light, section_y));
-                update.mip(states);
-            } else {
-                update.zero();
+            match light {
+                Some(light) => {
+                    update.convert(states, section, section::light_of(light, section_y));
+                    update.mip(states);
+                }
+                None => update.zero(),
             }
             changed.extend(self.insert_update(&update));
         }
@@ -299,7 +295,7 @@ fn neighbour_sides(update: &VoxelizedSection, level: u8) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::renderer::distant::voxel;
     use crate::world::block::BlockStateTable;
@@ -315,7 +311,7 @@ mod tests {
     }
 
     /// A fresh folder under the temp dir for test `name`.
-    fn temp_dir(name: &str) -> PathBuf {
+    pub(crate) fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pomme-distant-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
@@ -465,11 +461,21 @@ mod tests {
     }
 
     #[test]
-    fn sections_kept_before_a_folder_are_written_once_there_is_one() {
+    fn a_world_waiting_for_a_folder_stays_bounded() {
         let mut world = World {
-            capacity: 1,
+            capacity: 8,
             ..World::new(None)
         };
+        for x in 0..10 {
+            world.insert_update(&stone(x * 64, 0, 0, 7));
+        }
+        assert_eq!(world.sections.len(), 8);
+        assert_eq!(world.unsaved.len(), 8, "the dropped ones went unwritten");
+    }
+
+    #[test]
+    fn sections_kept_before_a_folder_are_written_once_there_is_one() {
+        let mut world = World::new(None);
         world.insert_update(&stone(5, 0, 0, 7));
         world.flush();
         assert_eq!(world.sections.len(), LEVELS as usize, "nothing dropped");
@@ -477,7 +483,6 @@ mod tests {
 
         let dir = temp_dir("late-dir");
         world.set_dir(Some(dir.clone()));
-        assert_eq!(world.sections.len(), 1, "the rest written as they left");
         world.flush();
         assert!(world.is_saved());
         let mut reread = World::new(Some(dir.clone()));
@@ -488,7 +493,7 @@ mod tests {
     }
 
     /// A column of four sections, the lowest stone, lit `light` if any.
-    fn column(light: Option<u8>) -> (Vec<Section>, Option<ChunkLightData>) {
+    pub(crate) fn column(light: Option<u8>) -> (Vec<Section>, Option<ChunkLightData>) {
         let table = BlockStateTable::native();
         let id = u32::from(table.find_state("stone", &[]).id());
         let mut sections = vec![Section::default(); 4];

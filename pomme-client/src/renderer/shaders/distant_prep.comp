@@ -14,7 +14,7 @@ layout(local_size_x = 1) in;
 
 void main() {
     uint listed = listed_count();
-    cmdgen_dispatch = uvec3((listed + 127u) / 128u, 1u, 1u);
+    cmdgen_dispatch = uvec3((listed + LIST_GROUP - 1u) / LIST_GROUP, 1u, 1u);
     opaque_draw_count = 0u;
     translucent_draw_count = 0u;
     temporal_draw_count = 0u;

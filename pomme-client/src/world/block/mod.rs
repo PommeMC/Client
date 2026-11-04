@@ -273,19 +273,19 @@ impl BlockStateData {
         match self.id {
             "mangrove_roots" => matches!(direction, model::Direction::Up | model::Direction::Down),
             id => {
-                matches!(
-                    id,
-                    "water"
-                        | "lava"
-                        | "glass"
-                        | "tinted_glass"
-                        | "ice"
-                        | "frosted_ice"
-                        | "blue_ice"
-                        | "slime_block"
-                        | "honey_block"
-                        | "powder_snow"
-                ) || id.ends_with("_stained_glass")
+                self.is_fluid_block()
+                    || matches!(
+                        id,
+                        "glass"
+                            | "tinted_glass"
+                            | "ice"
+                            | "frosted_ice"
+                            | "blue_ice"
+                            | "slime_block"
+                            | "honey_block"
+                            | "powder_snow"
+                    )
+                    || id.ends_with("_stained_glass")
                     || id.ends_with("copper_grate")
             }
         }

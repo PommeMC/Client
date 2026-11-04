@@ -26,7 +26,7 @@ layout(location = 0) out vec4 out_color;
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     float depth = texelFetch(sampler2D(distant_depth, distant_sampler), pixel, 0).r;
-    // Nothing drawn, or the chunks' own pixels.
+    // 0 where the chunks drew (distant_setup.frag), 1 where nothing did.
     if (depth == 0.0 || depth == 1.0) {
         discard;
     }

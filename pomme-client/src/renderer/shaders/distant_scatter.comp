@@ -5,7 +5,9 @@
 // chunks: a `uvec4` of four destination indices (bit 31 picks the node
 // buffer), then the four `uvec4`s to write there.
 
-layout(local_size_x = 128) in;
+#include "distant_consts.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
 
 layout(set = 0, binding = 0, std430) readonly restrict buffer Input {
     uvec4 in_data[];
@@ -30,8 +32,8 @@ void main() {
     uint inner = id & 3u;
     uint location = in_data[chunk][inner];
     uvec4 data = in_data[chunk + 1u + inner];
-    if ((location & 0x80000000u) != 0u) {
-        node_data[location & 0x7FFFFFFFu] = data;
+    if ((location & NODE_SCATTER_BIT) != 0u) {
+        node_data[location & ~NODE_SCATTER_BIT] = data;
     } else {
         section_data[location] = data;
     }

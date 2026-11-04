@@ -6,15 +6,15 @@
 // the output the same way. Only nodes with a mesh, below the top level and
 // without a request in flight take part.
 
-#define WORK_SIZE 64
-#define ELEMS_PER_THREAD 8
+#include "distant_section.glsl"
+
+#define WORK_SIZE CLEANER_SORT_THREADS
+#define ELEMS_PER_THREAD CLEANER_SORT_ELEMS
 #define OUTPUT_SIZE CLEANER_OUTPUT
 #define OPS_PER_THREAD (OUTPUT_SIZE / WORK_SIZE)
 // An id copied in from the output, not to be worked into it again.
 #define EXTERNAL (1u << 31u)
 #define NEVER 0xFFFFFFFFu
-
-#include "distant_section.glsl"
 
 layout(local_size_x = WORK_SIZE) in;
 

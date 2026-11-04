@@ -2290,6 +2290,7 @@ impl Renderer {
                             *render_distance,
                             self.swapchain.depth.handle(),
                             extent,
+                            sky.cardinal_light.table(),
                         );
                         pass = encoder.begin_render_pass(
                             &self.ctx.device,
