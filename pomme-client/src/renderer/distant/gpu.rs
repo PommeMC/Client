@@ -946,7 +946,7 @@ impl DistantBuffers {
                 |words| {
                     words
                         .chunks(4)
-                        .map(|pick| (pick[2], u64::from(pick[0]) << 32 | u64::from(pick[1])))
+                        .map(|pick| (pick[2], packed_key(pick[0], pick[1])))
                         .collect()
                 },
             );
@@ -1250,11 +1250,14 @@ fn read_words<R>(
     readback.read(|data| read(bytemuck::cast_slice(&data[..bytes as usize])))
 }
 
-/// The packed keys in `words`, a `uvec2` each, high word first.
+/// The packed keys in `words`, a `uvec2` each.
 fn packed_keys(words: &[u32]) -> impl Iterator<Item = u64> + '_ {
-    words
-        .chunks(2)
-        .map(|key| u64::from(key[0]) << 32 | u64::from(key[1]))
+    words.chunks(2).map(|key| packed_key(key[0], key[1]))
+}
+
+/// A section key the GPU wrote as its high word, then its low.
+fn packed_key(high: u32, low: u32) -> u64 {
+    u64::from(high) << 32 | u64::from(low)
 }
 
 /// Places `section`'s quads in the arena and queues their upload; its id, or
