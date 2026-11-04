@@ -7,9 +7,11 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::particle::{ParticleRef, ParticleTickContext, SingleQuadParticle};
+use super::flame::FlameParticleRegistration;
+use super::particle::{ParticleRef, ParticleTickContext};
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
-use super::render::ParticleView;
+use super::render::{ParticleLight, ParticleView};
+use super::single_quad_particle::SingleQuadParticle;
 use super::smoke::SmokeParticleRegistration;
 use super::types::{ParticleType, SimpleParticleType};
 use super::world::ParticleWorld;
@@ -75,6 +77,46 @@ pub fn contract_exemplar_smoke<R: ParticleResources, S>(
     // Notification stores no world: subsequent calls explicitly supply it.
     engine.tick(replacement_world);
     Ok((retained, old_world_snapshot))
+}
+
+/// Register the ordinary Flame provider, mutate a retained instance, query its
+/// light, and extract an owned frame snapshot.
+///
+/// Assumes the caller-established token names `minecraft:flame`; the options
+/// schema alone does not prove that identity. The initializer must build its
+/// engine from these SAME registered resources, successfully preparing
+/// descriptions/atlas and applying Flame's binding before spawning. Absent JSON
+/// does not bind the set. Initialization errors propagate, and the engine must
+/// dispatch through the concrete registered provider. This is a readiness
+/// precondition, not a runtime engine or a demonstration of visual fidelity.
+/// Retained identity/world association and cached sprites after reload remain
+/// deferred lifecycle concerns.
+pub fn contract_exemplar_flame<R: ParticleResources, S>(
+    mut resources: R,
+    particle_type: Rc<ParticleType<SimpleParticleType>>,
+    world: &dyn ParticleWorld,
+    view: &ParticleView<'_>,
+    create_engine: impl FnOnce(Rc<R>) -> io::Result<Box<dyn ParticleEngine<RenderState = S>>>,
+) -> io::Result<(Option<ParticleRef>, Option<ParticleLight>, S)> {
+    resources.register_sprite_provider(Rc::clone(&particle_type), &FlameParticleRegistration);
+    let options = SimpleParticleType::new(particle_type);
+    let mut engine = create_engine(Rc::new(resources))?;
+    let created = engine.create_particle(world, &options, DVec3::ZERO, DVec3::ZERO);
+    let retained = created.as_ref().map(Rc::clone);
+    if let Some(particle) = &retained {
+        let mut instance = particle.borrow_mut();
+        instance.set_lifetime(24);
+        instance.set_velocity(DVec3::new(0.0, 0.01, 0.0));
+    } // Release the guard before engine re-entry; creation already enqueued it.
+
+    // First tick drains pending; only admitted active particles update next.
+    engine.tick(world);
+    engine.tick(world);
+    let light = retained
+        .as_ref()
+        .map(|particle| particle.borrow().get_light_coords(world, view.partial_tick));
+    let snapshot = engine.extract(world, view);
+    Ok((retained, light, snapshot))
 }
 
 /// Exemplar-only capability for the caller's concrete SparkParticle equivalent.
