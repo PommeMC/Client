@@ -933,6 +933,9 @@ pub struct AppCore {
     pub deferred_quick_play: Option<crate::app::QuickPlay>,
     /// Vanilla `options.pauseOnLostFocus`.
     pub pause_on_lost_focus: bool,
+    /// A test-harness window: it opens without taking focus, and grabbing
+    /// leaves the OS cursor alone, so tests run while the desktop is in use.
+    pub test_window: bool,
     /// Vanilla `MouseHandler.mouseGrabbed`.
     mouse_grabbed: bool,
     /// The OS grab may no longer match `mouse_grabbed` (the window manager
@@ -1098,6 +1101,7 @@ impl AppCore {
             unfocused_since: None,
             deferred_quick_play: None,
             pause_on_lost_focus: true,
+            test_window: false,
             mouse_grabbed: false,
             os_grab_stale: false,
             player_skin_tx,
@@ -1189,6 +1193,16 @@ impl AppCore {
         self.os_grab_stale = true;
     }
 
+    /// GLFW, under vanilla, lets a disabled cursor go while another window
+    /// has focus; the refocus grab takes it back. winit doesn't, so the Start
+    /// menu or an alt-tabbed window would find the cursor still hidden and
+    /// clipped to this one.
+    pub fn suspend_cursor_grab(&self, window: &Window) {
+        if self.mouse_grabbed {
+            self.free_os_cursor(window);
+        }
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
@@ -1206,10 +1220,7 @@ impl AppCore {
             // Vanilla centers on grab too; warp before locking, which
             // freezes the position on some platforms.
             self.center_cursor(window);
-            let _ = window
-                .set_cursor_grab(CursorGrabMode::Locked)
-                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-            window.set_cursor_visible(false);
+            self.lock_os_cursor(window);
         }
     }
 
@@ -1249,19 +1260,35 @@ impl AppCore {
     /// gameplay starts with a centered cursor).
     fn release_cursor(&mut self, window: &Window) {
         if let CursorOp::Release { center } = self.step_cursor(false) {
-            let _ = window.set_cursor_grab(CursorGrabMode::None);
-            window.set_cursor_visible(true);
+            self.free_os_cursor(window);
             if center {
                 self.center_cursor(window);
             }
         }
     }
 
-    /// Never warps the OS pointer while another window has focus.
+    fn lock_os_cursor(&self, window: &Window) {
+        if !self.test_window {
+            let _ = window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+            window.set_cursor_visible(false);
+        }
+    }
+
+    fn free_os_cursor(&self, window: &Window) {
+        if !self.test_window {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+        }
+    }
+
+    /// Never warps the OS pointer while another window has focus, or in a
+    /// test window.
     fn center_cursor(&mut self, window: &Window) {
         let size = window.inner_size();
         let (x, y) = (size.width as f32 / 2.0, size.height as f32 / 2.0);
-        if self.unfocused_since.is_none() {
+        if self.unfocused_since.is_none() && !self.test_window {
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
         }
         self.input.on_cursor_moved(x, y);
