@@ -986,6 +986,11 @@ enum CursorOp {
     Release { center: bool },
 }
 
+fn free_os_cursor(window: &Window) {
+    let _ = window.set_cursor_grab(CursorGrabMode::None);
+    window.set_cursor_visible(true);
+}
+
 /// One `MouseHandler.grabMouse`/`releaseMouse` call as a pure transition over
 /// `(mouse_grabbed, os_grab_stale)`. Grabbing needs an active window and is a
 /// no-op once grabbed; releasing is a no-op once released and only centers on
@@ -1189,6 +1194,16 @@ impl AppCore {
         self.os_grab_stale = true;
     }
 
+    /// GLFW, under vanilla, lets a disabled cursor go while another window
+    /// has focus; the refocus grab takes it back. winit doesn't, so the Start
+    /// menu or an alt-tabbed window would find the cursor still hidden and
+    /// clipped to this one.
+    pub fn suspend_cursor_grab(&self, window: &Window) {
+        if self.mouse_grabbed {
+            free_os_cursor(window);
+        }
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
@@ -1249,8 +1264,7 @@ impl AppCore {
     /// gameplay starts with a centered cursor).
     fn release_cursor(&mut self, window: &Window) {
         if let CursorOp::Release { center } = self.step_cursor(false) {
-            let _ = window.set_cursor_grab(CursorGrabMode::None);
-            window.set_cursor_visible(true);
+            free_os_cursor(window);
             if center {
                 self.center_cursor(window);
             }

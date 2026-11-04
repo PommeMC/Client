@@ -1019,6 +1019,9 @@ impl ApplicationHandler for App {
                 // change, so a quick refocus (under the pause-on-lost-focus
                 // delay) re-issues the grab.
                 self.core.invalidate_cursor_grab_state();
+                if !focused && let Some(gfx) = self.phase.gfx_mut() {
+                    self.core.suspend_cursor_grab(&gfx.window);
+                }
                 if focused {
                     match self.phase.get_mut() {
                         AppPhase::Setup { .. } => {}
