@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
@@ -63,6 +64,7 @@ use crate::world::block::block_registry::{BlockDefinitions, BlockRegistry};
 use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
+use crate::world::level::LevelContext;
 
 /// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
 /// those skipped as occluded (the per-section occlusion win). Kept as each
@@ -2963,12 +2965,26 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        if !game.deterministic {
-            game.level_runtime.animate_tick(
-                &game.block_registry,
+        {
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = core.particle_engine.engine_access();
+            let mut level = LevelContext::new(
                 &game.chunk_store,
-                *game.player.position,
+                game.block_registry.block_state_table(),
+                gfx.renderer.camera_render_position(),
+                // The client currently advertises ParticleStatus::All; no quality setting exists.
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
             );
+            if !game.deterministic {
+                game.level_runtime.animate_tick(
+                    &game.block_registry,
+                    *game.player.position,
+                    &mut level,
+                );
+            }
+            core.particle_engine.tick(&mut level);
         }
         game.particle_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());

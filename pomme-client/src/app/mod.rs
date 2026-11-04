@@ -238,6 +238,7 @@ fn start_connecting(
         protocol,
         distant_cache,
     );
+    core.particle_engine.set_level();
     core.apply_cursor_grab(&gfx.window, None);
     AppPhase::Connecting {
         gfx,

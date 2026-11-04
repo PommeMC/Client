@@ -67,3 +67,10 @@ pub struct QuadParticleRenderState {
     pub light: ParticleLight,
     pub layer: ParticleLayer,
 }
+
+/// Owned CPU frame. Specialized entity/model states and GPU submission are
+/// deferred; this is not an empty stand-in for those unsupported routes.
+#[derive(Default)]
+pub struct ParticlesRenderState {
+    pub quads: Vec<QuadParticleRenderState>,
+}

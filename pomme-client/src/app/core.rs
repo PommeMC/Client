@@ -24,6 +24,7 @@ use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
+use crate::particles::{MappedParticleResources, ParticleEngine};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
@@ -1023,6 +1024,9 @@ pub struct AppCore {
     asset_reload_revision: u64,
     server_resource_ids: HashMap<uuid::Uuid, PackId>,
     pub(crate) block_definitions: Rc<BlockDefinitions>,
+    /// Canonical client-lifetime engine; world changes and reloads clear it in
+    /// place.
+    pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1181,6 +1185,9 @@ impl AppCore {
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
+        // Phase 7 must register providers before sharing these resources and bind
+        // real atlas sprites before spawning. The empty registry is valid meanwhile.
+        let particle_engine = ParticleEngine::new(Rc::new(MappedParticleResources::new()));
         let mut core = Self {
             user,
             presence,
@@ -1206,6 +1213,7 @@ impl AppCore {
             resource_repository,
             resources,
             block_definitions: Rc::new(BlockDefinitions::new()),
+            particle_engine,
             pending_pack_download: None,
             audio,
             tick_accumulator: 0.0,
@@ -1539,6 +1547,7 @@ impl AppCore {
     /// Every return from a world or server, before the title screen shows.
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+        self.particle_engine.set_level();
         self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
         // Leaving the world still retires it if resource preparation failed.
@@ -2189,6 +2198,7 @@ impl AppCore {
         prepared: crate::renderer::PreparedResources,
     ) {
         renderer.reload_assets(self.font_sources(), prepared);
+        self.particle_engine.clear_particles();
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
@@ -2265,6 +2275,7 @@ impl AppCore {
                 }
                 NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
                 NetworkEvent::DimensionInfo(dim) => {
+                    self.particle_engine.set_level();
                     game.enter_dimension(
                         dim,
                         self.menu.render_distance,
@@ -3666,6 +3677,7 @@ impl AppCore {
                     game.server_dialog = None;
                     game.configuring = true;
                     game.reset_sleep_for_level_teardown();
+                    self.particle_engine.set_level();
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
                 }
