@@ -553,15 +553,15 @@ impl Waitlist {
         starved.need = starved.need.max(need);
     }
 
-    /// Hands `pos` back for re-meshing, holding a claim on the room until
-    /// its mesh is uploaded when `claim`.
-    fn hand_back(&mut self, pos: ChunkPos, claim: bool) -> Option<Starved> {
-        let starved = self.columns.remove(&pos);
-        if claim && starved.is_some() {
+    /// Hands `pos`'s sections back for re-meshing, holding a claim on the
+    /// room until its mesh is uploaded when `claim`.
+    fn hand_back(&mut self, pos: ChunkPos, claim: bool) -> Option<Vec<i32>> {
+        let starved = self.columns.remove(&pos)?;
+        if claim {
             self.claims.insert(pos);
         }
         self.drop_frontier_if_empty();
-        starved
+        Some(starved.sections.into_iter().collect())
     }
 
     /// `pos`'s mesh reached upload: its claim, if any, is settled.
@@ -585,10 +585,12 @@ impl Waitlist {
     }
 
     /// Takes every column off the list, as there's room for them all.
-    fn take_all(&mut self) -> HashMap<ChunkPos, Starved> {
+    fn take_all(&mut self) -> impl Iterator<Item = (ChunkPos, Vec<i32>)> + use<> {
         self.claims.clear();
         self.frontier_sq = f64::INFINITY;
         std::mem::take(&mut self.columns)
+            .into_iter()
+            .map(|(pos, starved)| (pos, starved.sections.into_iter().collect()))
     }
 
     /// Moves the frontier in to `dist_sq` if that's nearer.
@@ -1419,24 +1421,15 @@ impl ChunkBufferStore {
             return;
         }
         if self.can_add_arena(device) {
-            out.extend(
-                self.waiting
-                    .take_all()
-                    .into_iter()
-                    .map(|(pos, starved)| (pos, starved.sections.into_iter().collect())),
-            );
+            out.extend(self.waiting.take_all());
             return;
         }
         // The draining arena too: allocation stops draining to use it.
         let arenas: Vec<&Arena> = self.arenas.iter().filter_map(live).collect();
-        let free_vertices: u64 = arenas
-            .iter()
-            .map(|a| u64::from(a.vertices.capacity() - a.vertices.used()))
-            .sum();
-        let free_indices: u64 = arenas
-            .iter()
-            .map(|a| u64::from(a.indices.capacity() - a.indices.used()))
-            .sum();
+        let free = |heap: &Tlsf| u64::from(heap.capacity() - heap.used());
+        let (free_vertices, free_indices) = arenas.iter().fold((0, 0), |(v, i), a| {
+            (v + free(&a.vertices), i + free(&a.indices))
+        });
         let dist = |pos| self.eye.map_or(0.0, |eye| column_dist_sq(pos, eye));
         let farthest_loaded = || {
             self.chunks
@@ -1462,8 +1455,8 @@ impl ChunkBufferStore {
         );
         self.waiting.frontier_sq = frontier_sq;
         for (pos, claim) in retry {
-            if let Some(starved) = self.waiting.hand_back(pos, claim) {
-                out.push((pos, starved.sections.into_iter().collect()));
+            if let Some(sections) = self.waiting.hand_back(pos, claim) {
+                out.push((pos, sections));
             }
         }
     }
@@ -2713,10 +2706,7 @@ mod tests {
         assert!(!waiting.beyond(far, None));
 
         // One still waits, so the frontier holds.
-        assert_eq!(
-            waiting.hand_back(far, false).map(|s| s.sections.len()),
-            Some(2)
-        );
+        assert_eq!(waiting.hand_back(far, false).map(|s| s.len()), Some(2));
         assert!(waiting.beyond(far, eye));
         // Handed back with a claim, the last one holds it until its mesh
         // reaches upload.
@@ -2737,7 +2727,7 @@ mod tests {
 
         waiting.starve(far, [0], need(10));
         waiting.pull_frontier(0.0);
-        assert_eq!(waiting.take_all().len(), 1);
+        assert_eq!(waiting.take_all().count(), 1);
         assert!(!waiting.beyond(near, eye));
     }
 }

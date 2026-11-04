@@ -86,7 +86,6 @@ option = { render_distance = 3 }
 expect = { terrain = "settled" }
 timeout_ms = 30000
 
-# The last screenshot's chat line fades after 10 seconds.
 [[step]]
 wait_ms = 11000
 
