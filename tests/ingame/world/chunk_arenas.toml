@@ -32,7 +32,7 @@ option = { render_distance = 4 }
 chunk_arenas = { vertices = 32768, max = 1 }
 
 [[step]]
-expect = { terrain = "settled" }
+expect = { terrain = "evicted" }
 timeout_ms = 30000
 
 [[step]]
@@ -70,7 +70,7 @@ chunk_arenas = { vertices = 32768, max = 1 }
 option = { render_distance = 4 }
 
 [[step]]
-expect = { terrain = "settled" }
+expect = { terrain = "evicted" }
 timeout_ms = 30000
 
 [[step]]
@@ -83,7 +83,7 @@ wait_ms = 3000
 option = { render_distance = 3 }
 
 [[step]]
-expect = { terrain = "settled" }
+expect = { terrain = "evicted" }
 timeout_ms = 30000
 
 [[step]]

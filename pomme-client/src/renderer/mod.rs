@@ -1299,6 +1299,12 @@ impl Renderer {
         self.chunk_buffers.slice_overlap()
     }
 
+    /// See [`ChunkBufferStore::evicted`].
+    #[cfg(feature = "test-harness")]
+    pub fn chunk_arenas_evicted(&self) -> Result<(), String> {
+        self.chunk_buffers.evicted()
+    }
+
     /// See [`ChunkBufferStore::starved_column`].
     #[cfg(feature = "test-harness")]
     pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
@@ -1358,10 +1364,8 @@ impl Renderer {
         self.frames.wait_all(&self.ctx.device);
     }
 
-    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns
-    /// the sections handed back for re-meshing, per column: those waiting
-    /// for room, or with room come free for them.
-    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
+    /// Upload a batch of chunk meshes in a single coalesced transfer.
+    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::ChunkUploads {
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }
 

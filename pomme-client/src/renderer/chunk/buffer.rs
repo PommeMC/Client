@@ -124,7 +124,7 @@ pub(crate) struct ChunkMeta {
 }
 
 impl ChunkMeta {
-    /// An instance entry for a draw outside the section pool: just the
+    /// An instance entry for a draw outside the chunk arenas: just the
     /// origin, fully faded in.
     pub(crate) fn instance(origin: [i32; 3]) -> Self {
         Self {
@@ -415,11 +415,13 @@ pub(crate) struct ChunkAlloc {
 impl ChunkAlloc {
     /// What the column's sections take.
     fn need(&self) -> Need {
-        let mut need = Need::default();
-        for sec in &self.sections {
-            need.add(sec.vtx_len, sec.idx_len);
-        }
-        need
+        self.slice_lens().map(|(_, lens)| lens).collect()
+    }
+
+    fn slice_lens(&self) -> impl Iterator<Item = (i32, SliceLens)> + '_ {
+        self.sections
+            .iter()
+            .map(|s| (s.section_index, (s.vtx_len, s.idx_len)))
     }
 }
 
@@ -492,6 +494,20 @@ impl Slice {
     }
 }
 
+/// A section's vertex and index slice lengths.
+type SliceLens = (u32, u32);
+
+/// A copy into arena `.0`, of vertices then indices.
+type ArenaCopy = (u16, rhi::BufferCopy, rhi::BufferCopy);
+
+/// Sections an upload batch left without a mesh, per column.
+pub struct ChunkUploads {
+    /// Starved sections that may fit now, for re-meshing.
+    pub remesh: Vec<(ChunkPos, Vec<i32>)>,
+    /// Sections that found no room, or were evicted for nearer ones.
+    pub starved: Vec<(ChunkPos, Vec<i32>)>,
+}
+
 /// What a column's sections take: in total, and the largest one's slices.
 #[derive(Clone, Copy, Default)]
 struct Need {
@@ -513,22 +529,29 @@ impl Need {
     fn fits_in(self, free_vertices: u64, free_indices: u64) -> bool {
         self.vertices <= free_vertices && self.indices <= free_indices
     }
+}
 
-    fn max(self, other: Self) -> Self {
-        Self {
-            vertices: self.vertices.max(other.vertices),
-            indices: self.indices.max(other.indices),
-            max_vertices: self.max_vertices.max(other.max_vertices),
-            max_indices: self.max_indices.max(other.max_indices),
+impl FromIterator<SliceLens> for Need {
+    fn from_iter<T: IntoIterator<Item = SliceLens>>(slices: T) -> Self {
+        let mut need = Self::default();
+        for (vertices, indices) in slices {
+            need.add(vertices, indices);
         }
+        need
     }
 }
 
-/// A column's sections that found no room, and what they need.
+/// A column's sections that found no room, each with what its newest mesh
+/// takes.
 #[derive(Default)]
 struct Starved {
-    sections: HashSet<i32>,
-    need: Need,
+    sections: HashMap<i32, SliceLens>,
+}
+
+impl Starved {
+    fn need(&self) -> Need {
+        self.sections.values().copied().collect()
+    }
 }
 
 /// The columns whose sections found no room, or were evicted for nearer
@@ -575,10 +598,13 @@ impl Waitlist {
         !self.fragmented.is_empty()
     }
 
-    fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
-        let starved = self.columns.entry(pos).or_default();
-        starved.sections.extend(sections);
-        starved.need = starved.need.max(need);
+    /// Lists `pos`'s `sections`, each with what its newest mesh takes.
+    fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = (i32, SliceLens)>) {
+        self.columns
+            .entry(pos)
+            .or_default()
+            .sections
+            .extend(sections);
     }
 
     /// Hands `pos`'s sections back for re-meshing, holding a claim on the
@@ -590,10 +616,10 @@ impl Waitlist {
             self.claims
                 .entry(pos)
                 .or_default()
-                .extend(&starved.sections);
+                .extend(starved.sections.keys());
         }
         self.drop_frontier_if_empty();
-        Some(starved.sections.into_iter().collect())
+        Some(starved.sections.into_keys().collect())
     }
 
     /// A mesh of `pos`'s `sections` reached upload: their claims are settled.
@@ -614,7 +640,7 @@ impl Waitlist {
         let Some(starved) = self.columns.get_mut(&pos) else {
             return;
         };
-        starved.sections.retain(|s| !sections.contains(s));
+        starved.sections.retain(|s, _| !sections.contains(s));
         if starved.sections.is_empty() {
             self.unlist(pos);
         }
@@ -646,7 +672,7 @@ impl Waitlist {
         self.drop_frontier_if_empty();
         columns
             .into_iter()
-            .map(|(pos, starved)| (pos, starved.sections.into_iter().collect()))
+            .map(|(pos, starved)| (pos, starved.sections.into_keys().collect()))
     }
 
     /// Moves the frontier in to `dist_sq` if that's nearer.
@@ -663,8 +689,8 @@ impl Waitlist {
 /// One vertex and one index heap, sub-allocated by [`Tlsf`]: a heap of
 /// vanilla's `UberGpuBuffer`, its vertex and index halves paired so each
 /// arena draws in one call. Device-local behind the staging buffer, in
-/// memory of its own so destroying it hands the VRAM back; host-visible on
-/// integrated GPUs.
+/// memory of its own so destroying it hands the VRAM back; host-visible,
+/// from the shared allocator, on integrated GPUs.
 struct Arena {
     vertex_buffer: rhi::backend::Buffer,
     index_buffer: rhi::backend::Buffer,
@@ -780,7 +806,7 @@ fn record_copies(
     arenas: &[Option<Arena>],
     src: Option<&Arena>,
     staging: &rhi::backend::Buffer,
-    copies: &mut [(u16, rhi::BufferCopy, rhi::BufferCopy)],
+    copies: &mut [ArenaCopy],
 ) {
     copies.sort_unstable_by_key(|&(arena, ..)| arena);
     for group in copies.chunk_by(|a, b| a.0 == b.0) {
@@ -813,6 +839,8 @@ pub struct ChunkBufferStore {
     /// [`Self::upload_batch`]: a slice was reclaimed, the eye reached another
     /// column, or the budget grew.
     retry_due: bool,
+    /// [`ChunkUploads::starved`] for the batch being uploaded.
+    starved: Vec<(ChunkPos, Vec<i32>)>,
     /// The live arenas, fullest first, as of the last arena change or
     /// frame; the order allocation tries them in.
     alloc_order: Vec<u16>,
@@ -933,6 +961,7 @@ impl ChunkBufferStore {
             max_arenas: MAX_ARENAS,
             waiting: Waitlist::default(),
             retry_due: false,
+            starved: Vec::new(),
             alloc_order: Vec::new(),
             draining: None,
             defragmenting: false,
@@ -981,11 +1010,7 @@ impl ChunkBufferStore {
 
     /// Submit the accumulated staging copies as a single transfer and wait for
     /// it, so a frame's uploads synchronize once instead of once per mesh.
-    fn flush_transfer(
-        &self,
-        device: &rhi::backend::Device,
-        copies: &mut Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)>,
-    ) {
+    fn flush_transfer(&self, device: &rhi::backend::Device, copies: &mut Vec<ArenaCopy>) {
         if copies.is_empty() {
             return;
         }
@@ -999,21 +1024,20 @@ impl ChunkBufferStore {
     /// `mesh.replaced` range. Staging copies for the whole batch are coalesced
     /// into as few transfers as the staging buffer holds (one per overflow,
     /// plus a final flush), each synchronized by a single fence wait — so a
-    /// streaming frame stalls once, not once per mesh. Returns the starved
-    /// sections that may fit now, per column, for re-meshing.
+    /// streaming frame stalls once, not once per mesh.
     pub fn upload_batch(
         &mut self,
         device: &rhi::backend::Device,
         meshes: &[ChunkMeshData],
-    ) -> Vec<(ChunkPos, Vec<i32>)> {
-        let mut needs_remesh: Vec<(ChunkPos, Vec<i32>)> = Vec::new();
+    ) -> ChunkUploads {
+        let mut remesh = Vec::new();
         // Until something changes, the arenas are as full as before and the
         // retry would fail too.
         if std::mem::take(&mut self.retry_due) {
-            self.retry_starved(device, &mut needs_remesh);
+            self.retry_starved(device, &mut remesh);
         }
         if meshes.is_empty() {
-            return needs_remesh;
+            return self.uploads(remesh);
         }
 
         // Sub-allocate an exact-size vertex + index slice for each non-empty
@@ -1073,7 +1097,7 @@ impl ChunkBufferStore {
         let vertex_size = self.format.vertex_size();
         // Copies accumulated for the current (not-yet-submitted) transfer, and the
         // running write cursors into each half of the staging buffer.
-        let mut copies: Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)> = Vec::new();
+        let mut copies: Vec<ArenaCopy> = Vec::new();
         let mut stg_v = 0usize;
         let mut stg_i = 0usize;
 
@@ -1131,7 +1155,7 @@ impl ChunkBufferStore {
             // Allocate the new slices before retiring the old: no room then
             // keeps the old mesh drawn instead of dropping it.
             let mut plans: Vec<Plan> = Vec::with_capacity(upload_secs.len());
-            let mut need = Need::default();
+            let mut lens: HashMap<i32, SliceLens> = HashMap::new();
             // Past the eviction frontier a column waits for room instead.
             let beyond = self.waiting.beyond(mesh.pos, self.eye);
             let mut no_room = beyond;
@@ -1142,7 +1166,7 @@ impl ChunkBufferStore {
                 if vcount == 0 || icount == 0 {
                     continue;
                 }
-                need.add(vcount, icount);
+                lens.insert(sec.section_index, (vcount, icount));
                 if no_room {
                     continue;
                 }
@@ -1173,6 +1197,7 @@ impl ChunkBufferStore {
                     ],
                 });
             }
+            let need: Need = lens.values().copied().collect();
             // A column with nothing to place doesn't wait.
             if no_room && need.vertices > 0 {
                 // Never drawn, so these go straight back.
@@ -1186,7 +1211,10 @@ impl ChunkBufferStore {
                     tracing::debug!("No room for {:?}'s mesh, keeping its old one", mesh.pos);
                     self.evict_beyond(mesh.pos, need);
                 }
-                self.waiting.starve(mesh.pos, accepted, need);
+                let sections = accepted
+                    .iter()
+                    .map(|&si| (si, lens.get(&si).copied().unwrap_or_default()));
+                self.starve(mesh.pos, sections);
                 continue;
             }
 
@@ -1297,7 +1325,14 @@ impl ChunkBufferStore {
         self.flush_transfer(device, &mut copies);
         self.ensure_meta_capacity(device);
 
-        needs_remesh
+        self.uploads(remesh)
+    }
+
+    fn uploads(&mut self, remesh: Vec<(ChunkPos, Vec<i32>)>) -> ChunkUploads {
+        ChunkUploads {
+            remesh,
+            starved: std::mem::take(&mut self.starved),
+        }
     }
 
     /// Grow the draw lists' meta and indirect buffers to hold every
@@ -1477,7 +1512,7 @@ impl ChunkBufferStore {
         let (victims, freed) = eviction_victims(loaded, dist, need, self.free_room());
         let frontier = match victims.last() {
             Some(&(nearest, _)) => nearest,
-            None if freed => {
+            None if freed && self.can_defragment() => {
                 self.waiting.fragmented.insert(pos);
                 dist.next_up()
             }
@@ -1490,11 +1525,18 @@ impl ChunkBufferStore {
         self.waiting.pull_frontier(frontier);
     }
 
+    /// Lists `pos`'s `sections` as waiting, and as starved for this batch.
+    fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = (i32, SliceLens)>) {
+        let sections: Vec<_> = sections.into_iter().collect();
+        self.starved
+            .push((pos, sections.iter().map(|&(si, _)| si).collect()));
+        self.waiting.starve(pos, sections);
+    }
+
     /// Drops `pos`'s mesh, starving the column until there's room for it.
     fn evict(&mut self, pos: ChunkPos) {
         if let Some(alloc) = self.drop_mesh(pos) {
-            let sections = alloc.sections.iter().map(|s| s.section_index);
-            self.waiting.starve(pos, sections, alloc.need());
+            self.starve(pos, alloc.slice_lens());
         }
     }
 
@@ -1522,13 +1564,16 @@ impl ChunkBufferStore {
                 .map(|&pos| dist(pos))
                 .fold(f64::NEG_INFINITY, f64::max)
         };
-        let waiting = self.waiting.columns.iter().map(|(&pos, s)| Waiting {
-            dist: dist(pos),
-            pos,
-            need: s.need,
-            fits_an_arena: arenas.iter().any(|a| {
-                a.vertices.fits(s.need.max_vertices) && a.indices.fits(s.need.max_indices)
-            }),
+        let waiting = self.waiting.columns.iter().map(|(&pos, s)| {
+            let need = s.need();
+            Waiting {
+                dist: dist(pos),
+                pos,
+                need,
+                fits_an_arena: arenas.iter().any(|a| {
+                    a.vertices.fits(need.max_vertices) && a.indices.fits(need.max_indices)
+                }),
+            }
         });
         let (retry, frontier_sq, fragmented) = columns_to_retry(
             waiting,
@@ -1539,7 +1584,9 @@ impl ChunkBufferStore {
             self.arena_size,
         );
         self.waiting.frontier_sq = frontier_sq;
-        self.waiting.fragmented.extend(fragmented);
+        if self.can_defragment() {
+            self.waiting.fragmented.extend(fragmented);
+        }
         for (pos, claim) in retry {
             if let Some(sections) = self.waiting.hand_back(pos, claim) {
                 out.push((pos, sections));
@@ -1701,7 +1748,7 @@ impl ChunkBufferStore {
         };
 
         let vertex_size = self.format.vertex_size();
-        let mut copies: Vec<(u16, rhi::BufferCopy, rhi::BufferCopy)> = Vec::new();
+        let mut copies: Vec<ArenaCopy> = Vec::new();
         let mut retired = Vec::new();
         let mut moved = 0;
         let mut no_room = false;
@@ -1788,6 +1835,11 @@ impl ChunkBufferStore {
             self.arena_size,
             self.waiting.is_fragmented(),
         )
+    }
+
+    /// Compaction only moves sections between arenas, so it needs two.
+    fn can_defragment(&self) -> bool {
+        self.live_use().nth(1).is_some()
     }
 
     /// Each live arena as (id, vertices used, indices used).
@@ -1892,6 +1944,23 @@ impl ChunkBufferStore {
         self.draining.is_some()
             || self.arenas.iter().flatten().any(|a| a.doomed.is_some())
             || self.arena_to_drain().is_some()
+    }
+
+    /// Columns wait for room while the eye's own column draws inside the
+    /// eviction frontier: too little room evicted far columns, not near ones.
+    #[cfg(feature = "test-harness")]
+    pub fn evicted(&self) -> Result<(), String> {
+        if self.waiting.columns.is_empty() {
+            return Err("no column waits for room".into());
+        }
+        let eye = self.eye.ok_or("nothing culled yet")?;
+        let own = ChunkPos::containing(BlockPos::containing(eye));
+        if !self.chunks.contains_key(&own) || self.waiting.beyond(own, self.eye) {
+            return Err(format!(
+                "the eye's column {own:?} isn't drawn inside the eviction frontier"
+            ));
+        }
+        Ok(())
     }
 
     /// Where an arena's ranges overlap, if they do: live sections, slices
@@ -2886,8 +2955,8 @@ mod tests {
     fn fragmentation_goes_with_its_column() {
         let (split, other) = (ChunkPos::new(1, 0), ChunkPos::new(2, 0));
         let mut waiting = Waitlist::default();
-        waiting.starve(split, [0], need(10));
-        waiting.starve(other, [0], need(10));
+        waiting.starve(split, sized([0]));
+        waiting.starve(other, sized([0]));
         waiting.fragmented.insert(split);
         assert!(waiting.is_fragmented());
         waiting.hand_back(split, true);
@@ -2897,17 +2966,35 @@ mod tests {
         waiting.forget(other);
         assert!(!waiting.is_fragmented());
 
-        waiting.starve(split, [0], need(10));
+        waiting.starve(split, sized([0]));
         waiting.fragmented.insert(split);
         assert_eq!(waiting.take_all().count(), 1);
         assert!(!waiting.is_fragmented());
+    }
+
+    /// Sections of 10 vertices each.
+    fn sized<const N: usize>(sections: [i32; N]) -> [(i32, SliceLens); N] {
+        sections.map(|s| (s, (10, 15)))
+    }
+
+    #[test]
+    fn a_column_needs_its_waiting_sections_newest_meshes() {
+        let pos = ChunkPos::new(1, 0);
+        let mut waiting = Waitlist::default();
+        waiting.starve(pos, [(0, (10, 15)), (1, (20, 30))]);
+        waiting.starve(pos, [(1, (5, 6)), (2, (40, 60))]);
+        let need = waiting.columns[&pos].need();
+        assert_eq!((need.vertices, need.max_vertices), (55, 40));
+        waiting.stop_waiting(pos, &HashSet::from([2]));
+        let need = waiting.columns[&pos].need();
+        assert_eq!((need.vertices, need.max_vertices), (15, 10));
     }
 
     #[test]
     fn placed_sections_leave_the_waitlist() {
         let pos = ChunkPos::new(1, 0);
         let mut waiting = Waitlist::default();
-        waiting.starve(pos, [0, 1], need(10));
+        waiting.starve(pos, sized([0, 1]));
         waiting.pull_frontier(0.0);
         waiting.fragmented.insert(pos);
         waiting.stop_waiting(pos, &HashSet::from([0]));
@@ -2926,8 +3013,8 @@ mod tests {
         let mut waiting = Waitlist::default();
         assert!(!waiting.beyond(far, eye));
 
-        waiting.starve(near, [0, 1], need(10));
-        waiting.starve(far, [0, 1], need(10));
+        waiting.starve(near, sized([0, 1]));
+        waiting.starve(far, sized([0, 1]));
         waiting.pull_frontier(column_dist_sq(far, at));
         assert!(waiting.beyond(far, eye));
         assert!(!waiting.beyond(near, eye));
@@ -2948,14 +3035,14 @@ mod tests {
         assert!(!waiting.beyond(far, eye));
 
         // An unload of the last one drops it too, claim and all.
-        waiting.starve(near, [0], need(10));
+        waiting.starve(near, sized([0]));
         waiting.pull_frontier(0.0);
         waiting.hand_back(near, true);
         waiting.forget(near);
         assert!(waiting.is_empty());
         assert!(!waiting.beyond(far, eye));
 
-        waiting.starve(far, [0], need(10));
+        waiting.starve(far, sized([0]));
         waiting.pull_frontier(0.0);
         assert_eq!(waiting.take_all().count(), 1);
         assert!(!waiting.beyond(near, eye));

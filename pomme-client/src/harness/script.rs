@@ -221,9 +221,10 @@ struct BiomeExpect {
     at: [i32; 3],
 }
 
-/// `settled`: every loaded column meshed, and the chunk pools' ranges
+/// `settled`: every loaded column meshed, and the chunk arenas' ranges
 /// consistent (vanilla's `hasRenderedAllSections`). `compacted`: that, with
-/// no chunk arena left to drain or free.
+/// no chunk arena left to drain or free. `evicted`: settled, with far
+/// columns waiting for room and the eye's own column drawn.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TerrainExpect {
@@ -698,19 +699,23 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             )
         }
         Expect::Terrain(TerrainExpect { terrain }) => {
-            let compacted = match terrain.as_str() {
-                "settled" => false,
-                "compacted" => true,
+            let (compacted, evicted) = match terrain.as_str() {
+                "settled" => (false, false),
+                "compacted" => (true, false),
+                "evicted" => (false, true),
                 _ => return Err(format!("unknown terrain state {terrain}")),
             };
             if let Some(pos) = game.first_unmeshed_column() {
                 return Err(format!("{pos:?} isn't meshed yet"));
             }
             if let Some(pos) = gfx.renderer.starved_chunk_column() {
-                return Err(format!("{pos:?}'s mesh doesn't fit the chunk pools"));
+                return Err(format!("{pos:?}'s mesh doesn't fit the chunk arenas"));
             }
             if let Some(overlap) = gfx.renderer.chunk_slice_overlap() {
                 return Err(overlap);
+            }
+            if evicted {
+                gfx.renderer.chunk_arenas_evicted()?;
             }
             ensure(
                 !compacted || !gfx.renderer.chunk_arenas_compacting(),
