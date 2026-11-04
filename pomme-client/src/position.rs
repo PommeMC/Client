@@ -43,6 +43,11 @@ impl ChunkPos {
     pub const fn new(x: i32, z: i32) -> Self {
         Self { x, z }
     }
+
+    /// Vanilla `ChunkPos.containing`: the column holding `pos`.
+    pub const fn containing(pos: BlockPos) -> Self {
+        Self::new(pos.x >> 4, pos.z >> 4)
+    }
 }
 
 // TODO: drop this once the serverbound packets carrying positions are

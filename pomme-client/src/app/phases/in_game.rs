@@ -1342,9 +1342,9 @@ impl GameState {
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
         let batch = self.drain_meshes();
         let upload_start = std::time::Instant::now();
-        let dropped = renderer.upload_chunk_meshes(&batch);
+        let uploads = renderer.upload_chunk_meshes(&batch);
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-        self.clear_dropped_meshed(dropped);
+        self.apply_uploads(uploads);
     }
 
     /// The frame's ready meshes, stale ones dropped and the rest's CPU-side
@@ -1395,7 +1395,11 @@ impl GameState {
     /// neighbourhood was loaded and lit, and it must have a mesh — an empty one
     /// counts, as vanilla's empty `CompiledSectionMesh` does.
     pub fn camera_section_ready(&self, camera_block: glam::IVec3) -> bool {
-        let column = ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4);
+        let column = ChunkPos::containing(BlockPos::new(
+            camera_block.x,
+            camera_block.y,
+            camera_block.z,
+        ));
         let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
             self.chunk_store.get_chunk(&p).is_some()
                 && self.light_engine.light_on_in_column((p.x, p.z))
@@ -1430,8 +1434,8 @@ impl GameState {
 
     /// Adopt a finished mesh's CPU-side state: its per-section visibility sets,
     /// epoch-guarded so a stale result can't overwrite a newer edit's
-    /// visibility, and the sections it compiled. The upload can still drop a
-    /// section afterwards, which `clear_dropped_meshed` takes back out.
+    /// visibility, and the sections it compiled. The upload can still starve
+    /// a section afterwards, which `apply_uploads` takes back out.
     fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
@@ -1446,16 +1450,23 @@ impl GameState {
         *self.compiled.entry(pos).or_default() |= meshed;
     }
 
-    /// Sections dropped on pool exhaustion were retired from the buffer; mark
-    /// them dirty again so the next rescan re-enqueues them, and clear their
-    /// compiled bit, since nothing of them reached the GPU.
-    fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
-        for (pos, sections) in dropped {
-            let retired = section_bits(sections);
-            if let Some(mask) = self.compiled.get_mut(&pos) {
-                *mask &= !retired;
-            }
-            self.mesh_columns.remark(pos, retired);
+    /// Starved sections aren't drawn, so they aren't compiled; those with
+    /// room come free for them are marked dirty again so the next rescan
+    /// re-enqueues them.
+    fn apply_uploads(&mut self, uploads: crate::renderer::chunk::buffer::ChunkUploads) {
+        for (pos, sections) in uploads.starved {
+            self.uncompile(pos, section_bits(sections));
+        }
+        for (pos, sections) in uploads.remesh {
+            let bits = section_bits(sections);
+            self.uncompile(pos, bits);
+            self.mesh_columns.remark(pos, bits);
+        }
+    }
+
+    fn uncompile(&mut self, pos: ChunkPos, bits: u32) {
+        if let Some(mask) = self.compiled.get_mut(&pos) {
+            *mask &= !bits;
         }
     }
 
@@ -1463,8 +1474,8 @@ impl GameState {
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
         self.apply_mesh_bookkeeping(&mut mesh);
-        let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
-        self.clear_dropped_meshed(dropped);
+        let uploads = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
+        self.apply_uploads(uploads);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the

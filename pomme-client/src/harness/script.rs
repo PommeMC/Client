@@ -49,6 +49,7 @@ struct StepFile {
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
+    chunk_arenas: Option<protocol::ChunkArenas>,
     hover: Option<protocol::Hover>,
     cursor: Option<[f32; 2]>,
     scroll: Option<f32>,
@@ -221,8 +222,10 @@ struct BiomeExpect {
     at: [i32; 3],
 }
 
-/// `settled`: every loaded column meshed, and the chunk pools' ranges
-/// consistent (vanilla's `hasRenderedAllSections`).
+/// `settled`: every loaded column meshed, and the chunk arenas' ranges
+/// consistent (vanilla's `hasRenderedAllSections`). `compacted`: that, with
+/// no chunk arena left to drain or free. `evicted`: settled, with far
+/// columns waiting for room and the eye's own column drawn.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TerrainExpect {
@@ -307,6 +310,9 @@ impl StepFile {
         }
         if self.deterministic == Some(true) {
             steps.push(Step::Run(Command::Deterministic));
+        }
+        if let Some(arenas) = self.chunk_arenas {
+            steps.push(Step::Run(Command::ChunkArenas(arenas)));
         }
         if let Some(hover) = self.hover {
             steps.push(Step::Run(Command::Hover(hover)));
@@ -697,13 +703,28 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             )
         }
         Expect::Terrain(TerrainExpect { terrain }) => {
-            if terrain != "settled" {
-                return Err(format!("unknown terrain state {terrain}"));
-            }
+            let (compacted, evicted) = match terrain.as_str() {
+                "settled" => (false, false),
+                "compacted" => (true, false),
+                "evicted" => (false, true),
+                _ => return Err(format!("unknown terrain state {terrain}")),
+            };
             if let Some(pos) = game.first_unmeshed_column() {
                 return Err(format!("{pos:?} isn't meshed yet"));
             }
-            gfx.renderer.chunk_slice_overlap().map_or(Ok(()), Err)
+            if let Some(pos) = gfx.renderer.starved_chunk_column() {
+                return Err(format!("{pos:?}'s mesh doesn't fit the chunk arenas"));
+            }
+            if let Some(overlap) = gfx.renderer.chunk_slice_overlap() {
+                return Err(overlap);
+            }
+            if evicted {
+                gfx.renderer.chunk_arenas_evicted()?;
+            }
+            ensure(
+                !compacted || !gfx.renderer.chunk_arenas_compacting(),
+                || "the chunk arenas are still compacting".into(),
+            )
         }
         Expect::Biome(BiomeExpect { biome, at }) => {
             let seen = protocol::biome(game, *at);
@@ -833,6 +854,7 @@ mod tests {
                 menu_background_blur: None,
                 brightness: None,
                 shader_pack: None,
+                render_distance: None,
             }))
         );
         assert_eq!(

@@ -3,8 +3,12 @@
 layout(local_size_x = 64) in;
 
 struct ChunkMeta {
-    vec4 aabb_min;
-    vec4 aabb_max;
+    vec3 aabb_min;
+    // Where the section's arena's draws start in the draw lists.
+    uint draw_base;
+    vec3 aabb_max;
+    // The section's arena, which picks its draw count.
+    uint arena;
     uint index_count;
     uint first_index;
     int vertex_offset;
@@ -45,7 +49,7 @@ layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
 };
 
 layout(set = 0, binding = 3) buffer CountBuf {
-    uint draw_count;
+    uint draw_counts[];
 };
 
 layout(set = 0, binding = 4) writeonly buffer IndirectCutoutBuf {
@@ -53,24 +57,24 @@ layout(set = 0, binding = 4) writeonly buffer IndirectCutoutBuf {
 };
 
 layout(set = 0, binding = 5) buffer CutoutCountBuf {
-    uint cutout_draw_count;
+    uint cutout_draw_counts[];
 };
 
-// Emit one indexed draw covering [first..first+count) for this section. The
-// per-instance attributes (origin + fade) come from meta entry `idx`, routed via
-// first_instance.
-void emit(uint count, uint first, int vertex_offset, uint idx, bool cutout) {
+// Emit one indexed draw covering [first..first+count) for this section into
+// its arena's draws. The per-instance attributes (origin + fade) come from
+// meta entry `idx`, routed via first_instance.
+void emit(ChunkMeta m, uint count, uint first, uint idx, bool cutout) {
     if (count == 0u) return;
     DrawCmd d;
     d.index_count = count;
     d.instance_count = 1u;
     d.first_index = first;
-    d.vertex_offset = vertex_offset;
+    d.vertex_offset = m.vertex_offset;
     d.first_instance = idx;
     if (cutout) {
-        cutout_draws[atomicAdd(cutout_draw_count, 1u)] = d;
+        cutout_draws[m.draw_base + atomicAdd(cutout_draw_counts[m.arena], 1u)] = d;
     } else {
-        draws[atomicAdd(draw_count, 1u)] = d;
+        draws[m.draw_base + atomicAdd(draw_counts[m.arena], 1u)] = d;
     }
 }
 
@@ -97,6 +101,6 @@ void main() {
 
     // Indices split solid-first.
     uint solid_count = m.solid_index_count;
-    emit(solid_count, m.first_index, m.vertex_offset, idx, false);
-    emit(m.index_count - solid_count, m.first_index + solid_count, m.vertex_offset, idx, true);
+    emit(m, solid_count, m.first_index, idx, false);
+    emit(m, m.index_count - solid_count, m.first_index + solid_count, idx, true);
 }
