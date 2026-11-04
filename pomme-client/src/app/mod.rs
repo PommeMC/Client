@@ -384,6 +384,7 @@ impl App {
         // A test window rarely has focus, so it must not pause on losing it.
         if harness.is_some() {
             self.core.pause_on_lost_focus = false;
+            self.core.test_window = true;
         }
         self.harness = harness;
         self
@@ -453,6 +454,7 @@ fn create_window(
         .with_title("Pomme")
         .with_fullscreen(core.display_mode.fullscreen_for(monitor))
         .with_visible(cfg!(mobile))
+        .with_active(!core.test_window)
         .with_window_icon(window_icon);
     if cfg!(not(mobile)) {
         window_attrs = window_attrs.with_inner_size(core.window_size);
