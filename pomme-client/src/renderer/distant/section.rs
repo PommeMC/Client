@@ -62,6 +62,16 @@ impl SectionKey {
         }
     }
 
+    /// The section of the same level `dx`/`dy`/`dz` sections away.
+    pub fn offset(self, [dx, dy, dz]: [i32; 3]) -> Self {
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+            z: self.z + dz,
+            ..self
+        }
+    }
+
     /// Blocks along a side.
     pub fn width(self) -> i32 {
         (SIDE as i32) << self.level
@@ -207,7 +217,7 @@ impl VoxelizedSection {
     ) {
         let biomes: [u32; 64] = std::array::from_fn(|i| {
             let (x, y, z) = position(i, 2);
-            section.biome(x as u32, y as u32, z as u32) & 0x1FF
+            voxel::biome(section.biome(x as u32, y as u32, z as u32))
         });
         self.non_air_count = 0;
         for i in 0..level_side(0).pow(3) {
@@ -567,5 +577,39 @@ mod tests {
         assert_eq!(read.non_empty_count, 2);
         assert!(decode(SectionKey { level: 1, ..key }, &encode(key, &section)).is_none());
         assert!(decode(key, b"not a section").is_none());
+    }
+
+    #[test]
+    fn damaged_files_read_as_nothing() {
+        let key = SectionKey {
+            level: 0,
+            x: 1,
+            y: 2,
+            z: 3,
+        };
+        let mut section = WorldSection::unseen();
+        section.data[0] = voxel::compose(0, 5, 0);
+        let file = encode(key, &section);
+        assert!(decode(key, &file[..file.len() / 2]).is_none(), "truncated");
+
+        let zlib = |bytes: &[u8]| {
+            let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            zlib.write_all(bytes).unwrap();
+            zlib.finish().unwrap()
+        };
+        let mut raw = Vec::new();
+        flate2::read::ZlibDecoder::new(file.as_slice())
+            .read_to_end(&mut raw)
+            .unwrap();
+        // Two palette entries: an index past them, then a palette cut short.
+        let mut past = raw.clone();
+        past[16..18].copy_from_slice(&2u16.to_le_bytes());
+        assert!(
+            decode(key, &zlib(&past)).is_none(),
+            "index past the palette"
+        );
+        let short = &raw[..raw.len() - 8];
+        assert!(decode(key, &zlib(short)).is_none(), "short palette");
+        assert!(decode(key, &zlib(&raw)).is_some());
     }
 }

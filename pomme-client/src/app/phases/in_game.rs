@@ -32,6 +32,7 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
+use crate::renderer::chunk::buffer::section_bit;
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
@@ -60,6 +61,40 @@ use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
+/// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
+/// those skipped as occluded (the per-section occlusion win). Kept as each
+/// walk lands and as columns unload, so F3 doesn't walk every column per
+/// frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshGate {
+    pub visible: u32,
+    pub hidden: u32,
+}
+
+impl MeshGate {
+    /// An in-frustum column's share: its `mask` out of `sections`.
+    fn column(mask: u32, sections: u32) -> Self {
+        let visible = mask.count_ones();
+        Self {
+            visible,
+            hidden: sections.saturating_sub(visible),
+        }
+    }
+
+    fn add(&mut self, mask: u32, sections: u32) {
+        let column = Self::column(mask, sections);
+        self.visible += column.visible;
+        self.hidden += column.hidden;
+    }
+
+    /// Takes back what [`Self::add`] counted for the same column.
+    pub(crate) fn remove(&mut self, mask: u32, sections: u32) {
+        let column = Self::column(mask, sections);
+        self.visible -= column.visible;
+        self.hidden -= column.hidden;
+    }
+}
+
 /// Which screen a server-opened container renders as.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerScreen {
@@ -69,6 +104,8 @@ pub enum ContainerScreen {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Hopper,
+    Dispenser,
 }
 
 impl ContainerScreen {
@@ -81,6 +118,8 @@ impl ContainerScreen {
             Self::ShulkerBox => ContainerKind::ShulkerBox,
             Self::Anvil => ContainerKind::Anvil,
             Self::Enchantment => ContainerKind::Enchantment,
+            Self::Hopper => ContainerKind::Hopper,
+            Self::Dispenser => ContainerKind::Dispenser,
         }
     }
 }
@@ -341,10 +380,9 @@ pub struct GameState {
     /// Meshes that didn't fit the frame's staging buffer, sent first next
     /// frame.
     pending_upload: Vec<ChunkMeshData>,
-    /// Per-column bitmask of currently-visible section indices (bit `si` set =
-    /// section is in-frustum and not occluded), from the last occlusion walk;
-    /// shared with the renderer.
-    pub vis_mask: Arc<HashMap<ChunkPos, u32>>,
+    /// The last walk's in-frustum columns and their visible-section masks, so
+    /// an unloading column can leave `mesh_gate`.
+    pub in_view_masks: HashMap<ChunkPos, u32>,
     /// The occlusion walk thread, holding every section's cave-cull
     /// visibility (vanilla `VisibilitySet`) as mesh results report it.
     pub walker: occlusion_graph::Walker,
@@ -356,10 +394,7 @@ pub struct GameState {
     /// the buffer's per-section geometry gate so a stale bulk can't re-stale
     /// an edited section's visibility.
     pub section_vis_epoch: HashMap<(ChunkPos, i32), u64>,
-    /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
-    /// recomputed each time an occlusion walk completes. Only the F3
-    /// overlay reads it now.
-    pub vis_tiers: HashMap<ChunkPos, u8>,
+    pub mesh_gate: MeshGate,
     pub vis_valid: bool,
     /// Camera 8-block bucket that last triggered an occlusion walk — movement,
     /// not rotation, drives recomputes (vanilla's cadence).
@@ -634,11 +669,11 @@ impl GameState {
             last_update_phases: crate::benchmark::UpdatePhases::default(),
             mesh_columns: MeshColumns::default(),
             pending_upload: Vec::new(),
-            vis_mask: Arc::default(),
+            in_view_masks: HashMap::new(),
             walker: occlusion_graph::Walker::spawn(),
             compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
-            vis_tiers: HashMap::new(),
+            mesh_gate: MeshGate::default(),
             vis_valid: false,
             last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
             vis_walk_pending: false,
@@ -1084,6 +1119,22 @@ impl GameState {
         handled
     }
 
+    /// A key's release in game: the overlay toggles on F3 release, unless a
+    /// chord consumed it, in every in-game sub-state.
+    pub fn on_key_released(
+        &mut self,
+        code: winit::keyboard::KeyCode,
+        input: &crate::app::input::InputState,
+        connection: &ConnectionHandle,
+    ) {
+        let overlay = input.key_bindings.matches_key(Action::ToggleOverlay, code);
+        let modifier = input.key_bindings.matches_key(Action::DebugModifier, code);
+        if overlay || modifier {
+            let f3_held = input.action_held(Action::DebugModifier);
+            self.handle_f3_release(overlay, modifier, f3_held, connection);
+        }
+    }
+
     /// Settle debug releases once all modifiers are up. Chords suppress the
     /// overlay toggle; releasing a modifier applies an open game-mode switcher.
     pub fn handle_f3_release(
@@ -1218,19 +1269,18 @@ impl GameState {
         self.reset_mesh_columns();
         self.remesh_all_columns();
         self.pending_upload.clear();
-        self.forget_visibility();
+        self.forget_visibility(occlusion_graph::Update::ClearSections);
         self.pending_load_rescan = true;
     }
 
     /// Drops every section's visibility and the last walk's result, as when
-    /// the meshes go.
-    pub fn forget_visibility(&mut self) {
-        self.walker.update(occlusion_graph::Update::Clear);
+    /// the meshes go; `clear` says whether the walker keeps the columns.
+    pub fn forget_visibility(&mut self, clear: occlusion_graph::Update) {
+        self.walker.update(clear);
         self.vis_generation += 1;
         self.vis_walk_pending = false;
         self.section_vis_epoch.clear();
-        self.vis_mask = Arc::default();
-        self.vis_tiers.clear();
+        self.clear_visibility();
         self.vis_valid = false;
     }
 
@@ -1329,13 +1379,13 @@ impl GameState {
         renderer.upload_distant(self.distant.drain());
         let (wanted, gone) = renderer.take_distant_requests();
         self.distant.request(wanted, gone);
-        let uploaded = renderer.upload_chunk_meshes(&batch);
-        self.pending_upload = batch.split_off(uploaded.taken);
+        let uploads = renderer.upload_chunk_meshes(&batch);
+        self.pending_upload = batch.split_off(uploads.taken);
         for mesh in &mut batch {
             self.apply_mesh_bookkeeping(mesh);
         }
         self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-        self.clear_dropped_meshed(uploaded.dropped);
+        self.apply_uploads(uploads);
         // Distant terrain gives way once a column's sections draw, not once
         // they load: the ring loaded around the view waits on its
         // neighbours to compile.
@@ -1416,8 +1466,8 @@ impl GameState {
 
     /// Adopt a finished mesh's CPU-side state: its per-section visibility sets,
     /// epoch-guarded so a stale result can't overwrite a newer edit's
-    /// visibility, and the sections it compiled. The upload can still drop a
-    /// section afterwards, which `clear_dropped_meshed` takes back out.
+    /// visibility, and the sections it compiled. The upload can still starve
+    /// a section afterwards, which `apply_uploads` takes back out.
     pub(crate) fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
         if let Some(t) = &mesh.timing {
             let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
@@ -1445,16 +1495,23 @@ impl GameState {
         *self.compiled.entry(pos).or_default() |= meshed;
     }
 
-    /// Sections dropped on pool exhaustion were retired from the buffer; mark
-    /// them dirty again so the next rescan re-enqueues them, and clear their
-    /// compiled bit, since nothing of them reached the GPU.
-    fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
-        for (pos, sections) in dropped {
-            let retired = section_bits(sections);
-            if let Some(mask) = self.compiled.get_mut(&pos) {
-                *mask &= !retired;
-            }
-            self.mesh_columns.remark(pos, retired);
+    /// Starved sections aren't drawn, so they aren't compiled; those with
+    /// room come free for them are marked dirty again so the next rescan
+    /// re-enqueues them.
+    fn apply_uploads(&mut self, uploads: crate::renderer::chunk::buffer::ChunkUploads) {
+        for (pos, sections) in uploads.starved {
+            self.uncompile(pos, section_bits(sections));
+        }
+        for (pos, sections) in uploads.remesh {
+            let bits = section_bits(sections);
+            self.uncompile(pos, bits);
+            self.mesh_columns.remark(pos, bits);
+        }
+    }
+
+    fn uncompile(&mut self, pos: ChunkPos, bits: u32) {
+        if let Some(mask) = self.compiled.get_mut(&pos) {
+            *mask &= !bits;
         }
     }
 
@@ -1462,8 +1519,8 @@ impl GameState {
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
         self.apply_mesh_bookkeeping(&mut mesh);
-        let uploaded = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
-        self.clear_dropped_meshed(uploaded.dropped);
+        let uploads = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
+        self.apply_uploads(uploads);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
@@ -1482,7 +1539,7 @@ impl GameState {
         if !self.position_set {
             if self.vis_valid {
                 self.vis_valid = false;
-                self.vis_tiers.clear();
+                self.clear_visibility();
             }
             return;
         }
@@ -1492,8 +1549,12 @@ impl GameState {
             && result.generation == self.vis_generation
         {
             self.vis_walk_pending = false;
-            self.vis_tiers = result.tiers;
-            self.vis_mask = result.masks;
+            let sections = self.chunk_store.section_count() as u32;
+            self.mesh_gate = MeshGate::default();
+            for &mask in result.in_view.values() {
+                self.mesh_gate.add(mask, sections);
+            }
+            self.in_view_masks = result.in_view;
             self.vis_valid = true;
             renderer.set_chunk_visibility(result.draw);
         }
@@ -1525,6 +1586,12 @@ impl GameState {
         }
     }
 
+    /// Drops the last walk's in-view masks and the totals made from them.
+    pub(crate) fn clear_visibility(&mut self) {
+        self.in_view_masks.clear();
+        self.mesh_gate = MeshGate::default();
+    }
+
     /// Publishes every loaded column's dirty sections to the mesh workers,
     /// re-meshing a whole column when the player's movement changes its LOD.
     /// Like vanilla, every section in render distance meshes regardless of
@@ -1553,12 +1620,6 @@ impl GameState {
                 .publish(&self.chunk_store, camera, requests);
         }
     }
-}
-
-/// Bit for one section index, 0 outside a column's 32 addressable sections (a
-/// camera outside build height resolves to such an index).
-fn section_bit(si: i32) -> u32 {
-    if (0..32).contains(&si) { 1u32 << si } else { 0 }
 }
 
 /// The bits for several section indices.
@@ -2185,6 +2246,82 @@ pub(crate) fn renders_first_person_hand(game: &GameState) -> bool {
     )
 }
 
+/// Vanilla `LevelExtractor.extractBlockOutline` under
+/// `GameRenderer.shouldRenderBlockOutline`: the targeted block's outline
+/// shape and its origin, unless the HUD is hidden or the player can't build
+/// there.
+fn block_outline(
+    game: &GameState,
+    selected_slot: u8,
+) -> Option<(
+    glam::DVec3,
+    &'static [crate::physics::block_shape::LocalBox],
+)> {
+    let Some(HitResult::Block(hit)) = camera_target(game) else {
+        return None;
+    };
+    if game.hide_gui {
+        return None;
+    }
+    let pos = hit.block_pos;
+    let block_state_data = block_state_data_at(game, pos);
+    // TODO: also skip blocks outside the world border once it's tracked.
+    if block_state_data.is_air() {
+        return None;
+    }
+    // TODO: gate on `abilities.mayBuild` rather than the game mode once it's
+    // tracked.
+    match game.player.game_mode {
+        3 if !crate::player::interaction::interactable_in_spectator(block_state_data) => {
+            return None;
+        }
+        // TODO: shown while the held item's `can_break` or `can_place_on`
+        // matches the block.
+        2 => return None,
+        _ => {}
+    }
+    let held_item = game.player.inventory.hand_stacks(selected_slot)[0]
+        .map(|data| crate::player::inventory::item_resource_name(data.kind));
+    let boxes = crate::physics::block_shape::outline_shape_holding_data(
+        block_state_data,
+        held_item.as_deref(),
+    );
+    Some((
+        block_state_data.outline_shape_position(pos.x, pos.y, pos.z),
+        boxes,
+    ))
+}
+
+/// Vanilla `Minecraft.hitResult`.
+// TODO: pick from a spectated entity; the target is cast from the player's
+// own body, so nothing counts as targeted while spectating one.
+fn camera_target(game: &GameState) -> Option<HitResult> {
+    game.camera_entity
+        .is_none()
+        .then_some(game.interaction.target)?
+}
+
+fn block_state_data_at(
+    game: &GameState,
+    pos: crate::position::BlockPos,
+) -> &crate::world::block::BlockStateData {
+    game.block_registry
+        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
+}
+
+/// Vanilla `Hud.canRenderCrosshairForSpectator`: the target is a block shown
+/// as interactable in spectator mode, or a menu-providing entity.
+fn spectator_crosshair(game: &GameState) -> bool {
+    match camera_target(game) {
+        Some(HitResult::Block(hit)) => crate::player::interaction::interactable_in_spectator(
+            block_state_data_at(game, hit.block_pos),
+        ),
+        // TODO: container minecarts and chest boats, once the pick ray
+        // reaches non-living entities.
+        _ => false,
+    }
+}
+
 fn hand_visible(sleeping: bool, hide_gui: bool, game_mode: u8) -> bool {
     !sleeping && !hide_gui && game_mode != 3
 }
@@ -2231,10 +2368,7 @@ fn bed_orientation(
     game: &GameState,
     sleeping_pos: Option<crate::position::BlockPos>,
 ) -> Option<BedDirection> {
-    let pos = sleeping_pos?;
-    game.block_registry
-        .block_state_data(game.chunk_store.get_block_state(pos.x, pos.y, pos.z))
-        .bed_direction()
+    block_state_data_at(game, sleeping_pos?).bed_direction()
 }
 
 /// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
@@ -2276,6 +2410,18 @@ fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
         _ => game.tool_highlight_timer = 40,
     }
     game.last_tool_highlight = selected;
+}
+
+/// Vanilla `DeltaTracker.Timer.advanceGameTime` and `runTick`'s
+/// `min(10, ticksToDo)`: every whole tick owed leaves the accumulator and at
+/// most ten run.
+pub(super) fn ticks_to_run(accumulator: &mut f32) -> u32 {
+    let mut owed = 0;
+    while *accumulator >= TICK_RATE {
+        *accumulator -= TICK_RATE;
+        owed += 1;
+    }
+    owed.min(10)
 }
 
 pub fn update_game(
@@ -2325,6 +2471,13 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_release() {
+        game.on_key_released(code, &core.input, connection);
+    }
+
+    // Added before the drain, which takes every packet when a tick is owed.
+    core.tick_accumulator += dt;
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {
@@ -2360,12 +2513,12 @@ pub fn update_game(
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
-    core.tick_accumulator += dt;
+    let ticks = ticks_to_run(&mut core.tick_accumulator);
     // Vanilla `Minecraft.runTick` ticks textures once per frame that runs any
     // ticks, before them.
     // TODO: vanilla also skips this while singleplayer is paused and under
     // `/tick freeze` (`isLevelRunningNormally`); pomme tracks neither yet.
-    let ticked = core.tick_accumulator >= TICK_RATE;
+    let ticked = ticks > 0;
     if ticked {
         if game.deterministic {
             gfx.renderer.hold_texture_animations();
@@ -2373,7 +2526,7 @@ pub fn update_game(
             gfx.renderer.tick_texture_animations();
         }
     }
-    while core.tick_accumulator >= TICK_RATE {
+    for _ in 0..ticks {
         game.tick_count = game.tick_count.wrapping_add(1);
         if !game.deterministic {
             game.block_light_flicker = tick_block_light_flicker(game.block_light_flicker);
@@ -2462,7 +2615,6 @@ pub fn update_game(
             game.xp_display_start_tick = game.tick_count as i64;
         }
         AppCore::send_client_tick_end(connection);
-        core.tick_accumulator -= TICK_RATE;
     }
     if ticked {
         gfx.renderer.tick_lightmap(lightmap_info(
@@ -2716,21 +2868,10 @@ pub fn update_game(
             sections_drawn: gfx.renderer.sections_drawn(),
             triangles_drawn: gfx.renderer.last_timings().triangles,
             occlusion_on: game.chunk_occlusion_enabled,
-            mesh_gate: game.vis_valid.then(|| {
-                // Among in-frustum columns: sections we mesh vs sections skipped as
-                // occluded (the per-section occlusion win). Middle slot unused.
-                let n = game.chunk_store.section_count() as u32;
-                let mut visible = 0u32;
-                let mut hidden = 0u32;
-                for (pos, &mask) in game.vis_mask.iter() {
-                    if game.vis_tiers.get(pos).copied().unwrap_or(0) == 0 {
-                        let v = mask.count_ones();
-                        visible += v;
-                        hidden += n.saturating_sub(v);
-                    }
-                }
-                (visible, 0, hidden)
-            }),
+            // The middle slot is unused.
+            mesh_gate: game
+                .vis_valid
+                .then_some((game.mesh_gate.visible, 0, game.mesh_gate.hidden)),
             gpu_name: gfx.renderer.gpu_name(),
             vulkan_version: gfx.renderer.api_version(),
             screen_w: gfx.renderer.screen_width(),
@@ -2944,6 +3085,7 @@ pub fn update_game(
             game.player.experience_progress,
             bar,
             game.player.game_mode,
+            spectator_crosshair(game),
             game.player.inventory.hotbar_slots(),
             game.player.inventory.offhand(),
             core.menu.main_hand_right(),
@@ -3510,18 +3652,22 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                 ),
-                ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
+                ContainerScreen::ShulkerBox
+                | ContainerScreen::Hopper
+                | ContainerScreen::Dispenser => crate::ui::chest::build_grid_screen(
                     &mut elements,
                     sw,
                     sh,
                     core.input.cursor_pos(),
                     &input,
+                    container.screen.click_kind(),
                     &container.slots,
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
                 ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
                     &mut elements,
@@ -3769,6 +3915,7 @@ pub fn update_game(
             game.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
+            core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         player_preview = crate::ui::creative_inventory::player_preview(
@@ -3934,6 +4081,7 @@ pub fn update_game(
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
     });
+    let block_outline = block_outline(game, core.input.selected_slot());
 
     use crate::entity::glowing::{appears_glowing, outline_color, scoreboard_name};
     use crate::renderer::pipelines::entity_renderer::Visibility;
@@ -4237,32 +4385,40 @@ pub fn update_game(
         Vec::new()
     };
 
-    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
-        Vec::new()
+    let (block_entity_renders, camera_block_entities) = if benchmark_running {
+        (Vec::new(), 0)
     } else {
-        // Vanilla `BlockEntityRenderer.shouldRender`: within 64 blocks of the
-        // camera, in a section the occlusion graph hasn't proven hidden.
+        // Vanilla `BlockEntityRenderer.shouldRender` keeps those within 64
+        // blocks of the camera, and `LevelExtractor` takes them from compiled
+        // sections; of those, the camera's pass draws the ones in sections it
+        // sees, faded in to 0.3, and the shadow pass all of them.
         let eye = gfx.renderer.camera_render_position();
         let min_section_y = game.chunk_store.min_y() >> 4;
-        let in_view = |pos: &BlockPos| {
-            let center = glam::DVec3::new(
-                f64::from(pos.x) + 0.5,
-                f64::from(pos.y) + 0.5,
-                f64::from(pos.z) + 0.5,
-            );
-            if center.distance_squared(eye) >= 64.0 * 64.0 {
-                return false;
-            }
-            let section = (pos.y >> 4) - min_section_y;
-            game.vis_mask
-                .get(&ChunkPos::new(pos.x >> 4, pos.z >> 4))
-                .is_none_or(|mask| mask & (1u32 << section) != 0)
-        };
-        game.chunk_store
+        let mut renders: Vec<(bool, crate::renderer::BlockEntityRenderInfo)> = game
+            .chunk_store
             .block_entities
             .iter()
-            .filter(|(pos, _)| in_view(pos))
             .filter_map(|(pos, be)| {
+                let center = glam::DVec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + 0.5,
+                    f64::from(pos.z) + 0.5,
+                );
+                if center.distance_squared(eye) >= 64.0 * 64.0 {
+                    return None;
+                }
+                let column = ChunkPos::new(pos.x >> 4, pos.z >> 4);
+                let section = (pos.y >> 4) - min_section_y;
+                if !game
+                    .compiled
+                    .get(&column)
+                    .is_some_and(|mask| mask & section_bit(section) != 0)
+                {
+                    return None;
+                }
+                let camera = gfx
+                    .renderer
+                    .chunk_section_shows_block_entities(column, section);
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
                 let block_state_data = game.block_registry.block_state_data(state);
                 let id = block_state_data.id();
@@ -4299,16 +4455,25 @@ pub fn update_game(
                     lid_open = lid_open.max(openness_at(&partner));
                     light = light.max(light_at(&partner));
                 }
-                Some(crate::renderer::BlockEntityRenderInfo {
-                    pos: *pos,
-                    kind: be.kind,
-                    yaw,
-                    variant,
-                    lid_open,
-                    light,
-                })
+                Some((
+                    camera,
+                    crate::renderer::BlockEntityRenderInfo {
+                        pos: *pos,
+                        kind: be.kind,
+                        yaw,
+                        variant,
+                        lid_open,
+                        light,
+                    },
+                ))
             })
-            .collect()
+            .collect();
+        renders.sort_by_key(|&(camera, _)| !camera);
+        let camera_len = renders.iter().filter(|&&(camera, _)| camera).count();
+        (
+            renders.into_iter().map(|(_, render)| render).collect(),
+            camera_len,
+        )
     };
 
     let weather_columns = if benchmark_running {
@@ -4440,6 +4605,7 @@ pub fn update_game(
         game.scoreboard.member_team_color(&core.user.username),
         renders_first_person_hand(game),
         destroy_info,
+        block_outline,
         game.show_chunk_borders,
         sky,
         ShadowScene {
@@ -4452,7 +4618,10 @@ pub fn update_game(
         &moving_block_renders,
         &entity_renders,
         &item_renders,
-        &block_entity_renders,
+        crate::renderer::BlockEntityList {
+            items: &block_entity_renders,
+            camera_len: camera_block_entities,
+        },
         &particle_quads,
         &weather_columns,
         if no_ambience {
@@ -5881,9 +6050,46 @@ fn lightmap_info(game: &GameState, brightness: f32, partial_tick: f32) -> Lightm
 #[cfg(test)]
 mod tests {
     use super::{
-        detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits,
-        tick_block_light_flicker,
+        MeshGate, detached_distance, has_red_overlay, scroll_wheel, section_bit, section_bits,
+        tick_block_light_flicker, ticks_to_run,
     };
+    use crate::app::TICK_RATE;
+
+    #[test]
+    fn owed_ticks_run_and_keep_the_residual() {
+        let mut acc = 2.5 * TICK_RATE;
+        assert_eq!(ticks_to_run(&mut acc), 2);
+        assert!((acc - 0.5 * TICK_RATE).abs() < 1e-4);
+    }
+
+    #[test]
+    fn owed_ticks_cap_at_ten_and_drop_the_rest() {
+        let mut acc = 25.5 * TICK_RATE;
+        assert_eq!(ticks_to_run(&mut acc), 10);
+        assert!(acc < TICK_RATE);
+    }
+
+    #[test]
+    fn mesh_gate_counts_masks_and_takes_them_back() {
+        let mut gate = MeshGate::default();
+        gate.add(0b1011, 24);
+        gate.add(0, 24);
+        assert_eq!(
+            gate,
+            MeshGate {
+                visible: 3,
+                hidden: 45
+            }
+        );
+        gate.remove(0b1011, 24);
+        assert_eq!(
+            gate,
+            MeshGate {
+                visible: 0,
+                hidden: 24
+            }
+        );
+    }
 
     #[test]
     fn block_light_flicker_stays_within_its_steady_bound() {

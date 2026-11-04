@@ -21,7 +21,7 @@ layout(local_size_x = 128) in;
 
 void main() {
     uint draw_id = gl_GlobalInvocationID.x;
-    if (draw_id >= section_count) {
+    if (draw_id >= listed_count()) {
         return;
     }
     uint section_id = render_list[draw_id];
@@ -63,11 +63,13 @@ void main() {
         temporal_ptr = atomicAdd(temporal_draw_count, cmd_count) + TEMPORAL_OFFSET;
     }
 
-    // Translucent quads: bucketed by distance, nearest in the last bucket.
+    // Translucent quads: bucketed by distance, nearest in the last bucket;
+    // past a full list neither listed nor counted, so the buckets' sums stay
+    // within it.
     uint count = counts.x & 0xFFFFu;
-    if (count != 0u) {
-        uint slot = atomicAdd(translucent_draw_count, 1u) + TRANSLUCENT_BUCKETS;
-        translucent_data[slot] = draw_id;
+    uint slot = count != 0u ? atomicAdd(translucent_draw_count, 1u) : TRANSLUCENT_DRAWS;
+    if (slot < TRANSLUCENT_DRAWS) {
+        translucent_data[slot + TRANSLUCENT_BUCKETS] = draw_id;
         uvec3 abs_rel = abs(relative);
         uint distance = (abs_rel.x + abs_rel.y + abs_rel.z) << detail;
         distance = (TRANSLUCENT_BUCKETS - 1u) - min(distance, TRANSLUCENT_BUCKETS - 1u);
@@ -78,9 +80,9 @@ void main() {
     // Double-sided quads, then the six face groups.
     count = counts.x >> 16u;
     if ((mask & (1u << 6u)) != 0u) {
-        write_draw(cmd_ptr++, draw_id, ptr, count);
+        write_draw(cmd_ptr++, OPAQUE_END, draw_id, ptr, count);
         if (render_temporally) {
-            write_draw(temporal_ptr++, draw_id, ptr, count);
+            write_draw(temporal_ptr++, TEMPORAL_END, draw_id, ptr, count);
         }
     }
     ptr += count;
@@ -88,9 +90,9 @@ void main() {
         uint word = counts[1u + (face >> 1u)];
         count = (face & 1u) == 0u ? word & 0xFFFFu : word >> 16u;
         if ((mask & (1u << face)) != 0u) {
-            write_draw(cmd_ptr++, draw_id, ptr, count);
+            write_draw(cmd_ptr++, OPAQUE_END, draw_id, ptr, count);
             if (render_temporally) {
-                write_draw(temporal_ptr++, draw_id, ptr, count);
+                write_draw(temporal_ptr++, TEMPORAL_END, draw_id, ptr, count);
             }
         }
         ptr += count;

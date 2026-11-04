@@ -27,7 +27,6 @@ All of these must pass. CI will reject your PR if they don't.
 
 ```bash
 just client-pre-pr          # Every Rust crate and tool, as CI runs them
-just launcher-pre-pr        # Launcher (Rust & TypeScript)
 ```
 
 `client-pre-pr` runs the same `ci-*` recipes CI does, including the
@@ -61,7 +60,7 @@ and unticking it removes the label again.
 
 Under **Reference**, name the classes in `reference/26.3/decompiled` you checked
 the change against. This is what reviewers compare against, so it saves a round
-trip. Put `n/a` for launcher, tooling and chore PRs.
+trip. Put `n/a` for tooling and chore PRs.
 
 For bug fixes, also include:
 
@@ -105,15 +104,6 @@ pomme-client/
     └── discord.rs          # Discord rich presence
 ```
 
-### Pomme launcher
-
-```bash
-pomme-launcher/
-├── src/                    # React frontend (TypeScript)
-├── src-tauri/              # Tauri backend (Rust)
-└── package.json            # Node dependencies
-```
-
 ## Releases
 
 Client releases are built by `.github/workflows/release-client.yml`:
@@ -131,9 +121,6 @@ as a portable install) and an installer built from it by `packaging/`: a dmg
 on macOS, a per-user setup on Windows and an AppImage on Linux, plus
 `sha256sums.txt`. The tag is baked into the build, which is how it updates
 itself and shows its version, and each release becomes the repo's "Latest".
-
-Launcher releases are cut by pushing a `launcher-v*` tag (e.g. `launcher-v0.1.2`)
-or by manual dispatch.
 
 A plain `v*` tag does nothing.
 

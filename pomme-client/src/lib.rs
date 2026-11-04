@@ -107,7 +107,6 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         *app = Some(platform.android_app.clone());
     }
 
-    // Ahead of the launch-token guard, which bench builds have no launcher for.
     #[cfg(feature = "cpu-bench")]
     if args.cpu_bench.is_some() || args.mesh_hash {
         let version = args.version.as_deref().unwrap_or(NATIVE.name);
@@ -276,8 +275,10 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     let code = app.chunk_bench_exit_code();
     #[cfg(feature = "test-harness")]
     let code = app.harness_exit_code().or(code);
-    // Dropped first, so what the game keeps on the way out gets written.
+    // Dropped first, so the distant terrain thread is told to write what it
+    // kept; then waited for, the window already gone.
     drop(app);
+    crate::renderer::distant::worker::wait_for_stopped(std::time::Duration::from_secs(30));
     if let Some(code) = code {
         std::process::exit(code);
     }

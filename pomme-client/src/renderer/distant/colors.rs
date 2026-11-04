@@ -72,10 +72,10 @@ impl DistantColors {
     pub fn tint_lut(&self) -> Vec<u32> {
         let mut lut = vec![u32::MAX; TINT_KINDS * TINT_BIOMES];
         for (&biome, climate) in self.climates.iter() {
-            let biome = biome as usize;
-            if biome >= TINT_BIOMES {
+            if biome >= super::voxel::UNKNOWN_BIOME {
                 continue;
             }
+            let biome = biome as usize;
             let colours = [
                 grass_color(climate, &self.grass, 0, 0),
                 foliage_color(climate, &self.foliage),

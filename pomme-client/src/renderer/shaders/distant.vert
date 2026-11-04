@@ -89,7 +89,7 @@ void main() {
     flags |= model_id << 16u;
 
     // The quad's light (block high, sky low) through the lightmap, shaded per
-    // face for models with ambient occlusion; the model's tint, constant or
+    // face for models that take directional shade; the model's tint, constant or
     // by the quad's biome.
     uint light = field(quad, 8u, 55u);
     vec3 lit = sample_lightmap(vec2(float(light >> 4u), float(light & 0xFu)) * 16.0).rgb;

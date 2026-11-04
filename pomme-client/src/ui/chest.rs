@@ -1,6 +1,8 @@
-//! The generic 9xN chest screen (vanilla `ContainerScreen` + `ChestMenu`) and
-//! the shulker box screen (`ShulkerBoxScreen` + `ShulkerBoxMenu`): contents
-//! slots 0..rows*9, then player inventory and hotbar.
+//! The single-grid container screens: the generic 9xN chest (vanilla
+//! `ContainerScreen` + `ChestMenu`), the shulker box (`ShulkerBoxScreen`),
+//! the hopper (`HopperScreen`) and the dispenser and dropper
+//! (`DispenserScreen`): contents slots first, then player inventory and
+//! hotbar.
 
 use std::time::Instant;
 
@@ -8,8 +10,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_backdrop, push_clipped_sprite,
-    push_cursor_stack, push_panel, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, centred_title_x, push_backdrop,
+    push_clipped_sprite, push_cursor_stack, push_panel, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -63,6 +65,7 @@ pub fn build_chest(
         cursor,
         input,
         ContainerKind::Chest { rows },
+        CHEST_GRID,
         rows_h + 31.0,
         slots,
         cursor_item,
@@ -71,38 +74,78 @@ pub fn build_chest(
     )
 }
 
+/// A contents grid: its top-left slot in GUI units and its column count.
+struct Grid {
+    x: f32,
+    y: f32,
+    cols: u16,
+}
+
+const CHEST_GRID: Grid = Grid {
+    x: 8.0,
+    y: 18.0,
+    cols: 9,
+};
+
+/// The shulker box, hopper and dispenser screens, each one background sprite
+/// over a contents grid. `kind` is one of those three menus.
 #[allow(clippy::too_many_arguments)]
-pub fn build_shulker_box(
+pub fn build_grid_screen(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     screen_h: f32,
     cursor: (f32, f32),
     input: &ContainerInput,
+    kind: ContainerKind,
     slots: &[ItemStack],
     title: &str,
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let panel = push_panel(
-        elements,
-        screen_w,
-        screen_h,
-        gs,
-        167.0,
-        SpriteId::ShulkerBoxBackground,
-    );
-    panel.label(elements, 8.0, 6.0, title);
-    panel.label(elements, 8.0, 73.0, "Inventory");
+    let (height, sprite, grid, main_y) = match kind {
+        ContainerKind::ShulkerBox => (167.0, SpriteId::ShulkerBoxBackground, CHEST_GRID, 84.0),
+        ContainerKind::Hopper => (
+            133.0,
+            SpriteId::HopperBackground,
+            Grid {
+                x: 44.0,
+                y: 20.0,
+                cols: 5,
+            },
+            51.0,
+        ),
+        _ => (
+            166.0,
+            SpriteId::DispenserBackground,
+            Grid {
+                x: 62.0,
+                y: 17.0,
+                cols: 3,
+            },
+            84.0,
+        ),
+    };
+    let panel = push_panel(elements, screen_w, screen_h, gs, height, sprite);
+    // `DispenserScreen` centres its title; the others keep the default.
+    let title_x = if kind == ContainerKind::Dispenser {
+        centred_title_x(title, text_width_fn)
+    } else {
+        8.0
+    };
+    panel.label(elements, title_x, 6.0, title);
+    panel.label(elements, 8.0, height - 94.0, "Inventory");
 
     build_contents(
         elements,
         &panel,
         cursor,
         input,
-        ContainerKind::ShulkerBox,
-        84.0,
+        kind,
+        grid,
+        main_y,
         slots,
         cursor_item,
         drag,
@@ -110,8 +153,8 @@ pub fn build_shulker_box(
     )
 }
 
-/// The contents grid at GUI-unit y 18, the player rows at `main_y`, and the
-/// shared gesture tail.
+/// The contents `grid`, the player rows at `main_y`, and the shared gesture
+/// tail.
 #[allow(clippy::too_many_arguments)]
 fn build_contents(
     elements: &mut Vec<MenuElement>,
@@ -119,6 +162,7 @@ fn build_contents(
     cursor: (f32, f32),
     input: &ContainerInput,
     kind: ContainerKind,
+    grid: Grid,
     main_y: f32,
     slots: &[ItemStack],
     cursor_item: &ItemStack,
@@ -130,18 +174,15 @@ fn build_contents(
     let main_base = kind.inv_start() as u16;
     ctx.player_rows(slots, main_base, main_base + 27, main_y);
 
-    for row in 0..main_base / 9 {
-        for col in 0..9u16 {
-            let num = row * 9 + col;
-            let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
-            ctx.slot(
-                8.0 + col as f32 * SLOT_STRIDE,
-                18.0 + row as f32 * SLOT_STRIDE,
-                item,
-                None,
-                num,
-            );
-        }
+    for num in 0..main_base {
+        let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
+        ctx.slot(
+            grid.x + (num % grid.cols) as f32 * SLOT_STRIDE,
+            grid.y + (num / grid.cols) as f32 * SLOT_STRIDE,
+            item,
+            None,
+            num,
+        );
     }
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);

@@ -148,6 +148,13 @@ const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs
 /// next.
 const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
+/// Whether the rest of the queue may wait for the next frame: only once the
+/// chunk budget is spent and while this frame owes no tick, so every packet
+/// received before a tick is handled before it runs.
+fn defer_packets(chunk_work: std::time::Duration, tick_accumulator: f32) -> bool {
+    chunk_work >= CHUNK_PACKET_BUDGET && tick_accumulator < crate::app::TICK_RATE
+}
+
 /// Applies a server-driven block change: block-entity sync, prediction
 /// absorption, the block + light write, and the remesh cascade. The block
 /// entity syncs even when a pending prediction absorbs the update (the state
@@ -429,6 +436,13 @@ fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
 /// The level's chunk, light and position updates, shared by the windowed
 /// client and the headless chunk benchmark; the caller does any renderer work.
 impl GameState {
+    /// The distant mesher tints with the chunk mesher's colours, so it takes
+    /// them again whenever the dispatcher or its biomes change.
+    fn sync_distant_colors(&mut self) {
+        self.distant
+            .set_colors(self.mesh_dispatcher.distant_colors());
+    }
+
     pub fn select_protocol(&mut self, protocol: i32) {
         let previous_slot = self.block_registry.block_state_table().table_slot();
         self.block_registry.select_protocol(protocol);
@@ -436,8 +450,7 @@ impl GameState {
             self.mesh_dispatcher = self
                 .mesh_dispatcher
                 .recreate_for_version(self.block_registry.owned_render_view());
-            self.distant
-                .set_colors(self.mesh_dispatcher.distant_colors());
+            self.sync_distant_colors();
             self.set_distant_cache_key();
         }
     }
@@ -474,8 +487,7 @@ impl GameState {
         self.biome_climate = Arc::new(colors);
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
-        self.distant
-            .set_colors(self.mesh_dispatcher.distant_colors());
+        self.sync_distant_colors();
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -532,16 +544,16 @@ impl GameState {
         // The meshes went with the old level, so their bookkeeping
         // has to go too, or the new level's camera section reads as
         // already meshed.
-        self.forget_visibility();
+        self.forget_visibility(VisUpdate::Clear);
         self.compiled.clear();
+        self.clear_visibility();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
             Arc::clone(&self.biome_climate),
             None,
             cardinal_light,
         );
-        self.distant
-            .set_colors(self.mesh_dispatcher.distant_colors());
+        self.sync_distant_colors();
         self.reset_mesh_columns();
     }
 
@@ -608,8 +620,10 @@ impl GameState {
         self.light_engine.chunk_unloaded((pos.x, pos.z));
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
-        self.vis_tiers.remove(&pos);
         let sections = self.chunk_store.section_count();
+        if let Some(mask) = self.in_view_masks.remove(&pos) {
+            self.mesh_gate.remove(mask, sections as u32);
+        }
         for si in 0..sections {
             self.section_vis_epoch.remove(&(pos, si));
         }
@@ -973,6 +987,9 @@ pub struct AppCore {
     pub deferred_quick_play: Option<crate::app::QuickPlay>,
     /// Vanilla `options.pauseOnLostFocus`.
     pub pause_on_lost_focus: bool,
+    /// A test-harness window: it opens without taking focus, and grabbing
+    /// leaves the OS cursor alone, so tests run while the desktop is in use.
+    pub test_window: bool,
     /// Vanilla `MouseHandler.mouseGrabbed`.
     mouse_grabbed: bool,
     /// The OS grab may no longer match `mouse_grabbed` (the window manager
@@ -1138,6 +1155,7 @@ impl AppCore {
             unfocused_since: None,
             deferred_quick_play: None,
             pause_on_lost_focus: true,
+            test_window: false,
             mouse_grabbed: false,
             os_grab_stale: false,
             player_skin_tx,
@@ -1229,6 +1247,16 @@ impl AppCore {
         self.os_grab_stale = true;
     }
 
+    /// GLFW, under vanilla, lets a disabled cursor go while another window
+    /// has focus; the refocus grab takes it back. winit doesn't, so the Start
+    /// menu or an alt-tabbed window would find the cursor still hidden and
+    /// clipped to this one.
+    pub fn suspend_cursor_grab(&self, window: &Window) {
+        if self.mouse_grabbed {
+            self.free_os_cursor(window);
+        }
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
@@ -1246,10 +1274,7 @@ impl AppCore {
             // Vanilla centers on grab too; warp before locking, which
             // freezes the position on some platforms.
             self.center_cursor(window);
-            let _ = window
-                .set_cursor_grab(CursorGrabMode::Locked)
-                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-            window.set_cursor_visible(false);
+            self.lock_os_cursor(window);
         }
     }
 
@@ -1290,19 +1315,35 @@ impl AppCore {
     /// gameplay starts with a centered cursor).
     fn release_cursor(&mut self, window: &Window) {
         if let CursorOp::Release { center } = self.step_cursor(false) {
-            let _ = window.set_cursor_grab(CursorGrabMode::None);
-            window.set_cursor_visible(true);
+            self.free_os_cursor(window);
             if center {
                 self.center_cursor(window);
             }
         }
     }
 
-    /// Never warps the OS pointer while another window has focus.
+    fn lock_os_cursor(&self, window: &Window) {
+        if !self.test_window {
+            let _ = window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+            window.set_cursor_visible(false);
+        }
+    }
+
+    fn free_os_cursor(&self, window: &Window) {
+        if !self.test_window {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+        }
+    }
+
+    /// Never warps the OS pointer while another window has focus, or in a
+    /// test window.
     fn center_cursor(&mut self, window: &Window) {
         let size = window.inner_size();
         let (x, y) = (size.width as f32 / 2.0, size.height as f32 / 2.0);
-        if self.unfocused_since.is_none() {
+        if self.unfocused_since.is_none() && !self.test_window {
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
         }
         self.input.on_cursor_moved(x, y);
@@ -1690,8 +1731,7 @@ impl AppCore {
         );
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
-        game.distant
-            .set_colors(game.mesh_dispatcher.distant_colors());
+        game.sync_distant_colors();
         game.particle_store = crate::particle::ParticleStore::new(
             renderer.uv_map().clone(),
             grass,
@@ -1795,11 +1835,13 @@ impl AppCore {
         // Vanilla `PacketProcessor.processQueuedPackets` drains everything
         // before this frame's ticks. A departure: after `CHUNK_PACKET_BUDGET`
         // of chunk packets the rest wait, in order, for the next frame, so a
-        // burst of chunks is a few short frames instead of one long one. The
-        // batch acknowledgement goes out when its chunks are taken, so the
-        // server paces itself to it as it does to a slower client.
+        // burst of chunks is a few short frames instead of one long one. Only
+        // frames that owe no tick split it (`defer_packets`; callers add the
+        // frame's time first), so they render and nothing more.
+        // `ChunkBatchReceived` is answered on the network thread as vanilla
+        // does, so this doesn't pace the server.
         let mut chunk_work = std::time::Duration::ZERO;
-        while chunk_work < CHUNK_PACKET_BUDGET
+        while !defer_packets(chunk_work, self.tick_accumulator)
             && let Ok(event) = rx.try_recv()
         {
             let chunk_packet = matches!(
@@ -2122,6 +2164,8 @@ impl AppCore {
                         MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
                         MenuKind::Anvil => Some(ContainerScreen::Anvil),
                         MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
+                        MenuKind::Hopper => Some(ContainerScreen::Hopper),
+                        MenuKind::Generic3x3 => Some(ContainerScreen::Dispenser),
                         _ => None,
                     };
                     if let Some(screen) = screen {
@@ -2157,8 +2201,8 @@ impl AppCore {
                         game.container_was_open = Some(container_id);
                         self.apply_cursor_grab(window, Some(game));
                     } else {
-                        // TODO: render the remaining menu screens (chest,
-                        // brewing stand, ...). Until then tell the server we
+                        // TODO: render the remaining menu screens (brewing
+                        // stand, crafter, beacon, ...). Until then tell the server we
                         // closed the menu so its container state stays
                         // consistent.
                         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
@@ -4069,11 +4113,11 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
-        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
-        resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
-        server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
-        sync_player_attribute_mirrors, sync_respawn_attributes,
+        CHUNK_PACKET_BUDGET, CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY,
+        MENU_REPEAT_INTERVAL, RepeatStepper, accepted_player_chat_tag, cursor_step, death_route,
+        player_input_state, resolve_corrected_look, resolve_head_profile,
+        resolve_player_position_correction, server_view_distance_update, serverbound_player_input,
+        sync_living_attribute_mirrors, sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::attribute::{
@@ -4106,6 +4150,16 @@ mod tests {
             }],
         );
         tab_list
+    }
+
+    #[test]
+    fn packets_wait_only_on_a_frame_that_owes_no_tick() {
+        use crate::app::TICK_RATE;
+        let spent = CHUNK_PACKET_BUDGET;
+        assert!(!super::defer_packets(spent / 2, 0.0));
+        assert!(super::defer_packets(spent, 0.9 * TICK_RATE));
+        assert!(!super::defer_packets(spent, TICK_RATE));
+        assert!(!super::defer_packets(spent * 10, 3.0 * TICK_RATE));
     }
 
     #[test]

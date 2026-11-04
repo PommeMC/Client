@@ -1,0 +1,47 @@
+# The F3 debug overlay: opens on an F3 tap, as its release toggles it, and
+# closes on the next.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+press = { key = "key.keyboard.f3" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "open"
+
+[[step]]
+press = { key = "key.keyboard.f3" }
+
+# The open shot's chat line fades too.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "closed"
+
+[[step]]
+chat = "/gamerule advance_time true"

@@ -4,7 +4,8 @@
 
 /// A quad's bits: face in 0-2 (`axis << 1 | side`, axis 0 for y, 1 for z,
 /// 2 for x), width-1 in 3-6, height-1 in 7-10, z in 11-15, y in 16-20, x in
-/// 21-25, model id in 26-45, biome in 46-54, light in 55-62.
+/// 21-25, model id in 26-45 (ids are u16, so 42-45 stay clear), biome in
+/// 46-54, light in 55-62.
 pub(crate) const QUAD_MODEL_SHIFT: u32 = 26;
 pub(crate) const QUAD_BIOME_SHIFT: u32 = 46;
 pub(crate) const QUAD_LIGHT_SHIFT: u32 = 55;

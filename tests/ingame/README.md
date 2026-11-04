@@ -116,13 +116,18 @@ creative_set_slot = { slot = 37, from = 36 }  # creative mode: copy a stack, as
 look_at = [0.5, -58.5, 4.0]                   # turn to face a point
 
 [[step]]
+modifiers = { shift = true }                  # held for the clicks and presses
+                                              # that follow; {} releases
+[[step]]
 mouse_down = "left"                           # or mouse_up; left, right, middle
 
 [[step]]
 hover = { slot = 36 }                         # creative item tab: hotbar slot
                                               # 36-44, or { catalog = 0 };
+                                              # any tab: { tab = "inventory" };
+                                              # inventory tab: { trash = true };
                                               # offset = [x, y] GUI px from
-                                              # the cell's centre
+                                              # the target's centre
 [[step]]
 cursor = [2, 2]                               # cursor to a point, GUI px
 
@@ -158,9 +163,10 @@ deterministic = true                          # holds flicker, particles,
 [[step]]
 chunk_arenas = { vertices = 65536, max = 1 }  # chunk arenas this small, this
                                               # many at most, so a small render
-                                              # distance fills them; a new size
-                                              # remeshes everything (no-op on
-                                              # vanilla)
+                                              # distance fills them; a new size,
+                                              # or a cap under the arenas there
+                                              # are, remeshes everything (no-op
+                                              # on vanilla)
 
 [[step]]
 wait_ms = 1000
@@ -168,8 +174,8 @@ wait_ms = 1000
 [[step]]
 frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # report line gives the frame
-                                              # rate, its 1% low, the CPU and
-                                              # GPU-wait share of a frame, the
+                                              # rate, its 1% low, the render
+                                              # encode time, the GPU wait, the
                                               # GPU's own time per pass, and
                                               # the sections and triangles drawn
 
@@ -199,7 +205,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A chat line | `chat` (text it contains) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | A biome | `biome` (name, e.g. `swamp`), `at` |
-| Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none nearer than the eviction frontier waiting for pool space), and no two of the chunk pools' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free |
+| Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space nearer than the eviction frontier, or while another arena fits), and no two of the chunk arenas' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free, and `terrain = "evicted"` for far columns waiting for room with the eye's own column drawn |
 | Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none) and `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
@@ -228,4 +234,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `hover` (`slot` 36-44 or `catalog` cell, in a creative item tab; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).

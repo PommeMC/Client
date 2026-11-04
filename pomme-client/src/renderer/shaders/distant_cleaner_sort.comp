@@ -8,17 +8,15 @@
 
 #define WORK_SIZE 64
 #define ELEMS_PER_THREAD 8
-#define OUTPUT_SIZE 256
+#define OUTPUT_SIZE CLEANER_OUTPUT
 #define OPS_PER_THREAD (OUTPUT_SIZE / WORK_SIZE)
-// section.rs `LEVELS - 1`.
-#define TOP_LEVEL 4
 // An id copied in from the output, not to be worked into it again.
 #define EXTERNAL (1u << 31u)
 #define NEVER 0xFFFFFFFFu
 
-layout(local_size_x = WORK_SIZE) in;
-
 #include "distant_section.glsl"
+
+layout(local_size_x = WORK_SIZE) in;
 
 layout(set = 0, binding = 0, std430) readonly restrict buffer LastRenderFrame {
     uint last_render_frame[];
@@ -31,9 +29,6 @@ layout(set = 0, binding = 1, std430) volatile restrict buffer MinVisibility {
 layout(set = 0, binding = 2, std430) readonly restrict buffer NodeData {
     uvec4 nodes[];
 };
-
-const uint NULL_MESH = (1u << 24u) - 1u;
-const uint EMPTY_MESH = (1u << 24u) - 2u;
 
 shared uint initial_sort[OUTPUT_SIZE];
 
@@ -85,10 +80,10 @@ bool should_sort(uint id) {
         return false;
     }
     uint mesh = node.z & 0xFFFFFFu;
-    if (mesh == EMPTY_MESH || mesh == NULL_MESH) {
+    if (mesh == EMPTY_ID || mesh == NULL_ID) {
         return false;
     }
-    if (lod_level(node.xy) == TOP_LEVEL) {
+    if (lod_level(node.xy) == LEVELS - 1u) {
         return false;
     }
     return (node.z & (1u << 24u)) == 0u;

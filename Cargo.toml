@@ -6,7 +6,6 @@ members = [
     "pomme-auth",
     "pomme-install",
     "pomme-client",
-    "pomme-launcher/src-tauri",
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-dirs",

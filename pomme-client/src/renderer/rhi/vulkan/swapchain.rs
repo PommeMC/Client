@@ -81,9 +81,8 @@ impl Swapchain {
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
         } else {
-            // Vanilla's vsync off is an immediate swap (`glfwSwapInterval(0)`):
-            // uncapped, tearing allowed. Mailbox stands in where Immediate is
-            // missing.
+            // Vanilla `GpuSurface.PresentMode`: vsync off takes Immediate,
+            // then Mailbox, then Fifo.
             [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
                 .into_iter()
                 .find(|m| present_modes.contains(m))

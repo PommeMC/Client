@@ -10,6 +10,7 @@ use super::bakery::{Bakery, FaceTexture, MODEL_TEXTURE_SIZE, TEXELS};
 use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::renderer::chunk::mesher::int_to_rgb;
 use crate::world::block::FluidKind;
+use crate::world::block::model::Direction;
 use crate::world::block::render_assets::{BlockRenderView, Tint};
 
 const SIZE: usize = MODEL_TEXTURE_SIZE;
@@ -110,7 +111,8 @@ pub(crate) trait Models {
     /// Block state `block`'s model, 0 for none.
     fn model(&mut self, block: u32) -> u16;
     fn metadata(&self, model: u16) -> Metadata;
-    /// The model of the fluid a model's block holds, for a fluid its own.
+    /// The model of the fluid a model's block holds, for a fluid its own;
+    /// for a fluid's lowered surface ([`Self::fluid_surface`]) the fluid's.
     fn fluid_model(&self, model: u16) -> u16;
     /// A fluid's model with its surface `gap` blocks below the top of a
     /// level-`level` voxel, inset as at level 0 rather than scaled with the
@@ -185,8 +187,8 @@ pub(crate) struct BlockModel {
     /// spans more than one block (23), and its tint state in bits 24-25: 1
     /// on some texels, 2 on all.
     pub face_data: [u32; 6],
-    /// Tinted (1), by the biome (2), translucent (4), shaded per face as
-    /// vanilla does blocks with ambient occlusion (8).
+    /// Tinted (1), by the biome (2), translucent (4), shaded per face (8,
+    /// [`super::bakery::BakeFlags::shaded`]).
     pub flags: u32,
     /// [`ModelTint::packed`].
     pub tint: u32,
@@ -274,7 +276,7 @@ impl ModelFactory {
         let id = self.models.len() as u16;
         self.models.push(ModelInfo {
             metadata: self.models[usize::from(fluid)].metadata,
-            fluid: id,
+            fluid,
         });
         self.tiles.push(ModelTile {
             id,
@@ -283,6 +285,17 @@ impl ModelFactory {
         });
         self.surfaces.insert((fluid, level, gap), id);
         id
+    }
+
+    /// Whether voxels of a model tinted `tint`, holding `held_fluid`, keep
+    /// their biome: for their own tint or for the fluid's. Only the metadata
+    /// takes the fluid's; the model's own record keeps its tint's, since an
+    /// untinted block has no biome colours to look up and the fluid's quads
+    /// draw with the fluid's record.
+    fn biome_coloured(&self, tint: ModelTint, held_fluid: Option<u16>) -> bool {
+        tint.biome_dependent()
+            || held_fluid
+                .is_some_and(|fluid| self.models[usize::from(fluid)].metadata.is_biome_coloured())
     }
 
     pub fn info(&self, model: u16) -> ModelInfo {
@@ -387,12 +400,15 @@ impl ModelFactory {
         let double_sided = [0, 2, 4]
             .iter()
             .any(|&a| depths[a].is_none() && depths[a + 1].is_none());
-        let mut metadata = u64::from(tint.biome_dependent())
+        let biome_coloured = self.biome_coloured(tint, held_fluid);
+        // Only a block culling its own kind on every side counts.
+        let culls_same = Direction::VALUES.iter().all(|&dir| data.culls_same(dir));
+        let mut metadata = u64::from(biome_coloured)
             | u64::from(layer == Layer::Translucent) << 1
             | u64::from(double_sided) << 2
             | u64::from(!is_fluid && data.fluid().kind != FluidKind::Empty) << 3
             | u64::from(is_fluid) << 4
-            | u64::from(data.culls_same()) << 5;
+            | u64::from(culls_same) << 5;
         let mut fully_opaque = true;
         let mut face_data = [u32::MAX; 6];
         // Highest face first, so each shifts into place.
@@ -715,6 +731,19 @@ mod tests {
         lower_surface(&mut faces, 1, 0);
         assert_eq!(faces[1] >> 16 & 63, 4);
         assert_eq!(faces[2] >> 12 & 0xF, 15);
+    }
+
+    #[test]
+    fn a_block_holding_water_keeps_the_biome_for_it() {
+        let mut factory = ModelFactory::new();
+        factory.models.push(ModelInfo {
+            metadata: Metadata(1 << 48 | 16 << 48),
+            fluid: 1,
+        });
+        assert!(factory.biome_coloured(ModelTint::None, Some(1)));
+        assert!(!factory.biome_coloured(ModelTint::None, Some(0)));
+        assert!(!factory.biome_coloured(ModelTint::Constant([1, 2, 3]), None));
+        assert!(factory.biome_coloured(ModelTint::Foliage, Some(0)));
     }
 
     /// Six faces of green with a clear texel at the corner of each.

@@ -74,7 +74,7 @@ Early Android and iOS builds build from source: see [BUILDING.md](./BUILDING.md)
 
 ## Building from source
 
-See [BUILDING.md](./BUILDING.md) for the client and launcher builds, running
+See [BUILDING.md](./BUILDING.md) for building the client, running
 the client standalone, and the development commands.
 
 ## Contributing

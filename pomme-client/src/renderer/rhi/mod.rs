@@ -205,7 +205,7 @@ impl<Texture> TextureTransition<Texture> {
 pub enum BufferUse {
     CopySrc,
     CopyDst,
-    /// Written by a compute shader.
+    /// A compute shader's storage writes; as a destination, its reads too.
     StorageWrite,
     /// Read or written by a compute shader.
     Storage,

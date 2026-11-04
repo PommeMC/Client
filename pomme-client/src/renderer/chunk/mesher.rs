@@ -275,6 +275,13 @@ pub struct SectionMesh {
     pub water_indices: Vec<u32>,
 }
 
+impl SectionMesh {
+    /// Opaque then water indices, which share one slice.
+    pub fn index_len(&self) -> u32 {
+        (self.indices.len() + self.water_indices.len()) as u32
+    }
+}
+
 /// Per-section meshing accumulator: one shared vertex pool plus separate
 /// solid, cutout, and water index lists. Finalized into a [`SectionMesh`]
 /// with solid and cutout concatenated solid-first; water stays separate for
@@ -984,8 +991,6 @@ impl MeshDispatcher {
         self.biome_climate = climate;
     }
 
-    /// (grass, foliage, dry foliage) colormaps, shared with the particle
-    /// store for break-particle tinting.
     /// How each block state looks in distant terrain, from this
     /// dispatcher's textures, colormaps and biomes.
     pub(crate) fn distant_colors(&self) -> Arc<crate::renderer::distant::colors::DistantColors> {
@@ -997,6 +1002,8 @@ impl MeshDispatcher {
         ))
     }
 
+    /// (grass, foliage, dry foliage) colormaps, shared with the particle
+    /// store for break-particle tinting.
     pub fn colormaps(&self) -> (Arc<Colormap>, Arc<Colormap>, Arc<Colormap>) {
         (
             Arc::clone(&self.grass_colormap),
@@ -2265,6 +2272,8 @@ fn face_occlusion_shape(block_state_data: &BlockStateData, direction: Direction)
 /// Vanilla `Block.shouldRenderFace`: a quad facing `direction` is drawn
 /// unless the neighbour's facing occlusion shape covers it, or the block
 /// skips rendering against its own kind (`skipRendering`).
+// TODO: `IronBarsBlock.skipRendering` (panes and bars hide the edge strip
+// against a connected neighbour of their kind).
 fn should_render_face(
     block_state_data: &BlockStateData,
     neighbour: &BlockStateData,
@@ -2275,7 +2284,7 @@ fn should_render_face(
         FaceShape::Empty => None,
         FaceShape::Mask(mask) => Some(mask),
     };
-    if block_state_data.culls_same() && block_state_data.id() == neighbour.id() {
+    if block_state_data.culls_same(direction) && block_state_data.id() == neighbour.id() {
         return false;
     }
     match (face_occlusion_shape(block_state_data, direction), occluder) {

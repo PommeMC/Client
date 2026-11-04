@@ -5,7 +5,9 @@
 //! chunk loads or unloads lights off the game thread instead of inside one
 //! frame. Block edits still light within their frame when the thread is
 //! idle, which it is unless such a burst is in progress: the game thread
-//! waits a moment for them.
+//! waits a moment for them. Vanilla's per-tick metering of queued light
+//! tasks is dropped: each run applies every task queued (see
+//! [`LevelLightEngine::run`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -91,6 +93,10 @@ pub(crate) struct LightWorker {
     awaited: Option<u64>,
     /// Columns whose light is on (vanilla `lightOnInColumn`).
     light_on: HashSet<(i32, i32)>,
+    /// Each column's last unload, by message count, until a report shows the
+    /// thread past it: what an earlier report says of the column is about the
+    /// chunk that went, not one loaded there since.
+    unloaded: HashMap<(i32, i32), u64>,
     has_sky: bool,
     section_count: i32,
 }
@@ -122,6 +128,7 @@ impl LightWorker {
             sent: 0,
             awaited: None,
             light_on: HashSet::new(),
+            unloaded: HashMap::new(),
             has_sky,
             section_count: (height / 16) as i32,
         }
@@ -162,6 +169,7 @@ impl LightWorker {
     /// Vanilla `queueLightRemoval`, and the sky sources go with the chunk.
     pub fn chunk_unloaded(&mut self, pos: (i32, i32)) {
         self.send(Message::ChunkUnloaded(pos));
+        self.unloaded.insert(pos, self.sent);
     }
 
     /// Vanilla `LevelChunk.setBlockState`'s light hooks, with the block
@@ -198,24 +206,33 @@ impl LightWorker {
     /// Waits briefly for an edit's light, so it lands in the edit's frame.
     pub fn poll(&mut self, store: &mut ChunkStore, out: &mut LightDirty) {
         let mut apply = |this: &mut Self, report: Report| {
+            let current = |column: &(i32, i32)| {
+                this.unloaded
+                    .get(column)
+                    .is_none_or(|&seq| report.handled >= seq)
+            };
             for (column, data) in report.columns {
-                // A column unloaded meanwhile keeps nothing.
-                if store
-                    .get_chunk(&crate::position::ChunkPos::new(column.0, column.1))
-                    .is_some()
-                {
+                if current(&column) {
                     store.light_data.insert(column, data);
                 }
             }
-            for (column, on) in &report.dirty.enabled {
-                if *on {
-                    this.light_on.insert(*column);
+            for (column, on) in report.dirty.enabled.into_iter().filter(|(c, _)| current(c)) {
+                if on {
+                    this.light_on.insert(column);
                 } else {
-                    this.light_on.remove(column);
+                    this.light_on.remove(&column);
                 }
             }
-            out.sections.extend(report.dirty.sections);
-            out.columns.extend(report.dirty.columns);
+            out.sections.extend(
+                report
+                    .dirty
+                    .sections
+                    .into_iter()
+                    .filter(|key| current(&key.column())),
+            );
+            out.columns
+                .extend(report.dirty.columns.into_iter().filter(|c| current(c)));
+            this.unloaded.retain(|_, seq| *seq > report.handled);
             if this.awaited.is_some_and(|seq| report.handled >= seq) {
                 this.awaited = None;
             }
@@ -279,5 +296,92 @@ fn run(
         if reports.send(report).is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::light::SectionKey;
+
+    /// A worker with no thread behind it: the test sends its reports.
+    fn worker() -> (LightWorker, Receiver<Message>, Sender<Report>) {
+        let (tx, messages) = crossbeam_channel::unbounded();
+        let (reports, rx) = crossbeam_channel::unbounded();
+        let worker = LightWorker {
+            tx,
+            rx,
+            sent: 0,
+            awaited: None,
+            light_on: HashSet::new(),
+            unloaded: HashMap::new(),
+            has_sky: false,
+            section_count: 4,
+        };
+        (worker, messages, reports)
+    }
+
+    fn report(handled: u64, column: (i32, i32)) -> Report {
+        let data = ChunkLightData {
+            sky_sections: Vec::new(),
+            block_sections: Vec::new(),
+            min_y: 0,
+            has_sky: false,
+            sky_top_section: None,
+        };
+        Report {
+            handled,
+            columns: vec![(column, Arc::new(data))],
+            dirty: LightDirty {
+                sections: HashSet::from([SectionKey::new(column.0, 0, column.1)]),
+                columns: vec![column],
+                enabled: vec![(column, true)],
+            },
+        }
+    }
+
+    #[test]
+    fn report_from_before_an_unload_skips_the_reloaded_column() {
+        let (mut worker, _messages, reports) = worker();
+        let mut store = ChunkStore::new(2);
+        let column = (3, 4);
+        worker.queue_task(LightTask::Remove { pos: column });
+        worker.chunk_unloaded(column);
+        // The reload's own messages follow; the thread hasn't seen any yet.
+        worker.queue_task(LightTask::Remove { pos: column });
+
+        reports.send(report(1, column)).unwrap();
+        let mut out = LightDirty::default();
+        worker.poll(&mut store, &mut out);
+        assert!(!store.light_data.contains_key(&column));
+        assert!(out.sections.is_empty());
+        assert!(out.columns.is_empty());
+        assert!(!worker.light_on_in_column(column));
+
+        reports.send(report(3, column)).unwrap();
+        worker.poll(&mut store, &mut out);
+        assert!(store.light_data.contains_key(&column));
+        assert_eq!(out.sections.len(), 1);
+        assert_eq!(out.columns, [column]);
+        assert!(worker.light_on_in_column(column));
+        assert!(worker.unloaded.is_empty());
+    }
+
+    #[test]
+    fn an_edit_is_awaited_until_a_report_covers_it() {
+        let (mut worker, _messages, reports) = worker();
+        let mut store = ChunkStore::new(2);
+        let mut out = LightDirty::default();
+        worker.block_dirty(0, 0, 0);
+        worker.block_dirty(1, 0, 0);
+        assert_eq!(worker.awaited, Some(2));
+
+        reports.send(report(1, (0, 0))).unwrap();
+        worker.poll(&mut store, &mut out);
+        assert_eq!(worker.awaited, Some(2));
+
+        reports.send(report(2, (0, 0))).unwrap();
+        worker.poll(&mut store, &mut out);
+        assert_eq!(worker.awaited, None);
     }
 }

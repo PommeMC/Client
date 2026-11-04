@@ -5,6 +5,12 @@ use std::path::Path;
 // shaders via the generated packing.glsl.
 include!("src/renderer/chunk/packing_consts.rs");
 
+// The same for distant terrain's sizes and markers, shared via the generated
+// distant_consts.glsl.
+mod distant_consts {
+    include!("src/renderer/distant/shader_consts.rs");
+}
+
 /// `PackedVertex::uv` back to a sprite-local UV, for `packing.glsl`.
 const UNPACK_SPRITE_UV: &str = "vec2 unpack_sprite_uv(uint uv) {
     uint mask = (1u << TERRAIN_UV_BITS) - 1u;
@@ -14,7 +20,7 @@ const UNPACK_SPRITE_UV: &str = "vec2 unpack_sprite_uv(uint uv) {
 
 fn main() {
     // `mobile` covers what Android and iOS share: touch, the soft keyboard,
-    // no launcher.
+    // no self-update.
     println!("cargo::rustc-check-cfg=cfg(mobile)");
     if matches!(
         std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
@@ -51,6 +57,13 @@ fn main() {
         ),
     )
     .expect("failed to write packing.glsl");
+
+    println!("cargo:rerun-if-changed=src/renderer/distant/shader_consts.rs");
+    fs::write(
+        Path::new(&out_dir).join("distant_consts.glsl"),
+        distant_consts_glsl(),
+    )
+    .expect("failed to write distant_consts.glsl");
 
     let compiler = shaderc::Compiler::new().expect("failed to create shaderc compiler");
     let mut options = shaderc::CompileOptions::new().expect("failed to create compile options");
@@ -126,6 +139,8 @@ fn main() {
         ("preview.frag", shaderc::ShaderKind::Fragment),
         ("menu_overlay.vert", shaderc::ShaderKind::Vertex),
         ("menu_overlay.frag", shaderc::ShaderKind::Fragment),
+        ("block_outline.vert", shaderc::ShaderKind::Vertex),
+        ("block_outline.frag", shaderc::ShaderKind::Fragment),
         ("block_overlay.vert", shaderc::ShaderKind::Vertex),
         ("block_overlay.frag", shaderc::ShaderKind::Fragment),
         ("sky.vert", shaderc::ShaderKind::Vertex),
@@ -186,6 +201,43 @@ fn main() {
         fs::write(&out_path, artifact.as_binary_u8())
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     }
+}
+
+/// `distant_consts.glsl`: the `uint` constants as `u` literals; plain those
+/// that layouts or the preprocessor take.
+fn distant_consts_glsl() -> String {
+    use distant_consts::*;
+    let uints = [
+        ("LEVELS", LEVELS),
+        ("MAX_NODES", MAX_NODES),
+        ("NULL_ID", NULL_ID),
+        ("EMPTY_ID", EMPTY_ID),
+        ("CLEANER_SENTINEL", CLEANER_SENTINEL),
+        ("MAX_REQUESTS", MAX_REQUESTS),
+        ("MAX_LISTED", MAX_LISTED),
+        ("QUADS_PER_DRAW", QUADS_PER_DRAW),
+        ("OPAQUE_DRAWS", OPAQUE_DRAWS),
+        ("TRANSLUCENT_DRAWS", TRANSLUCENT_DRAWS),
+        ("TEMPORAL_DRAWS", TEMPORAL_DRAWS),
+        ("TRANSLUCENT_OFFSET", TRANSLUCENT_OFFSET),
+        ("TEMPORAL_OFFSET", TEMPORAL_OFFSET),
+    ];
+    let plain = [
+        ("CLEANER_OUTPUT", u64::from(CLEANER_OUTPUT)),
+        ("TRANSLUCENT_BUCKETS", u64::from(TRANSLUCENT_BUCKETS)),
+        ("COUNTS_OPAQUE", COUNTS_OPAQUE),
+        ("COUNTS_TRANSLUCENT", COUNTS_TRANSLUCENT),
+        ("COUNTS_TEMPORAL", COUNTS_TEMPORAL),
+        ("COUNTS_CULL_DRAW", COUNTS_CULL_DRAW),
+    ];
+    let mut glsl = String::from("#ifndef DISTANT_CONSTS_GLSL\n#define DISTANT_CONSTS_GLSL\n");
+    for (name, value) in uints {
+        glsl += &format!("#define {name} {value}u\n");
+    }
+    for (name, value) in plain {
+        glsl += &format!("#define {name} {value}\n");
+    }
+    glsl + "#endif\n"
 }
 
 /// Deflates every block data table into `OUT_DIR/block-data/`, which

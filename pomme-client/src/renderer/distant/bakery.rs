@@ -305,10 +305,17 @@ pub(crate) struct BakeFlags {
     pub translucent: bool,
     /// Some opaque-layer quad leaves texels out.
     pub discard: bool,
-    /// Some quad takes ambient occlusion, so the model shades per face.
+    /// Some quad takes its face's directional shade, so the model shades
+    /// per face. Fluids do too, as vanilla's `FluidRenderer` shades them,
+    /// where the reference leaves them unshaded.
     pub shaded: bool,
     /// The first tinted quad's tint.
     pub tint: Tint,
+}
+
+/// Whether `quad` takes directional shade.
+fn shades(quad: &BakedQuad) -> bool {
+    quad.shade_face.is_some()
 }
 
 /// The rasterizer and the six views every block state is drawn through.
@@ -385,7 +392,7 @@ impl Bakery {
                 let Some(sprite) = uv_map.sprite_pixels(name) else {
                     continue;
                 };
-                flags.shaded |= quad.ambient_occlusion;
+                flags.shaded |= shades(quad);
                 if flags.tint == Tint::None {
                     flags.tint = quad.tint;
                 }
@@ -428,9 +435,11 @@ impl Bakery {
 }
 
 /// A full block of `fluid`: still on top and bottom, flowing on the sides
-/// over vanilla's half of the sprite. A source with nothing around it comes
-/// out as vanilla's `FluidRenderer` draws it but for its lowered top, which
-/// a distant run doesn't keep.
+/// over vanilla's half of the sprite, as vanilla's `FluidRenderer` draws a
+/// source with nothing around it. Departure: the top stays at the block's
+/// top where `FluidRenderer` lowers it, so a run of water voxels meets
+/// without a step; the surface's own height comes from the voxel's gap
+/// (`ModelFactory::fluid_surface`).
 fn fluid_quads(uv_map: &AtlasUVMap, fluid: FluidKind) -> Vec<Quad<'_>> {
     let (still, flow, meta) = match fluid {
         FluidKind::Water => ("water_still", "water_flow", META_TINTED),
@@ -540,6 +549,24 @@ mod tests {
                 assert!(texel.abs_diff_eq(Vec3::AXES[axis].extend(0.0), 1e-6));
             }
         }
+    }
+
+    #[test]
+    fn shade_follows_the_element_not_ambient_occlusion() {
+        let quad = |shade_face, ambient_occlusion| BakedQuad {
+            positions: face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
+            uvs: [[0.0; 2]; 4],
+            texture: crate::world::block::model::TextureId::intern("block/stone"),
+            cullface: None,
+            tint: Tint::None,
+            tint_index: None,
+            shade_light: 1.0,
+            shade_face,
+            emission: 0,
+            ambient_occlusion,
+        };
+        assert!(shades(&quad(Some(Direction::Up), false)));
+        assert!(!shades(&quad(None, true)));
     }
 
     #[test]

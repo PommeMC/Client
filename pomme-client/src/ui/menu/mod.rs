@@ -911,7 +911,7 @@ impl MainMenu {
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
             chunk_detail: settings.chunk_detail,
-            distant_terrain: settings.distant_terrain,
+            distant_terrain: distant_terrain_chunks(distant_terrain_step(settings.distant_terrain)),
             simulation_distance: settings.simulation_distance,
             server_render_distance: 0,
             fov: settings.fov,

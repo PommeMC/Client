@@ -55,7 +55,8 @@ static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Some(path) = LOG_FILE.get() {
+        let path = LOG_FILE.get();
+        if let Some(path) = path {
             let line = format!(
                 "{} PANIC {info}
 ",
@@ -67,7 +68,9 @@ pub fn install_panic_hook() {
                 .open(path)
                 .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
         }
-        if tracing::dispatcher::has_been_set() {
+        // Written to the file above, the default hook prints it on desktop;
+        // Android drops stderr, so logcat still needs it.
+        if tracing::dispatcher::has_been_set() && (path.is_none() || cfg!(target_os = "android")) {
             tracing::error!("{info}");
         }
         #[cfg(target_os = "android")]

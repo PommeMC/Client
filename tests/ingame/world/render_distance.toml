@@ -1,7 +1,7 @@
-# Render Distance down and back up: the far columns go when it drops and
-# come back when it rises, settling each time with every loaded column meshed
-# and uploaded and no two pool ranges overlapping. The test server's view
-# distance is 4, so 4 is the most this reaches.
+# Render Distance down and back up, settling each time with every loaded
+# column meshed and uploaded and no two pool ranges overlapping; the
+# screenshots show the far columns go when it drops and come back when it
+# rises. The test server's view distance is 4, so 4 is the most this reaches.
 
 [[step]]
 wait_ms = 2000

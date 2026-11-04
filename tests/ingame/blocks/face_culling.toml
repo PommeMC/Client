@@ -52,3 +52,9 @@ chat = "/fill 0 -61 0 15 -61 15 minecraft:grass_block"
 
 [[step]]
 expect = { block = "grass_block", at = [15, -61, 15] }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"

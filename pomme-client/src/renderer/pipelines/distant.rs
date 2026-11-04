@@ -10,9 +10,10 @@ use glam::{DVec3, Mat4};
 
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::buffer::DrawCommand;
+use crate::renderer::chunk::occlusion_graph::VIS_MARGIN_RADIANS;
 use crate::renderer::distant::gpu::{
     CLEANER_IDS_BYTES, CLEANER_KEYS_BYTES, COUNTS_BYTES, COUNTS_CULL_DRAW, CUBE_FIRST_INDEX,
-    DISTANT_FAR, DRAWS_BYTES, DistantBuffers, MAX_LISTED, NODE_VISIBILITY_BYTES, POSITIONS_BYTES,
+    DISTANT_FAR, DRAWS_BYTES, DistantBuffers, NODE_VISIBILITY_BYTES, POSITIONS_BYTES,
     QUEUE_META_BYTES, RENDER_LIST_BYTES, REQUESTS_BYTES, Region, SCRATCH_BYTES, SECTIONS_BYTES,
     TOP_IDS_BYTES, TRANSLUCENT_BUCKETS, TRANSLUCENT_BYTES, VISIBILITY_BYTES, VISIBILITY_SETS_BYTES,
 };
@@ -32,11 +33,6 @@ const DEPTH: rhi::TextureFormat = rhi::TextureFormat::Depth32Float;
 const HIZ: rhi::TextureFormat = rhi::TextureFormat::R32Float;
 /// A node is split while it covers more than this many pixels squared.
 const SUBDIVISION_SIZE: f32 = 64.0;
-/// How much wider than the view, in radians of field of view, the traversal
-/// requests meshes: terrain beside the view refines before a turn shows it.
-/// The chunk mesher schedules by the same margin. A departure: the reference
-/// requests only what it draws.
-const REQUEST_MARGIN_RADIANS: f32 = 0.6;
 
 /// The scene uniform (`distant_section.glsl`): the distant view projection
 /// moved by the camera's position within its 32-block section, that section,
@@ -52,10 +48,8 @@ struct SceneUniform {
     occlusion_skipped: u32,
     hiz_size: u32,
     min_sss: f32,
-    render_list_max: u32,
     request_limit: u32,
     render_distance: f32,
-    _pad: [u32; 3],
     frustum: [[f32; 4]; 6],
     request_frustum: [[f32; 4]; 6],
 }
@@ -151,9 +145,9 @@ enum Iteration {
     Even,
 }
 
-/// The screen-size targets, remade with the swapchain.
+/// The screen-size targets, remade with the swapchain
+/// ([`DistantPipeline::drop_targets`]).
 struct Targets {
-    extent: rhi::Extent,
     color: rhi::backend::Texture,
     depth: rhi::backend::Texture,
     /// The far side of the drawn chunks' boxes.
@@ -452,6 +446,13 @@ impl DistantPipeline {
     ) {
         self.blit.destroy(device);
         self.blit = create_blit_pipeline(device, swapchain, self.blit_layout);
+        self.drop_targets(device);
+    }
+
+    /// The swapchain was remade, its depth with it even at the same size:
+    /// the targets, sized to it and reading that depth, are remade by the
+    /// next frame that draws.
+    pub fn drop_targets(&mut self, device: &rhi::backend::Device) {
         if let Some(targets) = self.targets.take() {
             self.destroy_targets(device, targets);
         }
@@ -462,7 +463,7 @@ impl DistantPipeline {
     }
 
     /// The targets at `extent`, made with `frame_depth` (the swapchain's,
-    /// which the setup pass reads) as the swapchain is.
+    /// which the setup pass reads), unless they're already made.
     fn ensure_targets(
         &mut self,
         device: &rhi::backend::Device,
@@ -470,10 +471,6 @@ impl DistantPipeline {
         frame_depth: rhi::backend::TextureHandle,
         buffers: &DistantBuffers,
     ) {
-        if self.targets.as_ref().is_some_and(|t| t.extent != extent) {
-            let targets = self.targets.take().expect("checked");
-            self.destroy_targets(device, targets);
-        }
         if self.targets.is_some() {
             return;
         }
@@ -574,7 +571,6 @@ impl DistantPipeline {
             ],
         );
         self.targets = Some(Targets {
-            extent,
             setup_set: texture_set(frame_depth),
             color,
             depth,
@@ -630,13 +626,14 @@ impl DistantPipeline {
             occlusion_skipped: u32::from(self.cull.is_none()),
             hiz_size: targets.hiz_width << 16 | targets.hiz_height,
             min_sss: SUBDIVISION_SIZE * SUBDIVISION_SIZE / (extent.width * extent.height) as f32,
-            render_list_max: MAX_LISTED,
             request_limit: buffers.request_limit(),
             render_distance: buffers.render_distance_sq(),
-            _pad: [0; 3],
             frustum: Camera::planes_from_view_projection(view_proj),
+            // Terrain beside the view refines before a turn shows it, by the
+            // chunk mesher's margin. A departure: the reference requests only
+            // what it draws.
             request_frustum: Camera::planes_from_view_projection(
-                camera.distant_view_projection_dilated(DISTANT_FAR, REQUEST_MARGIN_RADIANS),
+                camera.distant_view_projection_dilated(DISTANT_FAR, VIS_MARGIN_RADIANS),
             ),
         }));
         let draw = buffers.draw_buffers();
@@ -703,8 +700,8 @@ impl DistantPipeline {
         )]);
         self.build_hiz(device, encoder, targets);
         self.clean(encoder, frame, frame_id, buffers);
-        buffers.record_traversal_setup(encoder, frame);
-        self.traverse(encoder, frame, targets, buffers.top_count(), queue_meta);
+        let top_count = buffers.record_traversal_setup(encoder, frame);
+        self.traverse(encoder, frame, targets, top_count, queue_meta);
         buffers.record_request_readback(encoder, frame);
         encoder.transition_textures(&[TextureTransition::color(
             depth,
@@ -713,7 +710,8 @@ impl DistantPipeline {
         )]);
 
         // `distant_prep.comp`, after last frame's draws are done with the
-        // counts and positions and the traversal with the render list.
+        // counts and positions and the traversal with the render list; the
+        // occlusion pass's vertex stage reads that list after it.
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::DrawInput, rhi::BufferUse::Storage),
             (rhi::BufferUse::ShaderRead, rhi::BufferUse::Storage),
@@ -725,6 +723,7 @@ impl DistantPipeline {
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput),
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::Storage),
+            (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),
             (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
         ]);
 
@@ -777,7 +776,7 @@ impl DistantPipeline {
             counts,
             0,
         );
-        buffers.record_count_readback(encoder, frame);
+        buffers.finish_list(encoder, frame);
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput),
             (rhi::BufferUse::StorageWrite, rhi::BufferUse::ShaderRead),

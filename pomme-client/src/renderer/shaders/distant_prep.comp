@@ -13,12 +13,13 @@ layout(local_size_x = 1) in;
 #include "distant_section.glsl"
 
 void main() {
-    cmdgen_dispatch = uvec3((section_count + 127u) / 128u, 1u, 1u);
+    uint listed = listed_count();
+    cmdgen_dispatch = uvec3((listed + 127u) / 128u, 1u, 1u);
     opaque_draw_count = 0u;
     translucent_draw_count = 0u;
     temporal_draw_count = 0u;
     cull_draw.count = 36u;
-    cull_draw.instance_count = section_count;
+    cull_draw.instance_count = listed;
     cull_draw.first_index = QUADS_PER_DRAW * 6u;
     cull_draw.base_vertex = 0;
     cull_draw.base_instance = 0u;

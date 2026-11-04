@@ -42,6 +42,7 @@ struct StepFile {
     click: Option<Click>,
     creative_set_slot: Option<CreativeSetSlot>,
     look_at: Option<[f64; 3]>,
+    modifiers: Option<protocol::Modifiers>,
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
@@ -231,9 +232,10 @@ struct BiomeExpect {
     at: [i32; 3],
 }
 
-/// `settled`: every loaded column meshed, and the chunk pools' ranges
+/// `settled`: every loaded column meshed, and the chunk arenas' ranges
 /// consistent (vanilla's `hasRenderedAllSections`). `compacted`: that, with
-/// no chunk arena left to drain or free.
+/// no chunk arena left to drain or free. `evicted`: settled, with far
+/// columns waiting for room and the eye's own column drawn.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TerrainExpect {
@@ -315,6 +317,9 @@ impl StepFile {
         }
         if let Some(at) = self.look_at {
             steps.push(Step::Run(Command::LookAt { at }));
+        }
+        if let Some(modifiers) = self.modifiers {
+            steps.push(Step::Run(Command::Modifiers(modifiers)));
         }
         if let Some(button) = self.mouse_down {
             steps.push(Step::Run(Command::MouseDown { button }));
@@ -405,9 +410,9 @@ struct FrameSample {
     triangles: u32,
 }
 
-/// `samples` summed up: the frame rate, its 1% low, the CPU and GPU-wait
-/// shares of a frame, the GPU's own time per pass, and what the chunk draws
-/// covered.
+/// `samples` summed up: the frame rate, its 1% low, the time the renderer
+/// takes to encode a world frame, the wait for the GPU, the GPU's own time
+/// per pass, and what the chunk draws covered.
 fn summarize(samples: &[FrameSample]) -> String {
     let mean =
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
@@ -430,19 +435,27 @@ fn summarize(samples: &[FrameSample]) -> String {
         .into_iter()
         .map(|(name, sum, count)| (name, sum / count as f32))
         .collect();
+    // A device without timestamps stamps nothing.
+    let gpu = if passes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; gpu {:.2} ms: {}",
+            passes.iter().map(|(_, ms)| ms).sum::<f32>(),
+            passes
+                .iter()
+                .map(|(name, ms)| format!("{name} {ms:.2}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
     format!(
-        "{} frames: {:.1} fps, 1% low {:.1} fps; cpu {:.2} ms, gpu wait {:.2} ms; gpu {:.2} ms: {}; {:.0} sections, {:.0}k triangles",
+        "{} frames: {:.1} fps, 1% low {:.1} fps; encode {:.2} ms, gpu wait {:.2} ms{gpu}; {:.0} sections, {:.0}k triangles",
         samples.len(),
         1000.0 / mean(|s| s.interval_ms),
         1000.0 / low,
         mean(|s| s.frame_ms),
         mean(|s| s.fence_ms),
-        passes.iter().map(|(_, ms)| ms).sum::<f32>(),
-        passes
-            .iter()
-            .map(|(name, ms)| format!("{name} {ms:.2}"))
-            .collect::<Vec<_>>()
-            .join(", "),
         mean(|s| s.sections as f32),
         mean(|s| s.triangles as f32) / 1000.0,
     )
@@ -811,19 +824,23 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
             )
         }
         Expect::Terrain(TerrainExpect { terrain }) => {
-            let compacted = match terrain.as_str() {
-                "settled" => false,
-                "compacted" => true,
+            let (compacted, evicted) = match terrain.as_str() {
+                "settled" => (false, false),
+                "compacted" => (true, false),
+                "evicted" => (false, true),
                 _ => return Err(format!("unknown terrain state {terrain}")),
             };
             if let Some(pos) = game.first_unmeshed_column() {
                 return Err(format!("{pos:?} isn't meshed yet"));
             }
             if let Some(pos) = gfx.renderer.starved_chunk_column() {
-                return Err(format!("{pos:?}'s mesh doesn't fit the chunk pools"));
+                return Err(format!("{pos:?}'s mesh doesn't fit the chunk arenas"));
             }
             if let Some(overlap) = gfx.renderer.chunk_slice_overlap() {
                 return Err(overlap);
+            }
+            if evicted {
+                gfx.renderer.chunk_arenas_evicted()?;
             }
             ensure(
                 !compacted || !gfx.renderer.chunk_arenas_compacting(),
@@ -1040,5 +1057,30 @@ mod tests {
         assert!(err("[[step]]\ncaht = \"a\"").contains("unknown field"));
         assert!(err("[[step]]\nexpect = { slot = 1, itme = \"a\" }").contains("did not match"));
         assert!(err("[[step]]\noption = { main_hand = \"up\" }").contains("unknown variant"));
+    }
+
+    #[test]
+    fn frame_times_parse_and_sum_up_with_the_slowest_hundredth() {
+        let steps = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
+        assert_eq!(steps, [Step::FrameTimes(Duration::from_secs(5))]);
+        // 198 frames of 10 ms and 2 of 50 ms: the 1% low is the slowest 2.
+        let samples: Vec<FrameSample> = (0..200)
+            .map(|i| FrameSample {
+                interval_ms: if i < 2 { 50.0 } else { 10.0 },
+                frame_ms: 1.0,
+                fence_ms: 0.5,
+                gpu: if i % 2 == 0 {
+                    vec![("chunks", 0.25), ("distant", 0.5)]
+                } else {
+                    vec![("chunks", 0.75)]
+                },
+                sections: 10,
+                triangles: 2000,
+            })
+            .collect();
+        assert_eq!(
+            summarize(&samples),
+            "200 frames: 96.2 fps, 1% low 20.0 fps; encode 1.00 ms, gpu wait 0.50 ms; gpu 1.00 ms: chunks 0.50, distant 0.50; 10 sections, 2k triangles"
+        );
     }
 }

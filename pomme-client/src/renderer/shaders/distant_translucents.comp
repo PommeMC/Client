@@ -15,7 +15,7 @@ layout(local_size_x = 128) in;
 #include "distant_section.glsl"
 
 void main() {
-    if (gl_GlobalInvocationID.x >= translucent_draw_count) {
+    if (gl_GlobalInvocationID.x >= min(translucent_draw_count, TRANSLUCENT_DRAWS)) {
         return;
     }
     uint draw_id = translucent_data[gl_GlobalInvocationID.x + TRANSLUCENT_BUCKETS];
@@ -25,5 +25,6 @@ void main() {
     uint distance = (rel.x + rel.y + rel.z) << detail;
     distance = (TRANSLUCENT_BUCKETS - 1u) - min(distance, TRANSLUCENT_BUCKETS - 1u);
     uint draw_ptr = atomicAdd(translucent_data[distance], 1u) + TRANSLUCENT_OFFSET;
-    write_draw(draw_ptr, draw_id, section_quad_start(meta), meta.b.x & 0xFFFFu);
+    write_draw(draw_ptr, TRANSLUCENT_END, draw_id, section_quad_start(meta),
+        meta.b.x & 0xFFFFu);
 }

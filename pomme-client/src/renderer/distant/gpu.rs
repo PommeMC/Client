@@ -14,7 +14,7 @@ use super::models::{
     ATLAS_COLUMNS, ATLAS_ROWS, BlockModel, CAPACITY, MODEL_MIP_LEVELS, ModelTile, TILE_HEIGHT,
     TILE_WIDTH,
 };
-use super::nodes::{MAX_NODES, NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
+use super::nodes::{NODE_BYTES, NODE_SCATTER_BIT, NodeGraph};
 use super::section::{LEVELS, SIDE, SectionKey};
 use super::worker::DistantUpdate;
 use crate::position::ChunkPos;
@@ -23,23 +23,27 @@ use crate::renderer::chunk::tlsf::Tlsf;
 use crate::renderer::rhi::IndirectDrawFeatures;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 
+/// The sizes and markers the shaders share.
+pub(crate) mod consts {
+    include!("shader_consts.rs");
+}
+
+use consts::{
+    CLEANER_OUTPUT, CLEANER_SENTINEL, MAX_NODES, OPAQUE_DRAWS, QUADS_PER_DRAW, TEMPORAL_DRAWS,
+    TEMPORAL_OFFSET, TRANSLUCENT_DRAWS, TRANSLUCENT_OFFSET,
+};
+pub(crate) use consts::{
+    COUNTS_CULL_DRAW, COUNTS_OPAQUE, COUNTS_TEMPORAL, COUNTS_TRANSLUCENT, MAX_LISTED, MAX_REQUESTS,
+    TRANSLUCENT_BUCKETS,
+};
+
+const _: () = assert!(consts::LEVELS == LEVELS as u32);
+
 /// The arena's size: an eighth of the device's memory, within these bounds.
 const MAX_ARENA_BYTES: u64 = 512 << 20;
 const MIN_ARENA_BYTES: u64 = 64 << 20;
-/// Quads the shared index buffer covers, the most a group can hold.
-const QUADS_PER_DRAW: u32 = 1 << 16;
 /// Sections the metadata buffer holds.
 const MAX_SECTIONS: u32 = 1 << 20;
-/// Sections a frame's render list, and nodes a traversal iteration, may hold.
-pub(crate) const MAX_LISTED: u32 = 200_000;
-/// The draw list's regions, in draws.
-const OPAQUE_DRAWS: u32 = 400_000;
-const TRANSLUCENT_DRAWS: u32 = 100_000;
-const TEMPORAL_DRAWS: u32 = 100_000;
-const TRANSLUCENT_OFFSET: u32 = OPAQUE_DRAWS;
-const TEMPORAL_OFFSET: u32 = OPAQUE_DRAWS + TRANSLUCENT_DRAWS;
-/// Distance buckets the translucent draws sort by.
-pub(crate) const TRANSLUCENT_BUCKETS: u32 = 1024;
 /// Quads a frame's staging holds for the arena.
 const STAGING_BYTES: u64 = 16 << 20;
 /// Records a frame's scatter list holds (`distant_scatter.comp`: chunks of
@@ -64,8 +68,6 @@ const TILES_PER_FRAME: usize = 256;
 pub(crate) const TINT_BIOMES: usize = 512;
 /// The requests in flight at which the traversal stops asking for more.
 const TARGET_REQUESTS: f64 = 4000.0;
-/// Requests a traversal may make a frame.
-pub(crate) const MAX_REQUESTS: u32 = 50;
 /// Top-level nodes the ring may hold.
 const MAX_ROOTS: usize = 1 << 14;
 /// The distant projection's far plane: 3000 chunks.
@@ -88,7 +90,7 @@ pub(crate) const RENDER_LIST_BYTES: u64 = (1 + MAX_LISTED as u64) * 4;
 pub(crate) const COUNTS_BYTES: u64 = 64;
 const COUNT_WORDS: usize = COUNTS_BYTES as usize / 4;
 pub(crate) const DRAWS_BYTES: u64 =
-    (OPAQUE_DRAWS + TRANSLUCENT_DRAWS + TEMPORAL_DRAWS) as u64 * size_of::<DrawCommand>() as u64;
+    (TEMPORAL_OFFSET + TEMPORAL_DRAWS) as u64 * size_of::<DrawCommand>() as u64;
 pub(crate) const POSITIONS_BYTES: u64 = MAX_LISTED as u64 * 8;
 pub(crate) const VISIBILITY_BYTES: u64 = MAX_SECTIONS as u64 * 4;
 pub(crate) const TRANSLUCENT_BYTES: u64 = (TRANSLUCENT_BUCKETS + TRANSLUCENT_DRAWS) as u64 * 4;
@@ -100,8 +102,7 @@ pub(crate) const SCRATCH_BYTES: u64 = MAX_LISTED as u64 * 4;
 pub(crate) const TOP_IDS_BYTES: u64 = MAX_ROOTS as u64 * 4;
 /// Per node, the frame the traversal last drew it, which the cleaner sorts by.
 pub(crate) const NODE_VISIBILITY_BYTES: u64 = MAX_NODES as u64 * 4;
-/// Nodes a cleaner pass picks: their ids, then their keys.
-const CLEANER_OUTPUT: u32 = 256;
+/// The cleaner's output: the ids it picks, then their keys.
 pub(crate) const CLEANER_IDS_BYTES: u64 = CLEANER_OUTPUT as u64 * 4;
 pub(crate) const CLEANER_KEYS_BYTES: u64 = CLEANER_OUTPUT as u64 * 8;
 /// Nodes a workgroup of the cleaner's sort covers (64 threads of 8).
@@ -109,11 +110,6 @@ const CLEANER_SORT_GROUP: u32 = 512;
 /// Visibility sets a frame's list holds.
 const MAX_VISIBILITY_SETS: usize = 1 << 16;
 pub(crate) const VISIBILITY_SETS_BYTES: u64 = MAX_VISIBILITY_SETS as u64 * 4;
-/// Byte offsets within the draw-count buffer (`distant_section.glsl`).
-pub(crate) const COUNTS_OPAQUE: u64 = 12;
-pub(crate) const COUNTS_TRANSLUCENT: u64 = 16;
-pub(crate) const COUNTS_TEMPORAL: u64 = 20;
-pub(crate) const COUNTS_CULL_DRAW: u64 = 24;
 
 /// A section's quads in the arena and its record (`SectionMeta`).
 #[derive(Clone, Copy)]
@@ -219,6 +215,11 @@ pub(crate) struct DistantBuffers {
     count_readbacks: Vec<rhi::backend::Buffer>,
     last_counts: [u32; COUNT_WORDS],
     slots: [u32; 3],
+    /// Frames recorded, which a frame ended at acquire is not.
+    recorded_frames: u64,
+    /// The recorded frame whose draw list the draw buffer holds, which the
+    /// next one's opaque draws use; `None` when there is none to use.
+    list_frame: Option<u64>,
     /// Per frame in flight, whether its cleaner readback holds a pass's
     /// keys.
     cleaner_pending: [bool; MAX_FRAMES_IN_FLIGHT],
@@ -253,6 +254,10 @@ pub(crate) struct DistantBuffers {
     /// Sections whose quads and ids are freed at the frame from which no
     /// in-flight frame can still draw them.
     pending_free: VecDeque<(u64, Uploaded)>,
+    /// Sections let go of, by the graph's dirty mark then; they join
+    /// [`Self::pending_free`] once the records changed by then are written,
+    /// so none on the GPU names them.
+    unflushed_free: VecDeque<(u64, Uploaded)>,
     /// Every model's six faces and their mips, a tile each.
     model_atlas: rhi::backend::Texture,
     model_sampler: rhi::backend::Sampler,
@@ -477,6 +482,8 @@ impl DistantBuffers {
             count_readbacks: readbacks("distant_count_readback", COUNTS_BYTES),
             last_counts: [0; COUNT_WORDS],
             slots: [0; 3],
+            recorded_frames: 0,
+            list_frame: None,
             nodes,
             requests,
             queue_meta,
@@ -496,6 +503,7 @@ impl DistantBuffers {
             bounds: BoundStore::new(device),
             frame_seq: 0,
             pending_free: VecDeque::new(),
+            unflushed_free: VecDeque::new(),
             model_atlas,
             model_sampler,
             models,
@@ -617,8 +625,11 @@ impl DistantBuffers {
     /// Carries the pending sections up, their quads into the arena through
     /// `frame`'s staging and their records through its scatter list, as many
     /// as fit, the rest next frame; then the changed nodes through the same
-    /// list.
+    /// list, but those naming a section still pending, which wait with it;
+    /// then the sections no node record names any more are freed. Call once
+    /// a recorded frame.
     pub fn record_uploads(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        self.recorded_frames += 1;
         let mut copies = Vec::new();
         let mut records: Vec<(u32, [u32; 4])> = Vec::new();
         let mut used = 0;
@@ -653,12 +664,22 @@ impl DistantBuffers {
             encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::ShaderRead);
         }
         // What fits the list; the rest of the nodes wait for the next frame.
+        let pending: HashSet<u32> = self.pending.iter().map(|p| p.uploaded.id).collect();
         records.extend(
             self.graph
-                .take_dirty(SCATTER_RECORDS.saturating_sub(records.len()))
+                .take_dirty(SCATTER_RECORDS.saturating_sub(records.len()), |id| {
+                    pending.contains(&id)
+                })
                 .into_iter()
                 .map(|(id, record)| (id | NODE_SCATTER_BIT, record)),
         );
+        let written = self.graph.written_through();
+        while let Some(&(mark, section)) = self.unflushed_free.front()
+            && mark <= written
+        {
+            self.unflushed_free.pop_front();
+            self.free_later(section);
+        }
         if records.is_empty() {
             return;
         }
@@ -689,14 +710,20 @@ impl DistantBuffers {
         ]);
     }
 
-    /// Before the traversal: this frame's top-level ids and queue metadata
-    /// (the first iteration over the roots, the rest empty), the render
-    /// list and request queue emptied.
-    pub fn record_traversal_setup(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
-        let top = self.graph.top_ids();
-        self.top_ids[frame].write_at(0, bytemuck::cast_slice(top));
+    /// Before the traversal: this frame's top-level ids (those whose records
+    /// are written) and queue metadata (the first iteration over the roots,
+    /// the rest empty), the render list and request queue emptied; how many
+    /// roots.
+    pub fn record_traversal_setup(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+    ) -> u32 {
+        let top = self.graph.written_top_ids();
+        let count = top.len() as u32;
+        self.top_ids[frame].write_at(0, bytemuck::cast_slice(&top));
         let mut meta = [[0u32, 1, 1, 0]; LEVELS as usize];
-        meta[0] = [(top.len() as u32).div_ceil(32), 1, 1, top.len() as u32];
+        meta[0] = [count.div_ceil(32), 1, 1, count];
         self.queue_meta_staging[frame].write_at(0, bytemuck::cast_slice(&meta));
         encoder.transition_buffers_many(&[
             (rhi::BufferUse::DrawInput, rhi::BufferUse::CopyDst),
@@ -713,6 +740,7 @@ impl DistantBuffers {
             (rhi::BufferUse::CopyDst, rhi::BufferUse::Storage),
             (rhi::BufferUse::CopyDst, rhi::BufferUse::DrawInput),
         ]);
+        count
     }
 
     /// After the traversal: its requests into this frame's readback, read
@@ -745,8 +773,8 @@ impl DistantBuffers {
 
     /// Before the cleaner's sort, when it should run (less than an eighth of
     /// the arena free, a fraction rather than a fixed amount since the arena
-    /// is sized to the device): its output reset to an id no node has; the
-    /// sort's workgroups.
+    /// is sized to the device): its output reset to the sentinel, an id no
+    /// node has; the sort's workgroups.
     pub fn record_cleaner_setup(
         &mut self,
         encoder: &rhi::backend::CommandEncoder,
@@ -762,7 +790,7 @@ impl DistantBuffers {
             self.cleaner_ids.handle(),
             0,
             CLEANER_IDS_BYTES,
-            MAX_NODES - 2,
+            CLEANER_SENTINEL,
         );
         encoder.transition_buffers(rhi::BufferUse::CopyDst, rhi::BufferUse::Storage);
         self.cleaner_pending[frame] = true;
@@ -770,32 +798,31 @@ impl DistantBuffers {
     }
 
     /// Without an indirect count, before the command generation: zeroes
-    /// the slots each region draws so the unwritten ones draw nothing, an
-    /// earlier frame's count plus a quarter and a floor for the temporal
-    /// region's spikes, as the chunk renderer's cull does.
+    /// the slots each region draws ([`draw_slots`]) so the unwritten ones
+    /// draw nothing, as the chunk renderer's cull does.
     pub fn record_draw_slots(&mut self, encoder: &rhi::backend::CommandEncoder) {
         if self.indirect.count {
             return;
         }
         let stride = size_of::<DrawCommand>() as u64;
         encoder.transition_buffers(rhi::BufferUse::DrawInput, rhi::BufferUse::CopyDst);
+        self.slots = draw_slots(&self.last_counts);
         for region in Region::ALL {
-            let (first, count_offset, max_draws) = region.layout();
-            let count = self.last_counts[count_offset as usize / 4];
-            let slots = (count + count / 4 + 256).min(max_draws);
+            let (first, ..) = region.layout();
             encoder.fill_buffer(
                 self.draws.handle(),
                 u64::from(first) * stride,
-                u64::from(slots) * stride,
+                u64::from(self.slots[region as usize]) * stride,
                 0,
             );
-            self.slots[region as usize] = slots;
         }
     }
 
-    /// Without an indirect count, after the command generation: the draw
+    /// After the command generation: this frame's draw list is the one the
+    /// next frame's opaque draws use; without an indirect count, the draw
     /// counts into this frame's readback.
-    pub fn record_count_readback(&self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+    pub fn finish_list(&mut self, encoder: &rhi::backend::CommandEncoder, frame: usize) {
+        self.list_frame = Some(self.recorded_frames);
         if !self.indirect.count {
             record_readback(
                 encoder,
@@ -880,24 +907,33 @@ impl DistantBuffers {
         self.pending_free.push_back((at, section));
     }
 
-    /// Frees the meshes the graph let go of.
+    /// Frees the meshes the graph let go of once no node record names them
+    /// and no frame draws them.
     fn free_released(&mut self) {
+        let mark = self.graph.dirty_mark();
         for id in std::mem::take(&mut self.graph.freed) {
-            if let Some(section) = self.meshes.remove(&id) {
-                self.free_later(section);
+            let section = if let Some(section) = self.meshes.remove(&id) {
+                section
             } else if let Some(at) = self.pending.iter().position(|p| p.uploaded.id == id) {
-                let pending = self.pending.remove(at).expect("found");
-                self.free_later(pending.uploaded);
-            }
+                self.pending.remove(at).expect("found").uploaded
+            } else {
+                continue;
+            };
+            self.unflushed_free.push_back((mark, section));
         }
     }
 
     /// Drops every section, as on a dimension change. The bounds stay: they
-    /// track the chunk store, which [`Self::clear_bounds`] follows.
+    /// track the chunk store, which [`Self::clear_bounds`] follows. Nothing
+    /// draws until new roots' records are written, so the meshes go free.
     pub fn clear(&mut self) {
+        self.list_frame = None;
         self.waiting.clear();
         self.graph.clear();
         self.free_released();
+        for (_, section) in std::mem::take(&mut self.unflushed_free) {
+            self.free_later(section);
+        }
         self.ring = None;
         self.view = None;
     }
@@ -1049,6 +1085,15 @@ impl DistantBuffers {
     /// multi-draw. The caller has bound the matching distant pipeline and its
     /// sets.
     pub fn draw(&self, pass: &rhi::backend::RenderPassEncoder, region: Region) {
+        // The opaque region is last frame's list, of no use after a clear or
+        // a frame that built none.
+        if matches!(region, Region::Opaque)
+            && self
+                .list_frame
+                .is_none_or(|built| built + 1 != self.recorded_frames)
+        {
+            return;
+        }
         let (first, count_offset, max_draws) = region.layout();
         pass.set_bind_group(1, self.group);
         pass.set_index_buffer(self.index_buffer.handle());
@@ -1455,6 +1500,17 @@ fn runs(mut mask: u32) -> impl Iterator<Item = (i32, i32)> {
     })
 }
 
+/// Without an indirect count, the slots each region draws: an earlier
+/// frame's count plus a quarter and a floor for the temporal region's
+/// spikes, within the region.
+fn draw_slots(last_counts: &[u32; COUNT_WORDS]) -> [u32; 3] {
+    Region::ALL.map(|region| {
+        let (_, count_offset, max_draws) = region.layout();
+        let count = last_counts[count_offset as usize / 4];
+        count.saturating_add(count / 4 + 256).min(max_draws)
+    })
+}
+
 /// `SectionMeta.writeMetadata`: the key high word first, the bounds, the
 /// first quad `ptr`; then the eight groups' quad counts in `u16` pairs.
 fn section_record(section: &BuiltSection, ptr: u32) -> [[u32; 4]; 2] {
@@ -1523,6 +1579,39 @@ mod tests {
                 [1, 2 | 3 << 16, 0, 2 | 2 << 16]
             ]
         );
+    }
+
+    #[test]
+    fn regions_tile_the_draw_list_and_counts_fit_their_buffer() {
+        let stride = size_of::<DrawCommand>() as u64;
+        let mut regions: Vec<(u32, u64, u32)> = Region::ALL.map(Region::layout).to_vec();
+        regions.sort_unstable_by_key(|&(first, ..)| first);
+        let mut next = 0;
+        for &(first, _, draws) in &regions {
+            assert_eq!(first, next);
+            next += draws;
+        }
+        assert_eq!(u64::from(next) * stride, DRAWS_BYTES);
+        // The counts follow cmdgen's dispatch size, a word each, before the
+        // occlusion pass's draw.
+        let mut counts: Vec<u64> = regions.iter().map(|&(_, count, _)| count).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, [12, 16, 20]);
+        assert_eq!(COUNTS_CULL_DRAW, 24);
+        assert!(COUNTS_CULL_DRAW + stride <= COUNTS_BYTES);
+    }
+
+    #[test]
+    fn draw_slots_grow_on_the_last_counts_within_their_regions() {
+        let mut counts = [0; COUNT_WORDS];
+        assert_eq!(draw_slots(&counts), [256; 3]);
+        counts[COUNTS_OPAQUE as usize / 4] = 1000;
+        counts[COUNTS_TEMPORAL as usize / 4] = u32::MAX;
+        counts[COUNTS_TRANSLUCENT as usize / 4] = TRANSLUCENT_DRAWS;
+        let slots = draw_slots(&counts);
+        assert_eq!(slots[Region::Opaque as usize], 1000 + 250 + 256);
+        assert_eq!(slots[Region::Temporal as usize], TEMPORAL_DRAWS);
+        assert_eq!(slots[Region::Translucent as usize], TRANSLUCENT_DRAWS);
     }
 
     #[test]

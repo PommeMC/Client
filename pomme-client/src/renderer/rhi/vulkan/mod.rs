@@ -291,6 +291,8 @@ pub struct BufferHandle(vk::Buffer);
 pub struct Buffer {
     raw: vk::Buffer,
     allocation: Allocation,
+    /// The size asked for; the allocation may be larger.
+    size: u64,
 }
 
 impl Buffer {
@@ -315,18 +317,17 @@ impl Buffer {
         Self::create(device, label, size, usage, location, false)
     }
 
-    /// Like [`Self::new`], in memory of its own, which goes back to the
+    /// Like [`Self::try_new`], in memory of its own, which goes back to the
     /// driver when the buffer is destroyed instead of staying in a shared
     /// block.
-    pub fn dedicated(
+    pub fn try_dedicated(
         device: &Device,
         label: &str,
         size: u64,
         usage: BufferUsages,
         location: MemoryLocation,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::create(device, label, size, usage, location, true)
-            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     fn create(
@@ -369,7 +370,11 @@ impl Buffer {
                 return Err(error);
             }
         };
-        let mut buffer = Self { raw, allocation };
+        let mut buffer = Self {
+            raw,
+            allocation,
+            size,
+        };
         if let Err(error) = unsafe {
             device.raw.bind_buffer_memory(
                 raw,
@@ -413,7 +418,7 @@ impl Buffer {
     }
 
     pub fn size(&self) -> u64 {
-        self.allocation.size()
+        self.size
     }
 
     /// Reads a [`MemoryLocation::Readback`] buffer; the caller has already
@@ -1221,7 +1226,7 @@ impl BufferUse {
                 vk::PipelineStageFlags::Transfer,
             ),
             Self::StorageWrite => (
-                vk::AccessFlags::ShaderWrite,
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
             ),
             Self::Storage => (
@@ -2090,19 +2095,25 @@ pub struct GpuTimer {
     pool: vk::QueryPool,
     /// Nanoseconds per tick.
     period: f32,
+    /// The bits a stamp holds; the counter wraps past them.
+    valid_mask: u64,
     per_frame: u32,
-    /// Each frame's stamps, named by what finished before them.
+    /// Each frame's stamps, named by what finished before them, as it
+    /// records them.
     written: [Vec<&'static str>; MAX_FRAMES_IN_FLIGHT],
+    /// The names of each frame's last submitted stamps, which its queries
+    /// hold; a frame recorded but never submitted leaves them.
+    submitted: [Vec<&'static str>; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl GpuTimer {
     /// None where the graphics queue has no timestamps.
     pub fn new(ctx: &Context, per_frame: u32) -> Option<Self> {
         let families = ctx.physical_device.get_queue_family_properties();
-        if families
+        let valid_bits = families
             .get(ctx.graphics_family as usize)
-            .is_none_or(|family| family.timestamp_valid_bits == 0)
-        {
+            .map_or(0, |family| family.timestamp_valid_bits);
+        if valid_bits == 0 {
             return None;
         }
         let pool = ctx
@@ -2120,8 +2131,10 @@ impl GpuTimer {
         Some(Self {
             pool,
             period: ctx.physical_device.get_properties().limits.timestamp_period,
+            valid_mask: u64::MAX >> (64 - valid_bits.min(64)),
             per_frame,
             written: Default::default(),
+            submitted: Default::default(),
         })
     }
 
@@ -2153,10 +2166,15 @@ impl GpuTimer {
         self.written[frame].push(what);
     }
 
+    /// Marks the frame's recorded stamps as submitted.
+    pub fn submitted(&mut self, frame: usize) {
+        self.submitted[frame] = std::mem::take(&mut self.written[frame]);
+    }
+
     /// The frame's stamps as milliseconds since the one before each, once
     /// its fence signalled; empty while the results aren't in.
     pub fn read(&self, device: &Device, frame: usize) -> Vec<(&'static str, f32)> {
-        let names = &self.written[frame];
+        let names = &self.submitted[frame];
         let mut ticks = vec![0u64; names.len()];
         if names.len() < 2
             || device
@@ -2179,7 +2197,7 @@ impl GpuTimer {
             .map(|(pair, &name)| {
                 (
                     name,
-                    pair[1].wrapping_sub(pair[0]) as f32 * self.period / 1e6,
+                    (pair[1].wrapping_sub(pair[0]) & self.valid_mask) as f32 * self.period / 1e6,
                 )
             })
             .collect()

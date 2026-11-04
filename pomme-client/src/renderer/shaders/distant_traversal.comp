@@ -6,12 +6,12 @@
 // Nodes hidden by the Hi-Z or just outside the view are walked and asked for
 // all the same, only not drawn, so what a turn or a climb brings into view
 // is already at the detail it needs (a departure: the reference walks only
-// what it draws). The nodes pushed for the next iteration size its dispatch.
+// what it draws). The nodes pushed for the next iteration size its dispatch:
+// a workgroup per 32 of them, capped at the queue's room (another departure:
+// the reference adds a workgroup per push and writes past a full queue).
 
 #define LOCAL_SIZE_BITS 5
 #define LOCAL_SIZE (1 << LOCAL_SIZE_BITS)
-#define MAX_ITERATIONS 5
-#define MAX_REQUESTS 50
 #define OUT_OF_BOUNDS 0xFFFFFFFFu
 
 layout(local_size_x = LOCAL_SIZE) in;
@@ -37,7 +37,7 @@ layout(set = 0, binding = 3, std430) restrict buffer NodeData {
 
 // Per iteration, its dispatch size (`xyz`) and how many nodes it has.
 layout(set = 0, binding = 4, std430) restrict buffer QueueMeta {
-    uvec4 queue_meta[MAX_ITERATIONS];
+    uvec4 queue_meta[LEVELS];
 };
 
 layout(set = 0, binding = 5, std430) readonly restrict buffer QueueSource {
@@ -59,11 +59,6 @@ layout(set = 0, binding = 9, std430) writeonly restrict buffer LastRenderFrame {
 layout(push_constant) uniform TraversalPc {
     uint queue_index;
 };
-
-const uint NULL_NODE = (1u << 24u) - 1u;
-const uint EMPTY_CHILDREN = (1u << 24u) - 2u;
-const uint NULL_MESH = (1u << 24u) - 1u;
-const uint EMPTY_MESH = (1u << 24u) - 2u;
 
 struct Node {
     uint id;
@@ -89,11 +84,11 @@ Node unpack_node(uint id) {
 }
 
 bool has_mesh(Node node) {
-    return node.mesh != NULL_MESH;
+    return node.mesh != NULL_ID;
 }
 
 bool has_children(Node node) {
-    return node.child_ptr != NULL_NODE;
+    return node.child_ptr != NULL_ID;
 }
 
 bool has_requested(Node node) {
@@ -109,9 +104,10 @@ void mark_requested(inout Node node) {
     nodes[node.id].z |= 1u << 24u;
 }
 
-// This iteration's node for the invocation, or none past the queue's count.
+// This iteration's node for the invocation, or none past the queue's count
+// or room (the scratch queues', which the top-level ids never pass).
 uint current_node() {
-    if (queue_meta[queue_index].w <= gl_GlobalInvocationID.x) {
+    if (min(queue_meta[queue_index].w, MAX_LISTED) <= gl_GlobalInvocationID.x) {
         return OUT_OF_BOUNDS;
     }
     return queue_source[gl_GlobalInvocationID.x];
@@ -119,17 +115,28 @@ uint current_node() {
 
 uint push_index;
 
+uint workgroups(uint nodes) {
+    return (min(nodes, MAX_LISTED) + LOCAL_SIZE - 1u) >> LOCAL_SIZE_BITS;
+}
+
 // Room for `count` nodes in the next iteration, its dispatch grown by the
-// workgroups they add.
+// workgroups they add; the pushes' ranges tile the queue, so the sizes sum
+// to its workgroups.
 void push_nodes_init(uint count) {
     uint index = atomicAdd(queue_meta[queue_index + 1u].w, count);
-    uint added = ((index + LOCAL_SIZE) >> LOCAL_SIZE_BITS) - (index >> LOCAL_SIZE_BITS);
-    atomicAdd(queue_meta[queue_index + 1u].x, added);
+    uint added = workgroups(index + count) - workgroups(index);
+    if (added != 0u) {
+        atomicAdd(queue_meta[queue_index + 1u].x, added);
+    }
     push_index = index;
 }
 
+// Past the queue's room, dropped.
 void push_node(uint id) {
-    queue_sink[push_index++] = id;
+    if (push_index < MAX_LISTED) {
+        queue_sink[push_index] = id;
+    }
+    push_index++;
 }
 
 // Frustum test against the near five planes; the far plane never cuts.
@@ -263,7 +270,7 @@ void add_request(inout Node node, bool visible) {
 }
 
 void enqueue_children(Node node) {
-    if (node.child_ptr == EMPTY_CHILDREN) {
+    if (!has_children(node) || node.child_ptr == EMPTY_ID) {
         return;
     }
     uint count = child_count(node);
@@ -274,11 +281,11 @@ void enqueue_children(Node node) {
 }
 
 void enqueue_render(Node node) {
-    if (section_count < render_list_max) {
+    if (section_count < MAX_LISTED) {
         last_render_frame[node.id] = frame_id;
-        if (node.mesh != EMPTY_MESH) {
+        if (node.mesh != EMPTY_ID) {
             uint index = atomicAdd(section_count, 1u);
-            if (index < render_list_max) {
+            if (index < MAX_LISTED) {
                 render_list[index] = node.mesh;
             }
         }

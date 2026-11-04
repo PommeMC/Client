@@ -8,17 +8,16 @@
 use std::collections::{HashMap, HashSet};
 
 use super::build::BuiltSection;
+use super::gpu::consts::{CLEANER_SENTINEL, EMPTY_ID as EMPTY, MAX_NODES, NULL_ID as NULL};
 use super::section::SectionKey;
 
-/// Nodes the buffer holds, a power of two.
-pub(crate) const MAX_NODES: u32 = 1 << 20;
 pub(crate) const NODE_BYTES: u64 = MAX_NODES as u64 * 16;
 /// Scatter indices with this bit go to the node buffer.
 pub(crate) const NODE_SCATTER_BIT: u32 = 1 << 31;
 /// Visibility-set ids with this bit were allocated, the rest freed.
 const VISIBILITY_RESET_BIT: u32 = 1 << 31;
-const NULL: u32 = (1 << 24) - 1;
-const EMPTY: u32 = (1 << 24) - 2;
+/// Ids handed out lie below the cleaner's sentinel, so no node is it.
+const NODE_IDS: u32 = CLEANER_SENTINEL;
 
 /// A node's geometry: none yet, nothing to draw, or a section id in the
 /// geometry store.
@@ -146,6 +145,7 @@ impl ChildRequest {
 /// freed one at a time.
 struct IdSet {
     words: Vec<u64>,
+    capacity: u32,
     /// No free id lies below this word.
     first_free: usize,
     used: u32,
@@ -155,6 +155,7 @@ impl IdSet {
     fn new(capacity: u32) -> Self {
         Self {
             words: vec![0; (capacity as usize).div_ceil(64)],
+            capacity,
             first_free: 0,
             used: 0,
         }
@@ -166,9 +167,8 @@ impl IdSet {
 
     /// The first run of `count` free ids, taken.
     fn alloc(&mut self, count: u32) -> Option<u32> {
-        let limit = self.words.len() as u32 * 64;
         let mut id = self.first_free as u32 * 64;
-        while id + count <= limit {
+        while id + count <= self.capacity {
             match (id..id + count).find(|&i| self.is_set(i)) {
                 Some(taken) => id = taken + 1,
                 None => {
@@ -239,8 +239,13 @@ pub(crate) struct NodeGraph {
     /// id takes the last one's place.
     top_ids: Vec<u32>,
     top_index: HashMap<u32, usize>,
-    /// Nodes whose record changed since [`Self::take_dirty`].
-    dirty: HashSet<u32>,
+    /// Nodes whose record changed since [`Self::take_dirty`], by the mark
+    /// ([`Self::dirty_mark`]) they changed at first.
+    dirty: HashMap<u32, u64>,
+    marks: u64,
+    /// Nodes placed whose record [`Self::take_dirty`] hasn't given yet; the
+    /// GPU still holds whatever their ids held before.
+    unwritten: HashSet<u32>,
     /// Ids allocated ([`VISIBILITY_RESET_BIT`]) or freed, for the cleaner's
     /// last-drawn frames.
     pub visibility_sets: HashSet<u32>,
@@ -255,14 +260,16 @@ impl NodeGraph {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            ids: IdSet::new(MAX_NODES),
+            ids: IdSet::new(NODE_IDS),
             entries: HashMap::new(),
             singles: Requests::new(),
             children: Requests::new(),
             top_keys: HashSet::new(),
             top_ids: Vec::new(),
             top_index: HashMap::new(),
-            dirty: HashSet::new(),
+            dirty: HashMap::new(),
+            marks: 0,
+            unwritten: HashSet::new(),
             visibility_sets: HashSet::new(),
             watch: Vec::new(),
             unwatch: Vec::new(),
@@ -272,6 +279,26 @@ impl NodeGraph {
 
     pub fn top_ids(&self) -> &[u32] {
         &self.top_ids
+    }
+
+    /// The top-level ids whose records the GPU has.
+    pub fn written_top_ids(&self) -> Vec<u32> {
+        let written = |id: &&u32| !self.unwritten.contains(id);
+        self.top_ids.iter().filter(written).copied().collect()
+    }
+
+    /// The latest mark a record changed at: what the GPU's records may name
+    /// now, they will no longer once [`Self::written_through`] reaches it.
+    pub fn dirty_mark(&self) -> u64 {
+        self.marks
+    }
+
+    /// Every record changed at or before this mark has been given out.
+    pub fn written_through(&self) -> u64 {
+        self.dirty
+            .values()
+            .min()
+            .map_or(self.marks, |first| first - 1)
     }
 
     /// The id every node lies below.
@@ -292,13 +319,50 @@ impl NodeGraph {
     }
 
     /// Up to `limit` of the records to write to the node buffer, by id,
-    /// since last time; the rest wait for the next call.
-    pub fn take_dirty(&mut self, limit: usize) -> Vec<(u32, [u32; 4])> {
-        let taken: Vec<u32> = self.dirty.iter().copied().take(limit).collect();
-        for id in &taken {
-            self.dirty.remove(id);
+    /// since last time, such that no written record points at one the GPU
+    /// lacks; the rest wait for a later call. A node whose mesh is `pending`
+    /// (its section record not yet written) waits, and so does a parent
+    /// until its children's records go, so the finest levels go first.
+    pub fn take_dirty(
+        &mut self,
+        limit: usize,
+        pending: impl Fn(u32) -> bool,
+    ) -> Vec<(u32, [u32; 4])> {
+        let level = |id: u32| self.nodes[id as usize].as_ref().map(|node| node.key.level);
+        let (mut live, freed): (Vec<u32>, Vec<u32>) =
+            self.dirty.keys().partition(|&&id| level(id).is_some());
+        live.sort_unstable_by_key(|&id| level(id));
+        let mut taken = HashSet::new();
+        let mut held = false;
+        for id in live {
+            if taken.len() == limit {
+                held = true;
+                break;
+            }
+            let node = self.node(id);
+            let mesh_pending = matches!(node.mesh, Mesh::Id(mesh) if pending(mesh));
+            let children_waiting = match node.children {
+                Children::At(ptr) => (ptr..ptr + u32::from(node.child_count))
+                    .any(|child| self.dirty.contains_key(&child) && !taken.contains(&child)),
+                Children::None | Children::Empty => false,
+            };
+            if mesh_pending || children_waiting {
+                held = true;
+            } else {
+                taken.insert(id);
+            }
         }
-        taken.into_iter().map(|id| (id, self.record(id))).collect()
+        if !held {
+            let room = limit - taken.len();
+            taken.extend(freed.into_iter().take(room));
+        }
+        let mut records = Vec::with_capacity(taken.len());
+        for id in taken {
+            self.dirty.remove(&id);
+            self.unwritten.remove(&id);
+            records.push((id, self.record(id)));
+        }
+        records
     }
 
     /// A node's record: the key, the mesh under the flags' low byte (bit 0 a
@@ -330,7 +394,8 @@ impl NodeGraph {
     }
 
     fn invalidate(&mut self, id: u32) {
-        self.dirty.insert(id);
+        self.marks += 1;
+        self.dirty.entry(id).or_insert(self.marks);
     }
 
     /// `id` was allocated or freed, so the cleaner's last-drawn frame for it
@@ -368,10 +433,12 @@ impl NodeGraph {
         });
         self.track(id, true);
         self.invalidate(id);
+        self.unwritten.insert(id);
     }
 
     fn free_node(&mut self, id: u32) {
         self.nodes[id as usize] = None;
+        self.unwritten.remove(&id);
         self.ids.free(id);
         self.track(id, false);
         self.invalidate(id);
@@ -654,6 +721,7 @@ impl NodeGraph {
         let node = self.nodes[from as usize].take().expect("a live node");
         let key = node.key;
         self.nodes[to as usize] = Some(node);
+        self.unwritten.remove(&from);
         self.ids.free(from);
         self.track(to, true);
         self.track(from, false);
@@ -996,6 +1064,13 @@ mod tests {
         section
     }
 
+    impl NodeGraph {
+        /// Every record waiting, none held for a pending mesh.
+        fn take_all(&mut self) -> Vec<(u32, [u32; 4])> {
+            self.take_dirty(usize::MAX, |_| false)
+        }
+    }
+
     fn top() -> SectionKey {
         SectionKey {
             level: LEVELS - 1,
@@ -1022,9 +1097,76 @@ mod tests {
         let mut uploader = uploader();
         graph.process_geometry_result(built(top(), 4, 0b101), &mut uploader);
         graph.process_geometry_result(built(other, 4, 0b101), &mut uploader);
-        assert_eq!(graph.take_dirty(1).len(), 1);
-        assert_eq!(graph.take_dirty(usize::MAX).len(), 1);
-        assert!(graph.take_dirty(usize::MAX).is_empty());
+        assert_eq!(graph.take_dirty(1, |_| false).len(), 1);
+        assert_eq!(graph.take_all().len(), 1);
+        assert!(graph.take_all().is_empty());
+    }
+
+    #[test]
+    fn a_parent_waits_for_its_childrens_records() {
+        let mut graph = NodeGraph::new();
+        let mut upload = uploader();
+        graph.set_roots(&HashSet::from([top()]));
+        graph.process_geometry_result(built(top(), 4, 0b11), &mut upload);
+        graph.take_all();
+        graph.process_request(top());
+        graph.take_all();
+        graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
+        graph.process_geometry_result(built(child_key(top(), 1), 2, 0), &mut upload);
+        assert_eq!(graph.entries[&top()], Entry::Inner(0));
+
+        // One record a take: the children first, the parent only after both.
+        let ids: Vec<u32> = (0..3)
+            .map(|_| {
+                let taken = graph.take_dirty(1, |_| false);
+                assert_eq!(taken.len(), 1);
+                taken[0].0
+            })
+            .collect();
+        assert_eq!(ids[2], 0, "{ids:?}");
+        assert_eq!(graph.written_through(), graph.dirty_mark());
+    }
+
+    #[test]
+    fn a_node_naming_a_pending_mesh_waits_with_it() {
+        let mut graph = NodeGraph::new();
+        graph.set_roots(&HashSet::from([top()]));
+        graph.process_geometry_result(built(top(), 4, 0), &mut uploader());
+        assert!(graph.take_dirty(usize::MAX, |mesh| mesh == 101).is_empty());
+        // Its id stays out of the traversal until the GPU has its record.
+        assert!(graph.written_top_ids().is_empty());
+        assert!(graph.written_through() < graph.dirty_mark());
+        assert_eq!(graph.take_all().len(), 1);
+        assert_eq!(graph.written_top_ids(), [0]);
+        assert_eq!(graph.written_through(), graph.dirty_mark());
+    }
+
+    #[test]
+    fn freed_records_wait_for_every_live_one() {
+        let mut graph = NodeGraph::new();
+        let mut upload = uploader();
+        let other = SectionKey { x: 1, ..top() };
+        graph.set_roots(&HashSet::from([top(), other]));
+        graph.process_geometry_result(built(top(), 4, 0), &mut upload);
+        graph.process_geometry_result(built(other, 4, 0), &mut upload);
+        graph.take_all();
+
+        // One root goes while the other's new mesh is pending.
+        graph.set_roots(&HashSet::from([top()]));
+        graph.process_geometry_result(built(top(), 4, 0), &mut upload);
+        assert!(graph.take_dirty(usize::MAX, |mesh| mesh == 103).is_empty());
+        let taken: HashMap<u32, [u32; 4]> = graph.take_all().into_iter().collect();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[&0][2] & 0xFF_FFFF, 103);
+        assert_eq!(taken[&1], [u32::MAX; 4]);
+    }
+
+    #[test]
+    fn no_node_is_given_the_cleaner_sentinel() {
+        let mut ids = IdSet::new(NODE_IDS);
+        assert_eq!(ids.alloc(NODE_IDS), Some(0));
+        assert_eq!(ids.alloc(1), None);
+        const { assert!(CLEANER_SENTINEL >= NODE_IDS && CLEANER_SENTINEL < MAX_NODES) };
     }
 
     #[test]
@@ -1036,7 +1178,7 @@ mod tests {
         graph.process_geometry_result(built(top(), 4, 0b101), &mut uploader());
         assert_eq!(graph.in_flight(), 0);
         assert_eq!(graph.top_ids(), &[0]);
-        let dirty = graph.take_dirty(usize::MAX);
+        let dirty = graph.take_all();
         let (id, record) = dirty[0];
         assert_eq!(id, 0);
         let key = top().pack();
@@ -1050,22 +1192,22 @@ mod tests {
         graph.set_roots(&HashSet::from([top()]));
         graph.process_geometry_result(built(top(), 4, 0b0000_0101), &mut upload);
         graph.watch.clear();
-        graph.take_dirty(usize::MAX);
+        graph.take_all();
 
         graph.process_request(top());
         let children: Vec<SectionKey> = [0, 2].map(|i| child_key(top(), i)).to_vec();
         assert_eq!(graph.watch, children);
         // The request shows on the GPU as the flag, so it isn't asked again.
-        let (_, record) = graph.take_dirty(usize::MAX)[0];
+        let (_, record) = graph.take_all()[0];
         assert_eq!(record[2] >> 24, 1);
         graph.process_request(top());
-        assert!(graph.take_dirty(usize::MAX).is_empty());
+        assert!(graph.take_all().is_empty());
 
         graph.process_geometry_result(built(children[0], 0, 0), &mut upload);
         assert_eq!(graph.in_flight(), 1);
         graph.process_geometry_result(built(children[1], 3, 0b1), &mut upload);
         assert_eq!(graph.in_flight(), 0);
-        let records: HashMap<u32, [u32; 4]> = graph.take_dirty(usize::MAX).into_iter().collect();
+        let records: HashMap<u32, [u32; 4]> = graph.take_all().into_iter().collect();
         let parent = records[&0];
         assert_eq!(parent[2] & 0xFF_FFFF, 101);
         // Two children from id 1, all leaves, no request.
@@ -1086,7 +1228,7 @@ mod tests {
         graph.process_request(top());
         graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
         graph.watch.clear();
-        graph.take_dirty(usize::MAX);
+        graph.take_all();
 
         graph.set_roots(&HashSet::new());
         assert!(graph.entries.is_empty());
@@ -1096,7 +1238,7 @@ mod tests {
         let mut freed = graph.freed.clone();
         freed.sort_unstable();
         assert_eq!(freed, vec![101, 102]);
-        let records = graph.take_dirty(usize::MAX);
+        let records = graph.take_all();
         assert!(records.iter().all(|&(_, record)| record == [u32::MAX; 4]));
     }
 
@@ -1112,13 +1254,13 @@ mod tests {
         let reset = |id| id | VISIBILITY_RESET_BIT;
         assert_eq!(graph.visibility_sets, HashSet::from([reset(0), reset(1)]));
         graph.watch.clear();
-        graph.take_dirty(usize::MAX);
+        graph.take_all();
 
         // An inner node: its mesh goes, its children stay.
         graph.remove_node_geometry(top());
         assert_eq!(graph.freed, vec![101]);
         assert_eq!(graph.unwatch, vec![top()]);
-        let (_, record) = graph.take_dirty(usize::MAX)[0];
+        let (_, record) = graph.take_all()[0];
         assert_eq!(record[2] & 0xFF_FFFF, NULL);
         assert_eq!(graph.entries[&top()], Entry::Inner(0));
 
@@ -1153,13 +1295,13 @@ mod tests {
         graph.process_geometry_result(built(top(), 4, 0b100), &mut upload);
         graph.process_request(top());
         graph.process_geometry_result(built(child_key(top(), 2), 2, 0), &mut upload);
-        graph.take_dirty(usize::MAX);
+        graph.take_all();
 
         // The root re-meshed with a new child before the old one.
         graph.process_geometry_result(built(top(), 4, 0b101), &mut upload);
         assert_eq!(graph.in_flight(), 1);
         graph.process_geometry_result(built(child_key(top(), 0), 2, 0), &mut upload);
-        let records: HashMap<u32, [u32; 4]> = graph.take_dirty(usize::MAX).into_iter().collect();
+        let records: HashMap<u32, [u32; 4]> = graph.take_all().into_iter().collect();
         let Entry::Inner(root) = graph.entries[&top()] else {
             panic!("root is inner");
         };

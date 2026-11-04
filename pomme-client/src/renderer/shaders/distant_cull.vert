@@ -22,10 +22,7 @@ void main() {
     ivec3 pos = ((section_position(section) << detail) - camera_section) << 5;
     const float EXPANSION = 1.0;
     vec3 offset = vec3(section_aabb_offset(section)) - EXPANSION;
-    // The shared cube indices give the corner's bits: x, y, z.
-    uint corner = gl_VertexIndex;
-    offset += vec3(corner & 1u, corner >> 1u & 1u, corner >> 2u)
-        * (vec3(section_aabb_size(section)) + 2.0 * EXPANSION);
+    offset += cube_corner(gl_VertexIndex) * (vec3(section_aabb_size(section)) + 2.0 * EXPANSION);
     gl_Position = distant_view_proj * vec4(vec3(pos) + offset * float(1 << detail), 1.0);
     gl_Position.z -= 0.000001 * gl_Position.w;
 

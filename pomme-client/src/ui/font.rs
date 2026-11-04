@@ -569,10 +569,11 @@ impl GlyphMap {
         set: Option<&'a FontSetData>,
         pick: impl FnOnce(usize) -> usize,
     ) -> &'a GlyphInfo {
-        let Some(bucket) = set.and_then(|set| set.obfuscation_glyphs.get(&width)) else {
+        let Some((set, bucket)) =
+            set.and_then(|set| Some((set, set.obfuscation_glyphs.get(&width)?)))
+        else {
             return &self.missing_glyph;
         };
-        let set = set.expect("the bucket's set");
         let ch = bucket[pick(bucket.len())];
         match set.non_fishy.get(&ch) {
             Some(glyph) => glyph.as_deref().unwrap_or(&self.missing_glyph),

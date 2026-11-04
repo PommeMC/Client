@@ -17,6 +17,18 @@ const GAP_MASK: u64 = 0xF;
 /// Block state 0 is air, whatever kind.
 pub(crate) const AIR: u32 = 0;
 
+/// The biome field's last value, stored for every registry id from it on.
+/// It has no tint row, so it draws untinted.
+pub(crate) const UNKNOWN_BIOME: u32 = 0x1FF;
+
+/// A biome's registry id as a voxel's biome. The reference numbers biomes
+/// per world as it first meets them; registry ids serve here since the
+/// cache folder is kept per biome registry. Ids that don't fit share
+/// [`UNKNOWN_BIOME`] rather than another biome's tint.
+pub(crate) fn biome(id: u32) -> u32 {
+    id.min(UNKNOWN_BIOME)
+}
+
 /// `light` is `block << 4 | sky`. Air keeps no biome.
 pub(crate) const fn compose(light: u8, block: u32, biome: u32) -> u64 {
     let light = (light as u64) << LIGHT_SHIFT;
@@ -159,6 +171,15 @@ mod tests {
         assert_eq!(block_id(with_light(voxel, 3)), 1234);
     }
 
+    #[test]
+    fn biomes_past_the_field_share_the_unknown_one() {
+        assert_eq!(biome(300), 300);
+        assert_eq!(biome(600), UNKNOWN_BIOME);
+        let voxel = compose(0, 1, biome(600));
+        assert_eq!(voxel >> BIOME_SHIFT & 0x1FF, u64::from(UNKNOWN_BIOME));
+        assert_eq!(light(voxel), 0, "no spill into the light");
+    }
+
     fn states(opacity: &[u8]) -> States {
         States {
             air: vec![false; opacity.len()].into(),
@@ -201,6 +222,13 @@ mod tests {
         // Stone over water: no gap.
         children[7] = stone;
         assert_eq!(states.mip(children, 2), stone);
+        // At level 4 the deepest surface, a lower child's 7 under its top,
+        // is 15 down: the most the gap holds.
+        let mut children = [air; 8];
+        children[0] = water | 7;
+        let deep = states.mip(children, 4);
+        assert_eq!(gap(deep), 15);
+        assert_eq!(block_id(deep), 1);
     }
 
     #[test]

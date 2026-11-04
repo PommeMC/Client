@@ -411,7 +411,7 @@ fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool
 }
 
 /// What the walk thread is told about the world: a section's visibility set
-/// from its mesh, a column loading or unloading, or the level gone.
+/// from its mesh, a column loading or unloading, the meshes or the level gone.
 pub enum Update {
     Section {
         pos: ChunkPos,
@@ -423,6 +423,9 @@ pub enum Update {
         pos: ChunkPos,
         sections: i32,
     },
+    /// The meshes went: every section's set goes, the columns stay loaded.
+    ClearSections,
+    /// The level went, columns and all.
     Clear,
 }
 
@@ -444,12 +447,11 @@ pub struct Walk {
 /// A walk's outcome, per loaded column.
 pub struct Visibility {
     pub generation: u64,
-    /// Bit `si` set = section in view and not occluded.
-    pub masks: Arc<HashMap<ChunkPos, u32>>,
-    /// What the renderer draws: `masks`, or every section with occlusion off.
+    /// What the renderer draws: bit `si` set for a section not occluded, or
+    /// every section with occlusion off.
     pub draw: Arc<HashMap<ChunkPos, u32>>,
-    /// Frustum tier (0 in view, 1 margin, 2 behind or fully occluded).
-    pub tiers: HashMap<ChunkPos, u8>,
+    /// The in-frustum columns with a visible section, and their masks.
+    pub in_view: HashMap<ChunkPos, u32>,
 }
 
 impl Walk {
@@ -482,15 +484,10 @@ impl Walk {
         let min_y = self.min_y as f32;
         let max_y = min_y + (self.section_count * 16) as f32;
         let full = section_mask(self.section_count);
-        let mut tiers = HashMap::with_capacity(columns.len());
+        let mut in_view = HashMap::new();
         let mut masks = HashMap::with_capacity(columns.len());
         for &pos in columns {
             let near = column_is_near(pos, self.eye);
-            let tier = if near {
-                0
-            } else {
-                column_frustum_tier(pos, self.eye, &self.planes, &self.planes_wide, min_y, max_y)
-            };
             // Near columns always draw fully; otherwise a column draws only the
             // sections the graph proved occlusion-visible (none => fully hidden).
             let mask = if near {
@@ -498,22 +495,30 @@ impl Walk {
             } else {
                 bfs.get(&pos).copied().unwrap_or(0)
             };
-            // A fully-occluded column (no visible section) drops to the hidden tier.
-            let tier = if tier == 0 && mask == 0 { 2 } else { tier };
-            tiers.insert(pos, tier);
+            if mask != 0
+                && (near
+                    || column_frustum_tier(
+                        pos,
+                        self.eye,
+                        &self.planes,
+                        &self.planes_wide,
+                        min_y,
+                        max_y,
+                    ) == 0)
+            {
+                in_view.insert(pos, mask);
+            }
             masks.insert(pos, mask);
         }
-        let masks = Arc::new(masks);
         let draw = if self.occlusion {
-            Arc::clone(&masks)
+            Arc::new(masks)
         } else {
             Arc::new(columns.iter().map(|&pos| (pos, full)).collect())
         };
         Visibility {
             generation: self.generation,
-            masks,
             draw,
-            tiers,
+            in_view,
         }
     }
 }
@@ -556,30 +561,49 @@ impl Walker {
     }
 }
 
-/// Ends when the game drops its [`Walker`].
-fn run(messages: &Receiver<Message>, results: &Sender<Visibility>) {
-    let mut section_vis = HashMap::new();
-    let mut columns = HashSet::new();
-    for message in messages {
-        match message {
-            Message::Update(Update::Section { pos, si, vis }) => {
-                section_vis.insert((pos, si), vis);
+/// The walk thread's view of the world.
+#[derive(Default)]
+struct WalkState {
+    section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    columns: HashSet<ChunkPos>,
+}
+
+impl WalkState {
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Section { pos, si, vis } => {
+                self.section_vis.insert((pos, si), vis);
             }
-            Message::Update(Update::Load(pos)) => {
-                columns.insert(pos);
+            Update::Load(pos) => {
+                self.columns.insert(pos);
             }
-            Message::Update(Update::Unload { pos, sections }) => {
-                columns.remove(&pos);
+            Update::Unload { pos, sections } => {
+                self.columns.remove(&pos);
                 for si in 0..sections {
-                    section_vis.remove(&(pos, si));
+                    self.section_vis.remove(&(pos, si));
                 }
             }
-            Message::Update(Update::Clear) => {
-                section_vis.clear();
-                columns.clear();
+            Update::ClearSections => self.section_vis.clear(),
+            Update::Clear => {
+                self.section_vis.clear();
+                self.columns.clear();
             }
+        }
+    }
+
+    fn walk(&self, walk: &Walk) -> Visibility {
+        walk.run(&self.section_vis, &self.columns)
+    }
+}
+
+/// Ends when the game drops its [`Walker`].
+fn run(messages: &Receiver<Message>, results: &Sender<Visibility>) {
+    let mut state = WalkState::default();
+    for message in messages {
+        match message {
+            Message::Update(update) => state.apply(update),
             Message::Walk(walk) => {
-                if results.send(walk.run(&section_vis, &columns)).is_err() {
+                if results.send(state.walk(&walk)).is_err() {
                     break;
                 }
             }
@@ -655,5 +679,39 @@ mod tests {
         assert!(mask.get(&ChunkPos::new(0, -1)).copied().unwrap_or(0) & (1 << 4) != 0);
         // ...but the section directly behind it on the same row/height is not.
         assert!(mask.get(&ChunkPos::new(0, -2)).copied().unwrap_or(0) & (1 << 4) == 0);
+    }
+
+    fn far_walk() -> Walk {
+        // Every plane passes everything, so only occlusion decides.
+        let open = [[0.0, 0.0, 0.0, 1.0]; 6];
+        Walk {
+            generation: 0,
+            cam_col: ChunkPos::new(0, 0),
+            eye: DVec3::new(8.0, 72.0, 8.0),
+            planes: open,
+            planes_wide: open,
+            min_y: 0,
+            section_count: 8,
+            occlusion: true,
+        }
+    }
+
+    #[test]
+    fn clearing_sections_keeps_loaded_columns() {
+        let pos = ChunkPos::new(6, 0);
+        let mut state = WalkState::default();
+        state.apply(Update::Load(ChunkPos::new(0, 0)));
+        state.apply(Update::Load(pos));
+        state.apply(Update::Section {
+            pos,
+            si: 4,
+            vis: VisibilitySet::none(),
+        });
+        state.apply(Update::ClearSections);
+        let vis = state.walk(&far_walk());
+        assert_eq!(vis.draw.get(&pos), Some(&section_mask(8)));
+
+        state.apply(Update::Clear);
+        assert!(state.walk(&far_walk()).draw.is_empty());
     }
 }

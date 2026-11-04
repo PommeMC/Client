@@ -2,12 +2,14 @@
 // uniform, a section's metadata, and the buffers the command generation
 // passes share, each declared by the shader that defines its binding.
 
+#include "distant_consts.glsl"
+
 // The scene uniform: the distant view projection moved by the camera's
 // position within its section, that section, the frame, and whether the
 // occlusion pass was skipped (cmdgen then keeps visibility itself); then
 // the traversal's: the Hi-Z's base size (width << 16 | height), the screen
-// area a node splits at, the render list's and the frame's request queue's
-// room, the render distance squared in blocks, the frustum planes, and those
+// area a node splits at, the frame's request queue's room, the render
+// distance squared in blocks, the frustum planes, and those
 // of the wider view meshes are requested within.
 #ifdef SCENE_BINDING
 layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform {
@@ -18,7 +20,6 @@ layout(set = DISTANT_SET, binding = SCENE_BINDING, std140) uniform SceneUniform 
     uint occlusion_skipped;
     uint hiz_size;
     float min_sss;
-    uint render_list_max;
     uint request_limit;
     float render_distance;
     vec4 frustum[6];
@@ -79,16 +80,15 @@ struct DrawCommand {
     uint base_instance;
 };
 
-// The draw list's regions, in draws.
-const uint OPAQUE_DRAWS = 400000u;
-const uint TRANSLUCENT_DRAWS = 100000u;
-const uint TRANSLUCENT_OFFSET = OPAQUE_DRAWS;
-const uint TEMPORAL_OFFSET = OPAQUE_DRAWS + TRANSLUCENT_DRAWS;
-// Translucent draws are bucketed by distance before their list is built;
-// the bucket counts lead the list.
-const uint TRANSLUCENT_BUCKETS = 1024u;
-// The shared index buffer: this many quads' indices, then the cube's.
-const uint QUADS_PER_DRAW = 65536u;
+// The draw list's regions' ends.
+const uint OPAQUE_END = OPAQUE_DRAWS;
+const uint TRANSLUCENT_END = TRANSLUCENT_OFFSET + TRANSLUCENT_DRAWS;
+const uint TEMPORAL_END = TEMPORAL_OFFSET + TEMPORAL_DRAWS;
+
+// The shared cube indices give a box corner's bits: x, y, z.
+vec3 cube_corner(uint vertex) {
+    return vec3(vertex & 1u, vertex >> 1u & 1u, vertex >> 2u);
+}
 
 #ifdef SECTION_METADATA_BINDING
 layout(set = DISTANT_SET, binding = SECTION_METADATA_BINDING, std430) readonly restrict buffer SectionBuffer {
@@ -106,6 +106,11 @@ layout(set = DISTANT_SET, binding = RENDER_LIST_BINDING, std430) RENDER_LIST_ACC
     uint section_count;
     uint render_list[];
 };
+
+// The traversal's count can overshoot the list as it races to fill it.
+uint listed_count() {
+    return min(section_count, MAX_LISTED);
+}
 #endif
 
 // cmdgen's dispatch size, the three regions' draw counts, and the occlusion
@@ -113,10 +118,10 @@ layout(set = DISTANT_SET, binding = RENDER_LIST_BINDING, std430) RENDER_LIST_ACC
 #ifdef DRAW_COUNTS_BINDING
 layout(set = DISTANT_SET, binding = DRAW_COUNTS_BINDING, std430) restrict buffer DrawCounts {
     uvec3 cmdgen_dispatch;
-    uint opaque_draw_count;
-    uint translucent_draw_count;
-    uint temporal_draw_count;
-    DrawCommand cull_draw;
+    layout(offset = COUNTS_OPAQUE) uint opaque_draw_count;
+    layout(offset = COUNTS_TRANSLUCENT) uint translucent_draw_count;
+    layout(offset = COUNTS_TEMPORAL) uint temporal_draw_count;
+    layout(offset = COUNTS_CULL_DRAW) DrawCommand cull_draw;
 };
 #endif
 
@@ -152,7 +157,12 @@ layout(set = DISTANT_SET, binding = TRANSLUCENT_DATA_BINDING, std430) restrict b
 #endif
 
 #ifdef DRAW_BUFFER_BINDING
-void write_draw(uint index, uint instance, uint offset, uint quad_count) {
+// Dropped at or past `end`, its region's end: the counts run on past a full
+// region, which the draws clamp to.
+void write_draw(uint index, uint end, uint instance, uint offset, uint quad_count) {
+    if (index >= end) {
+        return;
+    }
     DrawCommand cmd;
     cmd.count = quad_count * 6u;
     cmd.instance_count = 1u;

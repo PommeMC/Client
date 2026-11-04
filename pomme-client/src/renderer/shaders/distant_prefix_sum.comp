@@ -1,9 +1,14 @@
 #version 450
 
 // The translucent distance buckets turned into exclusive prefix sums in
-// place, one workgroup over the 1024 counts as 256 `uvec4`s.
+// place, one workgroup over the counts as `uvec4`s.
+
+#include "distant_consts.glsl"
 
 #define WORK_SIZE 256
+#if WORK_SIZE * 4 != TRANSLUCENT_BUCKETS
+#error "a uvec4 of buckets per invocation"
+#endif
 layout(local_size_x = WORK_SIZE) in;
 
 layout(set = 0, binding = 0, std430) buffer Counts {

@@ -433,6 +433,8 @@ impl Factory {
 
     /// The fluid faces on the section's two sides along `axis`, against the
     /// neighbouring sections; a neighbour holding a fluid culls as that fluid.
+    /// Fluids cull by kind rather than model, as their surfaces differ by
+    /// gap from section to section.
     fn fluid_outer(&mut self, axis: u8, models: &mut dyn Models) {
         self.mesher.face_offset = false;
         for side in 0..2usize {
@@ -446,10 +448,13 @@ impl Factory {
                     let voxel = s.across(axis, side, other, index);
                     let (quad, meta) = s.as_fluid(models, idx);
                     let (model, next_meta) = s.fluid_neighbour(models, voxel);
-                    let culls = model != 0
-                        && (meta.culls_same()
-                            && u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL
-                            || next_meta.face_occludes(axis << 1 | (1 - side) as u8));
+                    let culls = outer_culls(
+                        same_fluid(models, quad, model),
+                        meta,
+                        model,
+                        next_meta,
+                        axis << 1 | (1 - side) as u8,
+                    );
                     let quad = (!culls).then(|| {
                         apply_light(
                             side as u64 | quad & !QUAD_LIGHT | neighbour_light(voxel),
@@ -513,10 +518,13 @@ impl Factory {
                     let (quad, meta) = (s.quad(idx), s.meta(idx));
                     // Outward, against the neighbouring section's block.
                     let (model, next_meta) = Self::neighbour_model(models, voxel);
-                    let fail = model != 0
-                        && (meta.culls_same()
-                            && u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL
-                            || next_meta.face_occludes(axis << 1 | (1 - side) as u8));
+                    let fail = outer_culls(
+                        u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL,
+                        meta,
+                        model,
+                        next_meta,
+                        axis << 1 | (1 - side) as u8,
+                    );
                     // Inward, against the next layer in.
                     let inner = (idx as isize + step) as usize;
                     let (inner_quad, inner_meta) = (s.quad(inner), s.meta(inner));
@@ -737,12 +745,13 @@ impl Factory {
                 let (quad, meta) = s.as_fluid(models, idx);
                 let voxel = s.neighbour(side, i);
                 let (model, next_meta) = s.fluid_neighbour(models, voxel);
-                let mut culls = model != 0
-                    && (next_meta.is_fully_opaque()
-                        || next_meta.face_occludes(2 << 1 | (1 - side) as u8));
-                culls |= model != 0
-                    && meta.culls_same()
-                    && u64::from(model) << QUAD_MODEL_SHIFT == quad & MODEL;
+                let culls = outer_culls(
+                    same_fluid(models, quad, model),
+                    meta,
+                    model,
+                    next_meta,
+                    2 << 1 | (1 - side) as u8,
+                );
                 let quad = (!culls).then(|| {
                     apply_light(
                         side as u64 | quad & !QUAD_LIGHT | neighbour_light(voxel),
@@ -882,6 +891,20 @@ fn fluid_of(models: &mut dyn Models, model: u16, level: u8, gap: u8) -> u16 {
     models.fluid_surface(fluid, level, gap)
 }
 
+/// Whether a fluid quad's surface and the neighbouring surface `next` are
+/// the same fluid.
+fn same_fluid(models: &dyn Models, quad: u64, next: u16) -> bool {
+    let own = ((quad & MODEL) >> QUAD_MODEL_SHIFT) as u16;
+    models.fluid_model(own) == models.fluid_model(next)
+}
+
+/// Whether the neighbouring section's block, model `next`, hides a face of
+/// a block with `meta`: not when it's air, else when it's the `same` kind
+/// and the block culls its own, or its `face` against this one occludes.
+fn outer_culls(same: bool, meta: Metadata, next: u16, next_meta: Metadata, face: u8) -> bool {
+    next != 0 && (same && meta.culls_same() || next_meta.face_occludes(face))
+}
+
 /// Whether `face` of a block that's neither opaque nor fluid is drawn against
 /// `next`: not against its own kind when the model culls same, not when the
 /// model has no such face, and not when the face can be occluded and `next`
@@ -932,15 +955,16 @@ mod tests {
     use super::*;
 
     /// Models: 1 stone (opaque), 2 glass (sees through, culls its own
-    /// kind), 3 water (translucent fluid), 4 a waterlogged slab-like block
-    /// (holds water, open on top), 5 a snow layer (a full occluder below,
-    /// thin faces that can be occluded elsewhere).
+    /// kind), 3 water (translucent biome-coloured fluid), 4 a waterlogged
+    /// slab-like block (holds water, so keeps the biome; open on top), 5 a
+    /// snow layer (a full occluder below, thin faces that can be occluded
+    /// elsewhere).
     struct Stub;
 
     const OPAQUE_FACE: u64 = 0b0111;
     const CLEAR_FACE: u64 = 0b1110;
 
-    fn faces(byte: u64) -> u64 {
+    fn every_face(byte: u64) -> u64 {
         (0..6).fold(0, |m, f| m | byte << (8 * f))
     }
 
@@ -951,11 +975,11 @@ mod tests {
 
         fn metadata(&self, model: u16) -> Metadata {
             Metadata(match model {
-                1 => faces(OPAQUE_FACE) | 1 << 54,
-                2 => faces(CLEAR_FACE) | 32 << 48,
-                3 => faces(CLEAR_FACE) | (2 | 16 | 32) << 48,
-                4 => faces(OPAQUE_FACE) & !(0xFF << 8) | 0xFF << 8 | 8 << 48,
-                5 => faces(0b0100) & !0xFF | OPAQUE_FACE,
+                1 => every_face(OPAQUE_FACE) | 1 << 54,
+                2 => every_face(CLEAR_FACE) | 32 << 48,
+                3 => every_face(CLEAR_FACE) | (1 | 2 | 16 | 32) << 48,
+                4 => every_face(OPAQUE_FACE) & !(0xFF << 8) | 0xFF << 8 | (1 | 8) << 48,
+                5 => every_face(0b0100) & !0xFF | OPAQUE_FACE,
                 _ => 0,
             })
         }
@@ -1203,6 +1227,114 @@ mod tests {
         let open = build(&edge);
         let west = open.quads.iter().find(|&&q| face(q) == 4).unwrap();
         assert_eq!(west >> QUAD_LIGHT_SHIFT & 0xFF, 0x0F);
+    }
+
+    #[test]
+    fn section_borders_cull_along_y_and_z_too() {
+        let mut stone = WorldSection::unseen();
+        stone.data.fill(voxel::compose(0, 1, 0));
+        let on_stone = with(&[((5, 0, 7), 1)]);
+        let built = Factory::new().build(
+            key(),
+            &on_stone,
+            |k| (k.y == -1).then_some(&stone),
+            &mut Stub,
+        );
+        assert_eq!(built.quads.len(), 5);
+        assert!(built.quads.iter().all(|&q| face(q) != 0));
+        // Glass against glass in the section to the -z hides that face.
+        let glass = with(&[((5, 6, 31), 2)]);
+        let edge = with(&[((5, 6, 0), 2)]);
+        let built =
+            Factory::new().build(key(), &edge, |k| (k.z == -1).then_some(&glass), &mut Stub);
+        assert_eq!(built.quads.len(), 5);
+        assert!(built.quads.iter().all(|&q| face(q) != 2));
+    }
+
+    #[test]
+    fn water_in_a_waterlogged_block_keeps_its_biome() {
+        let mut section = WorldSection::unseen();
+        section.data[section::index(5, 6, 7)] = voxel::compose(0x0F, 4, 7);
+        let water: Vec<u64> = build(&section)
+            .quads
+            .into_iter()
+            .filter(|&q| model(q) == 3)
+            .collect();
+        assert_eq!(water.len(), 6);
+        assert!(water.iter().all(|&q| q >> QUAD_BIOME_SHIFT & 0x1FF == 7));
+    }
+
+    /// A [`Stub`] whose coarse water surfaces are models of their own, 100
+    /// plus the gap, as [`super::super::models::ModelFactory`]'s are.
+    struct Gapped;
+
+    impl Models for Gapped {
+        fn model(&mut self, block: u32) -> u16 {
+            Stub.model(block)
+        }
+
+        fn metadata(&self, model: u16) -> Metadata {
+            Stub.metadata(if model >= 100 { 3 } else { model })
+        }
+
+        fn fluid_model(&self, model: u16) -> u16 {
+            if model >= 100 {
+                3
+            } else {
+                Stub.fluid_model(model)
+            }
+        }
+
+        fn fluid_surface(&mut self, fluid: u16, level: u8, gap: u8) -> u16 {
+            if level == 0 {
+                fluid
+            } else {
+                100 + u16::from(gap)
+            }
+        }
+    }
+
+    #[test]
+    fn coarse_water_hides_its_faces_against_water_of_another_surface() {
+        let level_1 = |y| SectionKey {
+            level: 1,
+            y,
+            ..key()
+        };
+        let water = |gap| voxel::compose(0x0F, 3, 0) | gap;
+        let mut below = WorldSection::unseen();
+        below.data[section::index(5, 31, 7)] = water(0);
+        let mut above = WorldSection::unseen();
+        above.data[section::index(5, 0, 7)] = water(1);
+        let built = Factory::new().build(
+            level_1(1),
+            &above,
+            |k| (k.y == 0).then_some(&below),
+            &mut Gapped,
+        );
+        assert_eq!(built.quads.len(), 5);
+        assert!(built.quads.iter().all(|&q| face(q) != 0 && model(q) == 101));
+        let built = Factory::new().build(
+            level_1(0),
+            &below,
+            |k| (k.y == 1).then_some(&above),
+            &mut Gapped,
+        );
+        assert_eq!(built.quads.len(), 5);
+        assert!(built.quads.iter().all(|&q| face(q) != 1));
+        // Along x the same, between columns at different surfaces.
+        let mut west = WorldSection::unseen();
+        west.data[section::index(31, 5, 7)] = water(3);
+        let mut east = WorldSection::unseen();
+        east.data[section::index(0, 5, 7)] = water(2);
+        let built = Factory::new().build(
+            level_1(0),
+            &east,
+            |k| (k.x == -1).then_some(&west),
+            &mut Gapped,
+        );
+        assert_eq!(built.quads.len(), 5);
+        assert!(built.quads.iter().all(|&q| face(q) != 4));
     }
 
     #[test]

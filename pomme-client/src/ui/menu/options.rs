@@ -278,7 +278,7 @@ impl MainMenu {
             format!("Chunk Detail: {} chunks", self.chunk_detail)
         };
         let dt = if self.distant_terrain == 0 {
-            format!("{DISTANT_TERRAIN} Off")
+            format!("{DISTANT_TERRAIN} OFF")
         } else {
             format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
         };

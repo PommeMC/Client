@@ -36,7 +36,8 @@ use chunk::mesher::{ChunkMeshData, TerrainFormat};
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
-pub use pipelines::block_entity::BlockEntityRenderInfo;
+pub use pipelines::block_entity::{BlockEntityList, BlockEntityRenderInfo};
+use pipelines::block_outline::BlockOutlinePipeline;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
@@ -60,6 +61,7 @@ use winit::window::Window;
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::physics::block_shape::LocalBox;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
@@ -204,13 +206,15 @@ enum RenderMode<'a> {
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
+        /// The targeted block's outline shape and where it sits.
+        block_outline: Option<(glam::DVec3, &'static [LocalBox])>,
         show_chunk_borders: bool,
         sky: SkyState,
         shadows: ShadowScene<'a>,
         moving_blocks: &'a [MovingBlockRender],
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
-        block_entities: &'a [BlockEntityRenderInfo],
+        block_entities: BlockEntityList<'a>,
         particles: &'a [ParticleQuad],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
@@ -246,6 +250,7 @@ pub struct RenderTimings {
     pub sections: u32,
     pub triangles: u32,
     pub pace_ms: f32,
+    /// Encoding a world frame, the shader pack's passes included.
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -267,6 +272,7 @@ pub struct Renderer {
     lightmap: Lightmap,
     hand_pipeline: HandPipeline,
     block_overlay_pipeline: BlockOverlayPipeline,
+    block_outline_pipeline: BlockOutlinePipeline,
     sky_pipeline: SkyPipeline,
     panorama_pipeline: PanoramaPipeline,
     menu_pipeline: MenuOverlayPipeline,
@@ -409,6 +415,8 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
         );
+        let block_outline_pipeline =
+            BlockOutlinePipeline::new(&ctx.device, swapchain_state.targets());
 
         splash(&mut menu_pipeline, 0.7, "Loading sky and panorama...");
 
@@ -561,6 +569,7 @@ impl Renderer {
             lightmap,
             hand_pipeline,
             block_overlay_pipeline,
+            block_outline_pipeline,
             sky_pipeline,
             panorama_pipeline,
             menu_pipeline,
@@ -936,12 +945,33 @@ impl Renderer {
                     pack.end_geometry(encoder, pass, geometry);
                 }
             };
+        let particles = &self.particle_pipeline;
+        // Iris draws opaque particles before deferred and translucent ones
+        // after water, where vanilla submits each layer.
+        let draw_particles = |pack: &mut PackRenderer, translucent: bool| {
+            let geometry = if translucent {
+                PackGeometry::ParticlesTranslucent
+            } else {
+                PackGeometry::Particles
+            };
+            if particles.has_layer(translucent)
+                && let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry)
+            {
+                particles.draw_pack(&pass, frame, translucent);
+                pack.end_geometry(encoder, pass, geometry);
+            }
+        };
         let block_entity_pipeline = &mut self.block_entity_pipeline;
         let mut draw_block_entities = |pack: &mut PackRenderer, geometry| {
             if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
             {
                 block_entity_pipeline.pack_binding = Some(binding);
-                block_entity_pipeline.draw(&mut pass, frame, anchor, block_entities);
+                let items = if geometry == PackGeometry::ShadowBlockEntities {
+                    block_entities.items
+                } else {
+                    block_entities.camera()
+                };
+                block_entity_pipeline.draw(&mut pass, frame, anchor, items);
                 block_entity_pipeline.pack_binding = None;
                 pack.end_geometry(encoder, pass, geometry);
             }
@@ -961,9 +991,16 @@ impl Renderer {
         // Drawn underwater too, as Iris does; the pack fogs it.
         // TODO: skipped in lava and powder snow, or under an effect that
         // blocks the sky (`LevelRenderer.addSkyPass`).
-        let draws = self
+        let draws: Vec<_> = self
             .sky_pipeline
-            .draws(&self.camera, sky, pack.sun_path_rotation());
+            .horizon(sky, *render_distance)
+            .filter(|_| pack.horizon)
+            .into_iter()
+            .chain(
+                self.sky_pipeline
+                    .draws(&self.camera, sky, pack.sun_path_rotation()),
+            )
+            .collect();
         pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
         let frustum = self.camera.frustum_planes();
@@ -985,11 +1022,13 @@ impl Renderer {
                 pack.end_geometry(encoder, pass, geometry);
             }
         }
+        draw_particles(&mut pack, false);
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
         water(&mut pack, PackGeometry::Water, View::Camera);
+        draw_particles(&mut pack, true);
         pack.run_full_screen(device, encoder, frame, false);
-        // TODO: particles, weather, clouds, dropped items, the block-break
+        // TODO: weather, clouds, dropped items, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
         // block outline and chunk borders over the pack's depth.
         if let Some((_, slot)) = &mut self.shader_pack {
@@ -1009,6 +1048,8 @@ impl Renderer {
             self.height,
             self.vsync,
         )?;
+        // Its targets read the old swapchain's depth.
+        self.distant_pipeline.drop_targets(&self.ctx.device);
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -1029,6 +1070,8 @@ impl Renderer {
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.block_overlay_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.block_outline_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.sky_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1340,10 +1383,21 @@ impl Renderer {
         self.chunk_buffers.slice_overlap()
     }
 
+    /// See [`ChunkBufferStore::evicted`].
+    #[cfg(feature = "test-harness")]
+    pub fn chunk_arenas_evicted(&self) -> Result<(), String> {
+        self.chunk_buffers.evicted()
+    }
+
+    /// See [`ChunkBufferStore::shows_block_entities`].
+    pub fn chunk_section_shows_block_entities(&self, pos: ChunkPos, section: i32) -> bool {
+        self.chunk_buffers.shows_block_entities(pos, section)
+    }
+
     /// See [`ChunkBufferStore::starved_column`].
     #[cfg(feature = "test-harness")]
     pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
-        self.chunk_buffers.starved_column()
+        self.chunk_buffers.starved_column(&self.ctx.device)
     }
 
     /// See [`ChunkBufferStore::compacting`].
@@ -1403,7 +1457,8 @@ impl Renderer {
 
     /// Upload as many of a batch of chunk meshes as fit the frame's staging
     /// buffer, in a single coalesced transfer.
-    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::Uploaded {
+    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::ChunkUploads {
+        self.chunk_buffers.set_eye(self.camera_render_position());
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
     }
 
@@ -1530,13 +1585,14 @@ impl Renderer {
         player_team_color: Option<u32>,
         render_first_person_hand: bool,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
+        block_outline: Option<(glam::DVec3, &'static [LocalBox])>,
         show_chunk_borders: bool,
         mut sky: SkyState,
         shadows: ShadowScene<'_>,
         moving_blocks: &[MovingBlockRender],
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
-        block_entities: &[BlockEntityRenderInfo],
+        block_entities: BlockEntityList<'_>,
         particles: &[ParticleQuad],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
@@ -1588,6 +1644,7 @@ impl Renderer {
                 player_team_color,
                 render_first_person_hand,
                 destroy_info,
+                block_outline,
                 show_chunk_borders,
                 sky,
                 shadows,
@@ -1922,6 +1979,7 @@ impl Renderer {
             self.distant_pipeline.update_camera(frame, &uniform);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
+            self.block_outline_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
             self.entity_shadow_pipeline.update_camera(frame, &uniform);
             self.block_entity_pipeline.update_camera(frame, &uniform);
@@ -2115,6 +2173,11 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
+        let frame_start = std::time::Instant::now();
+        if let RenderMode::World { particles, .. } = &mode {
+            self.particle_pipeline
+                .prepare(frame, &self.camera, particles);
+        }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
         // Depth kept past the pass: distant terrain draws against it in
@@ -2131,8 +2194,6 @@ impl Renderer {
         let sw = self.swapchain.extent.width as f32;
         let sh = self.swapchain.extent.height as f32;
 
-        let frame_start = std::time::Instant::now();
-
         match &mode {
             RenderMode::World {
                 block_render,
@@ -2146,6 +2207,7 @@ impl Renderer {
                 player_team_color: _,
                 render_first_person_hand,
                 destroy_info,
+                block_outline,
                 show_chunk_borders,
                 sky,
                 shadows,
@@ -2153,7 +2215,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
-                particles,
+                particles: _,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2163,6 +2225,8 @@ impl Renderer {
                 eyes_in_water,
             } => {
                 let cull_ms = if pack_drawn {
+                    // TODO: the block outline, which packs draw through
+                    // `gbuffers_line`.
                     if let Some((_, Some(pack))) = &mut self.shader_pack {
                         pack.draw_final(&self.ctx.device, &mut pass, frame);
                     }
@@ -2259,7 +2323,6 @@ impl Renderer {
                             *stage,
                         );
                     }
-
                     let ent_frustum = self.camera.frustum_planes();
                     let ent_cull_dist = entity_cull_distance(*render_distance);
 
@@ -2277,8 +2340,12 @@ impl Renderer {
                         None,
                     );
 
-                    self.block_entity_pipeline
-                        .draw(&mut pass, frame, anchor, block_entities);
+                    self.block_entity_pipeline.draw(
+                        &mut pass,
+                        frame,
+                        anchor,
+                        block_entities.camera(),
+                    );
 
                     self.item_entity_pipeline.draw(
                         &self.ctx.device,
@@ -2292,12 +2359,16 @@ impl Renderer {
                     // lets water blend over particles behind it (vanilla draws
                     // particles after all translucents into a depth-sharing
                     // target).
-                    self.particle_pipeline.update_and_draw(
-                        &mut pass,
-                        frame,
-                        &self.camera,
-                        particles,
-                    );
+                    self.particle_pipeline.draw(&mut pass, frame);
+
+                    // After entities, block entities and particles, as
+                    // `LevelRenderer.submitFeatures` submits it.
+                    if let Some((origin, boxes)) = block_outline {
+                        let origin = (*origin - anchor).as_vec3();
+                        let screen = [self.screen_width() as f32, self.screen_height() as f32];
+                        self.block_outline_pipeline
+                            .draw(&mut pass, frame, boxes, origin, screen);
+                    }
 
                     self.gpu_stamp(&encoder, frame, "entities");
 
@@ -2538,10 +2609,13 @@ impl Renderer {
         self.gui_item_atlas.end_frame();
 
         let t_present = std::time::Instant::now();
-        match self
-            .frames
-            .submit_and_present(encoder, &self.ctx, &self.swapchain, image_index)?
-        {
+        let presented =
+            self.frames
+                .submit_and_present(encoder, &self.ctx, &self.swapchain, image_index)?;
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.submitted(frame);
+        }
+        match presented {
             rhi::Presented::Done => {}
             rhi::Presented::OutOfDate => self.swapchain_dirty = true,
             rhi::Presented::Suboptimal => {
@@ -2905,6 +2979,7 @@ impl Drop for Renderer {
         self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);
+        self.block_outline_pipeline.destroy(&self.ctx.device);
         self.sky_pipeline.destroy(&self.ctx.device);
         self.panorama_pipeline.destroy(&self.ctx.device);
         self.menu_pipeline.destroy(&self.ctx.device);

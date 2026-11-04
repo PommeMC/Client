@@ -5,6 +5,7 @@
 // (distant.frag discards nearer fragments).
 
 #include "camera_ubo.glsl"
+#include "distant_section.glsl"
 
 layout(push_constant) uniform BoundPc {
     // The camera's view projection with the distant near and far planes.
@@ -36,9 +37,7 @@ void main() {
         gl_Position = vec4(-100.0, -100.0, -100.0, 0.0);
         return;
     }
-    // The shared cube indices give the corner's bits: x, y, z.
-    uint corner = gl_VertexIndex;
-    vec3 point = vec3(origin + ivec3(corner & 1u, corner >> 1u & 1u, corner >> 2u) * size);
+    vec3 point = vec3(origin) + cube_corner(gl_VertexIndex) * vec3(size);
     gl_Position = distant_view_proj * vec4(point - camera_pos.xyz, 1.0);
     // Brought a hair closer, so a face on the box's edge still counts as inside.
     gl_Position.z -= 0.0005;

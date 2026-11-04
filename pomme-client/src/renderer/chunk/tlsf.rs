@@ -1,6 +1,8 @@
 //! A two-level segregated fit (TLSF) allocator over a range of `u32`
-//! elements: a good fit in constant time from per-size-class free lists, and
-//! freed blocks merged with free neighbours so the range doesn't fragment.
+//! elements: a good fit from per-size-class free lists, found through the
+//! class bitmaps in constant time and taken from an ordered set in log time
+//! (a request no rounded-up class holds scans its own class), and freed
+//! blocks merged with free neighbours so the range doesn't fragment.
 
 use std::collections::{BTreeMap, BTreeSet};
 
