@@ -530,11 +530,10 @@ struct Waitlist {
     /// back out as room frees, and is gone once nothing waits, so a column
     /// arriving after an unload or a teleport tries for room first.
     frontier_sq: f64,
-    /// A column has room in total but no gaps that hold its sections, and
-    /// nothing farther to evict: only compaction, packing an arena's
-    /// sections into the others' gaps, makes it room. Kept until nothing
-    /// waits.
-    fragmented: bool,
+    /// Waiting columns with room in total but no gaps that hold their
+    /// sections, and nothing farther to evict: only compaction, packing an
+    /// arena's sections into the others' gaps, makes them room.
+    fragmented: HashSet<ChunkPos>,
 }
 
 impl Default for Waitlist {
@@ -543,7 +542,7 @@ impl Default for Waitlist {
             columns: HashMap::new(),
             claims: HashMap::new(),
             frontier_sq: f64::INFINITY,
-            fragmented: false,
+            fragmented: HashSet::new(),
         }
     }
 }
@@ -552,6 +551,10 @@ impl Waitlist {
     /// Nothing waits for room or holds a claim to it.
     fn is_empty(&self) -> bool {
         self.columns.is_empty() && self.claims.is_empty()
+    }
+
+    fn is_fragmented(&self) -> bool {
+        !self.fragmented.is_empty()
     }
 
     fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
@@ -564,6 +567,7 @@ impl Waitlist {
     /// room until its mesh is uploaded when `claim`.
     fn hand_back(&mut self, pos: ChunkPos, claim: bool) -> Option<Vec<i32>> {
         let starved = self.columns.remove(&pos)?;
+        self.fragmented.remove(&pos);
         if claim {
             self.claims
                 .entry(pos)
@@ -590,19 +594,20 @@ impl Waitlist {
     fn forget(&mut self, pos: ChunkPos) {
         self.columns.remove(&pos);
         self.claims.remove(&pos);
+        self.fragmented.remove(&pos);
         self.drop_frontier_if_empty();
     }
 
     fn drop_frontier_if_empty(&mut self) {
         if self.is_empty() {
             self.frontier_sq = f64::INFINITY;
-            self.fragmented = false;
         }
     }
 
     /// Takes every column off the list, as there's room for them all.
     fn take_all(&mut self) -> impl Iterator<Item = (ChunkPos, Vec<i32>)> + use<> {
         self.claims.clear();
+        self.fragmented.clear();
         let columns = std::mem::take(&mut self.columns);
         self.drop_frontier_if_empty();
         columns
@@ -1409,7 +1414,7 @@ impl ChunkBufferStore {
             .map(|(&p, alloc)| (column_dist_sq(p, eye), p, alloc.need()));
         let (victims, freed) = eviction_victims(loaded, dist, need, self.free_room());
         if freed && victims.is_empty() {
-            self.waiting.fragmented = true;
+            self.waiting.fragmented.insert(pos);
         }
         let frontier = match victims.last() {
             Some(&(nearest, _)) if freed => nearest,
@@ -1474,7 +1479,7 @@ impl ChunkBufferStore {
             self.arena_size,
         );
         self.waiting.frontier_sq = frontier_sq;
-        self.waiting.fragmented |= fragmented;
+        self.waiting.fragmented.extend(fragmented);
         for (pos, claim) in retry {
             if let Some(sections) = self.waiting.hand_back(pos, claim) {
                 out.push((pos, sections));
@@ -1604,7 +1609,7 @@ impl ChunkBufferStore {
     /// the others' gaps, and stays whole for them. If the others have no
     /// gaps to take it, it backs off and tries again later.
     fn compact(&mut self, device: &rhi::backend::Device) {
-        if !self.waiting.fragmented {
+        if !self.waiting.is_fragmented() {
             if !self.waiting.is_empty() {
                 self.stop_draining();
                 return;
@@ -1624,7 +1629,7 @@ impl ChunkBufferStore {
                 };
                 tracing::debug!("Compacting chunk arena {id}");
                 self.draining = Some(id);
-                self.defragmenting = self.waiting.fragmented;
+                self.defragmenting = self.waiting.is_fragmented();
                 // Nothing lands in it while it drains, so these are all.
                 self.drain_queue = self
                     .chunks
@@ -1657,6 +1662,7 @@ impl ChunkBufferStore {
                     sec.vtx_len,
                     sec.idx_len,
                 ) else {
+                    tracing::debug!("No room to compact chunk arena {from}");
                     no_room = true;
                     break 'columns;
                 };
@@ -1682,8 +1688,8 @@ impl ChunkBufferStore {
             }
             self.drain_queue.pop();
         }
-        if no_room {
-            tracing::debug!("No room to compact chunk arena {from}");
+        let drained = self.defragmenting && self.drain_queue.is_empty();
+        if no_room || drained {
             self.back_off_compaction();
         }
         if copies.is_empty() {
@@ -1715,7 +1721,11 @@ impl ChunkBufferStore {
     }
 
     fn arena_to_drain(&self) -> Option<u16> {
-        arena_to_drain(self.live_use(), self.arena_size, self.waiting.fragmented)
+        arena_to_drain(
+            self.live_use(),
+            self.arena_size,
+            self.waiting.is_fragmented(),
+        )
     }
 
     /// Each live arena as (id, vertices used, indices used).
@@ -2230,13 +2240,13 @@ fn columns_to_retry(
     claimed: bool,
     farthest_loaded: impl FnOnce() -> f64,
     arena: ArenaSize,
-) -> (Vec<(ChunkPos, bool)>, f64, bool) {
+) -> (Vec<(ChunkPos, bool)>, f64, Vec<ChunkPos>) {
     let mut waiting: Vec<Waiting> = waiting.collect();
     waiting.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
     let farthest_loaded = std::cell::LazyCell::new(farthest_loaded);
     let mut retry = Vec::new();
     let mut held = claimed;
-    let mut fragmented = false;
+    let mut fragmented = Vec::new();
     for column in waiting {
         let past = column.dist >= frontier_sq;
         if past && held {
@@ -2260,7 +2270,9 @@ fn columns_to_retry(
             }
             held = true;
             if column.dist >= *farthest_loaded {
-                fragmented |= room;
+                if room {
+                    fragmented.push(column.pos);
+                }
                 continue;
             }
         }
@@ -2681,7 +2693,7 @@ mod tests {
             ARENA_SIZE,
         );
         assert!(retry.is_empty());
-        assert!(!fragmented);
+        assert!(fragmented.is_empty());
     }
 
     /// Room enough in total but no gap for the largest section, and nothing
@@ -2701,7 +2713,7 @@ mod tests {
             ARENA_SIZE,
         );
         assert!(retry.is_empty());
-        assert!(fragmented);
+        assert_eq!(fragmented, [ChunkPos::new(2, 0)]);
     }
 
     /// The evicting column's room, free in total but split too small for it,
@@ -2795,6 +2807,29 @@ mod tests {
         assert!(arenas_to_doom(&live, true).is_empty());
     }
 
+    /// Fragmentation lasts while the column it starves waits, not while
+    /// any column does.
+    #[test]
+    fn fragmentation_goes_with_its_column() {
+        let (split, other) = (ChunkPos::new(1, 0), ChunkPos::new(2, 0));
+        let mut waiting = Waitlist::default();
+        waiting.starve(split, [0], need(10));
+        waiting.starve(other, [0], need(10));
+        waiting.fragmented.insert(split);
+        assert!(waiting.is_fragmented());
+        waiting.hand_back(split, true);
+        assert!(!waiting.is_fragmented());
+
+        waiting.fragmented.insert(other);
+        waiting.forget(other);
+        assert!(!waiting.is_fragmented());
+
+        waiting.starve(split, [0], need(10));
+        waiting.fragmented.insert(split);
+        assert_eq!(waiting.take_all().count(), 1);
+        assert!(!waiting.is_fragmented());
+    }
+
     #[test]
     fn the_frontier_goes_once_nothing_waits() {
         let at = DVec3::new(8.0, 0.0, 8.0);
@@ -2824,17 +2859,13 @@ mod tests {
         assert!(waiting.is_empty());
         assert!(!waiting.beyond(far, eye));
 
-        // An unload of the last one drops it too, claim, fragmentation and
-        // all.
+        // An unload of the last one drops it too, claim and all.
         waiting.starve(near, [0], need(10));
         waiting.pull_frontier(0.0);
-        waiting.fragmented = true;
         waiting.hand_back(near, true);
-        assert!(waiting.fragmented);
         waiting.forget(near);
         assert!(waiting.is_empty());
         assert!(!waiting.beyond(far, eye));
-        assert!(!waiting.fragmented);
 
         waiting.starve(far, [0], need(10));
         waiting.pull_frontier(0.0);
