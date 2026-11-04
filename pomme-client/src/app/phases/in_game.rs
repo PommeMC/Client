@@ -32,7 +32,7 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
-use crate::renderer::chunk::buffer::column_is_near;
+use crate::renderer::chunk::buffer::{column_is_near, section_bit};
 use crate::renderer::chunk::mesh_columns::MeshColumns;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
@@ -1662,12 +1662,6 @@ fn column_frustum_tier(
     } else {
         2
     }
-}
-
-/// Bit for one section index, 0 outside a column's 32 addressable sections (a
-/// camera outside build height resolves to such an index).
-fn section_bit(si: i32) -> u32 {
-    if (0..32).contains(&si) { 1u32 << si } else { 0 }
 }
 
 /// The bits for several section indices.
@@ -4438,13 +4432,40 @@ pub fn update_game(
         Vec::new()
     };
 
-    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
-        Vec::new()
+    let (block_entity_renders, camera_block_entities) = if benchmark_running {
+        (Vec::new(), 0)
     } else {
-        game.chunk_store
+        // Vanilla `BlockEntityRenderer.shouldRender` keeps those within 64
+        // blocks of the camera, and `LevelExtractor` takes them from compiled
+        // sections; of those, the camera's pass draws the ones in sections it
+        // sees, faded in to 0.3, and the shadow pass all of them.
+        let eye = gfx.renderer.camera_render_position();
+        let min_section_y = game.chunk_store.min_y() >> 4;
+        let mut renders: Vec<(bool, crate::renderer::BlockEntityRenderInfo)> = game
+            .chunk_store
             .block_entities
             .iter()
             .filter_map(|(pos, be)| {
+                let center = glam::DVec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + 0.5,
+                    f64::from(pos.z) + 0.5,
+                );
+                if center.distance_squared(eye) >= 64.0 * 64.0 {
+                    return None;
+                }
+                let column = ChunkPos::new(pos.x >> 4, pos.z >> 4);
+                let section = (pos.y >> 4) - min_section_y;
+                if !game
+                    .compiled
+                    .get(&column)
+                    .is_some_and(|mask| mask & section_bit(section) != 0)
+                {
+                    return None;
+                }
+                let camera = gfx
+                    .renderer
+                    .chunk_section_shows_block_entities(column, section);
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
                 let block_state_data = game.block_registry.block_state_data(state);
                 let id = block_state_data.id();
@@ -4481,16 +4502,25 @@ pub fn update_game(
                     lid_open = lid_open.max(openness_at(&partner));
                     light = light.max(light_at(&partner));
                 }
-                Some(crate::renderer::BlockEntityRenderInfo {
-                    pos: *pos,
-                    kind: be.kind,
-                    yaw,
-                    variant,
-                    lid_open,
-                    light,
-                })
+                Some((
+                    camera,
+                    crate::renderer::BlockEntityRenderInfo {
+                        pos: *pos,
+                        kind: be.kind,
+                        yaw,
+                        variant,
+                        lid_open,
+                        light,
+                    },
+                ))
             })
-            .collect()
+            .collect();
+        renders.sort_by_key(|&(camera, _)| !camera);
+        let camera_len = renders.iter().filter(|&&(camera, _)| camera).count();
+        (
+            renders.into_iter().map(|(_, render)| render).collect(),
+            camera_len,
+        )
     };
 
     let weather_columns = if benchmark_running {
@@ -4611,7 +4641,10 @@ pub fn update_game(
         &moving_block_renders,
         &entity_renders,
         &item_renders,
-        &block_entity_renders,
+        crate::renderer::BlockEntityList {
+            items: &block_entity_renders,
+            camera_len: camera_block_entities,
+        },
         &particle_quads,
         &weather_columns,
         if no_ambience {

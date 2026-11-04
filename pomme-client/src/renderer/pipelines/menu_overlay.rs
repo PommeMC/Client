@@ -4772,12 +4772,13 @@ fn run_advance(
     bold: bool,
     inline_objects: bool,
 ) -> f32 {
+    let set = gm.font_set(font);
     text.chars()
         .map(|ch| {
             if ch == '\u{fffc}' && inline_objects {
                 inline_object_advance(bold)
             } else {
-                let glyph = gm.glyph(ch, font);
+                let glyph = gm.glyph_in(set, ch);
                 glyph.advance + if bold { glyph.bold_offset } else { 0.0 }
             }
         })
@@ -4845,6 +4846,7 @@ fn push_mc_text(
     'spans: for span in spans {
         let mut span_position = 0u64;
         let font = span.font.as_deref();
+        let font_set = gm.font_set(font);
         // Vanilla `PreparedTextBuilder.getShadowColor`: an explicit style
         // shadow always draws (alpha scaled by the text's); the default 25%
         // shadow only with drop shadow.
@@ -4918,10 +4920,10 @@ fn push_mc_text(
                     // renders the missing-font glyph.
                     gm.missing()
                 } else if span.obfuscated && ch != ' ' {
-                    let width = gm.glyph(ch, font).advance.ceil() as i32;
-                    gm.random_glyph(width, font, |len| obfuscation_rng.next_int(len))
+                    let width = gm.glyph_in(font_set, ch).advance.ceil() as i32;
+                    gm.random_glyph(width, font_set, |len| obfuscation_rng.next_int(len))
                 } else {
-                    gm.glyph(ch, font)
+                    gm.glyph_in(font_set, ch)
                 };
                 push_mc_glyph_quads(verts, gi, [cx, cy], px_scale, span, shadow_color);
                 (gi.advance + if span.bold { gi.bold_offset } else { 0.0 }) * px_scale

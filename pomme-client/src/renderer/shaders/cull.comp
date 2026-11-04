@@ -2,20 +2,32 @@
 
 layout(local_size_x = 64) in;
 
+// Vanilla's section fade (`SectionRenderDispatcher` fade-in) and near radius,
+// as `chunk/buffer.rs` has them.
+const float FADE_MS = 1000.0;
+const float NEARBY_DIST_SQ = 768.0;
+
 struct ChunkMeta {
     vec3 aabb_min;
-    // Where the section's arena's draws start in the draw lists.
-    uint draw_base;
-    vec3 aabb_max;
-    // The section's arena, which picks its draw count.
+    // The section's arena: its draw count and where its draws start.
     uint arena;
+    vec3 aabb_max;
     uint index_count;
     uint first_index;
     int vertex_offset;
+    // The fade-in factor, written here each cull and read per instance by
+    // the vertex stage.
     uint visibility;
+    uint solid_index_count;
     // ivec3 + uint pack into one 16-byte slot, matching the Rust layout.
     ivec3 origin;
-    uint solid_index_count;
+    uint water_index_count;
+    // The column's slot in the visibility masks, the section's bit in it,
+    // and when the section was uploaded (0: no fade).
+    uint column;
+    uint section;
+    uint uploaded_ms;
+    uint pad;
 };
 
 struct DrawCmd {
@@ -26,12 +38,13 @@ struct DrawCmd {
     uint first_instance;
 };
 
-layout(set = 0, binding = 0) readonly buffer MetaBuf {
+layout(set = 0, binding = 0) buffer MetaBuf {
     ChunkMeta chunks[];
 };
 
 layout(set = 0, binding = 1) uniform FrustumBuf {
     vec4 planes[6];
+    // Meta slots to walk: every arena's segment, headroom included.
     uint chunk_count;
     // Camera block position plus the eye's small offset from it; the
     // origins are rebased in integer math so nothing here forms a large
@@ -42,6 +55,17 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     float frac_x;
     float frac_y;
     float frac_z;
+    uint now_ms;
+    // Whether the occlusion masks apply (the camera view) or not (a shadow
+    // view, which draws occluded sections too).
+    uint use_visibility;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    // Per arena, where its segment of meta slots and draws starts and how
+    // many sections it holds; the rest of the segment is headroom.
+    uvec4 arena_base[64];
+    uvec4 arena_len[64];
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -60,10 +84,27 @@ layout(set = 0, binding = 5) buffer CutoutCountBuf {
     uint cutout_draw_counts[];
 };
 
+layout(set = 0, binding = 6) writeonly buffer IndirectWaterBuf {
+    DrawCmd water_draws[];
+};
+
+layout(set = 0, binding = 7) buffer WaterCountBuf {
+    uint water_draw_counts[];
+};
+
+// Per column slot, the occlusion graph's mask of visible sections.
+layout(set = 0, binding = 8) readonly buffer VisibilityBuf {
+    uint column_visibility[];
+};
+
+const uint SOLID = 0u;
+const uint CUTOUT = 1u;
+const uint WATER = 2u;
+
 // Emit one indexed draw covering [first..first+count) for this section into
-// its arena's draws. The per-instance attributes (origin + fade) come from
-// meta entry `idx`, routed via first_instance.
-void emit(ChunkMeta m, uint count, uint first, uint idx, bool cutout) {
+// its arena's draws of `layer`. The per-instance attributes (origin + fade)
+// come from meta entry `idx`, routed via first_instance.
+void emit(ChunkMeta m, uint base, uint count, uint first, uint idx, uint layer) {
     if (count == 0u) return;
     DrawCmd d;
     d.index_count = count;
@@ -71,10 +112,12 @@ void emit(ChunkMeta m, uint count, uint first, uint idx, bool cutout) {
     d.first_index = first;
     d.vertex_offset = m.vertex_offset;
     d.first_instance = idx;
-    if (cutout) {
-        cutout_draws[m.draw_base + atomicAdd(cutout_draw_counts[m.arena], 1u)] = d;
+    if (layer == SOLID) {
+        draws[base + atomicAdd(draw_counts[m.arena], 1u)] = d;
+    } else if (layer == CUTOUT) {
+        cutout_draws[base + atomicAdd(cutout_draw_counts[m.arena], 1u)] = d;
     } else {
-        draws[m.draw_base + atomicAdd(draw_counts[m.arena], 1u)] = d;
+        water_draws[base + atomicAdd(water_draw_counts[m.arena], 1u)] = d;
     }
 }
 
@@ -83,12 +126,29 @@ void main() {
     if (idx >= chunk_count) return;
 
     ChunkMeta m = chunks[idx];
-    if (m.index_count == 0u) return;
+    if (m.index_count == 0u && m.water_index_count == 0u) return;
+    uint base = arena_base[m.arena >> 2][m.arena & 3u];
+    // A slot in the segment's headroom holds a section that has gone.
+    if (idx - base >= arena_len[m.arena >> 2][m.arena & 3u]) return;
+    if (use_visibility != 0u && (column_visibility[m.column] & (1u << m.section)) == 0u) {
+        return;
+    }
 
-    vec3 base = vec3(m.origin - ivec3(cam_x, cam_y, cam_z))
-        - vec3(frac_x, frac_y, frac_z);
-    vec3 mn = base + m.aabb_min.xyz;
-    vec3 mx = base + m.aabb_max.xyz;
+    ivec3 cam = ivec3(cam_x, cam_y, cam_z);
+    vec3 frac = vec3(frac_x, frac_y, frac_z);
+    // Near columns appear at once; the rest ramp in from their upload.
+    float visibility = 1.0;
+    if (m.uploaded_ms != 0u) {
+        vec2 center = vec2(m.origin.xz - cam.xz) - frac.xz + 8.0;
+        if (dot(center, center) >= NEARBY_DIST_SQ) {
+            visibility = min(float(now_ms - m.uploaded_ms) / FADE_MS, 1.0);
+        }
+    }
+    chunks[idx].visibility = floatBitsToUint(visibility);
+
+    vec3 rel = vec3(m.origin - cam) - frac;
+    vec3 mn = rel + m.aabb_min.xyz;
+    vec3 mx = rel + m.aabb_max.xyz;
 
     for (int i = 0; i < 6; i++) {
         vec4 p = planes[i];
@@ -99,8 +159,9 @@ void main() {
         if (d < 0.0) return;
     }
 
-    // Indices split solid-first.
+    // Indices split solid first, then cutout, then water.
     uint solid_count = m.solid_index_count;
-    emit(m, solid_count, m.first_index, idx, false);
-    emit(m, m.index_count - solid_count, m.first_index + solid_count, idx, true);
+    emit(m, base, solid_count, m.first_index, idx, SOLID);
+    emit(m, base, m.index_count - solid_count, m.first_index + solid_count, idx, CUTOUT);
+    emit(m, base, m.water_index_count, m.first_index + m.index_count, idx, WATER);
 }

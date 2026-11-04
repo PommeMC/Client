@@ -24,13 +24,13 @@ use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::{AtlasUVMap, TextureAtlas};
-use chunk::buffer::{ChunkBufferStore, View};
+use chunk::buffer::{ChunkBufferStore, Layer, View};
 use chunk::mesh_source::MeshSource;
 use chunk::mesher::{ChunkMeshData, TerrainFormat};
 use chunk::moving_blocks::{MovingBlockBuffers, MovingBlockRender};
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
-pub use pipelines::block_entity::BlockEntityRenderInfo;
+pub use pipelines::block_entity::{BlockEntityList, BlockEntityRenderInfo};
 use pipelines::block_outline::BlockOutlinePipeline;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::book_preview::BookPreviewPipeline;
@@ -208,7 +208,7 @@ enum RenderMode<'a> {
         moving_blocks: &'a [MovingBlockRender],
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
-        block_entities: &'a [BlockEntityRenderInfo],
+        block_entities: BlockEntityList<'a>,
         particles: &'a [ParticleQuad],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
@@ -236,6 +236,7 @@ pub struct MenuSkin {
 #[derive(Default, Clone)]
 pub struct RenderTimings {
     pub pace_ms: f32,
+    /// Encoding a world frame, the shader pack's passes included.
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
@@ -879,17 +880,17 @@ impl Renderer {
         let terrain = |pack: &mut PackRenderer, geometry, view| {
             if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
                 pass.set_bind_group(3, pack.atlas_group);
-                for cutout in [false, true] {
-                    chunks.draw_indirect(&pass, frame, cutout, view);
+                for (layer, cutout) in [(Layer::Solid, false), (Layer::Cutout, true)] {
+                    chunks.draw_indirect(&pass, frame, layer, view);
                     moving_blocks.draw(&pass, frame, cutout);
                 }
                 pack.end_geometry(encoder, pass, geometry);
             }
         };
-        let water = |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6]| {
+        let water = |pack: &mut PackRenderer, geometry, view| {
             if let Some((pass, _)) = pack.begin_geometry(device, encoder, frame, geometry) {
                 pass.set_bind_group(3, pack.atlas_group);
-                chunks.draw_water(&pass, frustum, anchor, eye);
+                chunks.draw_indirect(&pass, frame, Layer::Water, view);
                 pack.end_geometry(encoder, pass, geometry);
             }
         };
@@ -936,7 +937,12 @@ impl Renderer {
             if let Some((mut pass, binding)) = pack.begin_geometry(device, encoder, frame, geometry)
             {
                 block_entity_pipeline.pack_binding = Some(binding);
-                block_entity_pipeline.draw(&mut pass, frame, anchor, block_entities);
+                let items = if geometry == PackGeometry::ShadowBlockEntities {
+                    block_entities.items
+                } else {
+                    block_entities.camera()
+                };
+                block_entity_pipeline.draw(&mut pass, frame, anchor, items);
                 block_entity_pipeline.pack_binding = None;
                 pack.end_geometry(encoder, pass, geometry);
             }
@@ -951,7 +957,7 @@ impl Renderer {
             draw_entities(&mut pack, PackGeometry::ShadowEntities, &planes, casters);
             draw_block_entities(&mut pack, PackGeometry::ShadowBlockEntities);
             pack.copy_opaque_depth(encoder, true);
-            water(&mut pack, PackGeometry::ShadowWater, &planes);
+            water(&mut pack, PackGeometry::ShadowWater, View::Shadow);
         }
         // Drawn underwater too, as Iris does; the pack fogs it.
         // TODO: skipped in lava and powder snow, or under an effect that
@@ -990,7 +996,7 @@ impl Renderer {
         draw_particles(&mut pack, false);
         pack.copy_opaque_depth(encoder, false);
         pack.run_full_screen(device, encoder, frame, true);
-        water(&mut pack, PackGeometry::Water, &frustum);
+        water(&mut pack, PackGeometry::Water, View::Camera);
         draw_particles(&mut pack, true);
         pack.run_full_screen(device, encoder, frame, false);
         // TODO: weather, clouds, dropped items, the block-break
@@ -1340,6 +1346,11 @@ impl Renderer {
         self.chunk_buffers.evicted()
     }
 
+    /// See [`ChunkBufferStore::shows_block_entities`].
+    pub fn chunk_section_shows_block_entities(&self, pos: ChunkPos, section: i32) -> bool {
+        self.chunk_buffers.shows_block_entities(pos, section)
+    }
+
     /// See [`ChunkBufferStore::starved_column`].
     #[cfg(feature = "test-harness")]
     pub fn starved_chunk_column(&self) -> Option<crate::position::ChunkPos> {
@@ -1465,7 +1476,7 @@ impl Renderer {
         moving_blocks: &[MovingBlockRender],
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
-        block_entities: &[BlockEntityRenderInfo],
+        block_entities: BlockEntityList<'_>,
         particles: &[ParticleQuad],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
@@ -2025,6 +2036,7 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
+        let frame_start = std::time::Instant::now();
         if let RenderMode::World { particles, .. } = &mode {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
@@ -2040,8 +2052,6 @@ impl Renderer {
 
         let sw = self.swapchain.extent.width as f32;
         let sh = self.swapchain.extent.height as f32;
-
-        let frame_start = std::time::Instant::now();
 
         match &mode {
             RenderMode::World {
@@ -2105,11 +2115,11 @@ impl Renderer {
                             .upload(&self.ctx.device, frame, moving_blocks);
                         self.chunk_pipeline.bind(&mut pass, frame, false);
                         self.chunk_buffers
-                            .draw_indirect(&pass, frame, false, View::Camera);
+                            .draw_indirect(&pass, frame, Layer::Solid, View::Camera);
                         self.moving_block_buffers.draw(&pass, frame, false);
                         self.chunk_pipeline.bind(&mut pass, frame, true);
                         self.chunk_buffers
-                            .draw_indirect(&pass, frame, true, View::Camera);
+                            .draw_indirect(&pass, frame, Layer::Cutout, View::Camera);
                         self.moving_block_buffers.draw(&pass, frame, true);
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
@@ -2145,8 +2155,12 @@ impl Renderer {
                         None,
                     );
 
-                    self.block_entity_pipeline
-                        .draw(&mut pass, frame, anchor, block_entities);
+                    self.block_entity_pipeline.draw(
+                        &mut pass,
+                        frame,
+                        anchor,
+                        block_entities.camera(),
+                    );
 
                     self.item_entity_pipeline.draw(
                         &self.ctx.device,
@@ -2173,12 +2187,11 @@ impl Renderer {
 
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
-                    // but doesn't write depth. CPU frustum-culled, reusing the entity
-                    // frustum/eye.
+                    // but doesn't write depth.
                     if vanilla_terrain {
                         self.chunk_pipeline.bind_water(&mut pass, frame);
                         self.chunk_buffers
-                            .draw_water(&pass, &ent_frustum, anchor, eye);
+                            .draw_indirect(&pass, frame, Layer::Water, View::Camera);
                     }
 
                     // Clouds draw after opaque world geometry (so terrain occludes

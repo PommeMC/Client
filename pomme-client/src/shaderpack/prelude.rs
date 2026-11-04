@@ -27,7 +27,7 @@ pub struct TerrainLighting {
 pub enum Geometry {
     /// `PackVertex` plus the section's `ChunkMeta`.
     Terrain,
-    /// `PackVertex`, the section origin in a push constant (`draw_water`).
+    /// Terrain's translucent water, the same inputs.
     Water,
     /// `EntityVertex` plus the entity renderer's per-instance data.
     Entity,
@@ -152,16 +152,9 @@ impl Geometry {
 impl Preludes {
     pub fn new(geometry: Geometry, lighting: TerrainLighting) -> Self {
         let (inputs, setup, model_view) = match geometry {
-            Geometry::Terrain => (
-                terrain_inputs(TERRAIN_ORIGIN),
-                terrain_setup(lighting),
-                "pomme_view",
-            ),
-            Geometry::Water => (
-                terrain_inputs(WATER_ORIGIN),
-                terrain_setup(lighting),
-                "pomme_view",
-            ),
+            Geometry::Terrain | Geometry::Water => {
+                (terrain_inputs(), terrain_setup(lighting), "pomme_view")
+            }
             Geometry::Entity => (
                 ENTITY_INPUTS.to_owned(),
                 ENTITY_SETUP.to_owned(),
@@ -262,8 +255,8 @@ mat4 pomme_eye_offset() {
 }
 ";
 
-/// Where a terrain vertex's section origin comes from: the section meta
-/// for the indirect passes, a push constant for `draw_water`.
+/// A terrain vertex's section origin and fade: the section meta the indirect
+/// passes read per instance.
 const TERRAIN_ORIGIN: &str = "
 layout(location = 5) in ivec3 pomme_in_origin;
 layout(location = 6) in float pomme_in_visibility;
@@ -273,17 +266,7 @@ vec3 pomme_section_origin() {
 }
 ";
 
-const WATER_ORIGIN: &str = "
-layout(push_constant) uniform PommeSection {
-    vec4 pomme_origin_fade;
-};
-
-vec3 pomme_section_origin() {
-    return pomme_origin_fade.xyz;
-}
-";
-
-fn terrain_inputs(origin: &str) -> String {
+fn terrain_inputs() -> String {
     format!(
         "
 const float POMME_POS_RANGE = {POS_RANGE:?};
@@ -300,7 +283,7 @@ layout(location = 4) in vec4 pomme_in_light_tint;
 layout(location = 7) in vec4 pomme_in_shade;
 layout(location = 8) in uint pomme_in_entity;
 vec4 pomme_mc_Entity;
-{origin}
+{TERRAIN_ORIGIN}
 // Level-0 sprite rectangles in atlas texels, as the atlas uploads them.
 layout(std430, set = 2, binding = 0) readonly buffer PommeSprites {{
     uvec4 pomme_sprite_rects[];

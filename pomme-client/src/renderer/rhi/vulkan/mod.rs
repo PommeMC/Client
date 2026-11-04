@@ -291,6 +291,8 @@ pub struct BufferHandle(vk::Buffer);
 pub struct Buffer {
     raw: vk::Buffer,
     allocation: Allocation,
+    /// The size asked for; the allocation may be larger.
+    size: u64,
 }
 
 impl Buffer {
@@ -368,7 +370,11 @@ impl Buffer {
                 return Err(error);
             }
         };
-        let mut buffer = Self { raw, allocation };
+        let mut buffer = Self {
+            raw,
+            allocation,
+            size,
+        };
         if let Err(error) = unsafe {
             device.raw.bind_buffer_memory(
                 raw,
@@ -409,6 +415,10 @@ impl Buffer {
 
     pub fn handle(&self) -> BufferHandle {
         BufferHandle(self.raw)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
     /// Reads a [`MemoryLocation::Readback`] buffer; the caller has already
@@ -1171,12 +1181,14 @@ impl BufferUse {
                 vk::PipelineStageFlags::Transfer,
             ),
             Self::StorageWrite => (
-                vk::AccessFlags::ShaderWrite,
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
             ),
-            Self::Indirect => (
-                vk::AccessFlags::IndirectCommandRead,
-                vk::PipelineStageFlags::DrawIndirect,
+            Self::DrawInput => (
+                vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::VertexAttributeRead
+                    | vk::AccessFlags::IndexRead,
+                vk::PipelineStageFlags::DrawIndirect | vk::PipelineStageFlags::VertexInput,
             ),
             Self::HostRead => (vk::AccessFlags::HostRead, vk::PipelineStageFlags::Host),
         }

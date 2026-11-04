@@ -1,12 +1,12 @@
 //! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher and its
-//! worker queue, the per-frame fade rebuild, cave culling and chunk packet
+//! worker queue, the chunk draw lists, cave culling and chunk packet
 //! decoding, with no window or Vulkan device.
 //! Criterion reports each run's change against the last.
 
 mod chunk_decode;
 mod dispatch;
-mod fade;
 mod fixtures;
+mod lists;
 mod mesh;
 mod mesh_hash;
 mod occlusion;
@@ -41,7 +41,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
         occlusion::bench_sections(&mut c, &assets);
     }
     chunk_decode::bench(&mut c, block_state_table);
-    fade::bench(&mut c);
+    lists::bench(&mut c);
     occlusion::bench_walk(&mut c);
 
     c.final_summary();
