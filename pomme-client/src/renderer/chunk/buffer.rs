@@ -557,6 +557,22 @@ impl Waitlist {
         !self.fragmented.is_empty()
     }
 
+    /// Unflags the fragmented columns compaction no longer helps: short of
+    /// room in total, or with a farther column loaded to evict instead.
+    fn prune_fragmented(
+        &mut self,
+        (free_vertices, free_indices): (u64, u64),
+        dist: impl Fn(ChunkPos) -> f64,
+        farthest_loaded: impl Fn() -> f64,
+    ) {
+        let columns = &self.columns;
+        self.fragmented.retain(|&pos| {
+            columns.get(&pos).is_some_and(|s| {
+                s.need.fits_in(free_vertices, free_indices) && dist(pos) >= farthest_loaded()
+            })
+        });
+    }
+
     fn starve(&mut self, pos: ChunkPos, sections: impl IntoIterator<Item = i32>, need: Need) {
         let starved = self.columns.entry(pos).or_default();
         starved.sections.extend(sections);
@@ -1456,12 +1472,13 @@ impl ChunkBufferStore {
         // The draining arena too: allocation stops draining to use it.
         let arenas: Vec<&Arena> = self.arenas.iter().filter_map(live).collect();
         let dist = |pos| self.eye.map_or(0.0, |eye| column_dist_sq(pos, eye));
-        let farthest_loaded = || {
+        let farthest_loaded = std::cell::LazyCell::new(|| {
             self.chunks
                 .keys()
                 .map(|&pos| dist(pos))
                 .fold(f64::NEG_INFINITY, f64::max)
-        };
+        });
+        let free = self.free_room();
         let waiting = self.waiting.columns.iter().map(|(&pos, s)| Waiting {
             dist: dist(pos),
             pos,
@@ -1472,13 +1489,15 @@ impl ChunkBufferStore {
         });
         let (retry, frontier_sq, fragmented) = columns_to_retry(
             waiting,
-            self.free_room(),
+            free,
             self.waiting.frontier_sq,
             !self.waiting.claims.is_empty(),
-            farthest_loaded,
+            || *farthest_loaded,
             self.arena_size,
         );
         self.waiting.frontier_sq = frontier_sq;
+        self.waiting
+            .prune_fragmented(free, dist, || *farthest_loaded);
         self.waiting.fragmented.extend(fragmented);
         for (pos, claim) in retry {
             if let Some(sections) = self.waiting.hand_back(pos, claim) {
@@ -2226,7 +2245,7 @@ struct Waiting {
 /// claims the room (see [`Waitlist::claims`]), and the eviction frontier
 /// after. Inside the frontier a column comes back, claiming, when it fits
 /// the free vertices and indices, or when a loaded column farther out (the
-/// farthest is at `farthest_loaded()`, asked at most once and only then) can
+/// farthest is at `farthest_loaded()`, asked only then) can
 /// be evicted for it; either way the free room is its, so no farther column
 /// takes it first. Past the frontier, only while no column holds a claim
 /// (`claimed`, or one nearer in this pass) or was left short, and
@@ -2238,12 +2257,11 @@ fn columns_to_retry(
     (mut free_vertices, mut free_indices): (u64, u64),
     mut frontier_sq: f64,
     claimed: bool,
-    farthest_loaded: impl FnOnce() -> f64,
+    farthest_loaded: impl Fn() -> f64,
     arena: ArenaSize,
 ) -> (Vec<(ChunkPos, bool)>, f64, Vec<ChunkPos>) {
     let mut waiting: Vec<Waiting> = waiting.collect();
     waiting.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
-    let farthest_loaded = std::cell::LazyCell::new(farthest_loaded);
     let mut retry = Vec::new();
     let mut held = claimed;
     let mut fragmented = Vec::new();
@@ -2269,7 +2287,7 @@ fn columns_to_retry(
                 break;
             }
             held = true;
-            if column.dist >= *farthest_loaded {
+            if column.dist >= farthest_loaded() {
                 if room {
                     fragmented.push(column.pos);
                 }
@@ -2828,6 +2846,23 @@ mod tests {
         waiting.fragmented.insert(split);
         assert_eq!(waiting.take_all().count(), 1);
         assert!(!waiting.is_fragmented());
+    }
+
+    #[test]
+    fn fragmentation_goes_once_compaction_cant_help() {
+        let (kept, short, nearer) = (
+            ChunkPos::new(9, 0),
+            ChunkPos::new(8, 0),
+            ChunkPos::new(2, 0),
+        );
+        let mut waiting = Waitlist::default();
+        waiting.starve(kept, [0], need(10));
+        waiting.starve(short, [0], need(500));
+        waiting.starve(nearer, [0], need(10));
+        waiting.fragmented.extend([kept, short, nearer]);
+        // Room for 100 in total, and nothing loaded past x = 5.
+        waiting.prune_fragmented((100, u64::MAX), |pos| f64::from(pos.x), || 5.0);
+        assert_eq!(waiting.fragmented, HashSet::from([kept]));
     }
 
     #[test]
