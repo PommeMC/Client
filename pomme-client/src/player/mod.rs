@@ -80,6 +80,8 @@ fn affects_water_flow(f: Fluid) -> bool {
     matches!(f.kind, FluidKind::Empty | FluidKind::Water)
 }
 
+/// Calculate vanilla water flow from neighboring fluid heights and sturdy
+/// faces.
 fn water_flow_at(
     chunks: &crate::world::chunk::ChunkStore,
     block_state_table: BlockStateTable,
@@ -137,7 +139,7 @@ fn water_flow_at(
                 let same_water = block_state_data.fluid().kind == FluidKind::Water;
                 !same_water
                     && !matches!(block_state_data.id(), "ice" | "frosted_ice")
-                    && block_state_data.is_full_face_sturdy(direction) == Some(true)
+                    && block_state_data.is_full_face_sturdy(direction)
             };
             if solid_face(y) || solid_face(y + 1) {
                 flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
