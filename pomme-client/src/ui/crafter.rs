@@ -63,7 +63,7 @@ pub fn build_crafter(
         SpriteId::CrafterBackground,
     );
     panel.label(elements, centred_title_x(title, text_width_fn), 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(elements, &panel, cursor, kind, slots, cursor_item, drag);
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
@@ -116,7 +116,7 @@ pub fn build_crafter(
         );
     }
 
-    gesture_result(
+    let mut result = gesture_result(
         input,
         hovered,
         &panel,
@@ -126,7 +126,10 @@ pub fn build_crafter(
         cursor_item,
         drag,
         last_click,
-    )
+    );
+    // `extractSlot`: the hand over a grid slot, whose area is its hover area.
+    result.pointer = hovered.is_some_and(|num| usize::from(num) < GRID_SLOTS);
+    result
 }
 
 #[cfg(test)]

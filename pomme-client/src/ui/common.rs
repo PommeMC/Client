@@ -474,10 +474,34 @@ pub(crate) fn push_slot_with_owner(
     use_player_team: bool,
 ) -> bool {
     let hovered = slot_hovered(cursor, x, y, size, scale);
-    if hovered {
-        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightBack);
-    }
-    match item {
+    push_slot_contents(
+        elements,
+        x,
+        y,
+        size,
+        scale,
+        hovered,
+        item,
+        empty_sprite,
+        use_player_team,
+    );
+    hovered
+}
+
+/// A slot's item, or its empty-slot sprite, between the hover highlights.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_slot_contents(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    hovered: bool,
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+    use_player_team: bool,
+) {
+    push_highlighted(elements, x, y, scale, hovered, |elements| match item {
         ItemStack::Empty => {
             if let Some(sprite) = empty_sprite {
                 elements.push(MenuElement::Image {
@@ -493,11 +517,25 @@ pub(crate) fn push_slot_with_owner(
         ItemStack::Present(data) => {
             push_item_icon_with_owner(elements, x, y, size, scale, data, use_player_team)
         }
+    });
+}
+
+/// `draw` between a hovered slot's back and front highlights.
+pub(crate) fn push_highlighted(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    hovered: bool,
+    draw: impl FnOnce(&mut Vec<MenuElement>),
+) {
+    if hovered {
+        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightBack);
     }
+    draw(elements);
     if hovered {
         push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightFront);
     }
-    hovered
 }
 
 /// Whether the cursor is over the slot at (x, y). Vanilla `isHovering`
@@ -510,7 +548,7 @@ pub(crate) fn slot_hovered(cursor: (f32, f32), x: f32, y: f32, size: f32, scale:
 }
 
 /// The hovered slot's 24x24 highlight (back or front), centred on the slot.
-pub(crate) fn push_slot_highlight(
+fn push_slot_highlight(
     elements: &mut Vec<MenuElement>,
     x: f32,
     y: f32,

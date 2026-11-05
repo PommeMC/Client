@@ -56,7 +56,7 @@ pub fn build_crafting_table(
 ) -> ContainerResult {
     let panel = push_crafting_table_background(elements, screen_w, screen_h, gs, x_offset);
     panel.label(elements, 29.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(
         elements,

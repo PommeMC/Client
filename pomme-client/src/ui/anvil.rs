@@ -122,7 +122,7 @@ pub fn build_anvil(
         SpriteId::AnvilBackground,
     );
     panel.label(elements, 60.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
     let editable = item(0).is_present();

@@ -110,8 +110,9 @@ pub enum ContainerScreen {
 }
 
 impl ContainerScreen {
-    /// The click-prediction menu kind backing this screen.
-    pub fn click_kind(self) -> ContainerKind {
+    /// The click-prediction menu kind backing this screen, without the
+    /// synced data some slots read (see [`OpenContainer::click_kind`]).
+    pub fn click_kind(self) -> ContainerKind<'static> {
         match self {
             Self::CraftingTable => ContainerKind::CraftingTable,
             Self::Furnace(_) => ContainerKind::Furnace,
@@ -121,7 +122,7 @@ impl ContainerScreen {
             Self::Enchantment => ContainerKind::Enchantment,
             Self::Hopper => ContainerKind::Hopper,
             Self::Dispenser => ContainerKind::Dispenser,
-            Self::BrewingStand => ContainerKind::BrewingStand,
+            Self::BrewingStand => ContainerKind::BrewingStand(None),
             Self::Crafter => ContainerKind::Crafter { disabled: 0 },
         }
     }
@@ -159,12 +160,13 @@ impl OpenContainer {
     }
 
     /// The click-prediction menu, with the crafter's disabled slots read from
-    /// the menu data.
-    pub fn click_kind(&self) -> ContainerKind {
+    /// the menu data and the brewing stand's rules from `recipes`.
+    pub fn click_kind<'a>(&self, recipes: &'a crate::recipe::RecipeBookState) -> ContainerKind<'a> {
         match self.screen {
             ContainerScreen::Crafter => ContainerKind::Crafter {
                 disabled: crate::ui::crafter::disabled_slots(&self.data),
             },
+            ContainerScreen::BrewingStand => ContainerKind::BrewingStand(Some(recipes)),
             screen => screen.click_kind(),
         }
     }
@@ -233,8 +235,8 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
-    /// The hand cursor is up for a hovered crafter grid slot.
-    pub crafter_pointer: bool,
+    /// The container screen's hand cursor is up.
+    pub screen_pointer: bool,
     /// The selected entry of a bundle in (menu id, slot). Vanilla keeps it on
     /// the stack but never sends it, so a server update of the slot drops it.
     pub bundle_selection: Option<(i32, u16, i32)>,
@@ -577,7 +579,7 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
-            crafter_pointer: false,
+            screen_pointer: false,
             bundle_selection: None,
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
@@ -2193,7 +2195,7 @@ pub(crate) fn send_container_clicks(
         let kind = game
             .open_container
             .as_ref()
-            .map_or(ContainerKind::Player, OpenContainer::click_kind);
+            .map_or(ContainerKind::Player, |c| c.click_kind(&game.recipe_book));
         let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
             ClickOperation::QuickCraft(QuickCraftClick {
                 kind: qc_kind,
@@ -2317,14 +2319,10 @@ fn crafter_slot_clicked(
             if s >= GRID_SLOTS || !c.slots[s].is_empty() || !slot_disabled(&c.data, s) {
                 return;
             }
-            // `Inventory.getItem(buttonNum)`: the hotbar, or 40 for the
-            // offhand, in player-menu indices here.
-            let held = match swap.target_slot {
-                i @ 0..=8 => 36 + usize::from(i),
-                40 => 45,
-                _ => return,
+            let Some(held) = ContainerKind::Player.swap_target_slot(swap.target_slot) else {
+                return;
             };
-            if game.player.inventory.slot(held).is_empty() {
+            if game.player.inventory.slot(held.into()).is_empty() {
                 return;
             }
             (s, true)
@@ -3591,7 +3589,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
-    let mut crafter_pointer = false;
+    let mut screen_pointer = false;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let raw_left = core.input.left_just_pressed();
@@ -3709,7 +3707,7 @@ pub fn update_game(
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
-        let (clicked_outside, ops, hovered) = if hide_main_for_book {
+        let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
             // shows only the screen's background behind it, and the book
             // takes every click.
@@ -3748,7 +3746,7 @@ pub fn update_game(
                     player_preview = Some(preview);
                 }
             }
-            (false, Vec::new(), None)
+            (false, Vec::new(), None, false)
         } else if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
@@ -3825,6 +3823,7 @@ pub fn update_game(
                     &container.data,
                     // 26.3 added the total fuel and brew time data slots.
                     crate::version::session_protocol() >= 777,
+                    &game.recipe_book,
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,
@@ -3906,7 +3905,12 @@ pub fn update_game(
                         },
                     ));
             }
-            (result.clicked_outside, result.ops, result.hovered)
+            (
+                result.clicked_outside,
+                result.ops,
+                result.hovered,
+                result.pointer,
+            )
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -3923,7 +3927,7 @@ pub fn update_game(
                 recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
-            (result.clicked_outside, result.ops, result.hovered)
+            (result.clicked_outside, result.ops, result.hovered, false)
         };
 
         if let Some((spec, _)) = recipe_context.as_ref()
@@ -3966,13 +3970,7 @@ pub fn update_game(
         }
 
         close_inventory = clicked_outside;
-        // `CrafterScreen.extractSlot`: the hand over a grid slot, whose area
-        // is the slot's hover area.
-        crafter_pointer = game
-            .open_container
-            .as_ref()
-            .is_some_and(|c| c.screen == ContainerScreen::Crafter)
-            && hovered.is_some_and(|s| usize::from(s) < crate::ui::crafter::GRID_SLOTS);
+        screen_pointer = pointer;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
         let is_bundle_slot = |game: &GameState, slot: u16| {
@@ -4243,10 +4241,10 @@ pub fn update_game(
         &text_events,
     );
 
-    if crafter_pointer != game.crafter_pointer {
-        game.crafter_pointer = crafter_pointer;
+    if screen_pointer != game.screen_pointer {
+        game.screen_pointer = screen_pointer;
         gfx.window
-            .set_cursor(crate::ui::common::cursor_icon(crafter_pointer));
+            .set_cursor(crate::ui::common::cursor_icon(screen_pointer));
     }
 
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {

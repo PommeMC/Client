@@ -57,7 +57,7 @@ pub fn build_chest(
         BOTTOM_TEX_H,
     );
     panel.label(elements, 8.0, 6.0, title);
-    panel.label(elements, 8.0, rows_h + 20.0, "Inventory");
+    panel.inventory_label(elements, rows_h + 20.0);
 
     build_contents(
         elements,
@@ -130,13 +130,13 @@ pub fn build_grid_screen(
     };
     let panel = push_panel(elements, screen_w, screen_h, gs, height, sprite);
     // `DispenserScreen` centres its title; the others keep the default.
-    let title_x = if kind == ContainerKind::Dispenser {
+    let title_x = if matches!(kind, ContainerKind::Dispenser) {
         centred_title_x(title, text_width_fn)
     } else {
         8.0
     };
     panel.label(elements, title_x, 6.0, title);
-    panel.label(elements, 8.0, height - 94.0, "Inventory");
+    panel.inventory_label(elements, height - 94.0);
 
     build_contents(
         elements,

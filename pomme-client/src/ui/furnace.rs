@@ -105,7 +105,7 @@ pub fn build_furnace(
 ) -> ContainerResult {
     let panel = push_furnace_background(elements, screen_w, screen_h, gs, variant, data, x_offset);
     panel.label(elements, centred_title_x(title, text_width_fn), 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(
         elements,

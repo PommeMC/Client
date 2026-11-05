@@ -12,13 +12,61 @@ use azalea_inventory::operations::{
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
 use azalea_registry::builtin::ItemKind;
 
+use crate::recipe::RecipeBookState;
+
+const BREWING_INPUT: &str = "minecraft:brewing_input";
+const BREWING_REAGENT: &str = "minecraft:brewing_reagent";
+const BREWING_POTION_INPUTS: &str = "minecraft:brewing_potion_inputs";
+const BREWING_FUEL: &str = "minecraft:brewing_fuel";
+
+/// Vanilla `BrewingStandMenu`'s `mayPlace` for slot `s`, from the synced data
+/// it reads; `None` where the client doesn't have that data. 26.3 syncs the
+/// `brewing_input` and `brewing_reagent` property sets, which 26.2 doesn't
+/// have.
+fn brewing_may_place(
+    recipes: Option<&RecipeBookState>,
+    s: usize,
+    item: &ItemStackData,
+) -> Option<bool> {
+    let recipes = recipes?;
+    let id = item.kind as u32;
+    let sets = &recipes.data.item_sets;
+    let in_tag = |tag| {
+        recipes
+            .item_tags()
+            .get(tag)
+            .is_some_and(|t| t.contains(&id))
+    };
+    match s {
+        // `PotionIngredient.isPotionInput`; 26.2's `PotionSlot.mayPlaceItem`.
+        0..=2 => Some(match sets.get(BREWING_INPUT) {
+            Some(set) => set.contains(&id) || in_tag(BREWING_POTION_INPUTS),
+            None => matches!(
+                item.kind,
+                ItemKind::Potion
+                    | ItemKind::SplashPotion
+                    | ItemKind::LingeringPotion
+                    | ItemKind::GlassBottle
+            ),
+        }),
+        // `IngredientsSlot`; 26.2 reads `PotionBrewing`, which isn't synced.
+        3 => sets.get(BREWING_REAGENT).map(|set| set.contains(&id)),
+        // `FuelSlot`: 26.2 reads the item tag. 26.3 reads the `brewing_fuel`
+        // component, which is dropped bridging stacks into azalea's types.
+        // TODO: keep it, so 26.3 fuel placements can be predicted.
+        4 => (!sets.contains_key(BREWING_REAGENT)).then(|| in_tag(BREWING_FUEL)),
+        _ => Some(true),
+    }
+}
+
 /// Which container menu a click applies to. `Furnace` covers the furnace,
 /// blast furnace, and smoker menus, which share the same slot structure;
 /// `Chest` covers every generic 9xN menu (chests, ender chests, barrels, ...).
 /// `Crafter` carries the disabled grid slots as a bitmask (bit `i` = slot `i`),
-/// which gate placement there.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ContainerKind {
+/// which gate placement there. `BrewingStand` carries the synced recipe
+/// property sets and item tags its slots read, when the caller has them.
+#[derive(Clone, Copy)]
+pub enum ContainerKind<'a> {
     Player,
     CraftingTable,
     Furnace,
@@ -28,11 +76,11 @@ pub enum ContainerKind {
     Enchantment,
     Hopper,
     Dispenser,
-    BrewingStand,
+    BrewingStand(Option<&'a RecipeBookState>),
     Crafter { disabled: u16 },
 }
 
-impl ContainerKind {
+impl ContainerKind<'_> {
     pub fn slot_count(self) -> usize {
         match self {
             Self::Player | Self::CraftingTable => 46,
@@ -40,7 +88,7 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
             Self::Enchantment => 38,
-            Self::Hopper | Self::BrewingStand => 41,
+            Self::Hopper | Self::BrewingStand(_) => 41,
             Self::Dispenser => 45,
             Self::Crafter { .. } => 46,
         }
@@ -55,7 +103,7 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
             Self::Enchantment => 2,
-            Self::Hopper | Self::BrewingStand => 5,
+            Self::Hopper | Self::BrewingStand(_) => 5,
             Self::Dispenser | Self::Crafter { .. } => 9,
         }
     }
@@ -85,7 +133,7 @@ impl ContainerKind {
             | Self::Enchantment
             | Self::Hopper
             | Self::Dispenser
-            | Self::BrewingStand => None,
+            | Self::BrewingStand(_) => None,
         }
     }
 
@@ -105,12 +153,25 @@ impl ContainerKind {
         matches!(self, Self::Player).then_some(45)
     }
 
-    /// Slots whose `mayPlace` needs server data: the brewing stand's
-    /// ingredient (`brewing_reagent` set, 26.2's `PotionBrewing`) and fuel
-    /// (`brewing_fuel` component, 26.2's tag). A click putting a new item
-    /// there isn't predicted, so a refused one doesn't show for a round trip.
-    fn unpredicted_place(self, s: usize) -> bool {
-        matches!((self, s), (Self::BrewingStand, 3 | 4))
+    /// The menu slot a SWAP's button reaches (`Inventory.getItem(buttonNum)`):
+    /// hotbar 0-8, or 40 for the offhand.
+    pub fn swap_target_slot(self, button: u8) -> Option<u16> {
+        match button {
+            i @ 0..=8 => Some(self.hotbar_menu_slot(i)),
+            40 => self.offhand_menu_slot(),
+            _ => None,
+        }
+    }
+
+    /// Whether putting `item` in slot `s` needs a `mayPlace` the client can't
+    /// evaluate ([`brewing_may_place`]); such a click isn't predicted, so a
+    /// refused one doesn't show for a round trip.
+    fn unpredicted_place(self, s: usize, item: &ItemStack) -> bool {
+        let Self::BrewingStand(recipes) = self else {
+            return false;
+        };
+        item.as_present()
+            .is_some_and(|d| brewing_may_place(recipes, s, d).is_none())
     }
 
     /// Per-slot stack limit where a menu overrides the item's own maximum
@@ -118,7 +179,7 @@ impl ContainerKind {
     /// brewing stand's bottle slots hold one.
     fn slot_limit(self, s: usize) -> i32 {
         match (self, s) {
-            (Self::Enchantment, 0) | (Self::BrewingStand, 0..=2) => 1,
+            (Self::Enchantment, 0) | (Self::BrewingStand(_), 0..=2) => 1,
             _ => i32::MAX,
         }
     }
@@ -184,7 +245,7 @@ impl ContainerKind {
                 contents: SlotList::default(),
                 player: SlotList::default(),
             },
-            Self::BrewingStand => Menu::BrewingStand {
+            Self::BrewingStand(_) => Menu::BrewingStand {
                 bottles: SlotList::default(),
                 ingredient: ItemStack::Empty,
                 fuel: ItemStack::Empty,
@@ -212,15 +273,11 @@ impl ContainerKind {
         match (self, s) {
             (Self::Player | Self::CraftingTable, 0) => false,
             (Self::Furnace | Self::Anvil, 2) => false,
-            // `PotionSlot`: 26.2's four items, which are also everything 26.3's
-            // `brewing_input` set and `brewing_potion_inputs` tag hold.
-            (Self::BrewingStand, 0..=2) => matches!(
-                item.kind,
-                ItemKind::Potion
-                    | ItemKind::SplashPotion
-                    | ItemKind::LingeringPotion
-                    | ItemKind::GlassBottle
-            ),
+            // Unknown rules accept; `unpredicted_place` then drops the
+            // prediction.
+            (Self::BrewingStand(recipes), 0..=4) => {
+                brewing_may_place(recipes, s, item).unwrap_or(true)
+            }
             (Self::Crafter { disabled }, 0..=8) => disabled & (1 << s) == 0,
             (Self::Crafter { .. }, 45) => false,
             (Self::Player, 5..=8) => {
@@ -272,10 +329,13 @@ pub fn apply_click(
         return Vec::new();
     }
     // Vanilla routes a player-slot shift-click by whether the item is
-    // smeltable or fuel (or a brewing reagent or fuel); recipes and fuel
-    // values live server-side, so leave those to the server too.
-    if matches!(kind, ContainerKind::Furnace | ContainerKind::BrewingStand)
-        && matches!(op, ClickOperation::QuickMove(_))
+    // smeltable or fuel (or a brewing reagent or fuel); the client lacks the
+    // furnace's recipes and fuel values, and one of the brewing stand's
+    // rules on either version, so leave those to the server too.
+    if matches!(
+        kind,
+        ContainerKind::Furnace | ContainerKind::BrewingStand(_)
+    ) && matches!(op, ClickOperation::QuickMove(_))
         && op
             .slot_num()
             .is_some_and(|s| s as usize >= kind.inv_start())
@@ -295,7 +355,7 @@ pub fn apply_click(
         if after == before {
             continue;
         }
-        if kind.unpredicted_place(i) && !after.is_empty() && !same_item(before, after) {
+        if kind.unpredicted_place(i, after) && !same_item(before, after) {
             *cursor = carried;
             *bundle = BundleClick {
                 selection,
@@ -399,17 +459,12 @@ fn apply_op(
         }
         ClickOperation::PickupAll(_) => pickup_all(kind, menu, cursor),
         ClickOperation::Swap(s) => {
-            let target = match s.target_slot {
-                i @ 0..=8 => Some(kind.hotbar_menu_slot(i) as usize),
-                40 => kind.offhand_menu_slot().map(usize::from),
-                _ => None,
-            };
             // Unmappable target (offhand outside the player menu): leave the
             // swap to the server.
-            let Some(target) = target else {
+            let Some(target) = kind.swap_target_slot(s.target_slot) else {
                 return;
             };
-            swap_click(kind, menu, s.source_slot as usize, target);
+            swap_click(kind, menu, s.source_slot as usize, target.into());
         }
         ClickOperation::Throw(t) => {
             // Vanilla THROW only acts with an empty cursor.
@@ -704,7 +759,7 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             ContainerKind::Furnace => {
                 move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
             }
-            ContainerKind::BrewingStand => {
+            ContainerKind::BrewingStand(_) => {
                 move_item_stack_to(kind, menu, s, 5..menu.len(), true);
             }
             ContainerKind::Enchantment => {
@@ -997,9 +1052,42 @@ mod quick_move_tests {
         assert_eq!(cursor.count(), 5);
     }
 
+    /// 26.2's synced state: item tags, no brewing property sets.
+    fn recipes_26_2() -> RecipeBookState {
+        let mut recipes = RecipeBookState::default();
+        recipes.set_item_tags(crate::recipe::ItemTags::from_entries([(
+            BREWING_FUEL.to_owned(),
+            vec![ItemKind::BlazePowder as u32],
+        )]));
+        recipes
+    }
+
+    /// 26.3's: the brewing property sets too, here with a datapack's stone as
+    /// a potion input.
+    fn recipes_26_3() -> RecipeBookState {
+        let mut recipes = RecipeBookState::default();
+        recipes.data.item_sets = [
+            (
+                BREWING_INPUT.to_owned(),
+                vec![ItemKind::Potion as u32, ItemKind::Stone as u32],
+            ),
+            (
+                BREWING_REAGENT.to_owned(),
+                vec![ItemKind::NetherWart as u32],
+            ),
+        ]
+        .into();
+        recipes.set_item_tags(crate::recipe::ItemTags::from_entries([(
+            BREWING_POTION_INPUTS.to_owned(),
+            vec![ItemKind::GlassBottle as u32],
+        )]));
+        recipes
+    }
+
     #[test]
     fn brewing_bottle_slots_take_one_potion_input() {
-        let kind = ContainerKind::BrewingStand;
+        let recipes = recipes_26_2();
+        let kind = ContainerKind::BrewingStand(Some(&recipes));
         let slots = vec![ItemStack::Empty; kind.slot_count()];
 
         let mut cursor = ItemStack::new(ItemKind::GlassBottle, 3);
@@ -1011,18 +1099,6 @@ mod quick_move_tests {
         let changed = left_click(kind, &slots, &mut cursor, 0);
         assert!(changed.is_empty());
 
-        // A new item in the ingredient or fuel slot waits for the server, which
-        // knows what they take; topping up what's there is predicted.
-        let changed = left_click(kind, &slots, &mut cursor, 4);
-        assert!(changed.is_empty());
-        assert_eq!(cursor.count(), 3);
-        let mut topped = slots.clone();
-        topped[4] = ItemStack::new(ItemKind::BlazePowder, 1);
-        let mut cursor = ItemStack::new(ItemKind::BlazePowder, 2);
-        let changed = left_click(kind, &topped, &mut cursor, 4);
-        assert_eq!(changed, vec![(4, ItemStack::new(ItemKind::BlazePowder, 3))]);
-        assert!(cursor.is_empty());
-
         // The menu's own slots shift-click into the player inventory, hotbar
         // end first.
         let mut slots = slots;
@@ -1030,5 +1106,58 @@ mod quick_move_tests {
         let mut menu = kind.build_menu(&slots);
         quick_move(kind, &mut menu, 3);
         assert_eq!(menu.slot(40).map(ItemStack::count), Some(4));
+    }
+
+    #[test]
+    fn brewing_26_2_predicts_fuel_by_tag_and_leaves_reagents_to_the_server() {
+        let recipes = recipes_26_2();
+        let kind = ContainerKind::BrewingStand(Some(&recipes));
+        let slots = vec![ItemStack::Empty; kind.slot_count()];
+
+        let mut cursor = ItemStack::new(ItemKind::BlazePowder, 2);
+        let changed = left_click(kind, &slots, &mut cursor, 4);
+        assert_eq!(changed, vec![(4, ItemStack::new(ItemKind::BlazePowder, 2))]);
+        let mut cursor = ItemStack::new(ItemKind::Stone, 2);
+        assert!(left_click(kind, &slots, &mut cursor, 4).is_empty());
+        assert_eq!(cursor.count(), 2);
+
+        // `PotionBrewing` isn't synced, so a new reagent waits for the server.
+        let mut cursor = ItemStack::new(ItemKind::NetherWart, 2);
+        assert!(left_click(kind, &slots, &mut cursor, 3).is_empty());
+        assert_eq!(cursor.count(), 2);
+    }
+
+    #[test]
+    fn brewing_26_3_reads_the_synced_sets_and_leaves_fuel_to_the_server() {
+        let recipes = recipes_26_3();
+        let kind = ContainerKind::BrewingStand(Some(&recipes));
+        let slots = vec![ItemStack::Empty; kind.slot_count()];
+
+        // The `brewing_input` set and the `brewing_potion_inputs` tag.
+        for item in [ItemKind::Stone, ItemKind::GlassBottle] {
+            let mut cursor = ItemStack::new(item, 1);
+            assert_eq!(
+                left_click(kind, &slots, &mut cursor, 0),
+                vec![(0, ItemStack::new(item, 1))]
+            );
+        }
+        let mut cursor = ItemStack::new(ItemKind::SplashPotion, 1);
+        assert!(left_click(kind, &slots, &mut cursor, 0).is_empty());
+
+        let mut cursor = ItemStack::new(ItemKind::NetherWart, 2);
+        let changed = left_click(kind, &slots, &mut cursor, 3);
+        assert_eq!(changed, vec![(3, ItemStack::new(ItemKind::NetherWart, 2))]);
+        let mut cursor = ItemStack::new(ItemKind::Stone, 2);
+        assert!(left_click(kind, &slots, &mut cursor, 3).is_empty());
+
+        // The `brewing_fuel` component isn't kept, so new fuel waits for the
+        // server; topping up what's there is predicted.
+        let mut cursor = ItemStack::new(ItemKind::BlazePowder, 2);
+        assert!(left_click(kind, &slots, &mut cursor, 4).is_empty());
+        assert_eq!(cursor.count(), 2);
+        let mut topped = slots.clone();
+        topped[4] = ItemStack::new(ItemKind::BlazePowder, 1);
+        let changed = left_click(kind, &topped, &mut cursor, 4);
+        assert_eq!(changed, vec![(4, ItemStack::new(ItemKind::BlazePowder, 3))]);
     }
 }

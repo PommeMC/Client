@@ -41,6 +41,7 @@ pub fn build_brewing_stand(
     slots: &[ItemStack],
     data: &[i16],
     has_totals: bool,
+    recipes: &crate::recipe::RecipeBookState,
     title: &str,
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
@@ -48,7 +49,7 @@ pub fn build_brewing_stand(
     gs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let kind = ContainerKind::BrewingStand;
+    let kind = ContainerKind::BrewingStand(Some(recipes));
     let panel = push_panel(
         elements,
         screen_w,
@@ -59,7 +60,7 @@ pub fn build_brewing_stand(
     );
     push_progress(elements, &panel, data, has_totals);
     panel.label(elements, centred_title_x(title, text_width_fn), 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(elements, &panel, cursor, kind, slots, cursor_item, drag);
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);

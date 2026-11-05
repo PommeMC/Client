@@ -33,6 +33,9 @@ pub struct ContainerResult {
     pub button: Option<u32>,
     /// Slot under the cursor this frame, for bundle mouse actions/tooltips.
     pub hovered: Option<u16>,
+    /// The screen asks for the hand cursor this frame (vanilla
+    /// `requestCursor(CursorTypes.POINTING_HAND)`).
+    pub pointer: bool,
 }
 
 /// Input for a container screen this frame.
@@ -65,6 +68,13 @@ pub struct Panel {
 impl Panel {
     pub fn contains(&self, cursor: (f32, f32)) -> bool {
         hit_test(cursor, [self.ox, self.oy, self.w, self.h])
+    }
+
+    /// The player inventory's label (vanilla `playerInventoryTitle`) at
+    /// GUI-unit height `y`.
+    pub fn inventory_label(&self, elements: &mut Vec<MenuElement>, y: f32) {
+        let title = crate::lang::translate("container.inventory").unwrap_or("Inventory");
+        self.label(elements, 8.0, y, title);
     }
 
     /// A dark, unshadowed menu label at GUI-unit position.
@@ -267,19 +277,19 @@ impl<'e> SlotCtx<'e> {
         num: u16,
         use_player_team: bool,
     ) {
-        let (px, py, _) = self.place(x, y, num);
+        let (px, py, hovered) = self.place(x, y, num);
         let shown = self
             .preview
             .as_ref()
             .and_then(|(m, _)| m.get(&num))
             .unwrap_or(item);
-        super::common::push_slot_with_owner(
+        super::common::push_slot_contents(
             self.elements,
             px,
             py,
             SLOT_SIZE * self.scale,
             self.scale,
-            self.cursor,
+            hovered,
             shown,
             empty,
             use_player_team,
@@ -289,23 +299,18 @@ impl<'e> SlotCtx<'e> {
     /// A slot drawn as an 18x18 `sprite` over its frame instead of its item
     /// (vanilla `CrafterScreen.extractDisabledSlot`), highlighted as usual.
     pub fn sprite_slot(&mut self, x: f32, y: f32, sprite: SpriteId, num: u16) {
-        use super::common::push_slot_highlight;
         let (px, py, hovered) = self.place(x, y, num);
         let s = self.scale;
-        if hovered {
-            push_slot_highlight(self.elements, px, py, s, SpriteId::SlotHighlightBack);
-        }
-        self.elements.push(MenuElement::Image {
-            x: px - s,
-            y: py - s,
-            w: 18.0 * s,
-            h: 18.0 * s,
-            sprite,
-            tint: WHITE,
+        super::common::push_highlighted(self.elements, px, py, s, hovered, |elements| {
+            elements.push(MenuElement::Image {
+                x: px - s,
+                y: py - s,
+                w: 18.0 * s,
+                h: 18.0 * s,
+                sprite,
+                tint: WHITE,
+            });
         });
-        if hovered {
-            push_slot_highlight(self.elements, px, py, s, SpriteId::SlotHighlightFront);
-        }
     }
 
     /// A fake-item slot vanilla never highlights (`isHighlightable` false,
@@ -475,6 +480,7 @@ pub fn gesture_result(
         ops,
         button: None,
         hovered,
+        pointer: false,
     }
 }
 
@@ -581,6 +587,12 @@ pub fn resolve_gesture(
             _ => QuickMoveClick::Right { slot },
         }));
     } else if double {
+        // Vanilla `mouseClicked` still sends the press's PICKUP when nothing is
+        // carried (the crafter toggles a slot on it), then `mouseReleased`
+        // gathers; carrying, the press starts a drag that sends nothing.
+        if !carrying {
+            ops.push(pickup(&click_kind, Some(slot)));
+        }
         ops.push(ClickOperation::PickupAll(PickupAllClick {
             slot,
             reversed: false,
@@ -619,4 +631,54 @@ fn quick_craft(kind: &QuickCraftKind, status: QuickCraftStatus) -> ClickOperatio
         kind: kind.clone(),
         status,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_handed_double_click_still_sends_the_press_pickup() {
+        let kind = ContainerKind::Crafter { disabled: 0 };
+        let slots = vec![ItemStack::Empty; kind.slot_count()];
+        let panel = Panel {
+            scale: 1.0,
+            ox: 0.0,
+            oy: 0.0,
+            w: 176.0,
+            h: 166.0,
+        };
+        let mut drag = None;
+        let mut last_click = Some((4, Instant::now()));
+        let press = ContainerInput {
+            left_pressed: true,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: true,
+            right_held: false,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        };
+        let (ops, _) = resolve_gesture(
+            &press,
+            Some(4),
+            &panel,
+            (10.0, 10.0),
+            kind,
+            &slots,
+            &ItemStack::Empty,
+            &mut drag,
+            &mut last_click,
+        );
+        assert!(matches!(
+            ops.as_slice(),
+            [
+                ClickOperation::Pickup(PickupClick::Left { slot: Some(4) }),
+                ClickOperation::PickupAll(PickupAllClick { slot: 4, .. }),
+            ]
+        ));
+    }
 }
