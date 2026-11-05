@@ -9,6 +9,7 @@ pub(crate) struct ParticleTypes {
     registry: MappedParticleRegistry,
     pub(super) smoke: Rc<ParticleType<SimpleParticleType>>,
     pub(super) flame: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) end_rod: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -28,11 +29,15 @@ impl ParticleTypes {
         let flame = registry
             .register(resource_id!("minecraft:flame"), false)
             .map_err(registration_error)?;
+        let end_rod = registry
+            .register(resource_id!("minecraft:end_rod"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
             smoke,
             flame,
+            end_rod,
         })
     }
 }
