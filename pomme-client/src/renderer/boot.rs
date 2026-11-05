@@ -7,6 +7,8 @@ use super::pipelines::menu_overlay::MenuOverlayPipeline;
 use super::{RendererError, rhi};
 use crate::ui::font::FontSources;
 
+const PARTS_TAKEN: &str = "boot screen parts are taken only by `into_parts`";
+
 pub struct BootScreen {
     /// Taken by [`Self::into_parts`] when the renderer is built on them.
     parts: Option<BootParts>,
@@ -74,14 +76,12 @@ impl BootScreen {
     }
 
     fn parts(&mut self) -> &mut BootParts {
-        self.parts
-            .as_mut()
-            .expect("boot screen parts are taken once")
+        self.parts.as_mut().expect(PARTS_TAKEN)
     }
 
     /// The GPU context and splash, for the renderer to build on.
     pub(super) fn into_parts(mut self) -> BootParts {
-        self.parts.take().expect("boot screen parts are taken once")
+        self.parts.take().expect(PARTS_TAKEN)
     }
 }
 
