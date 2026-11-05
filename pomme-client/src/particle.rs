@@ -1,25 +1,17 @@
-//! Legacy terrain/item particles and `ClientLevel.addDestroyBlockEffect`.
+//! Legacy item particles with their shared terrain-style initializer.
 //! The retained `ServerParticleKind` maps native network particle IDs.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use azalea_block::BlockState;
 use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
-use crate::physics::block_shape::{self, CollisionContext, LocalBox};
+use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::resolve_collision;
-use crate::position::{BlockPos, ChunkPos};
+use crate::position::ChunkPos;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
-use crate::renderer::chunk::mesher::{BiomeClimate, Colormap};
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::BlockStateTable;
-use crate::world::block::block_colors::BlockColors;
-use crate::world::block::particle_appearance::BlockParticleAppearance;
-use crate::world::block::render_assets::{BlockRenderView, Tint};
 use crate::world::chunk::ChunkStore;
 
 /// Vanilla `ParticleGroup.RESERVOIR_START` — above this, new particles are
@@ -193,115 +185,15 @@ pub struct ParticleStore {
     /// `ParticleEngine.particlesToAdd`).
     pending: Vec<Particle>,
     uv_map: AtlasUVMap,
-    block_colors: BlockColors,
 }
 
 impl ParticleStore {
-    pub fn new(
-        uv_map: AtlasUVMap,
-        grass_colormap: Arc<Colormap>,
-        foliage_colormap: Arc<Colormap>,
-        dry_foliage_colormap: Arc<Colormap>,
-    ) -> Self {
+    pub fn new(uv_map: AtlasUVMap) -> Self {
         Self {
             particles: Vec::new(),
             pending: Vec::new(),
             uv_map,
-            block_colors: BlockColors::new(grass_colormap, foliage_colormap, dry_foliage_colormap),
         }
-    }
-
-    /// Vanilla `ClientLevel.addDestroyBlockEffect`: a grid of terrain
-    /// particles across each box of the block's shape (4x4x4 for a full
-    /// cube).
-    pub fn add_destroy_block_effect(
-        &mut self,
-        pos: BlockPos,
-        state: BlockState,
-        registry: BlockRenderView<'_>,
-        chunks: &ChunkStore,
-        biome_climate: &HashMap<u32, BiomeClimate>,
-    ) {
-        let Some((region, color)) =
-            self.terrain_appearance(pos, state, registry, chunks, biome_climate)
-        else {
-            return;
-        };
-        let block_state_data = registry.block_state_table().block_state_data(state);
-        // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
-        // boxes, so a block with an empty outline emits nothing.
-        let boxes: &[LocalBox] = block_shape::outline_shape(block_state_data);
-        let shape_origin = block_state_data.outline_shape_position(pos.x, pos.y, pos.z);
-
-        for b in boxes {
-            let width_x = (b[3] - b[0]).min(1.0);
-            let width_y = (b[4] - b[1]).min(1.0);
-            let width_z = (b[5] - b[2]).min(1.0);
-            let count_x = ((width_x / 0.25).ceil() as i32).max(2);
-            let count_y = ((width_y / 0.25).ceil() as i32).max(2);
-            let count_z = ((width_z / 0.25).ceil() as i32).max(2);
-            for xx in 0..count_x {
-                for yy in 0..count_y {
-                    for zz in 0..count_z {
-                        let rel_x = (xx as f64 + 0.5) / count_x as f64;
-                        let rel_y = (yy as f64 + 0.5) / count_y as f64;
-                        let rel_z = (zz as f64 + 0.5) / count_z as f64;
-                        let spawn = DVec3::new(
-                            shape_origin.x + rel_x * width_x + b[0],
-                            shape_origin.y + rel_y * width_y + b[1],
-                            shape_origin.z + rel_z * width_z + b[2],
-                        );
-                        self.push(Particle::terrain(
-                            spawn,
-                            DVec3::new(rel_x - 0.5, rel_y - 0.5, rel_z - 0.5),
-                            region,
-                            color,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    /// `TerrainParticle`'s sprite and color for `state` at `pos`; `None` for
-    /// blocks that spawn no terrain particles.
-    fn terrain_appearance(
-        &self,
-        pos: BlockPos,
-        state: BlockState,
-        registry: BlockRenderView<'_>,
-        chunks: &ChunkStore,
-        biome_climate: &HashMap<u32, BiomeClimate>,
-    ) -> Option<(AtlasRegion, [f32; 3])> {
-        let block_state_data = registry.block_state_table().block_state_data(state);
-        if block_state_data.is_air() {
-            return None;
-        }
-        let block_id = block_state_data.id();
-        // The only vanilla `noTerrainParticles` blocks.
-        if matches!(block_id, "barrier" | "structure_void") {
-            return None;
-        }
-
-        let appearance =
-            BlockParticleAppearance::new(registry, &self.uv_map, &self.block_colors, biome_climate);
-        // TerrainParticle base grey, multiplied by the block's biome tint.
-        // grass_block is exempt (vanilla `colorAsTerrainParticle` returns
-        // white for it — its particle texture is dirt).
-        let mut color = [0.6f32; 3];
-        let faces = registry.get_textures(state);
-        if let Some(faces) = faces
-            && faces.tint != Tint::None
-            && block_id != "grass_block"
-        {
-            let tint = appearance.tint(state, pos, chunks);
-            for (c, t) in color.iter_mut().zip(tint) {
-                *c *= t;
-            }
-        }
-
-        let region = appearance.sprite(state);
-        Some((region, color))
     }
 
     /// `texture`'s atlas region, if the atlas has it.
@@ -517,8 +409,9 @@ fn rot_y(v: DVec3, angle: f64) -> DVec3 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use azalea_protocol::common::client_information::ParticleStatus;
 
@@ -529,11 +422,14 @@ mod tests {
         SimpleParticleType, register_builtin_providers,
     };
     use crate::renderer::chunk::atlas::TextureAtlas;
+    use crate::renderer::chunk::mesher::Colormap;
     use crate::resources::managers::ReloadableResourceManager;
     use crate::resources::pack_resources::PackType;
     use crate::resources::resource_id;
     use crate::util::random_source::RandomSource;
+    use crate::world::block::block_colors::BlockColors;
     use crate::world::block::block_registry::BlockRegistry;
+    use crate::world::block::particle_appearance::BlockParticleAppearance;
     use crate::world::level::LevelContext;
 
     #[test]

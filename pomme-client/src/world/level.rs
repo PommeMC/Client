@@ -1,6 +1,9 @@
 //! Conceptual equivalent to Vanilla ClientLevel/Level.  Provides access to
 //! resources other game systems need, without exposing internals of GameState
 //! generally.
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use azalea_block::BlockState;
 use azalea_protocol::common::client_information::ParticleStatus;
 use glam::DVec3;
@@ -12,10 +15,12 @@ use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
 use crate::particles::types::ParticleOptions;
+use crate::particles::{ParticleRef, TerrainParticle};
 use crate::physics::aabb::Aabb;
-use crate::physics::block_shape::CollisionContext;
+use crate::physics::block_shape::{self, CollisionContext, LocalBox};
 use crate::physics::collision::{CollisionWorld, resolve_collision};
 use crate::position::{BlockPos, ChunkPos};
+use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::renderer::chunk::block_lighter::{WorldLight, light_coords};
 use crate::util::random_source::RandomSource;
 
@@ -65,6 +70,51 @@ impl<'a> LevelContext<'a> {
     /// Missing chunks and positions outside the dimension height read as air.
     pub fn get_block_state(&self, pos: BlockPos) -> BlockState {
         self.chunks.get_block_state(pos.x, pos.y, pos.z)
+    }
+
+    /// A grid of terrain particles across each box of the block's outline.
+    pub fn add_destroy_block_effect(&mut self, pos: BlockPos, state: BlockState) {
+        let block_state_data = self.block_state_table().block_state_data(state);
+        if block_state_data.is_air()
+            || matches!(block_state_data.id(), "barrier" | "structure_void")
+        {
+            return;
+        }
+        let appearance = self.block_particle_appearance();
+        let sprite: AtlasRegion = appearance.sprite(state);
+        let tint: [f32; 3] = appearance.tint(state, pos, self.chunks());
+        let boxes: &[LocalBox] = block_shape::outline_shape(block_state_data);
+        let shape_origin = block_state_data.outline_shape_position(pos.x, pos.y, pos.z);
+
+        for b in boxes {
+            let width_x = (b[3] - b[0]).min(1.0);
+            let width_y = (b[4] - b[1]).min(1.0);
+            let width_z = (b[5] - b[2]).min(1.0);
+            let count_x = ((width_x / 0.25).ceil() as i32).max(2);
+            let count_y = ((width_y / 0.25).ceil() as i32).max(2);
+            let count_z = ((width_z / 0.25).ceil() as i32).max(2);
+            for xx in 0..count_x {
+                for yy in 0..count_y {
+                    for zz in 0..count_z {
+                        let rel_x = (xx as f64 + 0.5) / count_x as f64;
+                        let rel_y = (yy as f64 + 0.5) / count_y as f64;
+                        let rel_z = (zz as f64 + 0.5) / count_z as f64;
+                        let spawn = DVec3::new(
+                            shape_origin.x + rel_x * width_x + b[0],
+                            shape_origin.y + rel_y * width_y + b[1],
+                            shape_origin.z + rel_z * width_z + b[2],
+                        );
+                        let particle: ParticleRef = Rc::new(RefCell::new(TerrainParticle::new(
+                            spawn,
+                            DVec3::new(rel_x - 0.5, rel_y - 0.5, rel_z - 0.5),
+                            sprite,
+                            tint,
+                        )));
+                        self.particle_engine().add(particle);
+                    }
+                }
+            }
+        }
     }
 }
 
