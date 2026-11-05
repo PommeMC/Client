@@ -416,16 +416,19 @@ pub(crate) fn play_movement_sounds(
     }
 }
 
+// COMPAT: Vanilla's LevelEventHandler delegates block destruction to
+// ClientLevel. Keep this sound/particle handling here; reorganizing network
+// packet handling is outside the particle port's scope.
 /// Vanilla `LevelEventHandler` case 2001: a broken block's sound and
 /// particles.
 fn block_break_effect(
     audio: &crate::audio::AudioEngine,
     resources: &dyn ResourceManager,
-    game: &mut GameState,
+    level: &mut LevelContext<'_>,
     pos: crate::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
-    let block_state_data = game.block_registry.block_state_data(state);
+    let block_state_data = level.block_state_table().block_state_data(state);
     if !block_state_data.is_air() {
         crate::player::interaction::play_break_sound_for_id(
             audio,
@@ -435,13 +438,7 @@ fn block_break_effect(
             pos,
         );
     }
-    game.particle_store.add_destroy_block_effect(
-        pos,
-        state,
-        game.block_registry.render_view(),
-        &game.chunk_store,
-        &game.biome_climate,
-    );
+    level.add_destroy_block_effect(pos, state);
 }
 
 /// The local player's box as a push target, gated on `LivingEntity.isPushable`
@@ -2071,15 +2068,9 @@ impl AppCore {
             self.resources(),
             game.cardinal_light,
         );
-        let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
         game.sync_distant_colors();
-        game.particle_store = crate::particle::ParticleStore::new(
-            renderer.uv_map().clone(),
-            grass,
-            foliage,
-            dry_foliage,
-        );
+        game.particle_store = crate::particle::ParticleStore::new(renderer.uv_map().clone());
 
         game.rebuild_meshes();
         Ok(())
@@ -3008,15 +2999,42 @@ impl AppCore {
                         game.block_registry.block_state_table(),
                         state,
                     ) {
-                        let mut level = ClientPistonLevel::new(game, &mut priority_remesh);
-                        crate::world::piston::trigger_event(
-                            &mut level,
-                            pos,
-                            action_id,
-                            action_parameter,
+                        let destroyed = {
+                            let mut level = ClientPistonLevel::new(game, &mut priority_remesh);
+                            crate::world::piston::trigger_event(
+                                &mut level,
+                                pos,
+                                action_id,
+                                action_parameter,
+                            );
+                            std::mem::take(&mut level.destroyed)
+                        };
+                        let level_random = game.level_runtime.get_random().clone();
+                        let engine_access = self.particle_engine.engine_access();
+                        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                        let colors = BlockColors::new(grass, foliage, dry);
+                        let appearance = BlockParticleAppearance::new(
+                            game.block_registry.render_view(),
+                            renderer.uv_map(),
+                            &colors,
+                            &game.biome_climate,
                         );
-                        for (pos, state) in std::mem::take(&mut level.destroyed) {
-                            block_break_effect(&self.audio, &self.resources, game, pos, state);
+                        let mut level = LevelContext::new(
+                            &game.chunk_store,
+                            &appearance,
+                            renderer.camera_render_position(),
+                            ParticleStatus::All,
+                            &level_random,
+                            engine_access.as_ref(),
+                        );
+                        for (pos, state) in destroyed {
+                            block_break_effect(
+                                &self.audio,
+                                &self.resources,
+                                &mut level,
+                                pos,
+                                state,
+                            );
                         }
                     } else if action_id == 1 {
                         // Chest/shulker: the open-viewer count.
@@ -3329,9 +3347,30 @@ impl AppCore {
                     if event_type == 2001
                         && let Some(state) = game.block_registry.block_state_table().try_state(data)
                     {
-                        block_break_effect(&self.audio, &self.resources, game, pos, state);
+                        let level_random = game.level_runtime.get_random().clone();
+                        let engine_access = self.particle_engine.engine_access();
+                        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                        let colors = BlockColors::new(grass, foliage, dry);
+                        let appearance = BlockParticleAppearance::new(
+                            game.block_registry.render_view(),
+                            renderer.uv_map(),
+                            &colors,
+                            &game.biome_climate,
+                        );
+                        let mut level = LevelContext::new(
+                            &game.chunk_store,
+                            &appearance,
+                            renderer.camera_render_position(),
+                            ParticleStatus::All,
+                            &level_random,
+                            engine_access.as_ref(),
+                        );
+                        block_break_effect(&self.audio, &self.resources, &mut level, pos, state);
                     }
                 }
+                // COMPAT: Vanilla expands particle packets in ClientPacketListener and
+                // delegates spawning to ClientLevel. Moving network packet handling out of AppCore
+                // is outside the particle port's scope.
                 NetworkEvent::LevelParticles {
                     kind,
                     override_limiter,
@@ -4081,6 +4120,24 @@ impl AppCore {
                 .inventory
                 .hand_stacks(self.input.selected_slot())
                 .map(Option::<&_>::cloned);
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = self.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
+            let level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                renderer.camera_render_position(),
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
             game.interaction.tick_using_item(
                 hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
@@ -4091,8 +4148,7 @@ impl AppCore {
                 game.player.look_dir,
                 &mut crate::player::interaction::BreakEffects {
                     particles: &mut game.particle_store,
-                    registry: game.block_registry.render_view(),
-                    biome_climate: &game.biome_climate,
+                    level,
                 },
             );
 
@@ -4302,10 +4358,27 @@ impl AppCore {
             ),
         });
         let player_aabb = game.player.bounding_box();
+        let level_random = game.level_runtime.get_random().clone();
+        let engine_access = self.particle_engine.engine_access();
+        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+        let colors = BlockColors::new(grass, foliage, dry);
+        let appearance = BlockParticleAppearance::new(
+            game.block_registry.render_view(),
+            renderer.uv_map(),
+            &colors,
+            &game.biome_climate,
+        );
+        let level = LevelContext::new(
+            &game.chunk_store,
+            &appearance,
+            renderer.camera_render_position(),
+            ParticleStatus::All,
+            &level_random,
+            engine_access.as_ref(),
+        );
         let mut effects = crate::player::interaction::BreakEffects {
             particles: &mut game.particle_store,
-            registry: game.block_registry.render_view(),
-            biome_climate: &game.biome_climate,
+            level,
         };
         let dirty = game.interaction.tick_actions(
             &game.block_registry,

@@ -2,7 +2,6 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use azalea_block::BlockState;
 use glam::DVec3;
 
 use super::super::block_particle_option::BlockParticleOption;
@@ -23,7 +22,7 @@ use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
 
-struct TerrainParticle {
+pub(crate) struct TerrainParticle {
     position: DVec3,
     previous_position: DVec3,
     velocity: DVec3,
@@ -50,16 +49,18 @@ struct TerrainParticle {
 }
 
 impl TerrainParticle {
-    fn new(world: &LevelContext<'_>, position: DVec3, auxiliary: DVec3, state: BlockState) -> Self {
-        let appearance = world.block_particle_appearance();
-        let sprite = appearance.sprite(state);
+    pub(crate) fn new(
+        position: DVec3,
+        auxiliary: DVec3,
+        sprite: AtlasRegion,
+        tint: [f32; 3],
+    ) -> Self {
         let mut random = fastrand::Rng::new();
         let bounds = bounds_at(position, 0.2, 0.2);
         let lifetime = (4.0_f32 / (random.f32() * 0.9_f32 + 0.1_f32)) as u32;
         let velocity = randomized_motion(&mut random, auxiliary);
         let mut quad_size = randomized_quad_size(&mut random);
         let mut color = [0.6_f32; 3];
-        let tint = appearance.tint(state, BlockPos::containing(position), world.chunks());
         for (c, t) in color.iter_mut().zip(tint) {
             *c *= t;
         }
@@ -335,8 +336,11 @@ impl ParticleProvider<BlockParticleOption> for TerrainProvider {
         if data.is_air() || matches!(data.id(), "moving_piston" | "barrier" | "structure_void") {
             return None;
         }
+        let appearance = world.block_particle_appearance();
+        let sprite = appearance.sprite(state);
+        let tint = appearance.tint(state, BlockPos::containing(position), world.chunks());
         Some(Rc::new(RefCell::new(TerrainParticle::new(
-            world, position, auxiliary, state,
+            position, auxiliary, sprite, tint,
         ))))
     }
 }

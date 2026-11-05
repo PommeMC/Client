@@ -15,6 +15,7 @@ pub(super) use self::flame::FlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
+pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
 
 pub(crate) fn register_builtin_providers(
