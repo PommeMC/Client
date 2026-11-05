@@ -18,6 +18,7 @@ use crate::renderer::chunk::mesher::{BiomeClimate, Colormap};
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::BlockStateTable;
 use crate::world::block::block_colors::BlockColors;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block::render_assets::{BlockRenderView, Tint};
 use crate::world::chunk::ChunkStore;
 
@@ -262,34 +263,6 @@ impl ParticleStore {
         }
     }
 
-    /// Vanilla `ClientLevel.addParticle` of a `minecraft:block` particle
-    /// (`TerrainParticle.Provider`) with zero speed, tinted at the block
-    /// containing `pos`.
-    pub fn add_block_particle(
-        &mut self,
-        pos: DVec3,
-        state: BlockState,
-        registry: BlockRenderView<'_>,
-        chunks: &ChunkStore,
-        biome_climate: &HashMap<u32, BiomeClimate>,
-        camera_pos: DVec3,
-    ) {
-        if beyond_particle_range(camera_pos, pos)
-            || registry.block_state_table().block_state_data(state).id() == "moving_piston"
-        {
-            return;
-        }
-        if let Some((region, color)) = self.terrain_appearance(
-            BlockPos::containing(pos),
-            state,
-            registry,
-            chunks,
-            biome_climate,
-        ) {
-            self.push(Particle::terrain(pos, DVec3::ZERO, region, color));
-        }
-    }
-
     /// `TerrainParticle`'s sprite and color for `state` at `pos`; `None` for
     /// blocks that spawn no terrain particles.
     fn terrain_appearance(
@@ -310,6 +283,8 @@ impl ParticleStore {
             return None;
         }
 
+        let appearance =
+            BlockParticleAppearance::new(registry, &self.uv_map, &self.block_colors, biome_climate);
         // TerrainParticle base grey, multiplied by the block's biome tint.
         // grass_block is exempt (vanilla `colorAsTerrainParticle` returns
         // white for it — its particle texture is dirt).
@@ -319,25 +294,13 @@ impl ParticleStore {
             && faces.tint != Tint::None
             && block_id != "grass_block"
         {
-            let tint = self.block_colors.terrain_particle_color(
-                state,
-                pos,
-                registry,
-                chunks,
-                biome_climate,
-            );
+            let tint = appearance.tint(state, pos, chunks);
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
             }
         }
 
-        let region = match faces {
-            Some(faces) => self
-                .uv_map
-                .get_region(faces.particle.as_deref().unwrap_or(&faces.top)),
-            // No face textures at all: the missing-texture region.
-            None => self.uv_map.get_region(""),
-        };
+        let region = appearance.sprite(state);
         Some((region, color))
     }
 
@@ -554,7 +517,7 @@ fn rot_y(v: DVec3, angle: f64) -> DVec3 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
     use azalea_protocol::common::client_information::ParticleStatus;
@@ -565,8 +528,12 @@ mod tests {
         ParticleLight, ParticleResources, ParticleTypes, PreparedParticleDescriptions,
         SimpleParticleType, register_builtin_providers,
     };
+    use crate::renderer::chunk::atlas::TextureAtlas;
+    use crate::resources::managers::ReloadableResourceManager;
+    use crate::resources::pack_resources::PackType;
     use crate::resources::resource_id;
     use crate::util::random_source::RandomSource;
+    use crate::world::block::block_registry::BlockRegistry;
     use crate::world::level::LevelContext;
 
     #[test]
@@ -600,9 +567,20 @@ mod tests {
         );
         let random = RandomSource::new();
         let engine_access = engine.engine_access();
+        let registry = BlockRegistry::native();
+        let colors = BlockColors::new(
+            Arc::new(Colormap::fallback()),
+            Arc::new(Colormap::fallback()),
+            Arc::new(Colormap::fallback()),
+        );
+        let biome_climate = HashMap::new();
+        let manager = ReloadableResourceManager::new(PackType::ClientResources);
+        let atlas = TextureAtlas::build_cpu(&manager, &HashSet::new(), &HashSet::new()).uv_map;
+        let appearance =
+            BlockParticleAppearance::new(registry.render_view(), &atlas, &colors, &biome_climate);
         let mut level = LevelContext::new(
             &chunks,
-            BlockStateTable::native(),
+            &appearance,
             DVec3::ZERO,
             ParticleStatus::All,
             &random,

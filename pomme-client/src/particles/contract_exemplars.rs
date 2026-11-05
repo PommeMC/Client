@@ -29,7 +29,7 @@ use crate::world::level::LevelContext;
 /// For the sprite-factory form, replace ParticleResources::register with
 /// resources.register_sprite_provider(Rc::clone(&particle_type), registration):
 /// it supplies the stable SpriteSet to the factory before engine construction.
-/// LevelContext::new requires chunks, the block-state table, real camera
+/// LevelContext::new requires chunks, block particle appearance, real camera
 /// position, particle status, a persistent level RNG and the local engine's
 /// creation services. Callbacks receive that same full context.
 pub fn contract_exemplar<R: ParticleResources>(
@@ -48,7 +48,7 @@ pub fn contract_exemplar<R: ParticleResources>(
     let engine_access = engine.engine_access();
     let mut level = LevelContext::new(
         world.chunks(),
-        world.block_state_table(),
+        world.block_particle_appearance(),
         world.camera_render_position,
         world.particle_status,
         world.get_random(),
@@ -98,10 +98,11 @@ pub fn contract_registry_exemplar() -> Result<
 /// caller work. Since initialization precedes the engine, apply may use a no-op
 /// clear callback. This example does not demonstrate runtime or visual
 /// fidelity. The returned snapshot describes the old world, not a proof of
-/// world lifetime. LevelContext::new requires chunks, the block-state table,
-/// real camera position, particle status, a persistent level RNG and the local
-/// engine's creation services for both contexts. Input contexts supply only
-/// world/client inputs; callbacks receive the newly constructed full context.
+/// world lifetime. LevelContext::new requires chunks, block particle
+/// appearance, real camera position, particle status, a persistent level RNG
+/// and the local engine's creation services for both contexts. Input contexts
+/// supply only world/client inputs; callbacks receive the newly constructed
+/// full context.
 pub fn contract_exemplar_smoke<R: ParticleResources>(
     mut resources: R,
     particle_type: Rc<ParticleType<SimpleParticleType>>,
@@ -118,7 +119,7 @@ pub fn contract_exemplar_smoke<R: ParticleResources>(
     let engine_access = engine.engine_access();
     let mut level = LevelContext::new(
         world.chunks(),
-        world.block_state_table(),
+        world.block_particle_appearance(),
         world.camera_render_position,
         world.particle_status,
         world.get_random(),
@@ -148,7 +149,7 @@ pub fn contract_exemplar_smoke<R: ParticleResources>(
     // Notification stores no world: subsequent calls explicitly supply it.
     let mut replacement_level = LevelContext::new(
         replacement_world.chunks(),
-        replacement_world.block_state_table(),
+        replacement_world.block_particle_appearance(),
         replacement_world.camera_render_position,
         replacement_world.particle_status,
         replacement_world.get_random(),
@@ -171,7 +172,7 @@ pub fn contract_exemplar_smoke<R: ParticleResources>(
 /// Initialization precedes the engine, so apply may use a no-op clear callback.
 /// Retained identity/world association and cached sprites after reload remain
 /// deferred lifecycle concerns.
-/// LevelContext::new requires chunks, the block-state table, real camera
+/// LevelContext::new requires chunks, block particle appearance, real camera
 /// position, particle status, a persistent level RNG and the local engine's
 /// creation services. Callbacks receive that same full context.
 pub fn contract_exemplar_flame<R: ParticleResources>(
@@ -193,7 +194,7 @@ pub fn contract_exemplar_flame<R: ParticleResources>(
     let engine_access = engine.engine_access();
     let mut level = LevelContext::new(
         world.chunks(),
-        world.block_state_table(),
+        world.block_particle_appearance(),
         world.camera_render_position,
         world.particle_status,
         world.get_random(),

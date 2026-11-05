@@ -7,6 +7,7 @@ use glam::DVec3;
 
 use super::block::BlockStateTable;
 use super::block::block_registry::BlockRegistry;
+use super::block::particle_appearance::BlockParticleAppearance;
 use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
@@ -23,7 +24,7 @@ use crate::util::random_source::RandomSource;
 /// canonical particle engine's creation services are required at construction.
 pub struct LevelContext<'a> {
     chunks: &'a ChunkStore,
-    block_state_table: BlockStateTable,
+    block_particle_appearance: &'a BlockParticleAppearance<'a>,
     pub(crate) camera_render_position: DVec3,
     pub(crate) particle_status: ParticleStatus,
     pub(crate) random: &'a RandomSource,
@@ -33,7 +34,7 @@ pub struct LevelContext<'a> {
 impl<'a> LevelContext<'a> {
     pub(crate) fn new(
         chunks: &'a ChunkStore,
-        block_state_table: BlockStateTable,
+        block_particle_appearance: &'a BlockParticleAppearance<'a>,
         camera_render_position: DVec3,
         particle_status: ParticleStatus,
         random: &'a RandomSource,
@@ -41,7 +42,7 @@ impl<'a> LevelContext<'a> {
     ) -> Self {
         Self {
             chunks,
-            block_state_table,
+            block_particle_appearance,
             camera_render_position,
             particle_status,
             random,
@@ -54,7 +55,11 @@ impl<'a> LevelContext<'a> {
     }
 
     pub(crate) fn block_state_table(&self) -> BlockStateTable {
-        self.block_state_table
+        self.block_particle_appearance.block_state_table()
+    }
+
+    pub(crate) fn block_particle_appearance(&self) -> &'a BlockParticleAppearance<'a> {
+        self.block_particle_appearance
     }
 
     /// Missing chunks and positions outside the dimension height read as air.
@@ -214,8 +219,8 @@ impl<'a> LevelContext<'a> {
     }
 }
 
-// Terrain/item model, tint and material queries remain deferred contracts;
-// they must use the existing model services, not particle texture descriptions.
+// Item model queries remain deferred; they must use the existing model
+// services.
 
 /// Owns the persistent level random stream for animation sampling and
 /// particles. Block rules, session protocol bindings and chunks remain
