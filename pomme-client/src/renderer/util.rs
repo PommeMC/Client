@@ -52,6 +52,50 @@ pub fn sampled_texture_desc(label: &str, width: u32, height: u32) -> rhi::Textur
     )
 }
 
+/// A compute pipeline with one bind group, its layouts, and a set per frame
+/// in flight (or one, when nothing it binds is per frame).
+pub struct ComputePass {
+    pub pipeline: rhi::backend::ComputePipeline,
+    layout: rhi::backend::PipelineLayout,
+    group_layout: rhi::backend::BindGroupLayout,
+    sets: Vec<rhi::backend::BindGroup>,
+}
+
+impl ComputePass {
+    /// `bindings(frame)` gives the set for each of `frames`.
+    pub fn new(
+        device: &rhi::backend::Device,
+        label: &str,
+        shader: &[u8],
+        entries: &[rhi::BindGroupLayoutEntry],
+        push: Option<rhi::PushConstants>,
+        frames: usize,
+        bindings: impl Fn(usize) -> Vec<(u32, rhi::backend::BindingResource)>,
+    ) -> Self {
+        let group_layout = rhi::backend::create_bind_group_layout(device, entries);
+        let layout = rhi::backend::create_pipeline_layout(device, &[group_layout], push);
+        Self {
+            pipeline: rhi::backend::create_compute_pipeline(device, layout, label, shader),
+            layout,
+            group_layout,
+            sets: (0..frames)
+                .map(|frame| device.create_bind_group(group_layout, &bindings(frame)))
+                .collect(),
+        }
+    }
+
+    pub fn set(&self, frame: usize) -> rhi::backend::BindGroup {
+        self.sets[frame.min(self.sets.len() - 1)]
+    }
+
+    pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        destroy_bind_groups(device, self.sets.drain(..));
+        self.pipeline.destroy(device);
+        self.layout.destroy(device);
+        self.group_layout.destroy(device);
+    }
+}
+
 /// One host-visible buffer per frame in flight.
 pub fn create_per_frame_host_buffers(
     device: &rhi::backend::Device,
@@ -92,6 +136,30 @@ pub fn texture_binding(
     ]
 }
 
+/// A storage buffer at `binding`.
+pub fn storage_binding(
+    binding: u32,
+    buffer: &rhi::backend::Buffer,
+    bytes: u64,
+) -> (u32, rhi::backend::BindingResource) {
+    (
+        binding,
+        rhi::backend::BindingResource::storage(buffer, bytes),
+    )
+}
+
+/// A uniform buffer at `binding`.
+pub fn uniform_binding(
+    binding: u32,
+    buffer: &rhi::backend::Buffer,
+    bytes: u64,
+) -> (u32, rhi::backend::BindingResource) {
+    (
+        binding,
+        rhi::backend::BindingResource::uniform(buffer, bytes),
+    )
+}
+
 /// A [`FRAGMENT_TEXTURE`] group pointed at `texture`.
 pub fn create_texture_group(
     device: &rhi::backend::Device,
@@ -114,12 +182,7 @@ pub fn create_uniform_sets(
     let buffers = create_per_frame_host_buffers(device, size, rhi::BufferUsages::UNIFORM, name);
     let groups = buffers
         .iter()
-        .map(|buffer| {
-            device.create_bind_group(
-                layout,
-                &[(0, rhi::backend::BindingResource::uniform(buffer, size))],
-            )
-        })
+        .map(|buffer| device.create_bind_group(layout, &[uniform_binding(0, buffer, size)]))
         .collect();
     (groups, buffers)
 }

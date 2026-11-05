@@ -628,7 +628,6 @@ pub fn bake_all_models(
         if !results.contains_key(block_name)
             && !multipart_results.contains_key(block_name)
             && !crate::world::block_entity::is_block_entity_block(block_name)
-            && !crate::world::block_entity::is_fluid_block(block_name)
             && !crate::world::block_entity::is_invisible_block(block_name)
         {
             missing_names.push(block_name.to_string());

@@ -5,6 +5,12 @@ use std::path::Path;
 // shaders via the generated packing.glsl.
 include!("src/renderer/chunk/packing_consts.rs");
 
+// The same for distant terrain's sizes and markers, shared via the generated
+// distant_consts.glsl.
+mod distant_consts {
+    include!("src/renderer/distant/shader_consts.rs");
+}
+
 /// `PackedVertex::uv` back to a sprite-local UV, for `packing.glsl`.
 const UNPACK_SPRITE_UV: &str = "vec2 unpack_sprite_uv(uint uv) {
     uint mask = (1u << TERRAIN_UV_BITS) - 1u;
@@ -52,6 +58,13 @@ fn main() {
     )
     .expect("failed to write packing.glsl");
 
+    println!("cargo:rerun-if-changed=src/renderer/distant/shader_consts.rs");
+    fs::write(
+        Path::new(&out_dir).join("distant_consts.glsl"),
+        distant_consts_glsl(),
+    )
+    .expect("failed to write distant_consts.glsl");
+
     let compiler = shaderc::Compiler::new().expect("failed to create shaderc compiler");
     let mut options = shaderc::CompileOptions::new().expect("failed to create compile options");
     options.set_target_env(
@@ -84,6 +97,8 @@ fn main() {
         "item_instance.glsl",
         "lightmap.glsl",
         "light.glsl",
+        "distant_models.glsl",
+        "distant_section.glsl",
     ] {
         println!(
             "cargo:rerun-if-changed={}",
@@ -96,6 +111,24 @@ fn main() {
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
         ("water.frag", shaderc::ShaderKind::Fragment),
+        ("distant.vert", shaderc::ShaderKind::Vertex),
+        ("distant.frag", shaderc::ShaderKind::Fragment),
+        ("distant_bound.vert", shaderc::ShaderKind::Vertex),
+        ("distant_bound.frag", shaderc::ShaderKind::Fragment),
+        ("distant_setup.frag", shaderc::ShaderKind::Fragment),
+        ("distant_blit.frag", shaderc::ShaderKind::Fragment),
+        ("distant_cull.vert", shaderc::ShaderKind::Vertex),
+        ("distant_cull.frag", shaderc::ShaderKind::Fragment),
+        ("distant_scatter.comp", shaderc::ShaderKind::Compute),
+        ("distant_prep.comp", shaderc::ShaderKind::Compute),
+        ("distant_cmdgen.comp", shaderc::ShaderKind::Compute),
+        ("distant_prefix_sum.comp", shaderc::ShaderKind::Compute),
+        ("distant_translucents.comp", shaderc::ShaderKind::Compute),
+        ("distant_traversal.comp", shaderc::ShaderKind::Compute),
+        ("distant_hiz.frag", shaderc::ShaderKind::Fragment),
+        ("distant_cleaner_sort.comp", shaderc::ShaderKind::Compute),
+        ("distant_cleaner_results.comp", shaderc::ShaderKind::Compute),
+        ("distant_visibility_set.comp", shaderc::ShaderKind::Compute),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
         ("panorama.vert", shaderc::ShaderKind::Vertex),
@@ -168,6 +201,50 @@ fn main() {
         fs::write(&out_path, artifact.as_binary_u8())
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     }
+}
+
+/// `distant_consts.glsl`: the `uint` constants as `u` literals; plain those
+/// that layouts or the preprocessor take.
+fn distant_consts_glsl() -> String {
+    use distant_consts::*;
+    let uints = [
+        ("LEVELS", LEVELS),
+        ("MAX_NODES", MAX_NODES),
+        ("NULL_ID", NULL_ID),
+        ("EMPTY_ID", EMPTY_ID),
+        ("CLEANER_SENTINEL", CLEANER_SENTINEL),
+        ("MAX_REQUESTS", MAX_REQUESTS),
+        ("MAX_LISTED", MAX_LISTED),
+        ("QUADS_PER_DRAW", QUADS_PER_DRAW),
+        ("OPAQUE_DRAWS", OPAQUE_DRAWS),
+        ("TRANSLUCENT_DRAWS", TRANSLUCENT_DRAWS),
+        ("TEMPORAL_DRAWS", TEMPORAL_DRAWS),
+        ("TRANSLUCENT_OFFSET", TRANSLUCENT_OFFSET),
+        ("TEMPORAL_OFFSET", TEMPORAL_OFFSET),
+        ("NODE_SCATTER_BIT", NODE_SCATTER_BIT),
+        ("VISIBILITY_RESET_BIT", VISIBILITY_RESET_BIT),
+        ("SEEN_BEFORE_BIT", SEEN_BEFORE_BIT),
+    ];
+    let plain = [
+        ("CLEANER_OUTPUT", u64::from(CLEANER_OUTPUT)),
+        ("TRANSLUCENT_BUCKETS", u64::from(TRANSLUCENT_BUCKETS)),
+        ("COUNTS_OPAQUE", COUNTS_OPAQUE),
+        ("COUNTS_TRANSLUCENT", COUNTS_TRANSLUCENT),
+        ("COUNTS_TEMPORAL", COUNTS_TEMPORAL),
+        ("COUNTS_CULL_DRAW", COUNTS_CULL_DRAW),
+        ("LIST_GROUP", u64::from(LIST_GROUP)),
+        ("TRAVERSAL_GROUP_BITS", u64::from(TRAVERSAL_GROUP_BITS)),
+        ("CLEANER_SORT_THREADS", u64::from(CLEANER_SORT_THREADS)),
+        ("CLEANER_SORT_ELEMS", u64::from(CLEANER_SORT_ELEMS)),
+    ];
+    let mut glsl = String::from("#ifndef DISTANT_CONSTS_GLSL\n#define DISTANT_CONSTS_GLSL\n");
+    for (name, value) in uints {
+        glsl += &format!("#define {name} {value}u\n");
+    }
+    for (name, value) in plain {
+        glsl += &format!("#define {name} {value}\n");
+    }
+    glsl + "#endif\n"
 }
 
 /// Deflates every block data table into `OUT_DIR/block-data/`, which

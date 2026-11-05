@@ -50,6 +50,7 @@ const CHAT_SCALE: &str = "Chat Text Size:";
 const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
+const DISTANT_TERRAIN: &str = "Distant Terrain:";
 
 /// Vanilla `genericValueOrOffLabel`.
 fn menu_background_blur_label(radius: u8) -> String {
@@ -228,6 +229,7 @@ impl MainMenu {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
             "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
+            DISTANT_TERRAIN => super::DISTANT_TERRAIN_STEPS as f32,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
             "FOV:" => 80.0,
@@ -242,14 +244,11 @@ impl MainMenu {
             .map_or(gs / (w - 8.0 * gs), |span| 1.0 / span)
     }
 
-    /// Upper bound of the render distance slider: the server-announced view
-    /// distance while connected (can exceed 32), 32 otherwise.
+    /// Upper bound of the render distance slider: vanilla's 32, or past it
+    /// to a server's larger view distance (Pomme-only). The server's own
+    /// value caps only the distance drawn, as in vanilla.
     pub(crate) fn render_distance_max(&self) -> u32 {
-        if self.server_render_distance > 0 {
-            self.server_render_distance.max(3)
-        } else {
-            32
-        }
+        self.server_render_distance.max(32)
     }
 
     pub(super) fn build_options_video(
@@ -265,15 +264,16 @@ impl MainMenu {
             DisplayMode::Borderless => "Fullscreen: Borderless",
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
-        let rd_max = self.render_distance_max();
-        let rd = format!(
-            "Render Distance: {} chunks",
-            self.render_distance.min(rd_max)
-        );
+        let rd = format!("Render Distance: {} chunks", self.render_distance);
         let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
             "Chunk Detail: Off".to_string()
         } else {
             format!("Chunk Detail: {} chunks", self.chunk_detail)
+        };
+        let dt = if self.distant_terrain == 0 {
+            format!("{DISTANT_TERRAIN} OFF")
+        } else {
+            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
         };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
@@ -327,7 +327,7 @@ impl MainMenu {
             // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
-            OptRow::PairLeft(&cd),
+            OptRow::Pair(&cd, &dt),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
             OptRow::Pair(&blur_label, "Cloud Range: 128"),
@@ -338,15 +338,20 @@ impl MainMenu {
             OptRow::Pair(autosave_label, vignette_label),
             OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
         ];
-        let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
+        let rd_frac = ((self.render_distance as f32 - 2.0)
+            / (self.render_distance_max() as f32 - 2.0))
+            .clamp(0.0, 1.0);
         let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
             / super::CHUNK_DETAIL_SPAN)
             .clamp(0.0, 1.0);
+        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
+            / super::DISTANT_TERRAIN_STEPS as f32;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Chunk Detail:", cd_frac),
+            (DISTANT_TERRAIN, dt_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
             (BRIGHTNESS, self.brightness),
@@ -1571,6 +1576,9 @@ impl MainMenu {
                 "Chunk Detail:" => {
                     self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
                 }
+                DISTANT_TERRAIN => {
+                    self.distant_terrain = super::distant_terrain_chunks((v * span).round() as u32)
+                }
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * span).round() as u32
                 }
@@ -2096,6 +2104,17 @@ mod tests {
         assert!(!option_enabled("Graphics: Fancy", disabled));
         assert!(option_enabled("Render Distance: 12 chunks", disabled));
         assert!(option_enabled("Graphics Backend: Default", disabled));
+    }
+
+    #[test]
+    fn a_server_view_distance_widens_the_render_distance_slider_past_32_only() {
+        let mut key_bindings = crate::app::input::KeyBindings::default();
+        let mut menu = super::super::test_menu("", &mut key_bindings);
+        assert_eq!(menu.render_distance_max(), 32);
+        menu.server_render_distance = 10;
+        assert_eq!(menu.render_distance_max(), 32);
+        menu.server_render_distance = 128;
+        assert_eq!(menu.render_distance_max(), 128);
     }
 
     #[test]

@@ -149,9 +149,11 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # options screen does; also
                                               # menu_background_blur,
                                               # brightness, render_distance
-                                              # (chunks) and shader_pack
-                                              # (a name in fixtures/shaderpacks,
-                                              # "" for none)
+                                              # (chunks), distant_terrain
+                                              # (chunks, 0 for off) and
+                                              # shader_pack (a name in
+                                              # fixtures/shaderpacks, "" for
+                                              # none)
 [[step]]
 deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view
@@ -173,7 +175,9 @@ wait_ms = 1000
 frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # report line gives the frame
                                               # rate, its 1% low, the render
-                                              # encode time and the GPU wait
+                                              # encode time, the GPU wait, the
+                                              # GPU's own time per pass, and
+                                              # the sections and triangles drawn
 
 [[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
@@ -202,6 +206,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | A biome | `biome` (name, e.g. `swamp`), `at` |
 | Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space nearer than the eviction frontier, or while another arena fits), and no two of the chunk arenas' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free, and `terrain = "evicted"` for far columns waiting for room with the eye's own column drawn |
+| Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none) and `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom) and `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) |

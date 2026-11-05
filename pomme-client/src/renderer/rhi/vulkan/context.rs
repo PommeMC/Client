@@ -206,12 +206,14 @@ impl Context {
         let indirect_draw = IndirectDrawFeatures {
             count: supports_draw_indirect_count(&physical_device),
             multi_draw: physical_device.get_features().multi_draw_indirect == vk::TRUE,
+            fragment_stores: physical_device.get_features().fragment_stores_and_atomics == vk::TRUE,
         };
         tracing::info!("Indirect draws: {indirect_draw:?}");
         let enabled_features = vk::PhysicalDeviceFeatures {
             multi_draw_indirect: indirect_draw.multi_draw.into(),
             draw_indirect_first_instance: vk::TRUE,
             depth_clamp: physical_device.get_features().depth_clamp,
+            fragment_stores_and_atomics: indirect_draw.fragment_stores.into(),
             ..Default::default()
         };
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {

@@ -256,6 +256,41 @@ impl BlockStateData {
         self.is_air
     }
 
+    /// Vanilla `LeavesBlock`: every leaf block's id ends so.
+    pub(crate) fn is_leaves(&self) -> bool {
+        self.id.ends_with("_leaves")
+    }
+
+    /// Vanilla `LiquidBlock`: the fluid itself, not a block holding one.
+    pub(crate) fn is_fluid_block(&self) -> bool {
+        matches!(self.id, "water" | "lava")
+    }
+
+    /// Vanilla `skipRendering` against a neighbour of its own kind across
+    /// `direction`: `HalfTransparentBlock`, `LiquidBlock` and powder snow on
+    /// every side, mangrove roots only above and below.
+    pub(crate) fn culls_same(&self, direction: model::Direction) -> bool {
+        match self.id {
+            "mangrove_roots" => matches!(direction, model::Direction::Up | model::Direction::Down),
+            id => {
+                self.is_fluid_block()
+                    || matches!(
+                        id,
+                        "glass"
+                            | "tinted_glass"
+                            | "ice"
+                            | "frosted_ice"
+                            | "blue_ice"
+                            | "slime_block"
+                            | "honey_block"
+                            | "powder_snow"
+                    )
+                    || id.ends_with("_stained_glass")
+                    || id.ends_with("copper_grate")
+            }
+        }
+    }
+
     /// `getRenderShape() == RenderShape.INVISIBLE`: the blocks overriding it.
     pub(crate) fn is_invisible(&self) -> bool {
         self.is_air
@@ -1207,6 +1242,20 @@ mod tests {
         let last = table.try_state(table.state_count() as u32 - 1).unwrap();
         if let Some((key, value)) = props(last).entries().next() {
             assert_eq!(table.with_property(last, key, value), Some(last));
+        }
+    }
+
+    #[test]
+    fn mangrove_roots_cull_their_own_kind_only_vertically() {
+        use model::Direction;
+        let table = BlockStateTable::native();
+        let data = |name| table.block_state_data(table.first_state_of(name).unwrap());
+        let roots = data("mangrove_roots");
+        for direction in Direction::VALUES {
+            let vertical = matches!(direction, Direction::Up | Direction::Down);
+            assert_eq!(roots.culls_same(direction), vertical, "{direction:?}");
+            assert!(data("glass").culls_same(direction));
+            assert!(!data("stone").culls_same(direction));
         }
     }
 

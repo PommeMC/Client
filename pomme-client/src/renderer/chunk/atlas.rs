@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::{packing, rhi, util};
@@ -47,6 +48,17 @@ impl AtlasRegion {
     };
 }
 
+/// A block sprite's first frame, level 0.
+#[derive(Clone)]
+pub(crate) struct SpritePixels {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, row by row from the top.
+    pub rgba: Arc<[u8]>,
+    /// Mipped as `dark_cutout`, which leaves transparent texels black.
+    pub dark_cutout: bool,
+}
+
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,
@@ -54,6 +66,9 @@ pub struct AtlasUVMap {
     /// built; later ones fall back to the name lookup.
     by_texture: Vec<AtlasRegion>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+    /// Each block sprite's pixels, which distant terrain bakes its models
+    /// from.
+    sprite_pixels: HashMap<String, SpritePixels>,
     /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
     rects: Vec<[u32; 4]>,
     missing: AtlasRegion,
@@ -63,6 +78,7 @@ impl AtlasUVMap {
     fn new(
         regions: HashMap<String, AtlasRegion>,
         sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+        sprite_pixels: HashMap<String, SpritePixels>,
         rects: Vec<[u32; 4]>,
         missing: AtlasRegion,
     ) -> Self {
@@ -74,6 +90,7 @@ impl AtlasUVMap {
             regions,
             by_texture,
             sprite_alpha_masks,
+            sprite_pixels,
             rects,
             missing,
         }
@@ -100,6 +117,10 @@ impl AtlasUVMap {
 
     pub(crate) fn sprite_alpha_mask(&self, name: &str) -> Option<&SpriteAlphaMask> {
         self.sprite_alpha_masks.get(name)
+    }
+
+    pub(crate) fn sprite_pixels(&self, name: &str) -> Option<&SpritePixels> {
+        self.sprite_pixels.get(name)
     }
 
     /// Each sprite's texture name, by sprite index.
@@ -966,6 +987,7 @@ impl TextureAtlas {
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
+        let mut sprite_pixels = HashMap::new();
         let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
@@ -992,6 +1014,18 @@ impl TextureAtlas {
                     if let Some(mask) = &src.alpha_mask {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
+                    if let Some(mip) = &src.mip_source {
+                        let texels = (src.w * src.h * 4) as usize;
+                        sprite_pixels.insert(
+                            src.name.clone(),
+                            SpritePixels {
+                                width: src.w,
+                                height: src.h,
+                                rgba: src.data[..texels].into(),
+                                dark_cutout: mip.strategy == MipmapStrategy::DarkCutout,
+                            },
+                        );
+                    }
                     regions.insert(src.name.clone(), region);
                 }
                 _ => {
@@ -1000,7 +1034,13 @@ impl TextureAtlas {
             }
         }
 
-        let uv_map = AtlasUVMap::new(regions, sprite_alpha_masks, rects, missing_region);
+        let uv_map = AtlasUVMap::new(
+            regions,
+            sprite_alpha_masks,
+            sprite_pixels,
+            rects,
+            missing_region,
+        );
 
         AtlasCpu {
             uv_map,
@@ -1580,7 +1620,7 @@ mod tests {
             ("test/region_before_build".to_owned(), named),
             ("test/region_after_build".to_owned(), late_named),
         ]);
-        let uv_map = AtlasUVMap::new(regions, HashMap::new(), Vec::new(), missing);
+        let uv_map = AtlasUVMap::new(regions, HashMap::new(), HashMap::new(), Vec::new(), missing);
         // Interned after the map was built: found through the name instead.
         let late = TextureId::intern("test/region_after_build");
         assert_eq!(uv_map.region(built).pixel_rect, named.pixel_rect);

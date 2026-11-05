@@ -1,0 +1,119 @@
+# Distant Terrain keeps every chunk seen and draws them past the loaded
+# ones: a tower is kept as soon as its chunk is lit, still shows on the
+# horizon when left 200 blocks behind at Render Distance 2, comes back
+# after leaving the view, and goes with the option. Pomme-only (the vanilla
+# harness has no Distant Terrain), so it fails there by design.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 0 -60 0 2 -20 2 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [1, -20, 1] }
+
+[[step]]
+option = { render_distance = 2, distant_terrain = 32 }
+
+# Kept while its chunk is still loaded.
+[[step]]
+expect = { distant_terrain = { at = [1, 1] } }
+timeout_ms = 20000
+
+# Far enough that the tower's chunks unload.
+[[step]]
+chat = "/tp @s 200.5 -50 1.5"
+
+[[step]]
+expect = { player = { position = [200.5, -50.0, 1.5] } }
+timeout_ms = 20000
+
+# Sections are meshed as they come into view.
+[[step]]
+look_at = [1.5, -40.0, 1.5]
+
+[[step]]
+expect = { distant_terrain = { at = [1, 1] } }
+timeout_ms = 20000
+
+# Past the view (32 chunks), which drops the tower's sections.
+[[step]]
+chat = "/tp @s 3000.5 -50 1.5"
+
+[[step]]
+expect = { player = { position = [3000.5, -50.0, 1.5] } }
+timeout_ms = 20000
+
+[[step]]
+expect = { distant_terrain = { at = [1, 1], gone = true } }
+timeout_ms = 20000
+
+[[step]]
+chat = "/tp @s 200.5 -50 1.5"
+
+[[step]]
+expect = { player = { position = [200.5, -50.0, 1.5] } }
+timeout_ms = 20000
+
+# Sections are meshed as they come into view.
+[[step]]
+look_at = [1.5, -40.0, 1.5]
+
+[[step]]
+expect = { distant_terrain = { at = [1, 1] } }
+timeout_ms = 20000
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+look_at = [1.5, -40.0, 1.5]
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "on"
+
+[[step]]
+option = { distant_terrain = 0 }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "off"
+
+[[step]]
+chat = "/tp @s 1.5 -50 8.5"
+
+[[step]]
+expect = { player = { position = [1.5, -50.0, 8.5] } }
+timeout_ms = 20000
+
+[[step]]
+chat = "/fill 0 -60 0 2 -20 2 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [1, -20, 1] }
+
+[[step]]
+option = { render_distance = 12 }
+
+[[step]]
+chat = "/gamerule advance_time true"

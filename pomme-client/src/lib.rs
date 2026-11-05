@@ -53,7 +53,6 @@ pub use winit::platform::android::activity::AndroidApp;
 
 use crate::app::App;
 pub use crate::args::{LAUNCH_FILE, LaunchArgs};
-#[cfg(target_os = "android")]
 pub use crate::logging::install_panic_hook;
 use crate::user::UserData;
 
@@ -273,11 +272,14 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
     }
+    let code = app.chunk_bench_exit_code();
     #[cfg(feature = "test-harness")]
-    if let Some(code) = app.harness_exit_code() {
-        std::process::exit(code);
-    }
-    if let Some(code) = app.chunk_bench_exit_code() {
+    let code = app.harness_exit_code().or(code);
+    // Dropped first, so the distant terrain thread is told to write what it
+    // kept; then waited for, the window already gone.
+    drop(app);
+    crate::renderer::distant::worker::wait_for_stopped(std::time::Duration::from_secs(30));
+    if let Some(code) = code {
         std::process::exit(code);
     }
 }

@@ -40,6 +40,8 @@ struct Settings {
     // of 8 move to Off too.
     #[serde(rename = "chunk_detail_v2", default = "default_chunk_detail")]
     chunk_detail: u32,
+    #[serde(default)]
+    distant_terrain: u32,
     simulation_distance: u32,
     #[serde(default = "default_fov")]
     fov: u32,
@@ -149,6 +151,30 @@ const CHUNK_DETAIL_MIN: u32 = 8;
 pub const CHUNK_DETAIL_OFF: u32 = 49;
 const CHUNK_DETAIL_SPAN: f32 = (CHUNK_DETAIL_OFF - CHUNK_DETAIL_MIN) as f32;
 
+/// The Distant Terrain slider's steps past Off: 32 to 256 chunks, 16 apart.
+const DISTANT_TERRAIN_STEPS: u32 = 15;
+const DISTANT_TERRAIN_STEP: u32 = 16;
+
+/// The Distant Terrain slider step nearest `chunks`: 0 for off, else
+/// `1..=DISTANT_TERRAIN_STEPS`.
+fn distant_terrain_step(chunks: u32) -> u32 {
+    if chunks == 0 {
+        return 0;
+    }
+    ((chunks + DISTANT_TERRAIN_STEP / 2) / DISTANT_TERRAIN_STEP)
+        .saturating_sub(1)
+        .clamp(1, DISTANT_TERRAIN_STEPS)
+}
+
+/// The chunks Distant Terrain slider step `step` draws out to.
+fn distant_terrain_chunks(step: u32) -> u32 {
+    if step == 0 {
+        0
+    } else {
+        DISTANT_TERRAIN_STEP * (step + 1)
+    }
+}
+
 fn default_fov_effect_scale() -> f32 {
     1.0
 }
@@ -220,6 +246,7 @@ impl Default for Settings {
             gui_scale: 0,
             render_distance: 12,
             chunk_detail: CHUNK_DETAIL_OFF,
+            distant_terrain: 0,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,
@@ -719,6 +746,9 @@ pub struct MainMenu {
     /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
     /// within a VRAM budget.
     pub chunk_detail: u32,
+    /// How far distant terrain draws, in chunks, 0 for off. Pomme-custom:
+    /// the chunks the server forgets, drawn coarsely past the loaded ones.
+    pub distant_terrain: u32,
     pub simulation_distance: u32,
     /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
     pub server_render_distance: u32,
@@ -881,6 +911,7 @@ impl MainMenu {
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
             chunk_detail: settings.chunk_detail,
+            distant_terrain: distant_terrain_chunks(distant_terrain_step(settings.distant_terrain)),
             simulation_distance: settings.simulation_distance,
             server_render_distance: 0,
             fov: settings.fov,
@@ -1133,6 +1164,7 @@ impl MainMenu {
                     .saved()
                     .unwrap_or(self.render_distance),
                 chunk_detail: self.chunk_detail,
+                distant_terrain: self.distant_terrain,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
@@ -1203,6 +1235,13 @@ impl MainMenu {
             hat: self.skin_hat,
             main_hand_right: self.skin_main_hand_right,
         }
+    }
+
+    /// Sets Distant Terrain to `chunks`, 0 for off, else snapped to the
+    /// slider's steps, as a script asks.
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn set_distant_terrain(&mut self, chunks: u32) {
+        self.distant_terrain = distant_terrain_chunks(distant_terrain_step(chunks));
     }
 
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
@@ -1669,6 +1708,17 @@ mod tests {
         assert_eq!(settled(&mut menu), Some(vec!["face".to_owned()]));
         menu.set_screen(Screen::Main, &key_bindings);
         assert_eq!(settled(&mut menu), both);
+    }
+
+    #[test]
+    fn distant_terrain_snaps_to_its_slider_steps() {
+        assert_eq!(distant_terrain_step(0), 0);
+        assert_eq!(distant_terrain_chunks(distant_terrain_step(8)), 32);
+        assert_eq!(distant_terrain_chunks(distant_terrain_step(100)), 96);
+        assert_eq!(distant_terrain_chunks(distant_terrain_step(1000)), 256);
+        for step in 0..=DISTANT_TERRAIN_STEPS {
+            assert_eq!(distant_terrain_step(distant_terrain_chunks(step)), step);
+        }
     }
 
     #[test]

@@ -120,6 +120,17 @@ pub struct BufferCopy {
     pub size: u64,
 }
 
+impl BufferCopy {
+    /// The first `size` bytes of one buffer over the other's.
+    pub const fn from_start(size: u64) -> Self {
+        Self {
+            src_offset: 0,
+            dst_offset: 0,
+            size,
+        }
+    }
+}
+
 /// One layer of one mip level of a texture, whole, and where its texels sit
 /// tightly packed in a buffer: the buffer-texture copies Pomme makes.
 #[derive(Clone, Copy)]
@@ -152,7 +163,10 @@ pub enum TextureUse {
     Undefined,
     CopySrc,
     CopyDst,
+    /// Sampled by a vertex or fragment shader.
     ShaderRead,
+    /// Sampled by a compute shader.
+    ComputeRead,
     ColorAttachment,
     Present,
     /// A depth texture as a pass's depth target.
@@ -193,12 +207,18 @@ pub enum BufferUse {
     CopyDst,
     /// A compute shader's storage writes; as a destination, its reads too.
     StorageWrite,
+    /// Read or written by a compute shader.
+    Storage,
+    /// Written by a fragment shader.
+    FragmentWrite,
+    /// Read by a vertex or fragment shader.
+    ShaderRead,
     /// A draw's inputs: its indirect command, vertices and indices.
     DrawInput,
     HostRead,
 }
 
-/// The optional features behind the chunk pass's indirect draws.
+/// The optional features behind the GPU-driven passes.
 #[derive(Clone, Copy, Debug)]
 pub struct IndirectDrawFeatures {
     /// A draw count read from a buffer (`vkCmdDrawIndexedIndirectCount`,
@@ -208,6 +228,10 @@ pub struct IndirectDrawFeatures {
     /// Several indirect draws per call (`multiDrawIndirect`). Without it each
     /// draw-list slot is its own call.
     pub multi_draw: bool,
+    /// Fragment shaders may write storage buffers
+    /// (`fragmentStoresAndAtomics`), which the distant terrain's occlusion
+    /// pass records its results with.
+    pub fragment_stores: bool,
 }
 
 pub enum Acquired {
@@ -309,7 +333,7 @@ impl TextureDesc<'static> {
             extent.width,
             extent.height,
             TextureFormat::Depth32Float,
-            TextureUsages::RENDER_ATTACHMENT,
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
         )
     }
 }
@@ -672,6 +696,8 @@ pub enum FrontFace {
 pub enum CompareFunction {
     Less,
     LessEqual,
+    Greater,
+    Always,
 }
 
 #[derive(Clone, Copy)]
