@@ -1688,6 +1688,22 @@ impl MenuOverlayPipeline {
         Ok(())
     }
 
+    pub fn mc_font_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font.texture.handle()
+    }
+
+    pub fn mc_font_color_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font_color.texture.handle()
+    }
+
+    pub fn mc_font_sampler(&self) -> rhi::backend::Sampler {
+        self.mc_font.sampler
+    }
+
+    pub fn mc_glyph_map(&self) -> Option<&GlyphMap> {
+        self.geometry.mc_glyph_map.as_ref()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,

@@ -4648,6 +4648,100 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    let nameplate_renders: Vec<crate::renderer::pipelines::nameplate::NameplateRenderInfo> =
+        if benchmark_running || game.hide_gui {
+            Vec::new()
+        } else {
+            let target_entity_id = match game.interaction.target {
+                Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+                _ => None,
+            };
+            let mut list = Vec::new();
+            for (&entity_id, entity) in &game.entity_store.living {
+                if entity.sleeping_pos.is_some() {
+                    continue;
+                }
+                if entity.is_invisible && !spectating {
+                    let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+                    if !game.scoreboard.sees_friendly_invisible(&viewer, &name) {
+                        continue;
+                    }
+                }
+                let extras = entity_extras(
+                    entity_id,
+                    entity,
+                    partial_tick,
+                    game.sky_state.game_time as i64,
+                );
+                let interp_pos = entity
+                    .prev_position
+                    .lerp(entity.position, partial_tick as f64)
+                    + extras.render_offset;
+                if let Some(uuid) = entity.player_uuid {
+                    if uuid == core.user.uuid {
+                        continue;
+                    }
+                    let Some(player) = game.tab_list.players.get(&uuid) else {
+                        continue;
+                    };
+                    let pos =
+                        interp_pos + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
+                    let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
+                    let spans = game
+                        .scoreboard
+                        .player_name(&player.name, player.display_name.as_deref());
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans,
+                        discrete: entity.is_crouching,
+                        max_distance,
+                    });
+                } else if let Some(spans) = &entity.custom_name_spans {
+                    let is_targeted = target_entity_id == Some(entity_id);
+                    if !entity.custom_name_visible && !is_targeted {
+                        continue;
+                    }
+                    let max_distance = if is_targeted && !entity.custom_name_visible {
+                        16.0
+                    } else {
+                        64.0
+                    };
+                    let height =
+                        crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans: spans.clone(),
+                        discrete: false,
+                        max_distance,
+                    });
+                } else if let Some(name) = &entity.custom_name {
+                    let is_targeted = target_entity_id == Some(entity_id);
+                    if !entity.custom_name_visible && !is_targeted {
+                        continue;
+                    }
+                    let max_distance = if is_targeted && !entity.custom_name_visible {
+                        16.0
+                    } else {
+                        64.0
+                    };
+                    let height =
+                        crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
+                    let spans = vec![crate::ui::text::TextSpan::new(
+                        name.clone(),
+                        [1.0, 1.0, 1.0, 1.0],
+                    )];
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans,
+                        discrete: false,
+                        max_distance,
+                    });
+                }
+            }
+            list
+        };
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
     let distant_terrain = if game.light_engine.has_sky() {
@@ -4767,6 +4861,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &nameplate_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off

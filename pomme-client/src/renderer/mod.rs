@@ -48,6 +48,7 @@ use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
 use pipelines::lightmap::{Lightmap, LightmapInfo};
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
+use pipelines::nameplate::{NameplatePipeline, NameplateRenderInfo};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::post_effect::{PostEffect, PostEffects};
@@ -218,6 +219,7 @@ enum RenderMode<'a> {
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: BlockEntityList<'a>,
         particles: &'a [ParticleQuad],
+        nameplates: &'a [NameplateRenderInfo],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -290,6 +292,7 @@ pub struct Renderer {
     weather_pipeline: WeatherPipeline,
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
+    nameplate_pipeline: NameplatePipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
     /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
@@ -515,6 +518,13 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
         );
+        let nameplate_pipeline = NameplatePipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            menu_pipeline.mc_font_texture(),
+            menu_pipeline.mc_font_color_texture(),
+            menu_pipeline.mc_font_sampler(),
+        );
 
         let panorama_pipeline = PanoramaPipeline::new(
             &ctx.device,
@@ -662,6 +672,7 @@ impl Renderer {
             weather_pipeline,
             particle_pipeline,
             cloud_pipeline,
+            nameplate_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
             font_options,
@@ -1173,6 +1184,8 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
             self.particle_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
+            self.nameplate_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
             self.cloud_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.chunk_border_pipeline
@@ -1666,6 +1679,7 @@ impl Renderer {
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: BlockEntityList<'_>,
         particles: &[ParticleQuad],
+        nameplates: &[pipelines::nameplate::NameplateRenderInfo],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -1725,6 +1739,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 particles,
+                nameplates,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1844,6 +1859,12 @@ impl Renderer {
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         }
+        self.nameplate_pipeline.rebind_font(
+            &self.ctx.device,
+            self.menu_pipeline.mc_font_texture(),
+            self.menu_pipeline.mc_font_color_texture(),
+            self.menu_pipeline.mc_font_sampler(),
+        );
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {
@@ -2082,6 +2103,7 @@ impl Renderer {
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
+            self.nameplate_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
         }
 
@@ -2269,9 +2291,22 @@ impl Renderer {
         }
 
         let frame_start = std::time::Instant::now();
-        if let RenderMode::World { particles, .. } = &mode {
+        if let RenderMode::World {
+            particles,
+            nameplates,
+            ..
+        } = &mode
+        {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
+            self.nameplate_pipeline.prepare(
+                frame,
+                &self.camera,
+                self.camera_render_position(),
+                self.camera.anchor(),
+                self.menu_pipeline.mc_glyph_map(),
+                nameplates,
+            );
         }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
@@ -2311,6 +2346,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 particles: _,
+                nameplates: _,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2503,6 +2539,7 @@ impl Renderer {
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
                     }
+                    self.nameplate_pipeline.draw(&mut pass, frame);
                     self.gpu_stamp(&encoder, frame, "clouds");
                     cull_ms
                 };
@@ -3093,6 +3130,7 @@ impl Drop for Renderer {
         self.held_item_pipeline.destroy(&self.ctx.device);
         self.weather_pipeline.destroy(&self.ctx.device);
         self.particle_pipeline.destroy(&self.ctx.device);
+        self.nameplate_pipeline.destroy(&self.ctx.device);
         self.cloud_pipeline.destroy(&self.ctx.device);
         self.gui_item_pipeline.destroy(&self.ctx.device);
         self.gui_item_atlas.destroy(&self.ctx.device);
