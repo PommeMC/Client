@@ -32,12 +32,21 @@ impl ParticleDescription {
         let textures = values
             .iter()
             .map(|value| {
+                let parse_id = |value: &str| {
+                    let (namespace, path) = value.split_once(':').unwrap_or(("minecraft", value));
+                    let namespace = if namespace.is_empty() {
+                        "minecraft"
+                    } else {
+                        namespace
+                    };
+                    ResourceId::from_parts(namespace, path)
+                };
                 let raw = value.get();
                 match raw.as_bytes().first() {
                     Some(b'"') => {
-                        ResourceId::new(&serde_json::from_str::<String>(raw).map_err(invalid_json)?)
+                        parse_id(&serde_json::from_str::<String>(raw).map_err(invalid_json)?)
                     }
-                    Some(b'-' | b'0'..=b'9' | b't' | b'f') => ResourceId::new(raw),
+                    Some(b'-' | b'0'..=b'9' | b't' | b'f') => parse_id(raw),
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
