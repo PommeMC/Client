@@ -42,6 +42,7 @@ pub fn build_crafter(
     screen_h: f32,
     cursor: (f32, f32),
     input: &ContainerInput,
+    kind: ContainerKind,
     slots: &[ItemStack],
     data: &[i16],
     spectator: bool,
@@ -52,8 +53,6 @@ pub fn build_crafter(
     gs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let disabled = disabled_slots(data);
-    let kind = ContainerKind::Crafter { disabled };
     let panel = push_panel(
         elements,
         screen_w,
@@ -70,7 +69,7 @@ pub fn build_crafter(
     for num in 0..GRID_SLOTS as u16 {
         let x = 26.0 + (num % 3) as f32 * SLOT_STRIDE;
         let y = 17.0 + (num / 3) as f32 * SLOT_STRIDE;
-        if disabled & 1 << num != 0 {
+        if kind.crafter_slot_disabled(num.into()) {
             ctx.sprite_slot(x, y, SpriteId::CrafterDisabledSlot, num);
         } else {
             ctx.slot(x, y, item(num), None, num);
@@ -101,7 +100,7 @@ pub fn build_crafter(
     // An enabled empty grid slot under an empty cursor offers to disable it.
     if let Some(num) = hovered
         && usize::from(num) < GRID_SLOTS
-        && disabled & 1 << num == 0
+        && !kind.crafter_slot_disabled(num.into())
         && cursor_item.is_empty()
         && item(num).is_empty()
         && !spectator

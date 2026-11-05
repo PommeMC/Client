@@ -2319,6 +2319,7 @@ fn crafter_slot_clicked(
             if s >= GRID_SLOTS || !c.slots[s].is_empty() || !slot_disabled(&c.data, s) {
                 return;
             }
+            // The player inventory is indexed like the player menu.
             let Some(held) = ContainerKind::Player.swap_target_slot(swap.target_slot) else {
                 return;
             };
@@ -3823,7 +3824,7 @@ pub fn update_game(
                     &container.data,
                     // 26.3 added the total fuel and brew time data slots.
                     crate::version::session_protocol() >= 777,
-                    &game.recipe_book,
+                    container.click_kind(&game.recipe_book),
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,
@@ -3837,6 +3838,7 @@ pub fn update_game(
                     sh,
                     core.input.cursor_pos(),
                     &input,
+                    container.click_kind(&game.recipe_book),
                     &container.slots,
                     &container.data,
                     crate::player::is_spectator(game.player.game_mode),

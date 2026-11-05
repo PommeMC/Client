@@ -13,8 +13,8 @@ use super::container::{
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
-const SLOT_INGREDIENT: u16 = 3;
-const SLOT_FUEL: u16 = 4;
+pub const SLOT_INGREDIENT: u16 = 3;
+pub const SLOT_FUEL: u16 = 4;
 const SLOT_MAIN_BASE: u16 = 5;
 const SLOT_HOTBAR_BASE: u16 = 32;
 
@@ -41,7 +41,7 @@ pub fn build_brewing_stand(
     slots: &[ItemStack],
     data: &[i16],
     has_totals: bool,
-    recipes: &crate::recipe::RecipeBookState,
+    kind: ContainerKind,
     title: &str,
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
@@ -49,7 +49,6 @@ pub fn build_brewing_stand(
     gs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
-    let kind = ContainerKind::BrewingStand(Some(recipes));
     let panel = push_panel(
         elements,
         screen_w,
