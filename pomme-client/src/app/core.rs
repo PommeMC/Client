@@ -387,27 +387,24 @@ pub(super) fn play_entity_sound(
     )
 }
 
-/// A sound the local player makes, where it stands: vanilla
-/// `LocalPlayer.playSound`, which plays it locally while the server sends it
-/// only to other players.
-fn play_local_player_sound(
-    audio: &crate::audio::AudioEngine,
-    game: &mut GameState,
-    event: &str,
-    volume: f32,
-    pitch: f32,
-) {
-    let sound = crate::audio::SoundRef::event(event);
-    #[cfg(feature = "test-harness")]
-    game.record_sound(&sound);
-    audio.play_world_sound(
-        &sound,
-        crate::audio::CATEGORY_PLAYERS,
-        game.player.position,
-        volume,
-        pitch,
-        fastrand::u64(..),
-    );
+/// Plays the sounds the player's moves queued this tick, its own and the
+/// pistons' pushes alike, where it stands: vanilla `LocalPlayer.playSound`,
+/// which plays them locally while the server sends them only to other
+/// players.
+pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut GameState) {
+    for queued in std::mem::take(&mut game.player.movement_sounds.pending) {
+        let sound = crate::audio::SoundRef::event(queued.event);
+        #[cfg(feature = "test-harness")]
+        game.record_sound(&sound);
+        audio.play_world_sound(
+            &sound,
+            crate::audio::CATEGORY_PLAYERS,
+            game.player.position,
+            queued.volume,
+            queued.pitch,
+            fastrand::u64(..),
+        );
+    }
 }
 
 /// Vanilla `LevelEventHandler` case 2001: a broken block's sound and
@@ -3760,9 +3757,6 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
-        for sound in std::mem::take(&mut game.player.movement_sounds.pending) {
-            play_local_player_sound(&self.audio, game, sound.event, sound.volume, sound.pitch);
-        }
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
