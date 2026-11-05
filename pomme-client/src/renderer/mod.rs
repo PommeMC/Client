@@ -2179,6 +2179,9 @@ impl Renderer {
                         })
                         .collect();
                 }
+                MenuElement::SkinHead3D { .. } => {
+                    add_item("player_head", &[]);
+                }
                 _ => {}
             }
         }

@@ -1,5 +1,6 @@
-use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Unbreakable};
+use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Profile, Unbreakable};
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_registry::builtin::ItemKind;
 use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
@@ -577,6 +578,44 @@ pub fn push_item_icon(
     push_item_icon_with_owner(elements, x, y, size, scale, data, true);
 }
 
+pub fn profile_head_info(
+    profile: &Profile,
+) -> (Option<uuid::Uuid>, Option<String>, Option<String>, String) {
+    match &*profile.unpack {
+        azalea_inventory::components::PartialOrFullProfile::Partial(partial) => {
+            let textures = partial
+                .properties
+                .map
+                .get("textures")
+                .map(|p| p.value.clone());
+            let key = if let Some(id) = partial.id {
+                id.to_string()
+            } else if let Some(tex) = &textures {
+                format!("textures:{tex}")
+            } else if let Some(name) = &partial.name {
+                name.clone()
+            } else {
+                String::new()
+            };
+            (partial.id, partial.name.clone(), textures, key)
+        }
+        azalea_inventory::components::PartialOrFullProfile::Full(game_profile) => {
+            let textures = game_profile
+                .properties
+                .map
+                .get("textures")
+                .map(|p| p.value.clone());
+            let key = game_profile.uuid.to_string();
+            (
+                Some(game_profile.uuid),
+                Some(game_profile.name.clone()),
+                textures,
+                key,
+            )
+        }
+    }
+}
+
 pub(crate) fn push_item_icon_with_owner(
     elements: &mut Vec<MenuElement>,
     x: f32,
@@ -586,13 +625,26 @@ pub(crate) fn push_item_icon_with_owner(
     data: &ItemStackData,
     use_player_team: bool,
 ) {
-    push_item_glyph(
-        elements,
-        [x, y, size, size],
-        item_resource_name(data.kind),
-        Some(data),
-        use_player_team,
-    );
+    if data.kind == ItemKind::PlayerHead
+        && let Some(profile) = data.get_component::<Profile>()
+    {
+        let (_, _, _, key) = profile_head_info(&profile);
+        elements.push(MenuElement::SkinHead3D {
+            x,
+            y,
+            size,
+            uuid: key,
+            tint: WHITE,
+        });
+    } else {
+        push_item_glyph(
+            elements,
+            [x, y, size, size],
+            item_resource_name(data.kind),
+            Some(data),
+            use_player_team,
+        );
+    }
     push_item_decorations(elements, x, y, size, scale, data);
 }
 

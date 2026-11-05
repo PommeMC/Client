@@ -2846,7 +2846,8 @@ pub fn update_game(
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
-        || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
+        || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList))
+        || game.gui_open();
     core.sync_game_dynamic_atlas(game, &mut gfx.renderer, faces_shown);
 
     // The F3+F4 switcher shows the mouse cursor while open.
@@ -3664,6 +3665,15 @@ pub fn update_game(
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
+        for item in game.menu_slots() {
+            if let azalea_inventory::ItemStack::Present(data) = item
+                && data.kind == azalea_registry::builtin::ItemKind::PlayerHead
+                && let Some(profile) = data.get_component::<azalea_inventory::components::Profile>()
+            {
+                let (id, name, textures, _) = crate::ui::common::profile_head_info(&profile);
+                core.request_head_profile(id, name, textures);
+            }
+        }
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
         let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
@@ -4013,6 +4023,32 @@ pub fn update_game(
                 sh,
                 gs,
             );
+        } else if let Some(slot) = hovered
+            && game.cursor_item.is_empty()
+            && let Some(stack) = game
+                .menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+        {
+            let lines = match serde_json::to_value(stack) {
+                Ok(value) => {
+                    crate::ui::chat::item_tooltip_lines(&value, None, game.advanced_item_tooltips)
+                }
+                Err(_) => vec![crate::renderer::pipelines::menu_overlay::TooltipLine::new(
+                    crate::ui::common::item_display_name(stack),
+                    crate::ui::common::WHITE,
+                )],
+            };
+            if !lines.is_empty() {
+                crate::ui::common::push_tooltip_lines(
+                    &mut elements,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                    lines,
+                );
+            }
         }
         core.input.clear_just_pressed_actions();
     }

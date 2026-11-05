@@ -105,6 +105,7 @@ enum HeadState {
     Ready {
         hat: Vec<u8>,
         base: Vec<u8>,
+        head_3d: Option<Vec<u8>>,
     },
     /// No skin to show: a static profile with no textures, or a lookup that
     /// failed. Cached so it isn't retried (and re-logged) every frame.
@@ -1591,6 +1592,7 @@ impl AppCore {
                                 HeadState::Ready {
                                     hat: hat_face,
                                     base,
+                                    ..
                                 },
                             ..
                         }) = self.player_heads.get(profile)
@@ -1598,6 +1600,28 @@ impl AppCore {
                             let face = if *hat { hat_face } else { base };
                             entries.push((key.clone(), face.clone(), 8));
                             self.game_dynamic_atlas_keys.insert(key.clone());
+                        }
+                    }
+                }
+            }
+            for (profile, entry) in &self.player_heads {
+                if let HeadState::Ready { hat, head_3d, .. } = &entry.state {
+                    if let Some(id) = profile.id {
+                        entries.push((id.to_string(), hat.clone(), 8));
+                        if let Some(h3d) = head_3d {
+                            entries.push((format!("head3d:{id}"), h3d.clone(), 32));
+                        }
+                    }
+                    if let Some(textures) = &profile.textures {
+                        entries.push((format!("textures:{textures}"), hat.clone(), 8));
+                        if let Some(h3d) = head_3d {
+                            entries.push((format!("head3d:textures:{textures}"), h3d.clone(), 32));
+                        }
+                    }
+                    if let Some(name) = &profile.name {
+                        entries.push((name.clone(), hat.clone(), 8));
+                        if let Some(h3d) = head_3d {
+                            entries.push((format!("head3d:{name}"), h3d.clone(), 32));
                         }
                     }
                 }
@@ -1672,8 +1696,19 @@ impl AppCore {
     }
 
     /// Starts the one fetch a profile needs; its hat and base glyphs share it.
+    pub fn request_head_profile(
+        &mut self,
+        id: Option<uuid::Uuid>,
+        name: Option<String>,
+        textures: Option<String>,
+    ) {
+        let profile = HeadProfile { id, name, textures };
+        self.request_head(profile);
+    }
+
     fn request_head(&mut self, profile: HeadProfile) {
-        if self.player_heads.contains_key(&profile) {
+        if let Some(entry) = self.player_heads.get_mut(&profile) {
+            entry.last_used = Instant::now();
             return;
         }
         // A `Static` profile with no textures has nothing to fetch: vanilla's
@@ -1721,13 +1756,14 @@ impl AppCore {
             entry.state = match head.result {
                 Ok(data) => {
                     use crate::renderer::pipelines::menu_overlay::{
-                        extract_face_8x8, extract_face_8x8_with_hat,
+                        extract_face_8x8, extract_face_8x8_with_hat, render_head_3d,
                     };
+                    let head_3d = render_head_3d(&data.pixels, data.width, data.height, 32);
                     match (
                         extract_face_8x8(&data.pixels, data.width, data.height),
                         extract_face_8x8_with_hat(&data.pixels, data.width, data.height, false),
                     ) {
-                        (Some(hat), Some(base)) => HeadState::Ready { hat, base },
+                        (Some(hat), Some(base)) => HeadState::Ready { hat, base, head_3d },
                         _ => HeadState::Fallback,
                     }
                 }
