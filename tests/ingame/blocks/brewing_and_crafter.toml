@@ -77,6 +77,19 @@ click = { slot = 0, op = "quick_move" }
 [[step]]
 expect = { slot = 39, item = "potion", count = 1 }
 
+# From the inventory, a reagent goes to the ingredient slot.
+[[step]]
+click = { slot = 40, op = "quick_move" }
+
+[[step]]
+expect = { slot = 3, item = "nether_wart", count = 1 }
+
+[[step]]
+click = { slot = 3, op = "quick_move" }
+
+[[step]]
+expect = { slot = 40, item = "nether_wart", count = 1 }
+
 [[step]]
 close_menu = true
 
@@ -163,6 +176,15 @@ expect = { slot = 36, item = "air" }
 # So does a click carrying an item, which then places it.
 [[step]]
 click = { slot = 5, op = "pickup_left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/data get block 44 -60 7 disabled_slots"
+
+[[step]]
+expect = { chat = "[I; 5]" }
 
 [[step]]
 click = { slot = 2, op = "pickup_left" }
