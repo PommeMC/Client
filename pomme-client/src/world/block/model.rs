@@ -8,7 +8,9 @@ use serde::Deserialize;
 use super::json_bundle::JsonBundle;
 use super::render_assets::{FaceTextures, LoadProgress, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
+use crate::renderer::block_entity_model::{SkullKind, bake_skull_model};
 use crate::renderer::chunk::mesher::Colormap;
+use crate::renderer::entity_model::{PartAnim, cube_face_positions, cube_face_uvs};
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -1034,85 +1036,21 @@ pub fn bake_item_models(
     ground_transforms.insert("chest".to_string(), chest.ground_transform);
     flat_keys.remove("chest");
 
-    let skull = resolve_model(
-        "item/template_skull",
-        jar_assets_dir,
-        asset_index,
-        &mut model_cache,
-        packs,
-    );
-    for (name, tex, tw, th, hat, dragon) in [
-        (
-            "player_head",
-            "entity/player/wide/steve",
-            64.0,
-            64.0,
-            true,
-            false,
-        ),
-        (
-            "skeleton_skull",
-            "entity/skeleton/skeleton",
-            64.0,
-            32.0,
-            false,
-            false,
-        ),
-        (
-            "wither_skeleton_skull",
-            "entity/skeleton/wither_skeleton",
-            64.0,
-            32.0,
-            false,
-            false,
-        ),
-        (
-            "zombie_head",
-            "entity/zombie/zombie",
-            64.0,
-            64.0,
-            false,
-            false,
-        ),
-        (
-            "creeper_head",
-            "entity/creeper/creeper",
-            64.0,
-            64.0,
-            false,
-            false,
-        ),
-        (
-            "piglin_head",
-            "entity/piglin/piglin",
-            64.0,
-            64.0,
-            false,
-            false,
-        ),
-        (
-            "dragon_head",
-            "entity/enderdragon/dragon",
-            256.0,
-            256.0,
-            false,
-            true,
-        ),
-    ] {
+    for kind in SkullKind::ALL {
+        let (name, _) = kind.item_and_texture();
+        // The item's `base` in `items/<name>.json`.
+        let base = if kind == SkullKind::Dragon {
+            "item/dragon_head"
+        } else {
+            "item/template_skull"
+        };
+        let base = resolve_model(base, jar_assets_dir, asset_index, &mut model_cache, packs);
         item_models.insert(
             name.to_string(),
-            bake_skull_item_model(
-                skull.gui_transform,
-                skull.gui_light,
-                tex,
-                tw,
-                th,
-                hat,
-                dragon,
-            ),
+            bake_skull_item_model(kind, base.gui_transform, base.gui_light),
         );
-        gui_transforms.insert(name.to_string(), skull.gui_transform);
-        ground_transforms.insert(name.to_string(), skull.ground_transform);
+        gui_transforms.insert(name.to_string(), base.gui_transform);
+        ground_transforms.insert(name.to_string(), base.ground_transform);
         flat_keys.remove(name);
     }
 
@@ -1132,11 +1070,68 @@ pub fn bake_item_models(
     }
 }
 
+/// `SkullSpecialRenderer` as a mesh: the skull model under the item's
+/// `transformation` (translate (0.5, 0, 0.5), then 180 degrees about x), each
+/// face lit by its own normal as the GUI's item lighting does.
+fn bake_skull_item_model(
+    kind: SkullKind,
+    gui: DisplayTransform,
+    gui_light: GuiLight,
+) -> BakedModel {
+    let model = bake_skull_model(kind);
+    let (_, texture) = kind.item_and_texture();
+    let (tex_w, tex_h) = kind.texture_size();
+    let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_x(std::f32::consts::PI);
+    let (l0, l1) = gui_lights(gui_light);
+    let transforms = model.compute_part_transforms(&PartAnim::default());
+    let mut quads = Vec::new();
+    for (part, transform) in model.parts.iter().zip(&transforms) {
+        let to_item = item * *transform;
+        for cube in &part.cubes {
+            let center = to_item.transform_point3((cube.origin + cube.size * 0.5) / 16.0);
+            for (corners, [u0, v0, u1, v1]) in cube_face_positions(cube, false)
+                .iter()
+                .zip(cube_face_uvs(cube))
+            {
+                let mut positions = corners.map(|p| to_item.transform_point3(Vec3::from(p)));
+                let mut uvs = [[u1, v0], [u0, v0], [u0, v1], [u1, v1]]
+                    .map(|[u, v]| [u / tex_w as f32, v / tex_h as f32]);
+                let mut normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
+                // Item meshes cull back faces, so wind each face outward.
+                let face_center = positions.iter().sum::<Vec3>() / 4.0;
+                if normal.dot(face_center - center) < 0.0 {
+                    positions.reverse();
+                    uvs.reverse();
+                    normal = -normal;
+                }
+                let n_gui = transform_gui_normal(normal.normalize().to_array(), gui);
+                quads.push(BakedQuad {
+                    positions: positions.map(|p| p.to_array()),
+                    uvs,
+                    texture: TextureId::intern(texture),
+                    cullface: None,
+                    tint: super::render_assets::Tint::None,
+                    tint_index: None,
+                    shade_light: lambert_shade(n_gui, l0, l1),
+                    shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
+                });
+            }
+        }
+    }
+    BakedModel {
+        quads,
+        is_full_cube: false,
+    }
+}
+
 fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedModel {
     let tex = "entity/chest/normal";
     let mut quads = Vec::new();
     let shades = vanilla_gui_face_shades(gui, gui_light);
-    add_box_cube(
+    add_chest_cube(
         &mut quads,
         1.0 / 16.0,
         0.0,
@@ -1149,12 +1144,10 @@ fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedMod
         14.0,
         10.0,
         14.0,
-        64.0,
-        64.0,
         tex,
         shades,
     );
-    add_box_cube(
+    add_chest_cube(
         &mut quads,
         1.0 / 16.0,
         9.0 / 16.0,
@@ -1167,12 +1160,10 @@ fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedMod
         14.0,
         5.0,
         14.0,
-        64.0,
-        64.0,
         tex,
         shades,
     );
-    add_box_cube(
+    add_chest_cube(
         &mut quads,
         7.0 / 16.0,
         7.0 / 16.0,
@@ -1185,87 +1176,9 @@ fn bake_chest_item_model(gui: DisplayTransform, gui_light: GuiLight) -> BakedMod
         2.0,
         4.0,
         1.0,
-        64.0,
-        64.0,
         tex,
         shades,
     );
-    BakedModel {
-        quads,
-        is_full_cube: false,
-    }
-}
-
-fn bake_skull_item_model(
-    gui: DisplayTransform,
-    gui_light: GuiLight,
-    texture: &'static str,
-    tex_w: f32,
-    tex_h: f32,
-    with_hat: bool,
-    is_dragon: bool,
-) -> BakedModel {
-    let mut quads = Vec::new();
-    let shades = vanilla_gui_face_shades(gui, gui_light);
-    if is_dragon {
-        add_box_cube(
-            &mut quads,
-            2.0 / 16.0,
-            0.0,
-            2.0 / 16.0,
-            14.0 / 16.0,
-            12.0 / 16.0,
-            14.0 / 16.0,
-            176.0,
-            44.0,
-            16.0,
-            16.0,
-            16.0,
-            tex_w,
-            tex_h,
-            texture,
-            shades,
-        );
-    } else {
-        add_box_cube(
-            &mut quads,
-            4.0 / 16.0,
-            0.0,
-            4.0 / 16.0,
-            12.0 / 16.0,
-            8.0 / 16.0,
-            12.0 / 16.0,
-            0.0,
-            0.0,
-            8.0,
-            8.0,
-            8.0,
-            tex_w,
-            tex_h,
-            texture,
-            shades,
-        );
-        if with_hat {
-            add_box_cube(
-                &mut quads,
-                (4.0 - 0.25) / 16.0,
-                (0.0 - 0.25) / 16.0,
-                (4.0 - 0.25) / 16.0,
-                (12.0 + 0.25) / 16.0,
-                (8.0 + 0.25) / 16.0,
-                (12.0 + 0.25) / 16.0,
-                32.0,
-                0.0,
-                8.0,
-                8.0,
-                8.0,
-                tex_w,
-                tex_h,
-                texture,
-                shades,
-            );
-        }
-    }
     BakedModel {
         quads,
         is_full_cube: false,
@@ -1354,7 +1267,7 @@ fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_lig
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add_box_cube(
+fn add_chest_cube(
     quads: &mut Vec<BakedQuad>,
     x0: f32,
     y0: f32,
@@ -1367,11 +1280,11 @@ fn add_box_cube(
     w: f32,
     h: f32,
     d: f32,
-    tex_w: f32,
-    tex_h: f32,
     texture: &str,
     shades: [f32; 6],
 ) {
+    const TEX_SIZE: f32 = 64.0;
+
     // Vanilla ModelPart.Cube names the z=min vertices `t*` and z=max
     // vertices `l*`, then builds faces in DOWN/UP/WEST/NORTH/EAST/SOUTH
     // order. Keep that layout exactly: chest items use the special entity
@@ -1433,7 +1346,7 @@ fn add_box_cube(
             positions: spec.positions,
             uvs: spec
                 .uv_pixels
-                .map(|[u_px, v_px]| [u_px / tex_w, v_px / tex_h]),
+                .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
             texture: TextureId::intern(texture),
             cullface: None,
             tint: super::render_assets::Tint::None,
@@ -1532,21 +1445,11 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
 /// `paletted_permutations` atlas source for its trim textures.
 fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
     const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
-    loop {
-        if node_type(node) == Some("select")
-            && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
-            && let Some(fallback) = node.get("fallback")
-        {
-            node = fallback;
-            continue;
-        }
-        if node_type(node) == Some("condition")
-            && let Some(on_false) = node.get("on_false")
-        {
-            node = on_false;
-            continue;
-        }
-        break;
+    while node_type(node) == Some("select")
+        && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
+        && let Some(fallback) = node.get("fallback")
+    {
+        node = fallback;
     }
     node
 }

@@ -1,4 +1,6 @@
-use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Profile, Unbreakable};
+use azalea_inventory::components::{
+    CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
+};
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::ItemKind;
 use azalea_registry::tags::items::BUNDLES;
@@ -578,40 +580,54 @@ pub fn push_item_icon(
     push_item_icon_with_owner(elements, x, y, size, scale, data, true);
 }
 
-pub fn profile_head_info(
-    profile: &Profile,
-) -> (Option<uuid::Uuid>, Option<String>, Option<String>, String) {
-    match &*profile.unpack {
-        azalea_inventory::components::PartialOrFullProfile::Partial(partial) => {
-            let textures = partial
-                .properties
-                .map
-                .get("textures")
-                .map(|p| p.value.clone());
-            let key = if let Some(id) = partial.id {
-                id.to_string()
-            } else if let Some(tex) = &textures {
-                format!("textures:{tex}")
-            } else if let Some(name) = &partial.name {
-                name.clone()
-            } else {
-                String::new()
-            };
-            (partial.id, partial.name.clone(), textures, key)
+/// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
+/// `ResolvableProfile`, so two heads with the same id but different textures
+/// are different entries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HeadProfile {
+    pub(crate) id: Option<uuid::Uuid>,
+    pub(crate) name: Option<String>,
+    pub(crate) textures: Option<String>,
+}
+
+impl HeadProfile {
+    /// A player head item's `profile` component.
+    pub(crate) fn of_stack(data: &ItemStackData) -> Option<Self> {
+        if data.kind != ItemKind::PlayerHead {
+            return None;
         }
-        azalea_inventory::components::PartialOrFullProfile::Full(game_profile) => {
-            let textures = game_profile
-                .properties
-                .map
-                .get("textures")
-                .map(|p| p.value.clone());
-            let key = game_profile.uuid.to_string();
-            (
-                Some(game_profile.uuid),
-                Some(game_profile.name.clone()),
-                textures,
-                key,
-            )
+        let profile = data.get_component::<Profile>()?;
+        let textures = |properties: &azalea_auth::game_profile::GameProfileProperties| {
+            properties.map.get("textures").map(|p| p.value.clone())
+        };
+        Some(match &*profile.unpack {
+            PartialOrFullProfile::Partial(partial) => Self {
+                id: partial.id,
+                name: partial.name.clone(),
+                textures: textures(&partial.properties),
+            },
+            PartialOrFullProfile::Full(full) => Self {
+                id: Some(full.uuid),
+                name: Some(full.name.clone()),
+                textures: textures(&full.properties),
+            },
+        })
+    }
+
+    /// `ResolvableProfile.create`: a profile carrying properties, or both or
+    /// neither of id and name, is `Static` and never looks anything up; one
+    /// with exactly one of them is `Dynamic` and resolves first.
+    pub(crate) fn is_static(&self) -> bool {
+        self.textures.is_some() || self.id.is_some() == self.name.is_some()
+    }
+
+    /// The key its skin is held under: its id, else its skin textures, else
+    /// its name.
+    pub(crate) fn skin_key(&self) -> String {
+        match (self.id, &self.textures, &self.name) {
+            (Some(id), _, _) => id.to_string(),
+            (None, Some(textures), _) => format!("textures:{textures}"),
+            (None, None, name) => name.clone().unwrap_or_default(),
         }
     }
 }
@@ -625,26 +641,13 @@ pub(crate) fn push_item_icon_with_owner(
     data: &ItemStackData,
     use_player_team: bool,
 ) {
-    if data.kind == ItemKind::PlayerHead
-        && let Some(profile) = data.get_component::<Profile>()
-    {
-        let (_, _, _, key) = profile_head_info(&profile);
-        elements.push(MenuElement::SkinHead3D {
-            x,
-            y,
-            size,
-            uuid: key,
-            tint: WHITE,
-        });
-    } else {
-        push_item_glyph(
-            elements,
-            [x, y, size, size],
-            item_resource_name(data.kind),
-            Some(data),
-            use_player_team,
-        );
-    }
+    push_item_glyph(
+        elements,
+        [x, y, size, size],
+        item_resource_name(data.kind),
+        Some(data),
+        use_player_team,
+    );
     push_item_decorations(elements, x, y, size, scale, data);
 }
 

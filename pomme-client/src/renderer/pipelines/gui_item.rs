@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use glam::camera::rh::proj;
 use glam::{Mat3, Mat4, Vec3};
 
@@ -6,7 +8,7 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::block_lighter::UNLIT_LANE;
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::pipelines::lightmap::Lightmap;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, util};
 use crate::world::block::model::DisplayTransform;
 
 pub struct GuiItemPipeline {
@@ -15,7 +17,19 @@ pub struct GuiItemPipeline {
     /// The atlas size each frame's camera buffer was last written for.
     camera_px: [Option<u32>; MAX_FRAMES_IN_FLIGHT],
     atlas_px: u32,
+    /// Player heads' skins by head key, bound in the atlas's place while
+    /// their head bakes, as vanilla draws a profiled head's skull with the
+    /// player's skin.
+    head_skins: HashMap<String, HeadSkin>,
 }
+
+struct HeadSkin {
+    texture: rhi::backend::Texture,
+    group: rhi::backend::BindGroup,
+}
+
+/// The player head mesh that samples a bound skin rather than the atlas.
+pub const PLAYER_HEAD_SKIN_MESH: &str = "player_head#skin";
 
 impl GuiItemPipeline {
     pub fn new(
@@ -37,6 +51,7 @@ impl GuiItemPipeline {
             shared,
             camera_px: [None; MAX_FRAMES_IN_FLIGHT],
             atlas_px,
+            head_skins: HashMap::new(),
         }
     }
 
@@ -124,7 +139,70 @@ impl GuiItemPipeline {
         pass.draw(vertex_count, 1, 0, instance);
     }
 
+    pub fn has_head_skin(&self, key: &str) -> bool {
+        self.head_skins.contains_key(key)
+    }
+
+    /// Uploads the 64x64 skins of `heads` not held yet and frees the ones no
+    /// longer among them.
+    pub fn sync_head_skins<'a>(
+        &mut self,
+        device: &rhi::backend::Device,
+        heads: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    ) {
+        let mut wanted = HashSet::new();
+        for (key, pixels) in heads {
+            wanted.insert(key);
+            if !self.head_skins.contains_key(key) {
+                let texture = util::create_sampled_texture(device, "head_skin", pixels, 64, 64);
+                let group = self.shared.texture_group(device, texture.handle());
+                self.head_skins
+                    .insert(key.to_owned(), HeadSkin { texture, group });
+            }
+        }
+        for (_, skin) in self
+            .head_skins
+            .extract_if(|key, _| !wanted.contains(key.as_str()))
+        {
+            skin.texture.destroy(device);
+            skin.group.destroy(device);
+        }
+    }
+
+    /// [`Self::bake_to_slot`] for a player head drawn with the skin
+    /// [`Self::sync_head_skins`] holds for `key`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bake_head_to_slot(
+        &mut self,
+        pass: &rhi::backend::RenderPassEncoder,
+        frame: usize,
+        item_entity: &ItemEntityPipeline,
+        slot_x_px: u32,
+        slot_y_px: u32,
+        slot_size_px: u32,
+        key: &str,
+        display: DisplayTransform,
+    ) {
+        let Some(skin) = self.head_skins.get(key) else {
+            return;
+        };
+        self.shared.bind_texture(pass, Some(skin.group));
+        self.bake_to_slot(
+            pass,
+            frame,
+            item_entity,
+            slot_x_px,
+            slot_y_px,
+            slot_size_px,
+            PLAYER_HEAD_SKIN_MESH,
+            display,
+            &[],
+        );
+        self.shared.bind_texture(pass, None);
+    }
+
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
+        self.sync_head_skins(device, []);
         self.pipeline.destroy(device);
         self.shared.destroy(device);
     }

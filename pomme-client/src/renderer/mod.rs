@@ -1940,6 +1940,12 @@ impl Renderer {
     /// Player faces reuse the string-keyed favicon atlas, which holds only
     /// the last upload; the menu sends faces and favicons together
     /// (`MainMenu::menu_atlas_images`).
+    /// Holds the skins player head items are drawn with, by head key.
+    pub fn sync_head_skins<'a>(&mut self, heads: impl IntoIterator<Item = (&'a str, &'a [u8])>) {
+        self.gui_item_pipeline
+            .sync_head_skins(&self.ctx.device, heads);
+    }
+
     pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
         self.update_favicon_atlas(faces);
     }
@@ -2155,6 +2161,15 @@ impl Renderer {
                         item_stack.as_ref(),
                         owner_team_color,
                     );
+                    // A player head whose skin has arrived bakes with it.
+                    if let Some(key) = item_stack
+                        .as_ref()
+                        .and_then(crate::ui::common::HeadProfile::of_stack)
+                        .map(|profile| profile.skin_key())
+                        && self.gui_item_pipeline.has_head_skin(&key)
+                    {
+                        *item_name = format!("{HEAD_SKIN_ITEM_PREFIX}{key}");
+                    }
                     add_item(item_name, item_tints);
                 }
                 // Vanilla `ClientBundleTooltip` draws its contents with the
@@ -2178,9 +2193,6 @@ impl Renderer {
                             tints
                         })
                         .collect();
-                }
-                MenuElement::SkinHead3D { .. } => {
-                    add_item("player_head", &[]);
                 }
                 _ => {}
             }
@@ -2232,7 +2244,13 @@ impl Renderer {
                         slot,
                         name: name.clone(),
                         item_tints: item_tints.clone(),
-                        display: self.render_assets.get_item_gui_transform(name),
+                        display: self.render_assets.get_item_gui_transform(
+                            if name.starts_with(HEAD_SKIN_ITEM_PREFIX) {
+                                "player_head"
+                            } else {
+                                name
+                            },
+                        ),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
                 }
@@ -2256,17 +2274,30 @@ impl Renderer {
                 }
                 bake.set_scissor_rect(self.gui_item_atlas.scissor_rect(&job.slot));
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
-                self.gui_item_pipeline.bake_to_slot(
-                    &bake,
-                    frame,
-                    &self.item_entity_pipeline,
-                    sx,
-                    sy,
-                    self.gui_item_atlas.slot_px(),
-                    &job.name,
-                    job.display,
-                    &job.item_tints,
-                );
+                if let Some(key) = job.name.strip_prefix(HEAD_SKIN_ITEM_PREFIX) {
+                    self.gui_item_pipeline.bake_head_to_slot(
+                        &bake,
+                        frame,
+                        &self.item_entity_pipeline,
+                        sx,
+                        sy,
+                        self.gui_item_atlas.slot_px(),
+                        key,
+                        job.display,
+                    );
+                } else {
+                    self.gui_item_pipeline.bake_to_slot(
+                        &bake,
+                        frame,
+                        &self.item_entity_pipeline,
+                        sx,
+                        sy,
+                        self.gui_item_atlas.slot_px(),
+                        &job.name,
+                        job.display,
+                        &job.item_tints,
+                    );
+                }
             }
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
@@ -2745,6 +2776,13 @@ fn warm_item_meshes(
     uv_map: &chunk::atlas::AtlasUVMap,
     render_assets: &BlockRenderAssets,
 ) {
+    if let Some(model) = render_assets.get_item_model("player_head") {
+        item_entity_pipeline.ensure_skin_mesh(
+            device,
+            pipelines::gui_item::PLAYER_HEAD_SKIN_MESH,
+            model,
+        );
+    }
     for name in render_assets.item_names() {
         if let Some(model) = render_assets.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, name, model, uv_map);
@@ -2758,6 +2796,10 @@ fn warm_item_meshes(
         }
     }
 }
+
+/// The GUI item name a player head with an uploaded skin bakes under,
+/// followed by its head key.
+const HEAD_SKIN_ITEM_PREFIX: &str = "player_head#skin:";
 
 /// Decoded skin ready for upload: always a 64x64 RGBA sheet (legacy 64x32
 /// skins are converted), plus the profile's arm model.

@@ -32,6 +32,7 @@ use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
+use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
 };
@@ -81,31 +82,13 @@ struct PlayerSkinResult {
     result: Result<crate::renderer::SkinData, String>,
 }
 
-/// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
-/// `ResolvableProfile`, so two heads with the same id but different textures
-/// are different entries.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct HeadProfile {
-    id: Option<uuid::Uuid>,
-    name: Option<String>,
-    textures: Option<String>,
-}
-
-impl HeadProfile {
-    /// `ResolvableProfile.create`: a profile carrying properties, or both or
-    /// neither of id and name, is `Static` and never looks anything up; one
-    /// with exactly one of them is `Dynamic` and resolves first.
-    fn is_static(&self) -> bool {
-        self.textures.is_some() || self.id.is_some() == self.name.is_some()
-    }
-}
-
 enum HeadState {
     Pending,
     Ready {
         hat: Vec<u8>,
         base: Vec<u8>,
-        head_3d: Option<Vec<u8>>,
+        /// The 64x64 skin, which a profiled player head item is drawn with.
+        skin: Vec<u8>,
     },
     /// No skin to show: a static profile with no textures, or a lookup that
     /// failed. Cached so it isn't retried (and re-logged) every frame.
@@ -1525,6 +1508,15 @@ impl AppCore {
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
         self.player_heads
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
+        let skins: Vec<(String, &[u8])> = self
+            .player_heads
+            .iter()
+            .filter_map(|(profile, entry)| match &entry.state {
+                HeadState::Ready { skin, .. } => Some((profile.skin_key(), skin.as_slice())),
+                _ => None,
+            })
+            .collect();
+        renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)));
         for entry in self.inline_objects.values() {
             if let InlineObjectContent::Head { profile, .. } = &entry.content
                 && let Some(head) = self.player_heads.get_mut(profile)
@@ -1604,28 +1596,6 @@ impl AppCore {
                     }
                 }
             }
-            for (profile, entry) in &self.player_heads {
-                if let HeadState::Ready { hat, head_3d, .. } = &entry.state {
-                    if let Some(id) = profile.id {
-                        entries.push((id.to_string(), hat.clone(), 8));
-                        if let Some(h3d) = head_3d {
-                            entries.push((format!("head3d:{id}"), h3d.clone(), 32));
-                        }
-                    }
-                    if let Some(textures) = &profile.textures {
-                        entries.push((format!("textures:{textures}"), hat.clone(), 8));
-                        if let Some(h3d) = head_3d {
-                            entries.push((format!("head3d:textures:{textures}"), h3d.clone(), 32));
-                        }
-                    }
-                    if let Some(name) = &profile.name {
-                        entries.push((name.clone(), hat.clone(), 8));
-                        if let Some(h3d) = head_3d {
-                            entries.push((format!("head3d:{name}"), h3d.clone(), 32));
-                        }
-                    }
-                }
-            }
             if !entries.is_empty() {
                 renderer.update_face_atlas(&entries);
             }
@@ -1696,17 +1666,7 @@ impl AppCore {
     }
 
     /// Starts the one fetch a profile needs; its hat and base glyphs share it.
-    pub fn request_head_profile(
-        &mut self,
-        id: Option<uuid::Uuid>,
-        name: Option<String>,
-        textures: Option<String>,
-    ) {
-        let profile = HeadProfile { id, name, textures };
-        self.request_head(profile);
-    }
-
-    fn request_head(&mut self, profile: HeadProfile) {
+    pub(crate) fn request_head(&mut self, profile: HeadProfile) {
         if let Some(entry) = self.player_heads.get_mut(&profile) {
             entry.last_used = Instant::now();
             return;
@@ -1756,14 +1716,17 @@ impl AppCore {
             entry.state = match head.result {
                 Ok(data) => {
                     use crate::renderer::pipelines::menu_overlay::{
-                        extract_face_8x8, extract_face_8x8_with_hat, render_head_3d,
+                        extract_face_8x8, extract_face_8x8_with_hat,
                     };
-                    let head_3d = render_head_3d(&data.pixels, data.width, data.height, 32);
                     match (
                         extract_face_8x8(&data.pixels, data.width, data.height),
                         extract_face_8x8_with_hat(&data.pixels, data.width, data.height, false),
                     ) {
-                        (Some(hat), Some(base)) => HeadState::Ready { hat, base, head_3d },
+                        (Some(hat), Some(base)) => HeadState::Ready {
+                            hat,
+                            base,
+                            skin: data.pixels,
+                        },
                         _ => HeadState::Fallback,
                     }
                 }

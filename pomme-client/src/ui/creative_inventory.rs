@@ -18,7 +18,6 @@ use super::creative_tab_data::{
     FUNCTIONAL_BLOCKS_ITEMS, INGREDIENTS_ITEMS, NATURAL_BLOCKS_ITEMS, OP_BLOCKS_ITEMS,
     REDSTONE_BLOCKS_ITEMS, SPAWN_EGGS_ITEMS, TOOLS_AND_UTILITIES_ITEMS,
 };
-use crate::lang::item_display_name;
 use crate::player::inventory::{Inventory, item_resource_name};
 use crate::renderer::PlayerPreview;
 use crate::renderer::pipelines::entity_renderer::armor_render_infos;
@@ -460,6 +459,7 @@ pub fn build_creative_inventory(
     drop: Option<bool>,
     can_drop: bool,
     inventory: &Inventory,
+    registries: &azalea_core::registry_holder::RegistryHolder,
     gs: f32,
     advanced_tooltips: bool,
     left_held: bool,
@@ -530,6 +530,7 @@ pub fn build_creative_inventory(
 
     let size = SLOT_SIZE * scale;
     let tt = TooltipCtx {
+        registries,
         cursor,
         screen_w,
         screen_h,
@@ -1001,7 +1002,8 @@ fn item_or_empty(slots: &[ItemStack], idx: usize) -> ItemStack {
     slots.get(idx).cloned().unwrap_or(ItemStack::Empty)
 }
 
-struct TooltipCtx {
+struct TooltipCtx<'a> {
+    registries: &'a azalea_core::registry_holder::RegistryHolder,
     cursor: (f32, f32),
     screen_w: f32,
     screen_h: f32,
@@ -1031,22 +1033,7 @@ struct DragPreview {
     remainder: i32,
 }
 
-const TOOLTIP_NAME_COLOR: [f32; 4] = rgb(0xFFFFFF);
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
-const TOOLTIP_ADVANCED_COLOR: [f32; 4] = rgb(0x555555);
-const TOOLTIP_LORE_COLOR: [f32; 4] = rgb(0xAAAAAA);
-const RARITY_UNCOMMON: [f32; 4] = rgb(0xFFFF55);
-const RARITY_RARE: [f32; 4] = rgb(0x55FFFF);
-const RARITY_EPIC: [f32; 4] = rgb(0xFF55FF);
-
-fn rarity_color(kind: ItemKind) -> [f32; 4] {
-    match get_default_component::<Rarity>(kind) {
-        Some(Rarity::Uncommon) => RARITY_UNCOMMON,
-        Some(Rarity::Rare) => RARITY_RARE,
-        Some(Rarity::Epic) => RARITY_EPIC,
-        _ => TOOLTIP_NAME_COLOR,
-    }
-}
 
 // Fixed list rather than `from_u32(0..)` so registry-ID shifts between MC
 // versions don't silently change counts.
@@ -1077,7 +1064,7 @@ const TRACKED_COMPONENT_KINDS: &[DataComponentKind] = &[
     DataComponentKind::DamageResistant,
 ];
 
-fn total_component_count(data: &ItemStackData) -> usize {
+pub(crate) fn total_component_count(data: &ItemStackData) -> usize {
     TRACKED_COMPONENT_KINDS
         .iter()
         .filter(|&&kind| {
@@ -1123,49 +1110,6 @@ fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
     }
 }
 
-fn lore_lines(data: &ItemStackData) -> Vec<TooltipLine> {
-    let mut lines = Vec::new();
-    if let Some(damage) = data.component_patch.get::<Damage>() {
-        let max = data
-            .component_patch
-            .get::<MaxDamage>()
-            .map(|m| m.amount)
-            .or_else(|| get_default_component::<MaxDamage>(data.kind).map(|m| m.amount))
-            .unwrap_or(0);
-        if max > 0 {
-            lines.push(TooltipLine::new(
-                format!("Durability: {} / {}", max - damage.amount, max),
-                TOOLTIP_LORE_COLOR,
-            ));
-        }
-    }
-    if let Some(ench) = data.component_patch.get::<Enchantments>() {
-        for (enchantment, level) in &ench.levels {
-            lines.push(TooltipLine::new(
-                format!("{:?} {}", enchantment, roman(*level)),
-                TOOLTIP_LORE_COLOR,
-            ));
-        }
-    }
-    lines
-}
-
-fn roman(n: i32) -> &'static str {
-    match n {
-        1 => "I",
-        2 => "II",
-        3 => "III",
-        4 => "IV",
-        5 => "V",
-        6 => "VI",
-        7 => "VII",
-        8 => "VIII",
-        9 => "IX",
-        10 => "X",
-        _ => "",
-    }
-}
-
 fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
     static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
     static EMPTY: &[&str] = &[];
@@ -1187,26 +1131,19 @@ fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
         .unwrap_or(EMPTY)
 }
 
-fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<TooltipLine> {
-    let kind = data.kind;
-    let mut lines = Vec::new();
-    lines.push(TooltipLine::new(
-        item_display_name(kind),
-        rarity_color(kind),
-    ));
-    lines.extend(lore_lines(data));
-    for &title in tabs_containing(kind) {
-        lines.push(TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
-    }
-    if advanced {
-        lines.push(TooltipLine::new(
-            format!("minecraft:{}", item_resource_name(kind)),
-            TOOLTIP_ADVANCED_COLOR,
-        ));
-        lines.push(TooltipLine::new(
-            format!("{} component(s)", total_component_count(data)),
-            TOOLTIP_ADVANCED_COLOR,
-        ));
+/// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the stack's
+/// tooltip with the tabs holding it after its name.
+fn build_item_tooltip_lines(
+    data: &ItemStackData,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    advanced: bool,
+) -> Vec<TooltipLine> {
+    let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
+    if !lines.is_empty() {
+        let tabs = tabs_containing(data.kind)
+            .iter()
+            .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
+        lines.splice(1..1, tabs);
     }
     lines
 }
@@ -1219,7 +1156,7 @@ fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &Too
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
             y: tt.cursor.1,
-            lines: build_item_tooltip_lines(data, tt.advanced),
+            lines: build_item_tooltip_lines(data, tt.registries, tt.advanced),
             scale: FONT_SIZE * tt.gs,
             screen_w: tt.screen_w,
             screen_h: tt.screen_h,
@@ -1805,6 +1742,7 @@ mod tests {
             frame.drop,
             !frame.throttled,
             inventory,
+            &Default::default(),
             2.0,
             false,
             false,

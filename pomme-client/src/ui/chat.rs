@@ -2459,7 +2459,7 @@ fn push_hover_tooltip(
         // (`HoverEvent::Item`), so its components lose payload types and Java
         // number text; the dialog's item body passes its raw tag.
         HoverEvent::Item(value) => {
-            item_tooltip_lines_with_bindings(value, None, advanced_item_tooltips, bindings)
+            item_tooltip_lines_with_bindings(value, None, None, advanced_item_tooltips, bindings)
         }
         HoverEvent::Entity(value) if advanced_item_tooltips => {
             entity_tooltip_lines(value, bindings)
@@ -2597,12 +2597,94 @@ pub(crate) fn item_tooltip_lines(
     raw_components: Option<&NbtCompound>,
     advanced: bool,
 ) -> Vec<TooltipLine> {
-    item_tooltip_lines_with_bindings(value, raw_components, advanced, &KeyBindings::default())
+    item_tooltip_lines_with_bindings(
+        value,
+        raw_components,
+        None,
+        advanced,
+        &KeyBindings::default(),
+    )
 }
 
+/// A held stack's tooltip, vanilla `ItemStack.getTooltipLines`: what a
+/// container slot and the creative inventory show.
+// TODO: the item's default `attribute_modifiers` ("When in Main Hand: 7
+// Attack Damage"); the builder reads only the components the stack sets.
+pub(crate) fn stack_tooltip_lines(
+    data: &azalea_inventory::ItemStackData,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    advanced: bool,
+) -> Vec<TooltipLine> {
+    item_tooltip_lines_with_bindings(
+        &stack_json(data, registries),
+        None,
+        Some(super::creative_inventory::total_component_count(data)),
+        advanced,
+        &KeyBindings::default(),
+    )
+}
+
+/// The stack in `show_item`'s JSON shape, for [`item_tooltip_lines`].
+/// azalea's serde writes an enchantment as an enum variant, which can't key a
+/// JSON map, so enchantments go in by their registry names.
+// TODO: pomme's item grammar has no JSON output yet, so the rest still goes
+// through azalea's serde shape.
+fn stack_json(
+    data: &azalea_inventory::ItemStackData,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> serde_json::Value {
+    use azalea_inventory::components::{Enchantments, StoredEnchantments};
+    use azalea_registry::DataRegistry;
+
+    let stack = azalea_inventory::ItemStack::Present(data.clone())
+        .with_component::<Enchantments>(None)
+        .with_component::<StoredEnchantments>(None);
+    let mut value = serde_json::to_value(&stack).unwrap_or_default();
+    let names = |levels: &std::collections::HashMap<azalea_registry::data::Enchantment, i32>| {
+        levels
+            .iter()
+            .filter_map(|(enchantment, level)| {
+                let (id, _) = registries
+                    .enchantment
+                    .map
+                    .get_index(enchantment.protocol_id() as usize)?;
+                Some((id.to_string(), serde_json::Value::from(*level)))
+            })
+            .collect::<serde_json::Map<_, _>>()
+    };
+    let enchantments = [
+        (
+            "minecraft:enchantments",
+            data.get_component::<Enchantments>()
+                .map(|e| names(&e.levels)),
+        ),
+        (
+            "minecraft:stored_enchantments",
+            data.get_component::<StoredEnchantments>()
+                .map(|e| names(&e.enchantments)),
+        ),
+    ];
+    if let Some(map) = value.as_object_mut() {
+        let components = map
+            .entry("components")
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if let Some(components) = components.as_object_mut() {
+            for (key, levels) in enchantments {
+                if let Some(levels) = levels {
+                    components.insert(key.to_owned(), serde_json::Value::Object(levels));
+                }
+            }
+        }
+    }
+    value
+}
+
+/// `component_count` is the stack's components including its item's
+/// defaults; a hover's JSON carries only the ones it changes.
 fn item_tooltip_lines_with_bindings(
     value: &serde_json::Value,
     raw_components: Option<&NbtCompound>,
+    component_count: Option<usize>,
     advanced: bool,
     bindings: &KeyBindings,
 ) -> Vec<TooltipLine> {
@@ -2754,7 +2836,8 @@ fn item_tooltip_lines_with_bindings(
             }
         }
         lines.push(TooltipLine::new(id.to_owned(), common::rgb(0x555555)));
-        let component_count = components.map_or(0, serde_json::Map::len);
+        let component_count =
+            component_count.unwrap_or_else(|| components.map_or(0, serde_json::Map::len));
         if component_count > 0 {
             if crate::lang::translate("item.components").is_some() {
                 let component = Component::translate(
