@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
 use super::block_state_table::BlockStateTable;
+use super::json_bundle::JsonBundle;
 use super::model;
 use super::model::BakedModel;
 use crate::assets::AssetIndex;
@@ -154,7 +155,14 @@ impl BlockRenderAssets {
             .filter(|_| packs.is_none())
             .map(|dir| dir.join(BLOCK_CACHE_FILE));
 
-        let textures = cache_path.as_deref().and_then(load_cache);
+        // The bundle is the jar's files alone, so packs read from disk.
+        let bundle = packs
+            .is_none()
+            .then(|| JsonBundle::load(jar_assets_dir, asset_index, cache_dir));
+        let bundle = bundle.as_ref();
+
+        let textures: Option<HashMap<String, FaceTextures>> =
+            cache_path.as_deref().and_then(load_cache);
         if let Some(cached) = &textures {
             tracing::info!(
                 "Block render assets: {} blocks (cached textures)",
@@ -163,7 +171,8 @@ impl BlockRenderAssets {
         }
 
         let textures = textures.unwrap_or_else(|| {
-            let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
+            let mut textures =
+                model::load_all_block_textures(jar_assets_dir, asset_index, packs, bundle);
 
             textures
                 .entry("water".into())
@@ -179,8 +188,8 @@ impl BlockRenderAssets {
             textures
         });
 
-        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
+        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs, bundle);
+        let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs, bundle);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
@@ -584,20 +593,20 @@ fn constraints_match<'a>(
     })
 }
 
-fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+pub(super) fn load_cache<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let data = std::fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
 }
 
 /// Atomic, since every client of a version shares the one cache.
-fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
+pub(super) fn save_cache<T: Serialize>(path: &Path, value: &T) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(json) = serde_json::to_string(textures)
-        && let Err(e) = crate::util::write_atomic(path, json.as_bytes())
+    if let Ok(json) = serde_json::to_vec(value)
+        && let Err(e) = crate::util::write_atomic(path, &json)
     {
-        tracing::warn!("Failed to write block cache: {e}");
+        tracing::warn!("Failed to write {}: {e}", path.display());
     }
 }
 

@@ -308,15 +308,66 @@ pub struct Renderer {
     last_timings: RenderTimings,
 }
 
+const LOADING_MODELS: &str = "Loading block models...";
+
+/// A renderer whose block models are still loading on another thread, with
+/// the GPU context and splash up meanwhile. The app keeps handling window
+/// events while it waits, so a slow disk can't make the window hang.
+pub struct RendererBoot {
+    screen: boot::BootScreen,
+    render_assets: std::thread::JoinHandle<BlockRenderAssets>,
+}
+
+impl RendererBoot {
+    /// The block models are loaded, so [`Renderer::finish`] won't wait on them.
+    pub fn is_ready(&self) -> bool {
+        self.render_assets.is_finished()
+    }
+
+    pub fn draw_splash(&mut self) {
+        let _ = self.screen.draw(0.0, LOADING_MODELS);
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
+        self.screen.resize(width, height)
+    }
+}
+
 impl Renderer {
-    pub fn new(
-        window: Arc<Window>,
+    /// Brings up the GPU and the splash, and starts loading the block models
+    /// on another thread; [`Self::finish`] builds the rest.
+    pub fn begin(
+        window: &Window,
         font_sources: FontSources<'_>,
-        game_dir: &Path,
         cache_dir: &Path,
         vsync: bool,
-        panorama_dir: &Path,
         bedrock_ui_dir: &Path,
+    ) -> Result<RendererBoot, RendererError> {
+        let render_assets = {
+            let jar_assets_dir = font_sources.jar_assets_dir.to_path_buf();
+            let asset_index = font_sources.asset_index.clone();
+            let cache_dir = cache_dir.to_path_buf();
+            std::thread::spawn(move || {
+                BlockRenderAssets::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
+            })
+        };
+
+        let screen = boot::BootScreen::new(window, font_sources, Some(bedrock_ui_dir), vsync)?;
+        let mut boot = RendererBoot {
+            screen,
+            render_assets,
+        };
+        boot.draw_splash();
+        Ok(boot)
+    }
+
+    /// The renderer `boot` started, waiting for its block models if they
+    /// aren't loaded yet.
+    pub fn finish(
+        boot: RendererBoot,
+        font_sources: FontSources<'_>,
+        game_dir: &Path,
+        panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
         let FontSources {
             jar_assets_dir,
@@ -324,17 +375,17 @@ impl Renderer {
             packs,
             options: font_options,
         } = font_sources;
-        let render_assets_handle = {
-            let jar_assets_dir = jar_assets_dir.to_path_buf();
-            let asset_index = asset_index.clone();
-            let cache_dir = cache_dir.to_path_buf();
-            std::thread::spawn(move || {
-                BlockRenderAssets::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
-            })
-        };
-
-        let (ctx, swapchain_state, mut frames, mut menu_pipeline) =
-            boot::bring_up(&window, font_sources, Some(bedrock_ui_dir), vsync)?;
+        let RendererBoot {
+            screen,
+            render_assets: render_assets_handle,
+        } = boot;
+        let vsync = screen.vsync();
+        let boot::BootParts {
+            ctx,
+            swapchain: swapchain_state,
+            mut frames,
+            menu: mut menu_pipeline,
+        } = screen.into_parts();
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
@@ -355,7 +406,7 @@ impl Renderer {
             );
         };
 
-        splash(&mut menu_pipeline, 0.0, "Loading block models...");
+        splash(&mut menu_pipeline, 0.0, LOADING_MODELS);
 
         let camera = Camera::new(swapchain_state.extent.aspect_ratio());
         let render_assets = Arc::new(
