@@ -10,6 +10,7 @@ use super::block_shape::CollisionContext;
 use super::collision::{
     CollisionWorld, find_supporting_block, no_collision, resolve_collision, state_boxes,
 };
+use super::movement_sound;
 use crate::app::input::{self, InputState};
 use crate::entity::components::Velocity;
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT, is_spectator};
@@ -182,6 +183,13 @@ pub fn tick(
     player.move_strafe = strafe;
     travel(
         player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+    );
+    movement_sound::tick(
+        player,
+        world,
+        tags,
+        input.performing_action(input::Action::Sneak),
+        is_passenger,
     );
 
     player.tick_air_supply();
@@ -518,8 +526,7 @@ fn tick_water(
         let target_vy = vanilla_look_y(player.look_dir.x_rot_deg());
         let surface_y = (player.position.y + 1.0 - 0.1).floor() as i32;
         let surface_fluid = world
-            .block_state_table
-            .block_state_data(world.chunks.get_block_state(
+            .block_data(BlockPos::new(
                 player.position.x.floor() as i32,
                 surface_y,
                 player.position.z.floor() as i32,
@@ -606,13 +613,7 @@ fn contains_any_liquid(world: CollisionWorld<'_>, aabb: &Aabb) -> bool {
     for x in x0..x1 {
         for y in y0..y1 {
             for z in z0..z1 {
-                if world
-                    .block_state_table
-                    .block_state_data(world.chunks.get_block_state(x, y, z))
-                    .fluid()
-                    .kind
-                    != FluidKind::Empty
-                {
+                if world.block_data(BlockPos::new(x, y, z)).fluid().kind != FluidKind::Empty {
                     return true;
                 }
             }
@@ -705,6 +706,10 @@ fn settle_after_move(
     if y {
         player.velocity.y = 0.0;
     }
+    player.movement_sounds.last_move = Some(movement_sound::Move {
+        movement: resolved,
+        velocity: *player.velocity,
+    });
 }
 
 fn update_sprint_state(
@@ -1004,29 +1009,38 @@ fn block_state_at_player_position(
     )
 }
 
+/// `Entity.getBlockPosBelowThatAffectsMyMovement`'s block.
 fn block_below_affecting_movement(
     player: &LocalPlayer,
     world: CollisionWorld<'_>,
 ) -> azalea_block::BlockState {
-    let chunk_store = world.chunks;
-    let offset = f64::from(0.500_001_f32);
-    let y = (player.position.y - offset).floor() as i32;
+    let pos = on_pos(player, world, 0.500_001);
+    world.chunks.get_block_state(pos.x, pos.y, pos.z)
+}
 
-    if let Some(support) = player.main_supporting_block_pos {
-        let support_state = chunk_store.get_block_state(support.x, support.y, support.z);
-        let support_id = world.block_state_table.block_state_data(support_state).id();
-        // `Entity.getOnPos`: walls and fence gates keep the support's own Y.
-        if support_id.ends_with("_wall") || support_id.ends_with("_fence_gate") {
-            return support_state;
-        }
-        return chunk_store.get_block_state(support.x, y, support.z);
+/// Vanilla `Entity.getOnPos(offset)`: the supporting block's column `offset`
+/// below the feet, or the support itself for a near-zero offset, a fence
+/// (offsets up to 0.5), a wall or a fence gate.
+pub(super) fn on_pos(player: &LocalPlayer, world: CollisionWorld<'_>, offset: f32) -> BlockPos {
+    let y = (player.position.y - f64::from(offset)).floor() as i32;
+    let Some(support) = player.main_supporting_block_pos else {
+        return BlockPos::new(
+            player.position.x.floor() as i32,
+            y,
+            player.position.z.floor() as i32,
+        );
+    };
+    if offset <= 1.0e-5 {
+        return support;
     }
-
-    chunk_store.get_block_state(
-        player.position.x.floor() as i32,
-        y,
-        player.position.z.floor() as i32,
-    )
+    let support_id = world.block_data(support).id();
+    if (f64::from(offset) <= 0.5 && support_id.ends_with("_fence"))
+        || support_id.ends_with("_wall")
+        || support_id.ends_with("_fence_gate")
+    {
+        return support;
+    }
+    BlockPos::new(support.x, y, support.z)
 }
 
 fn update_supporting_block(

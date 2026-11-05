@@ -250,6 +250,7 @@ pub struct LocalPlayer {
     pub effects: crate::mob_effect::ActiveMobEffects,
     /// Vanilla `LocalPlayer.dropSpamThrottler`, gating creative drops.
     pub drop_spam: DropThrottle,
+    pub movement_sounds: crate::physics::movement_sound::MovementSounds,
 }
 
 /// Vanilla `TickThrottler(20, 1280)`: each drop adds 20, each tick takes one
@@ -348,6 +349,7 @@ impl LocalPlayer {
             experience_progress: 0.0,
             effects: crate::mob_effect::ActiveMobEffects::default(),
             drop_spam: DropThrottle::default(),
+            movement_sounds: Default::default(),
         }
     }
 
@@ -397,6 +399,7 @@ impl LocalPlayer {
         self.prev_walk_dist = 0.0;
         self.bob = 0.0;
         self.prev_bob = 0.0;
+        self.movement_sounds = Default::default();
         self.horizontal_collision = false;
         self.minor_horizontal_collision = false;
         self.main_supporting_block_pos = None;

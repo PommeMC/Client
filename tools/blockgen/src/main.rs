@@ -6,6 +6,7 @@
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
 //!   blockgen behavior <azalea generated.rs> <out.json>
 //!   blockgen state <generated/state.json> <blocks-<v>.json> <out.json>
+//!   blockgen sounds <out.json> <generated/sounds.json>...
 //!
 //! `blocks` flattens the report into a compact per-block table (name, first
 //! state id, default state id, ordered property lists). Every explicit state
@@ -27,6 +28,12 @@
 //! across the block's states, else a per-state array, and face-occlusion
 //! masks are deduped into a dictionary. State counts and value ranges are
 //! cross-checked against the version's blocks table.
+//!
+//! `sounds` merges the per-version block sound types `tools/stategen/
+//! SoundDump.java` dumps (see `just soundgen`), newest version first, into the
+//! one name-keyed table every version shares: the first dump that has a block
+//! wins, so a block only older versions have keeps its old sounds. Identical
+//! sound types are stored once.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -38,7 +45,8 @@ fn main() -> ExitCode {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
         [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
         [cmd, dump, blocks, out] if cmd == "state" => gen_state(dump, blocks, out),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>".into()),
+        [cmd, out, dumps @ ..] if cmd == "sounds" && !dumps.is_empty() => gen_sounds(out, dumps),
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>\n       blockgen sounds <out.json> <sounds.json>... (newest first)".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -339,6 +347,78 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
             carried.join(", ")
         );
     }
+    Ok(())
+}
+
+/// A block's `SoundType` as `SoundDump` writes it: volume, pitch, then the
+/// break, step, place, hit and fall events.
+type SoundTypeRow = (f32, f32, String, String, String, String, String);
+
+/// Merges per-version sound dumps (newest first) into `{"types": [...],
+/// "blocks": {name: type index}}`. Vanilla's `intentionally_empty` becomes an
+/// empty event, which the client reads as silent.
+fn gen_sounds(out_path: &str, dumps: &[String]) -> Result<(), Error> {
+    let mut blocks: BTreeMap<String, SoundTypeRow> = BTreeMap::new();
+    for dump in dumps {
+        let text = std::fs::read_to_string(dump).map_err(|e| format!("{dump}: {e}"))?;
+        let rows: BTreeMap<String, SoundTypeRow> =
+            serde_json::from_str(&text).map_err(|e| format!("{dump}: {e}"))?;
+        if rows.is_empty() {
+            return Err(format!("{dump}: no blocks").into());
+        }
+        for (name, row) in rows {
+            blocks.entry(name).or_insert(row);
+        }
+    }
+
+    let silent = |event: &str| {
+        if event == "intentionally_empty" {
+            ""
+        } else {
+            event
+        }
+        .to_string()
+    };
+    let mut types: Vec<SoundTypeRow> = Vec::new();
+    let mut index: BTreeMap<String, usize> = BTreeMap::new();
+    for (name, (volume, pitch, brk, step, place, hit, fall)) in blocks {
+        let row = (
+            volume,
+            pitch,
+            silent(&brk),
+            silent(&step),
+            silent(&place),
+            silent(&hit),
+            silent(&fall),
+        );
+        let i = types.iter().position(|t| *t == row).unwrap_or_else(|| {
+            types.push(row);
+            types.len() - 1
+        });
+        index.insert(name, i);
+    }
+
+    let mut out = String::new();
+    writeln!(out, "{{")?;
+    writeln!(out, "  \"types\": [")?;
+    for (i, row) in types.iter().enumerate() {
+        let comma = if i + 1 < types.len() { "," } else { "" };
+        writeln!(out, "    {}{comma}", serde_json::to_string(row)?)?;
+    }
+    writeln!(out, "  ],")?;
+    writeln!(out, "  \"blocks\": {{")?;
+    for (i, (name, t)) in index.iter().enumerate() {
+        let comma = if i + 1 < index.len() { "," } else { "" };
+        writeln!(out, "    {}: {t}{comma}", serde_json::to_string(name)?)?;
+    }
+    writeln!(out, "  }}")?;
+    writeln!(out, "}}")?;
+    std::fs::write(out_path, &out)?;
+    println!(
+        "wrote {} blocks over {} sound types to {out_path}",
+        index.len(),
+        types.len()
+    );
     Ok(())
 }
 

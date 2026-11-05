@@ -752,6 +752,17 @@ impl InputState {
         self.harness_press = Some((code, ctrl));
     }
 
+    /// Holds `code` down, or lets it go, as a real key event would.
+    #[cfg(feature = "test-harness")]
+    pub fn hold_key(&mut self, code: KeyCode, down: bool) {
+        let state = if down {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        };
+        self.on_key(code, state, false);
+    }
+
     /// The key a harness `press` released, once.
     #[cfg(feature = "test-harness")]
     pub fn take_harness_release(&mut self) -> Option<KeyCode> {

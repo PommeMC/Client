@@ -2101,7 +2101,7 @@ mod tests {
                     file.version
                 );
                 assert!(
-                    sound::BLOCK_SOUNDS.contains_key(&block.name),
+                    sound::BLOCK_SOUNDS.blocks.contains_key(&block.name),
                     "no sound entry for '{}' ({})",
                     block.name,
                     file.version
@@ -2112,7 +2112,7 @@ mod tests {
         for key in behaviors.keys() {
             assert!(known.contains(key), "orphaned behavior entry '{key}'");
         }
-        for key in sound::BLOCK_SOUNDS.keys() {
+        for key in sound::BLOCK_SOUNDS.blocks.keys() {
             assert!(known.contains(key), "orphaned sound entry '{key}'");
         }
     }

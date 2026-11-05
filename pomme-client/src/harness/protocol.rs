@@ -51,6 +51,9 @@ pub enum Command {
     Modifiers(Modifiers),
     /// Presses a key once: a key binding's default key, or a physical key.
     Press(Press),
+    /// Holds a key down until `key_up`, as `press` names it.
+    KeyDown(Key),
+    KeyUp(Key),
     /// Assigns inputs to a key binding for this session, unsaved.
     Bind(Bind),
     /// Changes client options through the options screen's own setters.
@@ -154,6 +157,14 @@ pub struct Press {
     pub key: Option<String>,
     #[serde(default)]
     pub ctrl: bool,
+}
+
+/// One of a key binding's default key (`action`) or a physical key (`key`).
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Key {
+    pub action: Option<String>,
+    pub key: Option<String>,
 }
 
 /// Key binding `action` set to `keys` (input ids), or back to its defaults

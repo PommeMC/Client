@@ -208,15 +208,42 @@ stategen version="26.2":
     v="{{ version }}"
     ref="reference/$v"
     jdk="{{ jdk }}"
+    mkdir -p tools/stategen/out
+    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/StateDump.java
+    "$jdk/java.exe" -cp "$(just _vanilla-classpath "$v")" StateDump "$v" "$ref/generated/state.json" pomme-client/src/world/block/data/piston-"$v".json
+    cargo run -p blockgen -- state "$ref/generated/state.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/state-"$v".json
+
+# Regenerate the block sound table every version shares by running each
+# version's vanilla (tools/stategen/SoundDump.java), then merging the dumps
+# newest first with `blockgen sounds`. Covers every version with a state table.
+soundgen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    jdk="{{ jdk }}"
+    mkdir -p tools/stategen/out
+    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/SoundDump.java
+    dumps=()
+    for v in $(ls pomme-client/src/world/block/data/state-*.json | sed 's/.*state-\(.*\)\.json/\1/' | sort -Vr); do
+        out="reference/$v/generated/sounds.json"
+        "$jdk/java.exe" -cp "$(just _vanilla-classpath "$v")" SoundDump "$out"
+        dumps+=("$out")
+    done
+    cargo run -p blockgen -- sounds pomme-client/src/world/block/block_sounds.json "${dumps[@]}"
+
+# The classpath that runs a version's vanilla server code with the tools in
+# tools/stategen/out: the deobf server jar when one exists (pre-26.x), and the
+# libraries bundled in the server jar, extracted on first use.
+_vanilla-classpath version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{ version }}"
+    ref="reference/$v"
     classes="$ref/server-$v.jar"
     if [ -f "$ref/server-$v-deobf.jar" ]; then classes="$ref/server-$v-deobf.jar"; fi
     if ! find "$ref/bundler" -name '*.jar' 2>/dev/null | grep -q .; then
         # This unzip build doesn't glob archive members; list them explicitly.
         unzip -Z1 "$ref/server.jar" | grep '^META-INF/libraries/.*\.jar$' \
-            | xargs unzip -qn "$ref/server.jar" -d "$ref/bundler"
+            | xargs unzip -qn "$ref/server.jar" -d "$ref/bundler" >&2
     fi
     libs=$(find "$ref/bundler" -name '*.jar' | tr '\n' ';')
-    mkdir -p tools/stategen/out
-    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/StateDump.java
-    "$jdk/java.exe" -cp "$classes;${libs}tools/stategen/out" StateDump "$v" "$ref/generated/state.json" pomme-client/src/world/block/data/piston-"$v".json
-    cargo run -p blockgen -- state "$ref/generated/state.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/state-"$v".json
+    echo "$classes;${libs}tools/stategen/out"
