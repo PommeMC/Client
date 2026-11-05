@@ -1,6 +1,7 @@
 use std::io;
 use std::rc::Rc;
 
+use super::block_particle_option::BlockParticleOption;
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::types::{ParticleType, SimpleParticleType};
 use crate::resources::resource_id;
@@ -10,6 +11,7 @@ pub(crate) struct ParticleTypes {
     pub(super) smoke: Rc<ParticleType<SimpleParticleType>>,
     pub(super) flame: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) end_rod: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) block: Rc<ParticleType<BlockParticleOption>>,
 }
 
 impl ParticleTypes {
@@ -32,12 +34,16 @@ impl ParticleTypes {
         let end_rod = registry
             .register(resource_id!("minecraft:end_rod"), false)
             .map_err(registration_error)?;
+        let block = registry
+            .register(resource_id!("minecraft:block"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
             smoke,
             flame,
             end_rod,
+            block,
         })
     }
 }

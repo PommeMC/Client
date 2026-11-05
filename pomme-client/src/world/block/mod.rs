@@ -16,6 +16,7 @@ mod block_state_table;
 mod condition;
 pub mod json_bundle;
 pub mod model;
+pub(crate) mod particle_appearance;
 pub mod render_assets;
 mod render_props;
 pub mod sound;
