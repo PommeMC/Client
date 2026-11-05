@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput;
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
@@ -24,6 +25,8 @@ use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
+use crate::particle::{ServerParticleKind, next_gaussian};
+use crate::particles::types::SimpleParticleType;
 use crate::particles::{
     MappedParticleResources, ParticleAtlasSprites, ParticleEngine, ParticleResources,
     ParticleTypes, PreparedParticleDescriptions, register_builtin_providers,
@@ -54,6 +57,7 @@ use crate::user::UserData;
 use crate::world::block::block_registry::BlockDefinitions;
 use crate::world::chunk::ChunkStore;
 use crate::world::environment::EnvironmentProbe;
+use crate::world::level::LevelContext;
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,
@@ -1045,7 +1049,7 @@ pub struct AppCore {
     pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
     particle_resources: Rc<MappedParticleResources>,
     sprite_sources: SpriteSources,
-    _particle_types: ParticleTypes,
+    particle_types: ParticleTypes,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1238,7 +1242,7 @@ impl AppCore {
             particle_engine,
             particle_resources,
             sprite_sources,
-            _particle_types: particle_types,
+            particle_types,
             pending_pack_download: None,
             audio,
             tick_accumulator: 0.0,
@@ -3384,15 +3388,49 @@ impl AppCore {
                     max_speed,
                     count,
                 } => {
-                    game.particle_store.add_particles_from_packet(
-                        kind,
-                        override_limiter,
-                        pos,
-                        glam::dvec3(x_dist as f64, y_dist as f64, z_dist as f64),
-                        max_speed as f64,
-                        count,
+                    let options = match kind {
+                        ServerParticleKind::EndRod => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.end_rod))
+                        }
+                    };
+                    let level_random = game.level_runtime.get_random().clone();
+                    let engine_access = self.particle_engine.engine_access();
+                    let mut level = LevelContext::new(
+                        &game.chunk_store,
+                        game.block_registry.block_state_table(),
                         renderer.camera_render_position(),
+                        ParticleStatus::All,
+                        &level_random,
+                        engine_access.as_ref(),
                     );
+                    let dist = dvec3(x_dist as f64, y_dist as f64, z_dist as f64);
+                    let max_speed = max_speed as f64;
+                    if count == 0 {
+                        level.add_particle_with_flags(
+                            &options,
+                            override_limiter,
+                            false,
+                            pos,
+                            dist * max_speed,
+                        );
+                    } else {
+                        for _ in 0..count {
+                            let scatter = dvec3(
+                                next_gaussian() * dist.x,
+                                next_gaussian() * dist.y,
+                                next_gaussian() * dist.z,
+                            );
+                            let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian())
+                                * max_speed;
+                            level.add_particle_with_flags(
+                                &options,
+                                override_limiter,
+                                false,
+                                pos + scatter,
+                                vel,
+                            );
+                        }
+                    }
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {

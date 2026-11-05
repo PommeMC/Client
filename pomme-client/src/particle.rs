@@ -1,6 +1,5 @@
-//! Particles: a port of vanilla `TerrainParticle`, `BreakingItemParticle`,
-//! `EndRodParticle`, `Particle`, `ClientLevel.addDestroyBlockEffect`, and the
-//! `ClientboundLevelParticles` spawn path.
+//! Legacy terrain/item particles and `ClientLevel.addDestroyBlockEffect`.
+//! The retained `ServerParticleKind` maps native network particle IDs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,25 +31,7 @@ const MAX_COLLISION_VELOCITY_SQ: f64 = 10000.0;
 /// Terrain particles use the default 0.2-wide, 0.2-tall bounding box.
 const HALF_WIDTH: f64 = 0.1;
 
-enum Kind {
-    /// `TerrainParticle` / `BreakingItemParticle`: collision physics,
-    /// world-lit, fixed sprite, opaque layer.
-    Terrain,
-    /// `EndRodParticle` (a `SimpleAnimatedParticle`): no collision,
-    /// full-bright, 8-frame animation, fades after half-life, translucent
-    /// layer.
-    EndRod,
-}
-
-impl Kind {
-    /// Vanilla `SingleQuadParticle.getLayer`.
-    fn translucent(&self) -> bool {
-        matches!(self, Kind::EndRod)
-    }
-}
-
 pub struct Particle {
-    kind: Kind,
     /// Bounding-box bottom-center, like vanilla `Particle.setPos`.
     pos: DVec3,
     prev_pos: DVec3,
@@ -95,7 +76,6 @@ impl Particle {
         let vo = fastrand::f32() * 3.0;
 
         Self {
-            kind: Kind::Terrain,
             pos,
             prev_pos: pos,
             vel,
@@ -115,62 +95,19 @@ impl Particle {
         }
     }
 
-    /// Vanilla `EndRodParticle`: velocity taken verbatim from the spawn call
-    /// (the 3-arg `Particle` constructor adds no jitter), tiny gravity, no
-    /// collision, warm fade color.
-    fn end_rod(pos: DVec3, vel: DVec3, frames: &[AtlasRegion; 8]) -> Self {
-        // SingleQuadParticle base quadSize, then EndRodParticle *= 0.75.
-        let size = 0.1 * (fastrand::f32() * 0.5 + 0.5) * 2.0 * 0.75;
-        let mut p = Self {
-            kind: Kind::EndRod,
-            pos,
-            prev_pos: pos,
-            vel,
-            age: 0,
-            lifetime: 60 + fastrand::i32(0..12),
-            on_ground: false,
-            stopped_by_collision: false,
-            gravity: f64::from(0.0125f32),
-            friction: f64::from(0.91f32),
-            size,
-            u0: 0.0,
-            u1: 0.0,
-            v0: 0.0,
-            v1: 0.0,
-            color: [1.0; 3],
-            alpha: 1.0,
-        };
-        p.set_sprite(&frames[0]);
-        p
-    }
-
     /// Vanilla `getLightCoords`, read each frame at the current position.
     fn light(&self, world: &WorldLight) -> LightLevels {
-        match self.kind {
-            // `Particle.getLightCoords`: sky light alone outside loaded chunks.
-            Kind::Terrain => {
-                let at = self.pos.floor().as_ivec3();
-                let loaded = world
-                    .chunks
-                    .get_chunk(&ChunkPos::new(at.x.div_euclid(16), at.z.div_euclid(16)))
-                    .is_some();
-                if loaded {
-                    block_lighter::light_coords(world, at.to_array())
-                } else {
-                    LightLevels::new(15, 0)
-                }
-            }
-            // `SimpleAnimatedParticle`.
-            Kind::EndRod => LightLevels::FULL_BRIGHT,
+        // `Particle.getLightCoords`: sky light alone outside loaded chunks.
+        let at = self.pos.floor().as_ivec3();
+        let loaded = world
+            .chunks
+            .get_chunk(&ChunkPos::new(at.x.div_euclid(16), at.z.div_euclid(16)))
+            .is_some();
+        if loaded {
+            block_lighter::light_coords(world, at.to_array())
+        } else {
+            LightLevels::new(15, 0)
         }
-    }
-
-    /// Vanilla `SingleQuadParticle.setSprite`.
-    fn set_sprite(&mut self, frame: &AtlasRegion) {
-        self.u0 = frame.u_min;
-        self.u1 = frame.u_max;
-        self.v0 = frame.v_min;
-        self.v1 = frame.v_max;
     }
 
     /// Vanilla `BreakingItemParticle`: the base-constructor velocity (zero
@@ -183,41 +120,18 @@ impl Particle {
     }
 
     /// Vanilla `Particle.tick`. Returns false when the particle expires.
-    fn tick(
-        &mut self,
-        chunks: &ChunkStore,
-        block_state_table: BlockStateTable,
-        end_rod_frames: &[AtlasRegion; 8],
-    ) -> bool {
+    fn tick(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) -> bool {
         self.prev_pos = self.pos;
         if self.age >= self.lifetime {
             return false;
         }
         self.age += 1;
         self.vel.y -= 0.04 * self.gravity;
-        match self.kind {
-            Kind::Terrain => self.move_with_collision(chunks, block_state_table),
-            // EndRodParticle.move() skips collision entirely.
-            Kind::EndRod => self.pos += self.vel,
-        }
+        self.move_with_collision(chunks, block_state_table);
         self.vel *= self.friction;
         if self.on_ground {
             self.vel.x *= 0.7;
             self.vel.z *= 0.7;
-        }
-        match self.kind {
-            Kind::Terrain => {}
-            // SimpleAnimatedParticle.tick: advance the sprite frame, then
-            // after half-life fade alpha out and lerp toward the fade color.
-            Kind::EndRod => {
-                self.set_sprite(&end_rod_frames[(self.age * 7 / self.lifetime) as usize]);
-                if self.age > self.lifetime / 2 {
-                    self.alpha = 1.0 - (self.age - self.lifetime / 2) as f32 / self.lifetime as f32;
-                    for (c, f) in self.color.iter_mut().zip(END_ROD_FADE) {
-                        *c += (f - *c) * 0.2;
-                    }
-                }
-            }
         }
         true
     }
@@ -254,22 +168,6 @@ impl Particle {
     }
 }
 
-/// `SimpleAnimatedParticle.setFadeColor(0xF2DEC9)` in `EndRodParticle`.
-const END_ROD_FADE: [f32; 3] = [242.0 / 255.0, 222.0 / 255.0, 201.0 / 255.0];
-
-/// Frame order from `assets/minecraft/particles/end_rod.json`: frame 0 is
-/// `glitter_7` and the animation walks toward `glitter_0`.
-pub const END_ROD_SPRITES: [&str; 8] = [
-    "particle/glitter_7",
-    "particle/glitter_6",
-    "particle/glitter_5",
-    "particle/glitter_4",
-    "particle/glitter_3",
-    "particle/glitter_2",
-    "particle/glitter_1",
-    "particle/glitter_0",
-];
-
 /// Server-sent particle types pomme implements. `from_id` returning `None`
 /// drops the packet in the network handler, before the event channel.
 #[derive(Clone, Copy, Debug)]
@@ -287,13 +185,6 @@ impl ServerParticleKind {
             _ => None,
         }
     }
-
-    /// Vanilla `ParticleType.getOverrideLimiter`.
-    fn override_limiter(self) -> bool {
-        match self {
-            Self::EndRod => false,
-        }
-    }
 }
 
 pub struct ParticleStore {
@@ -303,7 +194,6 @@ pub struct ParticleStore {
     /// `ParticleEngine.particlesToAdd`).
     pending: Vec<Particle>,
     uv_map: AtlasUVMap,
-    end_rod_frames: [AtlasRegion; 8],
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
@@ -316,12 +206,10 @@ impl ParticleStore {
         foliage_colormap: Arc<Colormap>,
         dry_foliage_colormap: Arc<Colormap>,
     ) -> Self {
-        let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
         Self {
             particles: Vec::new(),
             pending: Vec::new(),
             uv_map,
-            end_rod_frames,
             grass_colormap,
             foliage_colormap,
             dry_foliage_colormap,
@@ -574,58 +462,6 @@ impl ParticleStore {
         }
     }
 
-    /// Vanilla `ClientPacketListener.handleParticleEvent`: count 0 is a
-    /// single directional particle (velocity = dist * max_speed), otherwise a
-    /// gaussian scatter of `count` particles around the position.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_particles_from_packet(
-        &mut self,
-        kind: ServerParticleKind,
-        override_limiter: bool,
-        pos: DVec3,
-        dist: DVec3,
-        max_speed: f64,
-        count: u32,
-        camera_pos: DVec3,
-    ) {
-        if count == 0 {
-            self.add_server_particle(kind, override_limiter, pos, dist * max_speed, camera_pos);
-            return;
-        }
-        for _ in 0..count {
-            let scatter = dvec3(
-                next_gaussian() * dist.x,
-                next_gaussian() * dist.y,
-                next_gaussian() * dist.z,
-            );
-            let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian()) * max_speed;
-            self.add_server_particle(kind, override_limiter, pos + scatter, vel, camera_pos);
-        }
-    }
-
-    /// Vanilla `ClientLevel.doAddParticle`. Pomme reports
-    /// `ParticleStatus::All` in client information, so the MINIMAL/DECREASED
-    /// branches are unreachable and only the 32-block camera cull applies.
-    fn add_server_particle(
-        &mut self,
-        kind: ServerParticleKind,
-        override_limiter: bool,
-        pos: DVec3,
-        vel: DVec3,
-        camera_pos: DVec3,
-    ) {
-        if !(override_limiter || kind.override_limiter()) && beyond_particle_range(camera_pos, pos)
-        {
-            return;
-        }
-        match kind {
-            ServerParticleKind::EndRod => {
-                let frames = self.end_rod_frames;
-                self.push(Particle::end_rod(pos, vel, &frames));
-            }
-        }
-    }
-
     /// The block's biome tint using vanilla's default blend radius.
     fn blend_tint(
         &self,
@@ -677,9 +513,8 @@ impl ParticleStore {
     }
 
     pub fn tick(&mut self, chunks: &ChunkStore, block_state_table: BlockStateTable) {
-        let frames = self.end_rod_frames;
         self.particles
-            .retain_mut(|p| p.tick(chunks, block_state_table, &frames));
+            .retain_mut(|p| p.tick(chunks, block_state_table));
         self.particles.append(&mut self.pending);
     }
 
@@ -710,20 +545,20 @@ impl ParticleStore {
                         (p.alpha * 255.0).round() as u8,
                     ]),
                     light: p.light(world).lane(),
-                    translucent: p.kind.translucent(),
+                    translucent: false,
                 }
             })
             .collect()
     }
 }
 
-/// `java.util.Random.nextGaussian` (Marsaglia polar method), minus the
-/// second-sample cache.
 /// `LevelRenderer.addParticleInternal`'s 32-block camera cull.
 fn beyond_particle_range(camera_pos: DVec3, pos: DVec3) -> bool {
     camera_pos.distance_squared(pos) > 1024.0
 }
 
+/// `java.util.Random.nextGaussian` (Marsaglia polar method), minus the
+/// second-sample cache.
 pub(crate) fn next_gaussian() -> f64 {
     loop {
         let v1 = 2.0 * fastrand::f64() - 1.0;
@@ -760,7 +595,20 @@ fn rot_y(v: DVec3, angle: f64) -> DVec3 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use azalea_protocol::common::client_information::ParticleStatus;
+
     use super::*;
+    use crate::particles::{
+        MappedParticleResources, ParticleAtlasSprites, ParticleDescription, ParticleEngine,
+        ParticleLight, ParticleResources, ParticleTypes, PreparedParticleDescriptions,
+        SimpleParticleType, register_builtin_providers,
+    };
+    use crate::resources::resource_id;
+    use crate::util::random_source::RandomSource;
+    use crate::world::level::LevelContext;
 
     #[test]
     fn particles_take_vanilla_light_coords() {
@@ -773,7 +621,44 @@ mod tests {
         let terrain = Particle::terrain(DVec3::new(0.5, 64.0, 0.5), DVec3::ZERO, region, [1.0; 3]);
         // No chunk loaded: `Particle.getLightCoords`' sky-only fallback.
         assert_eq!(terrain.light(&world), LightLevels::new(15, 0));
-        let end_rod = Particle::end_rod(DVec3::ZERO, DVec3::ZERO, &[region; 8]);
-        assert_eq!(end_rod.light(&world), LightLevels::FULL_BRIGHT);
+        let types = ParticleTypes::new().unwrap();
+        let mut resources = MappedParticleResources::new();
+        register_builtin_providers(&types, &mut resources);
+        let resources = Rc::new(resources);
+        let mut engine = ParticleEngine::new(Rc::clone(&resources));
+        let sprite = resource_id!("minecraft:glitter_7");
+        resources.apply(
+            PreparedParticleDescriptions {
+                descriptions: BTreeMap::from([(
+                    types.end_rod.info().name().clone(),
+                    ParticleDescription {
+                        textures: vec![sprite.clone()],
+                    },
+                )]),
+            },
+            &ParticleAtlasSprites::new(BTreeMap::from([(sprite, region)]), region),
+            &mut || engine.clear_particles(),
+        );
+        let random = RandomSource::new();
+        let engine_access = engine.engine_access();
+        let mut level = LevelContext::new(
+            &chunks,
+            BlockStateTable::native(),
+            DVec3::ZERO,
+            ParticleStatus::All,
+            &random,
+            engine_access.as_ref(),
+        );
+        let options = SimpleParticleType::new(Rc::clone(&types.end_rod));
+        let end_rod = engine
+            .create_particle(&mut level, &options, DVec3::ZERO, DVec3::ZERO)
+            .unwrap();
+        assert_eq!(
+            end_rod.borrow().get_light_coords(&level, 0.0),
+            ParticleLight {
+                block: 240,
+                sky: 240
+            }
+        );
     }
 }
