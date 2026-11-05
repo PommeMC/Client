@@ -223,6 +223,9 @@ pub(crate) struct BlockStateData {
     outline_shape_uses_offset: bool,
     position_offset: Option<PositionOffset>,
     fluid: Fluid,
+    friction: f32,
+    speed_factor: f32,
+    jump_factor: f32,
     light: LightProps,
     /// Vanilla `getPistonPushReaction`, from the per-version piston table.
     push_reaction: PushReaction,
@@ -424,25 +427,19 @@ impl BlockStateData {
             .map(|mask| mask & (1 << direction as u8) != 0)
     }
 
-    // TODO: read friction, speed and jump factors from the generated state table.
+    /// Vanilla `Block.getFriction`, generated for the selected version.
     pub(crate) fn movement_friction(&self) -> f32 {
-        match self.id() {
-            "ice" | "packed_ice" | "frosted_ice" => 0.98,
-            "blue_ice" => 0.989,
-            "slime_block" => 0.8,
-            _ => 0.6,
-        }
+        self.friction
     }
 
+    /// Vanilla `Block.getSpeedFactor`, generated for the selected version.
     pub(crate) fn movement_speed_factor(&self) -> f32 {
-        match self.id() {
-            "soul_sand" | "honey_block" => 0.4,
-            _ => 1.0,
-        }
+        self.speed_factor
     }
 
+    /// Vanilla `Block.getJumpFactor`, generated for the selected version.
     pub(crate) fn movement_jump_factor(&self) -> f32 {
-        if self.id() == "honey_block" { 0.5 } else { 1.0 }
+        self.jump_factor
     }
 
     pub(crate) fn collision_shape_position(&self, x: i32, y: i32, z: i32) -> DVec3 {
@@ -511,6 +508,11 @@ struct StateFile {
 #[derive(serde::Deserialize)]
 struct StateEntry {
     name: String,
+    fr: PerState<f32>,
+    sf: PerState<f32>,
+    jf: PerState<f32>,
+    a: PerState<u8>,
+    sc: PerState<SpecialCollision>,
     e: PerState<u8>,
     d: PerState<u8>,
     p: PerState<u8>,
@@ -821,15 +823,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             .iter()
             .map(|(k, vs)| (intern(k), vs.iter().map(|v| intern(v)).collect()))
             .collect();
-        let is_air = matches!(block.name.as_str(), "air" | "cave_air" | "void_air");
         let collides = state_entry.c != 0;
-        let special_collision = match block.name.as_str() {
-            "scaffolding" => SpecialCollision::Scaffolding,
-            "powder_snow" => SpecialCollision::PowderSnow,
-            "moving_piston" => SpecialCollision::MovingPiston,
-            name if name.ends_with("shulker_box") => SpecialCollision::ShulkerBox,
-            _ => SpecialCollision::None,
-        };
 
         let count: u32 = props.iter().map(|(_, vs)| vs.len() as u32).product();
         let face_indices = light_face_indices(state_entry, count as usize);
@@ -843,6 +837,8 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
             let i = offset as usize;
+            let is_air = state_entry.a.get(i) != 0;
+            let special_collision = state_entry.sc.get(i);
             let flag = |field: &Option<PerState<u8>>| field.as_ref().map(|f| f.get(i) != 0);
             let generated = state_entry.generated_shapes();
             let collision = shapes[generated.collision.get(i) as usize];
@@ -895,6 +891,9 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                 outline_shape_uses_offset: generated.outline_offset.get(i) != 0,
                 position_offset,
                 fluid,
+                friction: state_entry.fr.get(i),
+                speed_factor: state_entry.sf.get(i),
+                jump_factor: state_entry.jf.get(i),
                 light,
                 push_reaction,
                 has_block_entity,
@@ -1083,6 +1082,22 @@ pub(crate) enum SpecialCollision {
     PowderSnow,
     MovingPiston,
     ShulkerBox,
+}
+
+impl<'de> serde::Deserialize<'de> for SpecialCollision {
+    /// Decode the generator's class-based collision-handler discriminant.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match <u8 as serde::Deserialize>::deserialize(deserializer)? {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Scaffolding),
+            2 => Ok(Self::PowderSnow),
+            3 => Ok(Self::MovingPiston),
+            4 => Ok(Self::ShulkerBox),
+            value => Err(serde::de::Error::custom(format!(
+                "unknown special collision kind {value}"
+            ))),
+        }
+    }
 }
 
 fn calculate_solid(collision: Option<&[LocalBox]>) -> bool {

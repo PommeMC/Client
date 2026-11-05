@@ -489,6 +489,11 @@ fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
 struct StateDumpFile {
     version: String,
     state_count: u32,
+    friction: Vec<f32>,
+    speed_factor: Vec<f32>,
+    jump_factor: Vec<f32>,
+    air: Vec<u8>,
+    special_collision: Vec<u8>,
     emission: Vec<u8>,
     dampening: Vec<u8>,
     propagates_skylight_down: Vec<u8>,
@@ -541,6 +546,8 @@ struct BlocksEntry {
     props: Vec<(String, Vec<String>)>,
 }
 
+/// Validate vanilla's complete state dump and write deduplicated per-block
+/// fields.
 fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
     let dump: StateDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
     let blocks: BlocksFile = serde_json::from_str(&std::fs::read_to_string(blocks_path)?)?;
@@ -561,6 +568,11 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
     }
     let n = dump.state_count as usize;
     for (key, len) in [
+        ("friction", dump.friction.len()),
+        ("speed_factor", dump.speed_factor.len()),
+        ("jump_factor", dump.jump_factor.len()),
+        ("air", dump.air.len()),
+        ("special_collision", dump.special_collision.len()),
         ("emission", dump.emission.len()),
         ("dampening", dump.dampening.len()),
         (
@@ -599,6 +611,18 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
         }
     }
     for i in 0..n {
+        for (name, value) in [
+            ("friction", dump.friction[i]),
+            ("speed_factor", dump.speed_factor[i]),
+            ("jump_factor", dump.jump_factor[i]),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("state {i}: invalid {name} {value}").into());
+            }
+        }
+        if dump.special_collision[i] > 4 {
+            return Err(format!("state {i}: unknown special collision kind").into());
+        }
         if dump.emission[i] > 15 || dump.dampening[i] > 15 {
             return Err(format!("state {i}: light value out of 0..=15 range").into());
         }
@@ -609,6 +633,7 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                 "use_shape_for_light_occlusion",
                 dump.use_shape_for_light_occlusion[i],
             ),
+            ("air", dump.air[i]),
             ("has_collision", dump.has_collision[i]),
             (
                 "blocks_motion",
@@ -797,6 +822,11 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             write!(line, ", \"m\": {}", scalar_or_array(blocks_motion, &range)?)?;
         }
         for (key, values) in [
+            ("fr", scalar_or_array(&dump.friction, &range)?),
+            ("sf", scalar_or_array(&dump.speed_factor, &range)?),
+            ("jf", scalar_or_array(&dump.jump_factor, &range)?),
+            ("a", scalar_or_array(&dump.air, &range)?),
+            ("sc", scalar_or_array(&dump.special_collision, &range)?),
             ("l", scalar_or_array(&dump.legacy_solid, &range)?),
             ("v", scalar_or_array(&dump.replaceable, &range)?),
             ("t", scalar_or_array(&dump.full_face_sturdy, &range)?),
