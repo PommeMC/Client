@@ -1,0 +1,60 @@
+# Multipart blocks whose `when` combines properties with AND or OR: a
+# straight redstone line draws no dot, the chiseled bookshelf shows books in
+# slots 0 and 4 only, and the south-facing shelf draws no parts for other
+# facings.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 1 -60 2 7 -60 2 minecraft:redstone_wire"
+
+[[step]]
+chat = "/setblock 2 -60 5 minecraft:chiseled_bookshelf[facing=south,slot_0_occupied=true,slot_4_occupied=true]"
+
+[[step]]
+chat = "/setblock 5 -60 5 minecraft:oak_shelf[facing=south]"
+
+[[step]]
+expect = { block = "redstone_wire", at = [4, -60, 2] }
+
+[[step]]
+expect = { block = "chiseled_bookshelf", at = [2, -60, 5] }
+
+[[step]]
+expect = { block = "oak_shelf", at = [5, -60, 5] }
+
+[[step]]
+chat = "/tp @s 4.0 -57.6 8.6"
+
+[[step]]
+look_at = [4.0, -60.0, 3.8]
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "scene"
+
+[[step]]
+chat = "/fill 1 -60 2 7 -60 5 minecraft:air"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"
