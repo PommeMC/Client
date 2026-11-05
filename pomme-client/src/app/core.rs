@@ -24,14 +24,18 @@ use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
-use crate::particles::{MappedParticleResources, ParticleEngine};
+use crate::particles::{
+    MappedParticleResources, ParticleAtlasSprites, ParticleEngine, ParticleResources,
+    ParticleTypes, PreparedParticleDescriptions, register_builtin_providers,
+};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
+use crate::renderer::chunk::atlas::AtlasCpu;
+use crate::renderer::chunk::atlas_sources::{SpriteSourceList, SpriteSources};
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
-use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
 use crate::resources::pack_resources::PackType;
 use crate::resources::packs::{
@@ -39,6 +43,7 @@ use crate::resources::packs::{
     PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
     SymlinkPolicy, ThemeSpecification, download_server_pack,
 };
+use crate::resources::{ResourceManager, resource_id};
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -995,6 +1000,17 @@ impl RepeatStepper {
     }
 }
 
+pub(super) struct PreparedParticleAssets {
+    pub(super) descriptions: PreparedParticleDescriptions,
+    pub(super) cpu: AtlasCpu,
+    pub(super) sprites: ParticleAtlasSprites,
+}
+
+struct PreparedPackAssets {
+    renderer: crate::renderer::PreparedResources,
+    particles: PreparedParticleAssets,
+}
+
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -1027,6 +1043,9 @@ pub struct AppCore {
     /// Canonical client-lifetime engine; world changes and reloads clear it in
     /// place.
     pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
+    particle_resources: Rc<MappedParticleResources>,
+    sprite_sources: SpriteSources,
+    _particle_types: ParticleTypes,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1156,7 +1175,7 @@ impl AppCore {
         presence: Option<DiscordPresence>,
         user: UserData,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let pack_type = PackType::ClientResources;
         let builtin_resources = BuiltinRepositorySource::new(None);
         let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
@@ -1185,9 +1204,12 @@ impl AppCore {
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
-        // Phase 7 must register providers before sharing these resources and bind
-        // real atlas sprites before spawning. The empty registry is valid meanwhile.
-        let particle_engine = ParticleEngine::new(Rc::new(MappedParticleResources::new()));
+        let particle_types = ParticleTypes::new()?;
+        let sprite_sources = SpriteSources::bootstrap();
+        let mut particle_resources = MappedParticleResources::new();
+        register_builtin_providers(&particle_types, &mut particle_resources);
+        let particle_resources = Rc::new(particle_resources);
+        let particle_engine = ParticleEngine::new(Rc::clone(&particle_resources));
         let mut core = Self {
             user,
             presence,
@@ -1214,6 +1236,9 @@ impl AppCore {
             resources,
             block_definitions: Rc::new(BlockDefinitions::new()),
             particle_engine,
+            particle_resources,
+            sprite_sources,
+            _particle_types: particle_types,
             pending_pack_download: None,
             audio,
             tick_accumulator: 0.0,
@@ -1243,7 +1268,7 @@ impl AppCore {
             game_dynamic_atlas_keys: HashSet::new(),
         };
         core.configure_resources();
-        core
+        Ok(core)
     }
 
     fn configure_resources(&mut self) {
@@ -1313,7 +1338,7 @@ impl AppCore {
 
     /// Activates the selection with nothing to prepare.
     fn reload_resources(&mut self) {
-        self.activate_resource_selection(None, |_| Ok(()))
+        self.activate_resource_selection(None, |_, _, _| Ok(()))
             .expect("activation with nothing to prepare can't fail");
     }
 
@@ -1322,7 +1347,11 @@ impl AppCore {
     fn activate_resource_selection<T>(
         &mut self,
         toggle: Option<(PackId, bool)>,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         self.resource_repository.reload();
         self.resource_repository
@@ -1337,13 +1366,17 @@ impl AppCore {
         let opened = self.resource_repository.open_all_enabled();
         let menu = &mut self.menu;
         let audio = &mut self.audio;
-        let prepared = self
-            .resources
-            .reload_with_preparation(opened, prepare, |resources| {
+        let particle_resources = &*self.particle_resources;
+        let sprite_sources = &self.sprite_sources;
+        let prepared = self.resources.reload_with_preparation(
+            opened,
+            |resources| prepare(resources, particle_resources, sprite_sources),
+            |resources| {
                 crate::lang::load(resources);
                 menu.load_splashes(resources);
                 audio.reload_assets(resources);
-            })?;
+            },
+        )?;
         self.asset_head_skins.clear();
         self.asset_head_skins_stale = true;
         self.head_skins_dirty = true;
@@ -1414,7 +1447,7 @@ impl AppCore {
         renderer: &mut Renderer,
         game: Option<&mut GameState>,
     ) -> std::io::Result<()> {
-        let prepared = self.activate_resource_selection(toggle, Renderer::prepare_resources)?;
+        let prepared = self.activate_resource_selection(toggle, Self::prepare_pack_assets)?;
         match game {
             Some(game) => self.reload_live_resource_assets(game, renderer, prepared),
             None => self.reload_pack_assets(renderer, prepared),
@@ -2019,7 +2052,7 @@ impl AppCore {
         &mut self,
         game: &mut GameState,
         renderer: &mut Renderer,
-        prepared: crate::renderer::PreparedResources,
+        prepared: PreparedPackAssets,
     ) {
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
@@ -2070,7 +2103,7 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        match self.remove_server_resource_packs(None, Renderer::prepare_resources) {
+        match self.remove_server_resource_packs(None, Self::prepare_pack_assets) {
             Ok(Some(prepared)) => {
                 renderer.clear_chunk_meshes();
                 self.reload_pack_assets(renderer, prepared);
@@ -2083,7 +2116,11 @@ impl AppCore {
     fn remove_server_resource_packs<T>(
         &mut self,
         uuid: Option<uuid::Uuid>,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<Option<T>> {
         let ids: Vec<_> = match uuid {
             Some(uuid) => self
@@ -2124,7 +2161,11 @@ impl AppCore {
         uuid: uuid::Uuid,
         hash: &str,
         path: std::path::PathBuf,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         let previous = self
             .server_resource_ids
@@ -2192,19 +2233,63 @@ impl AppCore {
         self.active_custom_resource_ids.is_empty()
     }
 
-    fn reload_pack_assets(
-        &mut self,
-        renderer: &mut Renderer,
-        prepared: crate::renderer::PreparedResources,
-    ) {
-        renderer.reload_assets(self.font_sources(), prepared);
-        self.particle_engine.clear_particles();
+    fn reload_pack_assets(&mut self, renderer: &mut Renderer, prepared: PreparedPackAssets) {
+        renderer.reload_assets(self.font_sources(), prepared.renderer, prepared.particles.cpu);
+        self.apply_particle_assets(prepared.particles.descriptions, prepared.particles.sprites);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.asset_reload_revision = self.asset_reload_revision.wrapping_add(1);
         self.complete_resource_selection();
+    }
+
+    fn prepare_pack_assets(
+        resources: &dyn ResourceManager,
+        particle_resources: &MappedParticleResources,
+        sprite_sources: &SpriteSources,
+    ) -> std::io::Result<PreparedPackAssets> {
+        Ok(PreparedPackAssets {
+            renderer: Renderer::prepare_resources(resources)?,
+            particles: Self::prepare_particle_assets(resources, particle_resources, sprite_sources)?,
+        })
+    }
+
+    pub(super) fn prepare_initial_particle_assets(&self) -> std::io::Result<PreparedParticleAssets> {
+        Self::prepare_particle_assets(
+            &self.resources,
+            &self.particle_resources,
+            &self.sprite_sources,
+        )
+    }
+
+    fn prepare_particle_assets(
+        resources: &dyn ResourceManager,
+        particle_resources: &MappedParticleResources,
+        sprite_sources: &SpriteSources,
+    ) -> std::io::Result<PreparedParticleAssets> {
+        let descriptions = particle_resources.prepare(resources)?;
+        let prepared =
+            SpriteSourceList::load(resources, &resource_id!("minecraft:particles"), sprite_sources)?
+                .prepare(resources, 0)?;
+        let sprites =
+            ParticleAtlasSprites::new(prepared.sprites, prepared.cpu.uv_map.missing_region());
+        Ok(PreparedParticleAssets {
+            descriptions,
+            cpu: prepared.cpu,
+            sprites,
+        })
+    }
+
+    pub(super) fn apply_particle_assets(
+        &mut self,
+        descriptions: PreparedParticleDescriptions,
+        sprites: ParticleAtlasSprites,
+    ) {
+        self.particle_resources
+            .apply(descriptions, &sprites, &mut || {
+                self.particle_engine.clear_particles();
+            });
     }
 
     /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
@@ -3650,7 +3735,7 @@ impl AppCore {
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
-                    match self.remove_server_resource_packs(id, Renderer::prepare_resources) {
+                    match self.remove_server_resource_packs(id, Self::prepare_pack_assets) {
                         Ok(Some(prepared)) => {
                             self.reload_live_resource_assets(game, renderer, prepared);
                         }
@@ -3751,7 +3836,7 @@ impl AppCore {
                             pending.id,
                             &pending.hash,
                             path,
-                            Renderer::prepare_resources,
+                            Self::prepare_pack_assets,
                         )
                         .map(|prepared| {
                             self.reload_live_resource_assets(game, renderer, prepared);

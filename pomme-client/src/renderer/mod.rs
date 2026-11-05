@@ -29,7 +29,7 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
-use chunk::atlas::{AtlasUVMap, TextureAtlas};
+use chunk::atlas::{AtlasCpu, AtlasUVMap, TextureAtlas};
 use chunk::buffer::{ChunkBufferStore, Layer, View};
 use chunk::mesh_source::MeshSource;
 use chunk::mesher::{ChunkMeshData, TerrainFormat};
@@ -310,6 +310,7 @@ pub struct Renderer {
     font_options: FontOptions,
 
     atlas: TextureAtlas,
+    particle_atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     entity_shadow_pipeline: EntityShadowPipeline,
     moving_block_buffers: MovingBlockBuffers,
@@ -359,6 +360,7 @@ const LOADING_SHARE: f32 = 0.5;
 /// window hang.
 pub struct RendererBoot {
     screen: boot::BootScreen,
+    particle_cpu: AtlasCpu,
     loaded: std::thread::JoinHandle<(BlockRenderAssets, chunk::atlas::AtlasCpu)>,
     model_inputs: Arc<crate::world::block::model::ModelInputs>,
     progress: Arc<LoadProgress>,
@@ -395,6 +397,7 @@ impl Renderer {
         window: &Window,
         resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
+        particle_cpu: AtlasCpu,
         use_vanilla_cache: bool,
         cache_dir: &Path,
         vsync: bool,
@@ -435,6 +438,7 @@ impl Renderer {
 
         let mut boot = RendererBoot {
             screen,
+            particle_cpu,
             loaded,
             model_inputs,
             progress,
@@ -457,6 +461,7 @@ impl Renderer {
         } = font_sources;
         let RendererBoot {
             screen,
+            particle_cpu,
             loaded,
             model_inputs,
             ..
@@ -612,12 +617,16 @@ impl Renderer {
         );
         let gpu_timer = rhi::backend::GpuTimer::new(&ctx, 16);
 
+        let particle_atlas = TextureAtlas::upload(&ctx.device, particle_cpu)
+            .map_err(|error| RendererError::Atlas(format!("upload particle atlas: {error}")))?;
+
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
             camera,
             render_assets,
             atlas,
+            particle_atlas,
             chunk_pipeline,
             lightmap,
             hand_pipeline,
@@ -1245,10 +1254,12 @@ impl Renderer {
 
     pub fn tick_texture_animations(&mut self) {
         self.atlas.tick_animations();
+        self.particle_atlas.tick_animations();
     }
 
     pub fn hold_texture_animations(&mut self) {
         self.atlas.hold_animations();
+        self.particle_atlas.hold_animations();
     }
 
     /// Redraws the lightmap with `info` on the next frame, as vanilla does
@@ -1849,6 +1860,7 @@ impl Renderer {
         &mut self,
         font_sources: FontSources<'_>,
         prepared: PreparedResources,
+        particle_cpu: AtlasCpu,
     ) {
         let resources = font_sources.resources;
         let PreparedResources {
@@ -1900,6 +1912,11 @@ impl Renderer {
         // GUI item slots cache fully rendered pixels. Releasing their keys is
         // enough: reused slots are marked stale and cleared before rebaking.
         self.gui_item_atlas.invalidate_all();
+
+        let particle_atlas = TextureAtlas::upload(&self.ctx.device, particle_cpu)
+            .expect("failed to rebuild particle atlas");
+        let mut retired = std::mem::replace(&mut self.particle_atlas, particle_atlas);
+        retired.destroy(&self.ctx.device);
 
         tracing::info!("Assets reloaded");
     }
@@ -2219,6 +2236,7 @@ impl Renderer {
             distant.buffers.record_model_upload(&encoder, frame);
             distant.buffers.record_uploads(&encoder, frame);
         }
+        self.particle_atlas.record_animation_upload(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
         self.gpu_stamp(&encoder, frame, "uploads");
 
@@ -3333,6 +3351,7 @@ impl Drop for Renderer {
         self.gui_item_pipeline.destroy(&self.ctx.device);
         self.gui_item_atlas.destroy(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
+        self.particle_atlas.destroy(&self.ctx.device);
 
         if let Some(timer) = &mut self.gpu_timer {
             timer.destroy(&self.ctx.device);

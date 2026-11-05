@@ -259,10 +259,10 @@ impl App {
         user: UserData,
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let pending_skin_uuid = user.has_profile.then_some(user.uuid);
-        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
-        Self {
+        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size)?;
+        Ok(Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
                 pending_skin_uuid,
@@ -280,7 +280,7 @@ impl App {
             #[cfg(feature = "test-harness")]
             harness: None,
             chunk_bench: None,
-        }
+        })
     }
 
     /// A `--chunk-bench` run: borderless, as most players play, never paused
@@ -741,15 +741,32 @@ impl ApplicationHandler for App {
                     }
                 };
 
+                let prepared_particles = match self.core.prepare_initial_particle_assets() {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::error!("Failed to prepare particle assets: {error}");
+                        event_loop.exit();
+                        return AppPhase::Setup {
+                            quick_play,
+                            pending_skin_uuid,
+                            loading: None,
+                        };
+                    }
+                };
                 let loading = match Renderer::begin(
                     &window,
                     self.core.resources(),
                     self.core.font_sources(),
+                    prepared_particles.cpu,
                     self.core.use_vanilla_block_cache(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
                 ) {
                     Ok(boot) => {
+                        self.core.apply_particle_assets(
+                            prepared_particles.descriptions,
+                            prepared_particles.sprites,
+                        );
                         window.request_redraw();
                         Some(Box::new(Loading {
                             boot,

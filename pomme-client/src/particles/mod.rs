@@ -4,11 +4,11 @@
 //! Smoke and Flame simulations and sprite providers accompany a CPU engine
 //! for SingleQuads and NoRender. AppCore owns and ticks the canonical engine
 //! with a fully bound context.
-//! Provider bootstrap, atlas sources, producers and GPU adoption remain
-//! deferred; the legacy store still produces and renders existing effects.
-//! Leaf values, typed tokens and sealed options erasure are real data/bridges,
-//! not placeholder behavior. The ordinary contract_exemplar needs a caller's
-//! real provider and resource/atlas initializer.
+//! Canonical providers share the independent particle atlas lifecycle.
+//! Producers and drawing remain deferred; the legacy store still renders
+//! existing effects. Leaf values, typed tokens and sealed options erasure are
+//! real data/bridges, not placeholder behavior. The ordinary contract_exemplar
+//! needs a caller's real provider and resource/atlas initializer.
 //!
 //! Root contracts describe identity, instances and extraction values. Resources
 //! own provider bindings, descriptions and sprites; runtime owns engine/groups;
@@ -24,6 +24,7 @@ mod contract_exemplars;
 mod particle;
 pub(crate) mod particle_engine_access;
 mod particle_provider;
+mod particle_types;
 mod registry;
 pub(crate) mod render;
 mod resources;
@@ -31,6 +32,8 @@ mod runtime;
 mod single_quad_particle;
 pub(crate) mod types;
 
+pub(crate) use self::builtin::register_builtin_providers;
+pub(crate) use self::particle_types::ParticleTypes;
 #[allow(
     unused_imports,
     reason = "Some contract exports await producer and renderer adoption"
