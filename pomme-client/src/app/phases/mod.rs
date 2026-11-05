@@ -107,6 +107,9 @@ pub enum AppPhase {
     Setup {
         quick_play: Option<crate::app::QuickPlay>,
         pending_skin_uuid: Option<uuid::Uuid>,
+        /// The window and its renderer, once `resumed` has started loading
+        /// them.
+        loading: Option<Box<Loading>>,
     },
     InMenu {
         gfx: Gfx,
@@ -134,6 +137,15 @@ pub enum AppPhase {
         world: World,
         then: AfterSaving,
     },
+}
+
+/// A window showing the splash while its renderer loads.
+pub struct Loading {
+    /// Declared before `window`, so its Vulkan resources go before the
+    /// surface's window does.
+    pub boot: crate::renderer::RendererBoot,
+    pub window: Arc<Window>,
+    pub next_frame: Instant,
 }
 
 /// Where a save leads, so closing the window can wait for it too.

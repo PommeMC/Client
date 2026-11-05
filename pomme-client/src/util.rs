@@ -70,6 +70,25 @@ impl JavaRandom {
     }
 }
 
+/// `f` over `items` on every core, the results in `items`' order. For work
+/// that waits on the disk: cold file opens wait on it and the virus scanner,
+/// not the CPU.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
+    let chunk = items.len().div_ceil(threads).max(1);
+    let f = &f;
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = items
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(f).collect::<Vec<_>>()))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("parallel_map worker panicked"))
+            .collect()
+    })
+}
+
 /// Writes `bytes` to a temp sibling and renames it over `path`, so a reader
 /// only ever sees the old or the new file, never a truncated one. No fsync,
 /// like vanilla `Options.save`.

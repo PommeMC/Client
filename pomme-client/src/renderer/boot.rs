@@ -8,53 +8,77 @@ use super::{RendererError, rhi};
 use crate::ui::font::FontSources;
 
 pub struct BootScreen {
-    menu: MenuOverlayPipeline,
-    swapchain: rhi::backend::Swapchain,
-    frames: rhi::backend::Frames,
+    /// Taken by [`Self::into_parts`] when the renderer is built on them.
+    parts: Option<BootParts>,
     vsync: bool,
-    ctx: rhi::backend::Context,
+}
+
+pub(super) struct BootParts {
+    pub ctx: rhi::backend::Context,
+    pub swapchain: rhi::backend::Swapchain,
+    pub frames: rhi::backend::Frames,
+    pub menu: MenuOverlayPipeline,
 }
 
 impl BootScreen {
     pub fn new(
         window: &Window,
         font_sources: FontSources<'_>,
+        bedrock_ui_dir: Option<&std::path::Path>,
         vsync: bool,
     ) -> Result<Self, RendererError> {
-        let (ctx, swapchain, frames, menu) = bring_up(window, font_sources, None, vsync)?;
+        let (ctx, swapchain, frames, menu) = bring_up(window, font_sources, bedrock_ui_dir, vsync)?;
         Ok(Self {
-            menu,
-            swapchain,
-            frames,
+            parts: Some(BootParts {
+                ctx,
+                swapchain,
+                frames,
+                menu,
+            }),
             vsync,
-            ctx,
         })
     }
 
     /// A minimised window (0×0) keeps the old swapchain, as
     /// `Renderer::resize` does, until it's restored.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
+        let Some(parts) = &mut self.parts else {
+            return Ok(());
+        };
         if width == 0 || height == 0 {
             return Ok(());
         }
-        self.ctx.device.wait_idle();
-        self.swapchain
-            .rebuild(&self.ctx, &mut self.frames, width, height, self.vsync)?;
+        parts.ctx.device.wait_idle();
+        parts
+            .swapchain
+            .rebuild(&parts.ctx, &mut parts.frames, width, height, self.vsync)?;
         Ok(())
     }
 
     pub fn draw(&mut self, progress: f32, status: &str) -> Result<(), RendererError> {
-        let extent = self.swapchain.extent;
+        let Some(parts) = &mut self.parts else {
+            return Ok(());
+        };
+        let extent = parts.swapchain.extent;
         super::Renderer::render_splash(
-            &self.ctx,
-            &self.swapchain,
-            &mut self.frames,
-            &mut self.menu,
+            &parts.ctx,
+            &parts.swapchain,
+            &mut parts.frames,
+            &mut parts.menu,
             extent.width as f32,
             extent.height as f32,
             progress,
             status,
         )
+    }
+
+    pub(super) fn vsync(&self) -> bool {
+        self.vsync
+    }
+
+    /// The GPU context and splash, for the renderer to build on.
+    pub(super) fn into_parts(mut self) -> BootParts {
+        self.parts.take().expect("boot screen parts are taken once")
     }
 }
 
@@ -95,9 +119,11 @@ pub(super) fn bring_up(
 
 impl Drop for BootScreen {
     fn drop(&mut self) {
-        self.ctx.device.wait_idle();
-        self.frames.destroy(&self.ctx.device);
-        self.menu.destroy(&self.ctx.device);
-        self.swapchain.destroy(&self.ctx);
+        if let Some(mut parts) = self.parts.take() {
+            parts.ctx.device.wait_idle();
+            parts.frames.destroy(&parts.ctx.device);
+            parts.menu.destroy(&parts.ctx.device);
+            parts.swapchain.destroy(&parts.ctx);
+        }
     }
 }

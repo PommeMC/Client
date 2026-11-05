@@ -54,6 +54,7 @@ impl CpuMeshAssets {
             &asset_index,
             None,
             None,
+            None,
         ));
         let (texture_names, generated_item_textures) = atlas_texture_names(&render_assets);
         let uv_map = TextureAtlas::build_cpu(
@@ -61,6 +62,7 @@ impl CpuMeshAssets {
             &asset_index,
             &texture_names,
             &generated_item_textures,
+            None,
             None,
         )
         .uv_map;

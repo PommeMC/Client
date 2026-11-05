@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
 use super::block_state_table::BlockStateTable;
+use super::json_bundle::JsonBundle;
 use super::model;
 use super::model::BakedModel;
 use crate::assets::AssetIndex;
@@ -141,12 +143,62 @@ impl OwnedBlockRenderView {
     }
 }
 
+/// The stages of loading the block models and their atlas, each an equal
+/// share of the progress.
+#[derive(Clone, Copy)]
+pub enum LoadStage {
+    Files,
+    Blockstates,
+    Items,
+    Textures,
+}
+
+impl LoadStage {
+    const ALL: [Self; 4] = [Self::Files, Self::Blockstates, Self::Items, Self::Textures];
+}
+
+/// How far loading the block models and their atlas has got, for the splash.
+#[derive(Default)]
+pub struct LoadProgress {
+    stage: AtomicU32,
+    done: AtomicU32,
+    total: AtomicU32,
+}
+
+impl LoadProgress {
+    pub(crate) fn begin_stage(progress: Option<&Self>, stage: LoadStage, total: usize) {
+        if let Some(progress) = progress {
+            progress.done.store(0, Ordering::Relaxed);
+            progress.total.store(total as u32, Ordering::Relaxed);
+            progress.stage.store(stage as u32, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn step(progress: Option<&Self>) {
+        if let Some(progress) = progress {
+            progress.done.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn stage(&self) -> LoadStage {
+        LoadStage::ALL[self.stage.load(Ordering::Relaxed) as usize]
+    }
+
+    pub fn fraction(&self) -> f32 {
+        let total = self.total.load(Ordering::Relaxed).max(1);
+        let done = self.done.load(Ordering::Relaxed).min(total);
+        let stage = self.stage.load(Ordering::Relaxed);
+        (stage as f32 + done as f32 / total as f32) / LoadStage::ALL.len() as f32
+    }
+}
+
 impl BlockRenderAssets {
     pub fn load(
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         cache_dir: Option<&Path>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
+        progress: Option<&LoadProgress>,
     ) -> Self {
         // Only vanilla textures are cached, so a cache shared between
         // profiles never carries one profile's resource packs into another.
@@ -154,7 +206,14 @@ impl BlockRenderAssets {
             .filter(|_| packs.is_none())
             .map(|dir| dir.join(BLOCK_CACHE_FILE));
 
-        let textures = cache_path.as_deref().and_then(load_cache);
+        // The bundle is the jar's files alone, so packs read from disk.
+        let bundle = packs
+            .is_none()
+            .then(|| JsonBundle::load(jar_assets_dir, asset_index, cache_dir, progress));
+        let bundle = bundle.as_ref();
+
+        let textures: Option<HashMap<String, FaceTextures>> =
+            cache_path.as_deref().and_then(load_cache);
         if let Some(cached) = &textures {
             tracing::info!(
                 "Block render assets: {} blocks (cached textures)",
@@ -163,7 +222,8 @@ impl BlockRenderAssets {
         }
 
         let textures = textures.unwrap_or_else(|| {
-            let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
+            let mut textures =
+                model::load_all_block_textures(jar_assets_dir, asset_index, packs, bundle);
 
             textures
                 .entry("water".into())
@@ -179,8 +239,20 @@ impl BlockRenderAssets {
             textures
         });
 
-        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let baked_items = model::bake_item_models(jar_assets_dir, asset_index, packs);
+        LoadProgress::begin_stage(
+            progress,
+            LoadStage::Blockstates,
+            bundle.map_or(0, |b| b.blockstates().len()),
+        );
+        let (baked, multipart) =
+            model::bake_all_models(jar_assets_dir, asset_index, packs, bundle, progress);
+        LoadProgress::begin_stage(
+            progress,
+            LoadStage::Items,
+            bundle.map_or(0, |b| b.item_names().len()),
+        );
+        let baked_items =
+            model::bake_item_models(jar_assets_dir, asset_index, packs, bundle, progress);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
@@ -584,20 +656,42 @@ fn constraints_match<'a>(
     })
 }
 
-fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+pub(super) fn load_cache<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let data = std::fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
 }
 
 /// Atomic, since every client of a version shares the one cache.
-fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
+pub(super) fn save_cache<T: Serialize>(path: &Path, value: &T) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(json) = serde_json::to_string(textures)
-        && let Err(e) = crate::util::write_atomic(path, json.as_bytes())
+    if let Ok(json) = serde_json::to_vec(value)
+        && let Err(e) = crate::util::write_atomic(path, &json)
     {
-        tracing::warn!("Failed to write block cache: {e}");
+        tracing::warn!("Failed to write {}: {e}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod load_progress_tests {
+    use super::{LoadProgress, LoadStage};
+
+    #[test]
+    fn each_stage_fills_an_equal_share() {
+        let progress = LoadProgress::default();
+        assert_eq!(progress.fraction(), 0.0);
+        LoadProgress::begin_stage(Some(&progress), LoadStage::Blockstates, 4);
+        LoadProgress::step(Some(&progress));
+        assert_eq!(progress.fraction(), (1.0 + 0.25) / 4.0);
+        // Steps past the total don't run into the next stage.
+        for _ in 0..10 {
+            LoadProgress::step(Some(&progress));
+        }
+        assert_eq!(progress.fraction(), 2.0 / 4.0);
+        LoadProgress::begin_stage(Some(&progress), LoadStage::Items, 0);
+        assert_eq!(progress.fraction(), 2.0 / 4.0);
+        assert!(matches!(progress.stage(), LoadStage::Items));
     }
 }
 

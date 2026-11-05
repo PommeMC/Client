@@ -5,7 +5,8 @@ use std::sync::{Arc, LazyLock, RwLock};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
-use super::render_assets::{FaceTextures, Tint};
+use super::json_bundle::JsonBundle;
+use super::render_assets::{FaceTextures, LoadProgress, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::chunk::mesher::Colormap;
 
@@ -76,6 +77,23 @@ struct ModelFile {
     display: HashMap<String, serde_json::Value>,
     gui_light: Option<GuiLight>,
     ambientocclusion: Option<bool>,
+}
+
+/// Model files parsed so far, and the bundle they're read from when there's
+/// one. A model that's missing or doesn't parse is remembered too, so it's
+/// read and reported once.
+struct ModelLoader<'a> {
+    models: HashMap<String, Option<ModelFile>>,
+    bundle: Option<&'a JsonBundle>,
+}
+
+impl<'a> ModelLoader<'a> {
+    fn new(bundle: Option<&'a JsonBundle>) -> Self {
+        Self {
+            models: HashMap::new(),
+            bundle,
+        }
+    }
 }
 
 #[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,14 +535,16 @@ pub fn load_all_block_textures(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    bundle: Option<&JsonBundle>,
 ) -> HashMap<String, FaceTextures> {
     let mut results = HashMap::new();
-    let mut model_cache = HashMap::new();
+    let mut model_cache = ModelLoader::new(bundle);
 
     for_each_blockstate(
         jar_assets_dir,
         asset_index,
         packs,
+        bundle,
         |block_name, blockstate| {
             let model_ref = extract_default_model_ref(blockstate)?;
             let resolved = resolve_model(
@@ -554,18 +574,22 @@ pub fn bake_all_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    bundle: Option<&JsonBundle>,
+    progress: Option<&LoadProgress>,
 ) -> (BakedModelMap, MultipartMap) {
     let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
-    let mut model_cache = HashMap::new();
+    let mut model_cache = ModelLoader::new(bundle);
     let mut total = 0u32;
 
     for_each_blockstate(
         jar_assets_dir,
         asset_index,
         packs,
+        bundle,
         |block_name, blockstate| {
             total += 1;
+            LoadProgress::step(progress);
             let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
             // Variants (and multipart cases) naming the same model, rotation
             // and uvlock share one bake. Per block, since tints are.
@@ -624,16 +648,22 @@ pub fn bake_all_models(
     );
 
     let mut missing_names: Vec<String> = Vec::new();
-    for_each_blockstate(jar_assets_dir, asset_index, packs, |block_name, _| {
-        if !results.contains_key(block_name)
-            && !multipart_results.contains_key(block_name)
-            && !crate::world::block_entity::is_block_entity_block(block_name)
-            && !crate::world::block_entity::is_invisible_block(block_name)
-        {
-            missing_names.push(block_name.to_string());
-        }
-        Some(())
-    });
+    for_each_blockstate(
+        jar_assets_dir,
+        asset_index,
+        packs,
+        bundle,
+        |block_name, _| {
+            if !results.contains_key(block_name)
+                && !multipart_results.contains_key(block_name)
+                && !crate::world::block_entity::is_block_entity_block(block_name)
+                && !crate::world::block_entity::is_invisible_block(block_name)
+            {
+                missing_names.push(block_name.to_string());
+            }
+            Some(())
+        },
+    );
     missing_names.sort();
     let baked_count = results.len() + multipart_results.len();
     tracing::info!(
@@ -676,7 +706,7 @@ pub enum ItemTintSource {
 /// Every `minecraft/items/*.json` name across the jar and the active packs,
 /// so a pack can add an item, not only replace one. Vanilla walks every pack
 /// in `FallbackResourceManager`.
-fn item_definition_names(
+pub(super) fn item_definition_names(
     jar_assets_dir: &Path,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> std::collections::BTreeSet<String> {
@@ -812,6 +842,8 @@ pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    bundle: Option<&JsonBundle>,
+    progress: Option<&LoadProgress>,
 ) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
@@ -825,7 +857,7 @@ pub fn bake_item_models(
         "minecraft/textures/colormap/grass.png",
         packs,
     );
-    let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
+    let mut model_cache = ModelLoader::new(bundle);
 
     let mut bake = |name: &str, parts: &[ModelPart]| {
         let mut merged: Option<BakedModel> = None;
@@ -942,12 +974,24 @@ pub fn bake_item_models(
         }
     };
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
+    let item_names = match bundle {
+        Some(bundle) => bundle.item_names().to_vec(),
+        None => item_definition_names(jar_assets_dir, packs)
+            .into_iter()
+            .collect(),
+    };
+    for item_name in &item_names {
+        LoadProgress::step(progress);
         let item_name = item_name.as_str();
         let item_asset_key = format!("minecraft/items/{item_name}.json");
-        let item_path =
-            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
-        let Ok(contents) = std::fs::read_to_string(item_path) else {
+        let Some(contents) = read_json(bundle, &item_asset_key, || {
+            Some(resolve_asset_path_with_packs(
+                jar_assets_dir,
+                asset_index,
+                &item_asset_key,
+                packs,
+            ))
+        }) else {
             continue;
         };
         let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
@@ -1576,8 +1620,17 @@ fn for_each_blockstate(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    bundle: Option<&JsonBundle>,
     mut callback: impl FnMut(&str, &BlockstateFile) -> Option<()>,
 ) {
+    if let Some(bundle) = bundle {
+        for (name, contents) in bundle.blockstates() {
+            if let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(contents) {
+                callback(name, &blockstate);
+            }
+        }
+        return;
+    }
     let Some(blockstates_dir) = resolve_blockstates_dir(jar_assets_dir, asset_index, packs) else {
         tracing::warn!("Blockstates directory not found");
         return;
@@ -1611,7 +1664,7 @@ fn for_each_blockstate(
     }
 }
 
-fn resolve_blockstates_dir(
+pub(super) fn resolve_blockstates_dir(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
@@ -1687,7 +1740,7 @@ fn resolve_model(
     model_id: &str,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-    cache: &mut HashMap<String, ModelFile>,
+    cache: &mut ModelLoader<'_>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
@@ -1769,27 +1822,49 @@ fn load_model<'a>(
     model_id: &str,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-    cache: &'a mut HashMap<String, ModelFile>,
+    cache: &'a mut ModelLoader<'_>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> Option<&'a ModelFile> {
-    if cache.contains_key(model_id) {
-        return cache.get(model_id);
+    if !cache.models.contains_key(model_id) {
+        let model = read_model(model_id, jar_assets_dir, asset_index, cache.bundle, packs);
+        cache.models.insert(model_id.to_string(), model);
     }
+    cache.models.get(model_id)?.as_ref()
+}
 
+fn read_model(
+    model_id: &str,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    bundle: Option<&JsonBundle>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> Option<ModelFile> {
     let asset_key = model_id_to_asset_key(model_id);
-    let file_path = resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)?;
-
-    let contents = std::fs::read_to_string(&file_path).ok()?;
-    let model: ModelFile = match serde_json::from_str(&contents) {
-        Ok(model) => model,
+    let contents = read_json(bundle, &asset_key, || {
+        resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)
+    })?;
+    match serde_json::from_str(&contents) {
+        Ok(model) => Some(model),
         Err(error) => {
             // Vanilla rejects the model too, but it says so rather than going quiet.
             tracing::warn!("{model_id}: model JSON is invalid ({error}); skipping");
-            return None;
+            None
         }
-    };
-    cache.insert(model_id.to_string(), model);
-    cache.get(model_id)
+    }
+}
+
+/// `asset_key`'s contents from the bundle, else from `path` on disk.
+fn read_json<'b>(
+    bundle: Option<&'b JsonBundle>,
+    asset_key: &str,
+    path: impl FnOnce() -> Option<PathBuf>,
+) -> Option<std::borrow::Cow<'b, str>> {
+    if let Some(contents) = bundle.and_then(|bundle| bundle.get(asset_key)) {
+        return Some(std::borrow::Cow::Borrowed(contents));
+    }
+    std::fs::read_to_string(path()?)
+        .ok()
+        .map(std::borrow::Cow::Owned)
 }
 
 fn resolve_model_path(
@@ -3063,11 +3138,15 @@ mod tests {
         .unwrap();
         std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
 
-        let baked = bake_item_models(&jar, &None, None);
+        let baked = bake_item_models(&jar, &None, None, None, None);
         assert_eq!(
             baked.flat_texture_keys.get("holey").map(Vec::as_slice),
             Some([Some("item/zero".to_string())].as_slice())
         );
+        // Read through the bundle, the same files bake the same.
+        let bundle = JsonBundle::load(&jar, &None, None, None);
+        let from_bundle = bake_item_models(&jar, &None, None, Some(&bundle), None);
+        assert_eq!(from_bundle.flat_texture_keys, baked.flat_texture_keys);
         assert_eq!(
             baked.flat_texture_keys.get("unresolved").map(Vec::as_slice),
             Some(
@@ -3099,7 +3178,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = HashMap::new();
+        let mut cache = ModelLoader::new(None);
         let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
         assert_eq!(resolved.gui_transform, gui_transform(135.0));
         assert_eq!(resolved.gui_light, GuiLight::Front);
@@ -3159,7 +3238,7 @@ mod tests {
 
         let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
         packs.enable_local_pack("test_pack");
-        let baked = bake_item_models(&jar, &None, Some(&packs));
+        let baked = bake_item_models(&jar, &None, Some(&packs), None, None);
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
             Some([Some("other:item/replacement".to_string())].as_slice())
@@ -3204,7 +3283,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = HashMap::new();
+        let mut cache = ModelLoader::new(None);
         let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);

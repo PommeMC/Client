@@ -25,7 +25,9 @@ use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, start_chunk_load, update_game};
 use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
-use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
+use crate::app::phases::{
+    AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Loading, Panorama,
+};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
@@ -246,6 +248,7 @@ impl App {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
                 pending_skin_uuid,
+                loading: None,
             }),
             install: install::Install::new(&core, false),
             installed_window: None,
@@ -378,6 +381,78 @@ impl App {
         });
     }
 
+    /// Finishes the renderer a loading `Setup` started, waiting for its block
+    /// models if they're still loading, and opens the menu (or the quick
+    /// play).
+    fn finish_loading(&mut self, event_loop: &ActiveEventLoop) {
+        self.phase.transition(|app| match app {
+            AppPhase::Setup {
+                quick_play,
+                mut pending_skin_uuid,
+                loading: Some(loading),
+            } => {
+                let Loading { boot, window, .. } = *loading;
+                let mut renderer = match Renderer::finish(
+                    boot,
+                    self.core.font_sources(),
+                    &self.core.data_dirs.game_dir,
+                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("Failed to create renderer: {e}");
+                        event_loop.exit();
+                        return AppPhase::Setup {
+                            quick_play,
+                            pending_skin_uuid,
+                            loading: None,
+                        };
+                    }
+                };
+
+                if let Some(p) = &mut self.core.presence {
+                    p.set_in_menu(&self.core.version);
+                }
+
+                if let Some(uuid) = pending_skin_uuid.take() {
+                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
+                    self.core.menu.set_player_face(Some(&uuid));
+                }
+
+                self.core.apply_cursor_grab(&window, None);
+
+                let gfx = Gfx {
+                    renderer: ManuallyDrop::new(renderer),
+                    window,
+                    last_frame: Instant::now(),
+                    fps_counter: FpsCounter::new(),
+                };
+                let panorama = Panorama::new();
+                let launch = match quick_play {
+                    Some(play) if self.core.menu.account_gated() => {
+                        self.core.deferred_quick_play = Some(play);
+                        MenuUpdateResult::None
+                    }
+                    Some(play) => in_menu::quick_play(&mut self.core, play),
+                    None => MenuUpdateResult::None,
+                };
+                match launch {
+                    MenuUpdateResult::Connect {
+                        connect_args,
+                        world,
+                    } => start_connecting(&mut self.core, gfx, panorama, *connect_args, world),
+                    _ => AppPhase::InMenu { gfx, panorama },
+                }
+            }
+            _ => app,
+        });
+        // The first frame of the normal loop, which asks for each next one
+        // itself.
+        if let Some(gfx) = self.phase.gfx_mut() {
+            gfx.window.request_redraw();
+        }
+    }
+
     /// Updates a release build to the newest release before the menu.
     pub fn check_for_update(&mut self) {
         self.install = install::Install::new(&self.core, true);
@@ -496,10 +571,21 @@ impl ApplicationHandler for App {
         self.core.menu.flush_settings(&self.core.input.key_bindings);
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         self.suspended = true;
         if let Some(install) = &mut self.install {
             install.suspend();
+        }
+        // The surface goes with the window, so a loading renderer finishes
+        // first and then suspends like any other.
+        if matches!(
+            self.phase.get(),
+            AppPhase::Setup {
+                loading: Some(_),
+                ..
+            }
+        ) {
+            self.finish_loading(event_loop);
         }
         // Android may kill a suspended app without dropping anything.
         if let AppPhase::Connecting { game, .. } | AppPhase::InGame { game, .. } =
@@ -528,7 +614,8 @@ impl ApplicationHandler for App {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
-                mut pending_skin_uuid,
+                pending_skin_uuid,
+                loading: None,
             } => {
                 // The first-run download's window, if it ran.
                 let window = match self
@@ -543,62 +630,36 @@ impl ApplicationHandler for App {
                         return AppPhase::Setup {
                             quick_play,
                             pending_skin_uuid,
+                            loading: None,
                         };
                     }
                 };
 
-                let mut renderer = match Renderer::new(
-                    Arc::clone(&window),
+                let loading = match Renderer::begin(
+                    &window,
                     self.core.font_sources(),
-                    &self.core.data_dirs.game_dir,
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
-                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                     &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
-                    Ok(r) => r,
+                    Ok(boot) => {
+                        window.request_redraw();
+                        Some(Box::new(Loading {
+                            boot,
+                            window,
+                            next_frame: Instant::now(),
+                        }))
+                    }
                     Err(e) => {
                         tracing::error!("Failed to create renderer: {e}");
                         event_loop.exit();
-                        return AppPhase::Setup {
-                            quick_play,
-                            pending_skin_uuid,
-                        };
+                        None
                     }
                 };
-
-                if let Some(p) = &mut self.core.presence {
-                    p.set_in_menu(&self.core.version);
-                }
-
-                if let Some(uuid) = pending_skin_uuid.take() {
-                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
-                    self.core.menu.set_player_face(Some(&uuid));
-                }
-
-                self.core.apply_cursor_grab(&window, None);
-
-                let gfx = Gfx {
-                    renderer: ManuallyDrop::new(renderer),
-                    window,
-                    last_frame: Instant::now(),
-                    fps_counter: FpsCounter::new(),
-                };
-                let panorama = Panorama::new();
-                let launch = match quick_play {
-                    Some(play) if self.core.menu.account_gated() => {
-                        self.core.deferred_quick_play = Some(play);
-                        MenuUpdateResult::None
-                    }
-                    Some(play) => in_menu::quick_play(&mut self.core, play),
-                    None => MenuUpdateResult::None,
-                };
-                match launch {
-                    MenuUpdateResult::Connect {
-                        connect_args,
-                        world,
-                    } => start_connecting(&mut self.core, gfx, panorama, *connect_args, world),
-                    _ => AppPhase::InMenu { gfx, panorama },
+                AppPhase::Setup {
+                    quick_play,
+                    pending_skin_uuid,
+                    loading,
                 }
             }
             _ => app,
@@ -626,11 +687,6 @@ impl ApplicationHandler for App {
                         // renderer on; the real `resumed` builds it.
                         if !self.suspended {
                             self.resumed(event_loop);
-                            // The first frame of the normal loop, which asks
-                            // for each next one itself.
-                            if let Some(gfx) = self.phase.gfx_mut() {
-                                gfx.window.request_redraw();
-                            }
                         }
                     }
                 }
@@ -668,6 +724,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 if let Some(app_rt) = self.phase.gfx_mut() {
                     app_rt.renderer.resize(new_size);
+                } else if let AppPhase::Setup {
+                    loading: Some(loading),
+                    ..
+                } = self.phase.get_mut()
+                    && let Err(e) = loading.boot.resize(new_size.width, new_size.height)
+                {
+                    tracing::error!("Failed to resize the splash: {e}");
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -1078,7 +1141,15 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if matches!(self.phase.get(), AppPhase::Setup { .. }) {
+                if let AppPhase::Setup { loading, .. } = self.phase.get_mut() {
+                    let Some(loading) = loading else {
+                        return;
+                    };
+                    if !loading.boot.is_ready() {
+                        loading.boot.draw_splash();
+                        return;
+                    }
+                    self.finish_loading(event_loop);
                     return;
                 }
 
@@ -1317,6 +1388,23 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Vanilla `FramerateLimitTracker` holds its loading screen to 60 fps
+        // (`OUT_OF_LEVEL_MENU_LIMIT`).
+        if let AppPhase::Setup {
+            loading: Some(loading),
+            ..
+        } = self.phase.get_mut()
+        {
+            let now = Instant::now();
+            if now >= loading.next_frame {
+                loading.next_frame = now + std::time::Duration::from_secs(1) / 60;
+                loading.window.request_redraw();
+            }
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                loading.next_frame,
+            ));
+            return;
+        }
         // UIKit ignores a redraw asked for mid-draw, which is where each frame
         // asks for the next, so iOS asks again once drawing is done.
         #[cfg(target_os = "ios")]
