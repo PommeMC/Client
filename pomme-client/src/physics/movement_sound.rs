@@ -15,12 +15,12 @@
 use glam::DVec3;
 
 use super::collision::CollisionWorld;
-use super::movement::on_pos;
+use super::movement::{is_climbable_state, on_pos};
 use crate::attribute::AttributeKind;
 use crate::player::LocalPlayer;
 use crate::position::BlockPos;
 use crate::world::block::sound::block_sounds_for_id;
-use crate::world::block::{BlockStateData, BlockTags};
+use crate::world::block::{BlockStateData, BlockStateTable, BlockTags};
 
 /// `Player.getFallSounds`.
 const SMALL_FALL: &str = "entity.player.small_fall";
@@ -56,6 +56,8 @@ pub struct MovementSounds {
     ticks_since_chime: u32,
     /// Vanilla `Entity.firstTick`: no splash for spawning in water.
     pub(crate) first_tick: bool,
+    /// The player's own move this tick, emitted by [`tick`] once `travel`
+    /// is done.
     pub(super) last_move: Option<Move>,
     /// This tick's sounds, for the caller to play.
     pub pending: Vec<PlayerSound>,
@@ -75,9 +77,8 @@ impl Default for MovementSounds {
     }
 }
 
-/// `Entity.move`'s `applyMovementEmissionAndPlaySound` for this tick's move.
-/// `Player.getMovementEmission` emits nothing while flying or sneaking on
-/// the ground, and `Entity.move` skips it for a passenger.
+/// [`emit`]s the player's own move this tick; `Entity.move` skips a
+/// passenger's.
 pub(super) fn tick(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
@@ -87,20 +88,34 @@ pub(super) fn tick(
 ) {
     let sounds = &mut player.movement_sounds;
     sounds.ticks_since_chime = sounds.ticks_since_chime.saturating_add(1);
-    let Some(mv) = sounds.last_move.take() else {
-        return;
-    };
-    if player.flying || (player.on_ground && shift_down) || is_passenger {
+    if let Some(mv) = sounds.last_move.take()
+        && !is_passenger
+    {
+        emit(player, world, tags, shift_down, mv);
+    }
+}
+
+/// `Entity.move`'s `applyMovementEmissionAndPlaySound` for one move.
+/// `Player.getMovementEmission` emits nothing while flying or sneaking on
+/// the ground.
+pub(super) fn emit(
+    player: &mut LocalPlayer,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    shift_down: bool,
+    mv: Move,
+) {
+    if player.flying || (player.on_ground && shift_down) {
         return;
     }
 
-    let effect_pos = on_pos(player, world, 0.2);
-    let support_pos = on_pos(player, world, 1.0e-5);
+    let effect_pos = on_pos(player, world, tags, 0.2);
+    let support_pos = on_pos(player, world, tags, 1.0e-5);
     let support = world.block_data(support_pos);
     let moved = if is_state_climbable(support, tags) {
         mv.movement.length()
     } else {
-        mv.movement.x.hypot(mv.movement.z)
+        (mv.movement.x * mv.movement.x + mv.movement.z * mv.movement.z).sqrt()
     };
     player.movement_sounds.move_dist += (moved * f64::from(0.6_f32)) as f32;
 
@@ -131,7 +146,6 @@ pub(super) fn tick(
 
 /// `Entity.vibrationAndSoundEffectsFromBlock`: whether stepping on the block
 /// counts, playing its step sound when `with_sound`.
-#[allow(clippy::too_many_arguments)]
 fn step_on(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
@@ -172,32 +186,39 @@ fn play_step_sound(
     on: &BlockStateData,
     mv: Move,
 ) {
+    let table = world.block_state_table;
     if player.in_water {
         water_swim_sound(player, mv.velocity);
-        muffled_step(&mut player.movement_sounds, on);
+        muffled_step(&mut player.movement_sounds, table, on);
         return;
     }
     let sounds = &mut player.movement_sounds;
     // `Entity.getPrimaryStepSoundBlockPos`.
     let above = world.block_data(BlockPos::new(pos.x, pos.y + 1, pos.z));
     if tags.contains("minecraft:combination_step_sound_blocks", above.id()) {
-        step(sounds, above, 0.15, 1.0);
-        muffled_step(sounds, on);
+        step(sounds, table, above, 0.15, 1.0);
+        muffled_step(sounds, table, on);
     } else if tags.contains("minecraft:inside_step_sound_blocks", above.id()) {
-        step(sounds, above, 0.15, 1.0);
+        step(sounds, table, above, 0.15, 1.0);
     } else {
-        step(sounds, on, 0.15, 1.0);
+        step(sounds, table, on, 0.15, 1.0);
     }
 }
 
 /// `Entity.playMuffledStepSound`.
-fn muffled_step(sounds: &mut MovementSounds, state: &BlockStateData) {
-    step(sounds, state, 0.05, 0.8);
+fn muffled_step(sounds: &mut MovementSounds, table: BlockStateTable, state: &BlockStateData) {
+    step(sounds, table, state, 0.05, 0.8);
 }
 
 /// `state`'s step sound, its `SoundType` volume and pitch scaled.
-fn step(sounds: &mut MovementSounds, state: &BlockStateData, volume: f32, pitch: f32) {
-    let sound_type = block_sounds_for_id(state.id());
+fn step(
+    sounds: &mut MovementSounds,
+    table: BlockStateTable,
+    state: &BlockStateData,
+    volume: f32,
+    pitch: f32,
+) {
+    let sound_type = block_sounds_for_id(table, state.id());
     play(
         sounds,
         &sound_type.step_event,
@@ -262,7 +283,12 @@ pub(super) fn land(
                 1.0,
             );
             if cause_fall_damage(player, world, fall, 0.2) {
-                block_fall_sound(&mut player.movement_sounds, "honey_block", false);
+                block_fall_sound(
+                    &mut player.movement_sounds,
+                    world.block_state_table,
+                    "honey_block",
+                    false,
+                );
             }
         }
         "pointed_dripstone"
@@ -326,14 +352,24 @@ fn cause_fall_damage(
         player.position.z.floor() as i32,
     ));
     if !below.is_air() {
-        block_fall_sound(&mut player.movement_sounds, below.id(), true);
+        block_fall_sound(
+            &mut player.movement_sounds,
+            world.block_state_table,
+            below.id(),
+            true,
+        );
     }
     true
 }
 
 /// Block `id`'s fall sound, at half its volume and three quarters its pitch.
-fn block_fall_sound(sounds: &mut MovementSounds, id: &str, unless_silent: bool) {
-    let sound_type = block_sounds_for_id(id);
+fn block_fall_sound(
+    sounds: &mut MovementSounds,
+    table: BlockStateTable,
+    id: &str,
+    unless_silent: bool,
+) {
+    let sound_type = block_sounds_for_id(table, id);
     queue(
         sounds,
         &sound_type.fall_event,
@@ -345,7 +381,7 @@ fn block_fall_sound(sounds: &mut MovementSounds, id: &str, unless_silent: bool) 
 
 /// `Entity.playAmethystStepSound`.
 fn amethyst_chime(sounds: &mut MovementSounds) {
-    let decay = 0.997_f64.powi(sounds.ticks_since_chime as i32) as f32;
+    let decay = 0.997_f64.powf(f64::from(sounds.ticks_since_chime)) as f32;
     let intensity = (sounds.crystal_sound_intensity * decay + 0.07).min(1.0);
     sounds.crystal_sound_intensity = intensity;
     let pitch = 0.5 + intensity * fastrand::f32() * 1.2;
@@ -379,7 +415,7 @@ fn queue(
 
 /// `Entity.isStateClimbable`.
 fn is_state_climbable(state: &BlockStateData, tags: &BlockTags) -> bool {
-    tags.contains("minecraft:climbable", state.id()) || state.id() == "powder_snow"
+    is_climbable_state(state, tags) || state.id() == "powder_snow"
 }
 
 #[cfg(test)]
@@ -387,7 +423,7 @@ mod tests {
     use glam::dvec3;
 
     use super::*;
-    use crate::world::block::{BlockStateTable, block_tags_for_test};
+    use crate::world::block::block_tags_for_test;
     use crate::world::chunk::ChunkStore;
 
     fn tags() -> BlockTags {

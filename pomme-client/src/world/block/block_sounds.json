@@ -1419,5 +1419,13 @@
     "yellow_wool_stairs": 20,
     "zombie_head": 5,
     "zombie_wall_head": 5
+  },
+  "versions": {
+    "1.21.4": {"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4},
+    "1.21.3": {"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4},
+    "1.21.1": {"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4,"spawner":4},
+    "1.20.4": {"cobweb":5,"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4,"spawner":4},
+    "1.20.2": {"cobweb":5,"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4,"spawner":4},
+    "1.20.1": {"cobweb":5,"comparator":0,"heavy_weighted_pressure_plate":4,"iron_bars":4,"iron_block":4,"iron_door":4,"iron_trapdoor":4,"jukebox":5,"lever":0,"repeater":0,"spawner":4,"sponge":2,"tripwire_hook":5,"wet_sponge":2}
   }
 }

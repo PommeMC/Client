@@ -251,7 +251,8 @@ impl InteractionState {
             block_registry.block_state_table(),
         );
         mark_dirty(&pos, dirty_chunks);
-        play_break_sound_for_id(audio, block_registry.block_state_data(state).id(), pos);
+        let table = block_registry.block_state_table();
+        play_break_sound_for_id(audio, table, table.block_state_data(state).id(), pos);
         effects.particles.add_destroy_block_effect(
             pos,
             state,
@@ -1245,7 +1246,10 @@ impl InteractionState {
         chunks.set_block_state(pos.x, pos.y, pos.z, state, block_state_table);
         mark_dirty(&pos, dirty_chunks);
         // `BlockItem.place`, which the server sends only to other players.
-        let sounds = block_sounds_for_id(block_state_table.block_state_data(state).id());
+        let sounds = block_sounds_for_id(
+            block_state_table,
+            block_state_table.block_state_data(state).id(),
+        );
         play_placed_or_broken(audio, &sounds.place_event, sounds, pos);
     }
 
@@ -1433,7 +1437,12 @@ impl InteractionState {
             legacy_mining,
         );
         if self.destroy_ticks % 4.0 == 0.0 {
-            play_hit_sound(audio, block_state_data.id(), hit.block_pos);
+            play_hit_sound(
+                audio,
+                block_registry.block_state_table(),
+                block_state_data.id(),
+                hit.block_pos,
+            );
         }
         self.destroy_ticks += 1.0;
 
@@ -1738,8 +1747,8 @@ fn destroy_speed(
 /// Plays a block's mining hit sound, matching vanilla
 /// `MultiPlayerGameMode.continueDestroyBlock`: volume `(volume + 1) / 8`, pitch
 /// `pitch * 0.5`.
-fn play_hit_sound(audio: &AudioEngine, id: &str, pos: BlockPos) {
-    let s = block_sounds_for_id(id);
+fn play_hit_sound(audio: &AudioEngine, table: BlockStateTable, id: &str, pos: BlockPos) {
+    let s = block_sounds_for_id(table, id);
     play_block_sound(
         audio,
         &s.hit_event,
@@ -1751,8 +1760,13 @@ fn play_hit_sound(audio: &AudioEngine, id: &str, pos: BlockPos) {
 
 /// Plays a block's break sound, matching vanilla `LevelEventHandler` event
 /// 2001.
-pub(crate) fn play_break_sound_for_id(audio: &AudioEngine, id: &str, pos: BlockPos) {
-    let sounds = block_sounds_for_id(id);
+pub(crate) fn play_break_sound_for_id(
+    audio: &AudioEngine,
+    table: BlockStateTable,
+    id: &str,
+    pos: BlockPos,
+) {
+    let sounds = block_sounds_for_id(table, id);
     play_placed_or_broken(audio, &sounds.break_event, sounds, pos);
 }
 

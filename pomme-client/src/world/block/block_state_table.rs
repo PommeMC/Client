@@ -38,6 +38,11 @@ impl BlockStateTable {
         self.slot
     }
 
+    /// The version whose data files this table was built from.
+    pub(crate) fn version(self) -> &'static str {
+        BLOCK_DATA[self.slot].version
+    }
+
     /// Validates a wire-side state id in this selected table.
     pub(crate) fn try_state(self, id: u32) -> Option<BlockState> {
         if (id as usize) < self.table.len() {
