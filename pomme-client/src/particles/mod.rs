@@ -7,8 +7,9 @@
 //! Sprite providers share the independent particle atlas lifecycle; Terrain
 //! resolves its appearance from the block atlas and block colors.
 //! Server EndRod packets use the canonical engine and dedicated atlas draws;
-//! ordinary Sniffer terrain uses typed BLOCK requests. Block destruction and
-//! item effects still use the legacy store. Leaf values, typed
+//! ordinary Sniffer terrain uses typed BLOCK requests. World-owned block
+//! destruction directly adds Terrain instances; item effects use the legacy
+//! store. Leaf values, typed
 //! tokens and sealed options erasure are real data/bridges, not placeholder
 //! behavior. The ordinary contract_exemplar
 //! needs a caller's real provider and resource/atlas initializer.
@@ -36,7 +37,7 @@ mod runtime;
 mod single_quad_particle;
 pub(crate) mod types;
 
-pub(crate) use self::builtin::register_builtin_providers;
+pub(crate) use self::builtin::{TerrainParticle, register_builtin_providers};
 pub(crate) use self::particle_types::ParticleTypes;
 #[allow(
     unused_imports,

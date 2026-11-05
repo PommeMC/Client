@@ -586,15 +586,7 @@ impl GameState {
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
             non_living_store: crate::entity::non_living::NonLivingStore::new(),
-            particle_store: {
-                let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
-                crate::particle::ParticleStore::new(
-                    mesh_source.uv_map().clone(),
-                    grass,
-                    foliage,
-                    dry_foliage,
-                )
-            },
+            particle_store: crate::particle::ParticleStore::new(mesh_source.uv_map().clone()),
             block_entity_anim: BlockEntityAnimStore::default(),
             level_runtime: crate::world::level::LevelRuntime::new(),
             player: LocalPlayer::new(),
