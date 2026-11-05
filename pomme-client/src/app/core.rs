@@ -2203,6 +2203,8 @@ impl AppCore {
                         MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
                         MenuKind::Hopper => Some(ContainerScreen::Hopper),
                         MenuKind::Generic3x3 => Some(ContainerScreen::Dispenser),
+                        MenuKind::BrewingStand => Some(ContainerScreen::BrewingStand),
+                        MenuKind::Crafter3x3 => Some(ContainerScreen::Crafter),
                         _ => None,
                     };
                     if let Some(screen) = screen {
@@ -2238,8 +2240,8 @@ impl AppCore {
                         game.container_was_open = Some(container_id);
                         self.apply_cursor_grab(window, Some(game));
                     } else {
-                        // TODO: render the remaining menu screens (brewing
-                        // stand, crafter, beacon, ...). Until then tell the server we
+                        // TODO: render the remaining menu screens (beacon,
+                        // loom, ...). Until then tell the server we
                         // closed the menu so its container state stays
                         // consistent.
                         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;

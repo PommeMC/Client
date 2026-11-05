@@ -1,0 +1,234 @@
+# The brewing stand and crafter open through a right click with a block in
+# hand, show their contents, and shift click into the hotbar. The brewing
+# stand starts brewing (fuel bar, arrow, bubbles); the crafter shows its
+# result and disabled slot, empty grid clicks toggle slots on the server, and
+# a number-key swap or a carried item turns a disabled one back on.
+# The blocks stay until the end: the server runs commands apart from clicks,
+# so removing one could beat the click that empties it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:stone"
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 1 }
+
+[[step]]
+chat = "/setblock 40 -60 7 minecraft:brewing_stand{Items:[{Slot:0b,id:\"minecraft:potion\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:water\"}}},{Slot:3b,id:\"minecraft:nether_wart\",count:1},{Slot:4b,id:\"minecraft:blaze_powder\",count:2}]}"
+
+[[step]]
+expect = { block = "brewing_stand", at = [40, -60, 7] }
+
+[[step]]
+chat = "/setblock 44 -60 7 minecraft:crafter{Items:[{Slot:0b,id:\"minecraft:oak_planks\",count:1},{Slot:1b,id:\"minecraft:oak_planks\",count:1},{Slot:3b,id:\"minecraft:oak_planks\",count:1},{Slot:4b,id:\"minecraft:oak_planks\",count:1}],disabled_slots:[I;8]}"
+
+[[step]]
+expect = { block = "crafter", at = [44, -60, 7] }
+
+[[step]]
+chat = "/tp @s 40.5 -60 4.5 0 0"
+
+[[step]]
+expect = { player = { position = [40.5, -60.0, 4.5] } }
+
+[[step]]
+look_at = [40.5, -59.5, 7.5]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "brewing_stand", title = "Brewing Stand" }
+
+[[step]]
+expect = { slot = 0, item = "potion", count = 1 }
+
+# Brewing took one blaze powder as fuel.
+[[step]]
+expect = { slot = 4, item = "blaze_powder", count = 1 }
+
+# Chat fades after 10 seconds; brewing takes 20.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "brewing_stand"
+
+[[step]]
+click = { slot = 3, op = "quick_move" }
+
+[[step]]
+expect = { slot = 40, item = "nether_wart", count = 1 }
+
+[[step]]
+click = { slot = 0, op = "quick_move" }
+
+[[step]]
+expect = { slot = 39, item = "potion", count = 1 }
+
+# From the inventory, a reagent goes to the ingredient slot.
+[[step]]
+click = { slot = 40, op = "quick_move" }
+
+[[step]]
+expect = { slot = 3, item = "nether_wart", count = 1 }
+
+[[step]]
+click = { slot = 3, op = "quick_move" }
+
+[[step]]
+expect = { slot = 40, item = "nether_wart", count = 1 }
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 44.5 -60 4.5 0 0"
+
+[[step]]
+expect = { player = { position = [44.5, -60.0, 4.5] } }
+
+[[step]]
+look_at = [44.5, -59.5, 7.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "crafter_3x3", title = "Crafter" }
+
+[[step]]
+expect = { slot = 0, item = "oak_planks", count = 1 }
+
+# The result slot comes after the hotbar.
+[[step]]
+expect = { slot = 45, item = "crafting_table", count = 1 }
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "crafter"
+
+# An empty enabled slot clicked with nothing carried turns off; a disabled
+# one turns back on.
+[[step]]
+click = { slot = 2, op = "pickup_left" }
+
+# Slot packets and commands run on separate server queues.
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/data get block 44 -60 7 disabled_slots"
+
+[[step]]
+expect = { chat = "[I; 2, 8]" }
+
+[[step]]
+click = { slot = 8, op = "pickup_left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/data get block 44 -60 7 disabled_slots"
+
+[[step]]
+expect = { chat = "[I; 2]" }
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "crafter_toggled"
+
+# A number-key swap of a held item into a disabled slot turns it on first.
+[[step]]
+click = { slot = 2, op = { swap = { hotbar = 0 } } }
+
+[[step]]
+expect = { slot = 2, item = "stone", count = 1 }
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+# So does a click carrying an item, which then places it.
+[[step]]
+click = { slot = 5, op = "pickup_left" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/data get block 44 -60 7 disabled_slots"
+
+[[step]]
+expect = { chat = "[I; 5]" }
+
+[[step]]
+click = { slot = 2, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 2, item = "air" }
+
+[[step]]
+click = { slot = 5, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 5, item = "stone", count = 1 }
+
+# The brewing stand's nether wart and potion hold the hotbar's last two slots.
+[[step]]
+click = { slot = 0, op = "quick_move" }
+
+[[step]]
+expect = { slot = 42, item = "oak_planks", count = 1 }
+
+[[step]]
+expect = { slot = 45, item = "air" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+# The crafter's result never reached the offhand.
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { slot = 45, item = "air" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/fill 40 -60 7 44 -60 7 minecraft:air"
+
+[[step]]
+chat = "/clear @s"

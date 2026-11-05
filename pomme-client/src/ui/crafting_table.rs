@@ -7,8 +7,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_cursor_stack,
-    push_panel_offset, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, gesture_result, push_cursor_stack,
+    push_panel_offset,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -56,7 +56,7 @@ pub fn build_crafting_table(
 ) -> ContainerResult {
     let panel = push_crafting_table_background(elements, screen_w, screen_h, gs, x_offset);
     panel.label(elements, 29.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(
         elements,
@@ -95,7 +95,7 @@ pub fn build_crafting_table(
         push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
     }
 
-    let (ops, clicked_outside) = resolve_gesture(
+    gesture_result(
         input,
         hovered,
         &panel,
@@ -105,12 +105,5 @@ pub fn build_crafting_table(
         cursor_item,
         drag,
         last_click,
-    );
-
-    ContainerResult {
-        clicked_outside,
-        ops,
-        button: None,
-        hovered,
-    }
+    )
 }

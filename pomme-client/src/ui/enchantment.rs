@@ -228,7 +228,7 @@ pub fn build_enchantment(
         SpriteId::EnchantingTableBackground,
     );
     panel.label(elements, 8.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
     let gold = item(SLOT_LAPIS).count();
@@ -317,6 +317,7 @@ pub fn build_enchantment(
             ops,
             button,
             hovered,
+            pointer: false,
         },
         book: BookPreview {
             rect: [

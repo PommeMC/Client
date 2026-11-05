@@ -200,6 +200,25 @@ fn packet_ids_match_azalea() {
         table_id(Phase::Game, Direction::Serverbound, "bundle_item_selected")
     );
 
+    // `ServerboundContainerSlotStateChangedPacket.write`: the slot and the
+    // container id as varints, then the new state.
+    let slot_state = azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged {
+        slot_id: 3,
+        container_id: 7,
+        new_state: true,
+    };
+    let mut body = Vec::new();
+    azalea_buf::AzBuf::azalea_write(&slot_state, &mut body).unwrap();
+    assert_eq!(body, [3, 7, 1]);
+    assert_eq!(
+        ServerboundGamePacket::ContainerSlotStateChanged(slot_state).id(),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "container_slot_state_changed"
+        )
+    );
+
     let teleport = ServerboundGamePacket::TeleportToEntity(
         azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity {
             uuid: uuid::Uuid::nil(),

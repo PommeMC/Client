@@ -8,8 +8,8 @@ use azalea_inventory::ItemStack;
 
 use super::common::{FONT_SIZE, WHITE, push_field_text};
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_cursor_stack, push_panel,
-    resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, gesture_result, push_cursor_stack,
+    push_panel,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -122,7 +122,7 @@ pub fn build_anvil(
         SpriteId::AnvilBackground,
     );
     panel.label(elements, 60.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    panel.inventory_label(elements, 72.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
     let editable = item(0).is_present();
@@ -166,7 +166,7 @@ pub fn build_anvil(
 
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
-    let (ops, clicked_outside) = resolve_gesture(
+    gesture_result(
         input,
         hovered,
         &panel,
@@ -176,14 +176,7 @@ pub fn build_anvil(
         cursor_item,
         drag,
         last_click,
-    );
-
-    ContainerResult {
-        clicked_outside,
-        ops,
-        button: None,
-        hovered,
-    }
+    )
 }
 
 /// The rename text at (62,24): white shadowed inside its 103-wide clip, with

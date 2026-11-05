@@ -111,13 +111,9 @@ pub fn update_menu(
     core.audio.set_volumes(core.menu.category_volumes());
     let action = result.action;
 
-    let cursor_icon = if result.cursor_pointer {
-        winit::window::CursorIcon::Pointer
-    } else {
-        winit::window::CursorIcon::Default
-    };
     if core.input.cursor_moved_this_frame() {
-        gfx.window.set_cursor(cursor_icon);
+        gfx.window
+            .set_cursor(crate::ui::common::cursor_icon(result.cursor_pointer));
     }
 
     if let Some(images) = core.menu.menu_atlas_images() {
