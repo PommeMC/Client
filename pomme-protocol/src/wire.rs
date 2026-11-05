@@ -115,6 +115,26 @@ pub fn encode_set_creative_mode_slot(slot: i16, stack: Option<&crate::item::Item
     buf
 }
 
+pub fn encode_move_vehicle(pos: DVec3, y_rot: f32, x_rot: f32, on_ground: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(34);
+    write_varint(&mut buf, game_serverbound_id("move_vehicle"));
+    buf.extend_from_slice(&pos.x.to_be_bytes());
+    buf.extend_from_slice(&pos.y.to_be_bytes());
+    buf.extend_from_slice(&pos.z.to_be_bytes());
+    buf.extend_from_slice(&y_rot.to_be_bytes());
+    buf.extend_from_slice(&x_rot.to_be_bytes());
+    buf.push(on_ground as u8);
+    buf
+}
+
+pub fn encode_paddle_boat(left: bool, right: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3);
+    write_varint(&mut buf, game_serverbound_id("paddle_boat"));
+    buf.push(left as u8);
+    buf.push(right as u8);
+    buf
+}
+
 /// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;
@@ -247,6 +267,18 @@ mod tests {
         assert_eq!(
             encode_interact(42, 1, DVec3::ZERO, false),
             [0x1A, 42, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn paddle_boat_packet_layout() {
+        assert_eq!(
+            encode_paddle_boat(true, false),
+            [game_serverbound_id("paddle_boat") as u8, 1, 0]
+        );
+        assert_eq!(
+            encode_paddle_boat(false, true),
+            [game_serverbound_id("paddle_boat") as u8, 0, 1]
         );
     }
 

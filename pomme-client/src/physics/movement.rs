@@ -181,16 +181,22 @@ pub fn tick(
         player.no_jump_delay = 0;
     }
 
-    player.move_forward = forward;
-    player.move_strafe = strafe;
+    if is_passenger {
+        player.velocity = Velocity::new(0.0, 0.0, 0.0);
+        player.move_forward = 0.0;
+        player.move_strafe = 0.0;
+    } else {
+        player.move_forward = forward;
+        player.move_strafe = strafe;
+    }
     travel(
         player,
         input,
         world,
         tags,
         is_passenger,
-        forward,
-        strafe,
+        player.move_forward,
+        player.move_strafe,
         sin_y_rot,
         cos_y_rot,
     );

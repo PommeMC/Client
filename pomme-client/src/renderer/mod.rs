@@ -1283,6 +1283,10 @@ impl Renderer {
         self.camera.reset(position, look_dir);
     }
 
+    pub fn set_camera_look_dir(&mut self, look_dir: LookDirection) {
+        self.camera.set_look_dir(look_dir);
+    }
+
     pub fn set_top_down_radius(&mut self, radius_blocks: f32) {
         self.camera.frame_top_down(radius_blocks);
     }

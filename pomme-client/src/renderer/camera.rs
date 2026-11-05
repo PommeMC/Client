@@ -296,6 +296,10 @@ impl Camera {
         self.look_dir = look_dir;
     }
 
+    pub fn set_look_dir(&mut self, look_dir: LookDirection) {
+        self.look_dir = look_dir;
+    }
+
     pub fn sync_pos(&mut self, position: Position) {
         self.position = position
     }

@@ -1,3 +1,4 @@
+pub mod boat;
 pub mod components;
 pub mod dimensions;
 pub mod glowing;
@@ -821,6 +822,9 @@ pub struct LivingEntity {
     pub velocity: DVec3,
     /// Vanilla `wasTouchingWater`, probed per tick for aquatic kinds.
     pub is_in_water: bool,
+    /// Boat control state (vanilla `AbstractBoat`); only meaningful while
+    /// the kind is a `*_boat`/`*_raft`.
+    pub boat_sim: boat::BoatSim,
     /// Squid client sim (vanilla `Squid.aiStep`), degrees.
     pub x_body_rot: f32,
     pub prev_x_body_rot: f32,
@@ -1070,6 +1074,7 @@ impl LivingEntity {
             armor: Default::default(),
             velocity: DVec3::ZERO,
             is_in_water: false,
+            boat_sim: boat::BoatSim::default(),
             x_body_rot: 0.0,
             prev_x_body_rot: 0.0,
             z_body_rot: 0.0,
@@ -2050,6 +2055,11 @@ impl EntityStore {
             }
             (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
+            // Boat paddle strokes (`AbstractBoat.DATA_ID_PADDLE_LEFT/RIGHT`),
+            // sequential after `VehicleEntity`'s hurt/damage ids; drives the
+            // remote boats' `animatePaddle` clocks.
+            (k, 15, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[0] = b,
+            (k, 16, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[1] = b,
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
@@ -2221,6 +2231,17 @@ impl EntityStore {
         }
     }
 
+    pub fn reset_living_interpolation(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.prev_position = entity.position;
+            entity.prev_body_y_rot_deg = entity.body_y_rot_deg;
+            entity.prev_head_y_rot_deg = entity.head_y_rot_deg;
+            entity.look_dir = crate::entity::components::LookDirection::new(
+                entity.body_y_rot_deg,
+                entity.look_dir.x_rot_deg(),
+            );
+        }
+    }
     pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
@@ -2364,6 +2385,7 @@ impl EntityStore {
             .find(|entity| entity.player_uuid == Some(*uuid))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn tick_living(
         &mut self,
         chunks: &ChunkStore,
@@ -2372,10 +2394,14 @@ impl EntityStore {
         local_push_box: Option<Aabb>,
         pusher_allowed: impl Fn(i32, &LivingEntity) -> bool,
         simulation_distance: u32,
+        controlled_vehicle_id: Option<i32>,
     ) -> DVec3 {
         let mut local_push = DVec3::ZERO;
         let thundering = self.thundering;
         for (&id, entity) in &mut self.living {
+            if Some(id) == controlled_vehicle_id {
+                continue;
+            }
             entity.tick_interpolation();
             // A scared armadillo's body control skips its client tick.
             if !(entity.entity_type == EntityKind::Armadillo && entity.armadillo.is_scared()) {
@@ -2414,6 +2440,9 @@ impl EntityStore {
                 entity.tick_party(chunks, block_state_table);
             }
             entity.tick_kind_anims();
+            if is_boat(entity.entity_type) {
+                boat::tick_paddles(&mut entity.boat_sim);
+            }
             if entity.entity_type == EntityKind::Panda {
                 let holding = entity.equipment(EquipmentSlot::Mainhand).is_some();
                 if entity.panda.tick(thundering, entity.is_in_water, holding) {
@@ -2449,13 +2478,48 @@ impl EntityStore {
                 && pushes_local_player(entity)
                 && pusher_allowed(id, entity)
                 && living_entity_aabb(entity).intersects(&local_box)
-                && let Some((local_impulse, remote_impulse)) =
-                    living_push_impulses(player_position, entity.position)
             {
-                local_push += local_impulse;
-                if accepts_reciprocal_push(entity) {
-                    entity.velocity += remote_impulse;
+                let can_push = if is_boat(entity.entity_type) {
+                    let boat_box = boat::boat_aabb(entity);
+                    local_box.min.y <= boat_box.min.y + 0.1
+                } else {
+                    true
+                };
+                if can_push
+                    && let Some((local_impulse, remote_impulse)) =
+                        living_push_impulses(player_position, entity.position)
+                {
+                    local_push += local_impulse;
+                    if accepts_reciprocal_push(entity) {
+                        entity.velocity += remote_impulse;
+                    }
                 }
+            }
+
+            if is_boat(entity.entity_type) && entity.velocity.length_squared() > 1e-6 {
+                let world =
+                    crate::physics::collision::CollisionWorld::new(chunks, block_state_table);
+                let ctx =
+                    crate::physics::block_shape::CollisionContext::position(entity.position.y);
+                let (step, on_ground) = crate::physics::collision::resolve_collision(
+                    world,
+                    boat::boat_aabb(entity),
+                    crate::entity::components::Velocity::new(
+                        entity.velocity.x,
+                        entity.velocity.y,
+                        entity.velocity.z,
+                    ),
+                    0.0,
+                    entity.on_ground,
+                    &ctx,
+                );
+                entity.prev_position = entity.position;
+                entity.position.x += step.x;
+                entity.position.y += step.y;
+                entity.position.z += step.z;
+                entity.on_ground = on_ground;
+                entity.velocity.x *= 0.9;
+                entity.velocity.z *= 0.9;
             }
         }
         local_push
@@ -2514,12 +2578,62 @@ pub fn is_equine(kind: &EntityKind) -> bool {
 
 /// Vanilla `Llama` and its `TraderLlama` subclass: `AbstractHorse`s that
 /// pomme renders apart from the horse family.
+pub fn is_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.ends_with("_boat") || s.ends_with("_raft")
+}
+
+pub fn is_raft(kind: EntityKind) -> bool {
+    kind.to_str().ends_with("_raft")
+}
+
+pub fn is_chest_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.contains("chest_boat") || s.contains("chest_raft")
+}
+
+pub fn is_animal(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Pig
+            | EntityKind::Cow
+            | EntityKind::Sheep
+            | EntityKind::Chicken
+            | EntityKind::Wolf
+            | EntityKind::Ocelot
+            | EntityKind::Cat
+            | EntityKind::Horse
+            | EntityKind::Donkey
+            | EntityKind::Mule
+            | EntityKind::SkeletonHorse
+            | EntityKind::ZombieHorse
+            | EntityKind::Llama
+            | EntityKind::TraderLlama
+            | EntityKind::Camel
+            | EntityKind::CamelHusk
+            | EntityKind::Fox
+            | EntityKind::Panda
+            | EntityKind::PolarBear
+            | EntityKind::Rabbit
+            | EntityKind::Turtle
+            | EntityKind::Bee
+            | EntityKind::Strider
+            | EntityKind::Goat
+            | EntityKind::Axolotl
+            | EntityKind::Frog
+            | EntityKind::Sniffer
+            | EntityKind::Armadillo
+            | EntityKind::Mooshroom
+    )
+}
+
 pub fn is_llama(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Llama | EntityKind::TraderLlama)
 }
 
 pub fn is_living_mob(kind: &EntityKind) -> bool {
-    is_equine(kind)
+    is_boat(*kind)
+        || is_equine(kind)
         || is_llama(*kind)
         || matches!(
             kind,
@@ -2585,18 +2699,19 @@ fn omnidirectional_air_mover(kind: EntityKind) -> bool {
 /// Kinds whose `wasTouchingWater` matters for rendering (fish flop pose,
 /// squid body rotation).
 fn probes_water(kind: &EntityKind) -> bool {
-    matches!(
-        kind,
-        EntityKind::Squid
-            | EntityKind::GlowSquid
-            | EntityKind::Cod
-            | EntityKind::Salmon
-            | EntityKind::TropicalFish
-            | EntityKind::Pufferfish
-            | EntityKind::Panda
-            | EntityKind::Turtle
-            | EntityKind::Axolotl
-    )
+    is_boat(*kind)
+        || matches!(
+            kind,
+            EntityKind::Squid
+                | EntityKind::GlowSquid
+                | EntityKind::Cod
+                | EntityKind::Salmon
+                | EntityKind::TropicalFish
+                | EntityKind::Pufferfish
+                | EntityKind::Panda
+                | EntityKind::Turtle
+                | EntityKind::Axolotl
+        )
 }
 
 #[cfg(test)]
@@ -3004,6 +3119,7 @@ mod tests {
             None,
             |_, _| true,
             10,
+            None,
         );
     }
 
@@ -3081,6 +3197,7 @@ mod tests {
             Some(local_box),
             |id, _| id != 5,
             10,
+            None,
         );
         let expected = f64::from(0.05_f32) * 0.5;
 

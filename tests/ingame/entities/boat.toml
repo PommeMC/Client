@@ -1,0 +1,39 @@
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/fill -8 -61 -8 40 -58 40 minecraft:water"
+
+[[step]]
+chat = "/fill 0 -61 14 9 -50 14 minecraft:stone"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+chat = '/summon minecraft:oak_boat 4.5 -57 4.5 {Rotation:[0f,0f]}'
+
+[[step]]
+expect = { entity = "oak_boat", y_rot = 0.0 }
+
+[[step]]
+chat = "/ride @s mount @e[type=oak_boat,limit=1]"
+
+[[step]]
+expect = { riding = true }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+expect = { entity = "oak_boat", at = [4.5, -57.48, 13.31], y_rot = 0.0 }
+timeout_ms = 5000

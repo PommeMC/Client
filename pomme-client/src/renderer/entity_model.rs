@@ -1,5 +1,6 @@
 use glam::{Mat4, Vec3};
 
+use crate::entity::boat::clamped_lerp;
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
@@ -135,6 +136,7 @@ pub enum ModelConvention {
     /// block's min corner, pivots at `offset/16`, vanilla ZYX euler with
     /// unmodified signs. Used by the chest models.
     BlockYUp,
+    Boat,
 }
 
 #[derive(Clone)]
@@ -270,6 +272,10 @@ impl BakedEntityModel {
                     Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
                 }
                 ModelConvention::BlockYUp => pivot,
+                ModelConvention::Boat => {
+                    let rebase = if part.parent.is_some() { 0.0 } else { 6.0 };
+                    Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
+                }
             } / 16.0;
 
             // Vanilla's `translateAndRotate` ZYX euler product. Only the
@@ -278,7 +284,7 @@ impl BakedEntityModel {
             // by diag(1,-1,1): x and z angles negate, y keeps its sign,
             // order stays ZYX — matching the pivot's y-only mirror above.
             let rot_mat = match self.convention {
-                ModelConvention::EntityYDown => {
+                ModelConvention::EntityYDown | ModelConvention::Boat => {
                     Mat4::from_rotation_z(-rot.z)
                         * Mat4::from_rotation_y(rot.y)
                         * Mat4::from_rotation_x(-rot.x)
@@ -302,6 +308,10 @@ impl BakedEntityModel {
                 // The X half of vanilla's `scale(-1,-1,1)` (the bake negates
                 // Y); without it every model renders left-right mirrored.
                 Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)) * local
+            } else if self.convention == ModelConvention::Boat {
+                Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
+                    * Mat4::from_rotation_y(90.0_f32.to_radians())
+                    * local
             } else {
                 local
             };
@@ -2579,7 +2589,206 @@ pub fn bake_pufferfish_model(puff_state: u32) -> BakedEntityModel {
     bake_model(parts, 32, 32)
 }
 
-/// Vanilla `IronGolemModel.createBodyLayer`, 128x128.
+fn boat_parts() -> Vec<EntityPart> {
+    vec![
+        rotated(
+            vpart(
+                "bottom",
+                None,
+                Vec3::new(0.0, 3.0, 1.0),
+                vec![vbox((0, 0), (-14.0, -9.0, -3.0), (28.0, 16.0, 3.0))],
+            ),
+            Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+        ),
+        rotated(
+            vpart(
+                "back",
+                None,
+                Vec3::new(-15.0, 4.0, 4.0),
+                vec![vbox((0, 19), (-13.0, -7.0, -1.0), (18.0, 6.0, 2.0))],
+            ),
+            Vec3::new(0.0, 3.0 * std::f32::consts::FRAC_PI_2, 0.0),
+        ),
+        rotated(
+            vpart(
+                "front",
+                None,
+                Vec3::new(15.0, 4.0, 0.0),
+                vec![vbox((0, 27), (-8.0, -7.0, -1.0), (16.0, 6.0, 2.0))],
+            ),
+            Vec3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+        ),
+        rotated(
+            vpart(
+                "right",
+                None,
+                Vec3::new(0.0, 4.0, -9.0),
+                vec![vbox((0, 35), (-14.0, -7.0, -1.0), (28.0, 6.0, 2.0))],
+            ),
+            Vec3::new(0.0, std::f32::consts::PI, 0.0),
+        ),
+        vpart(
+            "left",
+            None,
+            Vec3::new(0.0, 4.0, 9.0),
+            vec![vbox((0, 43), (-14.0, -7.0, -1.0), (28.0, 6.0, 2.0))],
+        ),
+        rotated(
+            vpart(
+                "left_paddle",
+                None,
+                Vec3::new(3.0, -5.0, 9.0),
+                vec![
+                    vbox((62, 0), (-1.0, 0.0, -5.0), (2.0, 2.0, 18.0)),
+                    vbox((62, 0), (-1.001, -3.0, 8.0), (1.0, 6.0, 7.0)),
+                ],
+            ),
+            Vec3::new(0.0, 0.0, 0.19634955),
+        ),
+        rotated(
+            vpart(
+                "right_paddle",
+                None,
+                Vec3::new(3.0, -5.0, -9.0),
+                vec![
+                    vbox((62, 20), (-1.0, 0.0, -5.0), (2.0, 2.0, 18.0)),
+                    vbox((62, 20), (0.001, -3.0, 8.0), (1.0, 6.0, 7.0)),
+                ],
+            ),
+            Vec3::new(0.0, std::f32::consts::PI, 0.19634955),
+        ),
+    ]
+}
+
+pub fn bake_boat_water_patch_model() -> BakedEntityModel {
+    let parts = vec![rotated(
+        vpart(
+            "water_patch",
+            None,
+            Vec3::new(0.0, -3.0, 1.0),
+            vec![vbox((0, 0), (-14.0, -9.0, -3.0), (28.0, 16.0, 3.0))],
+        ),
+        Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+    )];
+    bake_model(parts, 128, 64).with_convention(ModelConvention::Boat)
+}
+
+pub fn bake_boat_model() -> BakedEntityModel {
+    bake_model(boat_parts(), 128, 64).with_convention(ModelConvention::Boat)
+}
+
+fn chest_boat_parts(mut parts: Vec<EntityPart>) -> Vec<EntityPart> {
+    parts.push(rotated(
+        vpart(
+            "chest_bottom",
+            None,
+            Vec3::new(-2.0, -5.0, -6.0),
+            vec![vbox((0, 76), (0.0, 0.0, 0.0), (12.0, 8.0, 12.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    parts.push(rotated(
+        vpart(
+            "chest_lid",
+            None,
+            Vec3::new(-2.0, -9.0, -6.0),
+            vec![vbox((0, 59), (0.0, 0.0, 0.0), (12.0, 4.0, 12.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    parts.push(rotated(
+        vpart(
+            "chest_lock",
+            None,
+            Vec3::new(-1.0, -6.0, -1.0),
+            vec![vbox((0, 59), (0.0, 0.0, 0.0), (2.0, 4.0, 1.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    parts
+}
+
+pub fn bake_chest_boat_model() -> BakedEntityModel {
+    bake_model(chest_boat_parts(boat_parts()), 128, 128).with_convention(ModelConvention::Boat)
+}
+
+fn raft_parts() -> Vec<EntityPart> {
+    vec![
+        rotated(
+            vpart(
+                "bottom",
+                None,
+                Vec3::new(0.0, -2.1, 1.0),
+                vec![
+                    vbox((0, 0), (-14.0, -11.0, -4.0), (28.0, 20.0, 4.0)),
+                    vbox((0, 0), (-14.0, -9.0, -8.0), (28.0, 16.0, 4.0)),
+                ],
+            ),
+            Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+        ),
+        rotated(
+            vpart(
+                "left_paddle",
+                None,
+                Vec3::new(3.0, -4.0, 9.0),
+                vec![
+                    vbox((0, 24), (-1.0, 0.0, -5.0), (2.0, 2.0, 18.0)),
+                    vbox((0, 24), (-1.001, -3.0, 8.0), (1.0, 6.0, 7.0)),
+                ],
+            ),
+            Vec3::new(0.0, 0.0, 0.19634955),
+        ),
+        rotated(
+            vpart(
+                "right_paddle",
+                None,
+                Vec3::new(3.0, -4.0, -9.0),
+                vec![
+                    vbox((40, 24), (-1.0, 0.0, -5.0), (2.0, 2.0, 18.0)),
+                    vbox((40, 24), (0.001, -3.0, 8.0), (1.0, 6.0, 7.0)),
+                ],
+            ),
+            Vec3::new(0.0, std::f32::consts::PI, 0.19634955),
+        ),
+    ]
+}
+
+pub fn bake_raft_model() -> BakedEntityModel {
+    bake_model(raft_parts(), 128, 64).with_convention(ModelConvention::Boat)
+}
+
+pub fn bake_chest_raft_model() -> BakedEntityModel {
+    let mut parts = raft_parts();
+    parts.push(rotated(
+        vpart(
+            "chest_bottom",
+            None,
+            Vec3::new(-2.0, -10.1, -6.0),
+            vec![vbox((0, 76), (0.0, 0.0, 0.0), (12.0, 8.0, 12.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    parts.push(rotated(
+        vpart(
+            "chest_lid",
+            None,
+            Vec3::new(-2.0, -14.1, -6.0),
+            vec![vbox((0, 59), (0.0, 0.0, 0.0), (12.0, 4.0, 12.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    parts.push(rotated(
+        vpart(
+            "chest_lock",
+            None,
+            Vec3::new(-1.0, -11.1, -1.0),
+            vec![vbox((0, 59), (0.0, 0.0, 0.0), (2.0, 4.0, 1.0))],
+        ),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+    ));
+    bake_model(parts, 128, 128).with_convention(ModelConvention::Boat)
+}
+
 pub fn bake_iron_golem_model() -> BakedEntityModel {
     let parts = vec![
         vpart(
@@ -5590,6 +5799,38 @@ static BABY_RABBIT_HOP: KfAnim = {
         ],
     }
 };
+
+pub fn compute_boat_anim(
+    model: &BakedEntityModel,
+    rowing_time_left: f32,
+    rowing_time_right: f32,
+) -> PartAnim {
+    use std::f32::consts::PI;
+    let mut anim = PartAnim::default();
+    for (idx, part) in model.parts.iter().enumerate() {
+        let (rowing_time, side) = match part.name.as_str() {
+            "left_paddle" => (rowing_time_left, 0),
+            "right_paddle" => (rowing_time_right, 1),
+            _ => continue,
+        };
+        let x_rot = clamped_lerp(
+            -std::f32::consts::FRAC_PI_3,
+            -0.2617994,
+            ((-rowing_time).sin() + 1.0) / 2.0,
+        );
+        let mut y_rot = clamped_lerp(
+            -std::f32::consts::FRAC_PI_4,
+            std::f32::consts::FRAC_PI_4,
+            ((-rowing_time + 1.0).sin() + 1.0) / 2.0,
+        );
+        if side == 1 {
+            y_rot = PI - y_rot;
+        }
+        anim.rotation
+            .push((idx, Vec3::new(x_rot, y_rot, 0.19634955)));
+    }
+    anim
+}
 
 /// Rabbit: head look plus the HOP keyframe animation (vanilla 26.2 rabbits
 /// are keyframe-animated; there is no walk cycle).
