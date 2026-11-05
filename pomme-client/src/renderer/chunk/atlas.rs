@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::assets::AssetId;
 use crate::renderer::{packing, rhi, util};
 use crate::resources::managers::ResourceManager;
-use crate::resources::{ResourceContent, ResourceId};
+use crate::resources::{Resource, ResourceContent, ResourceId};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::{BlockRenderAssets, LoadProgress, LoadStage};
 
@@ -179,7 +179,7 @@ const MISSING_TILE: u32 = 16;
 /// this globally when any stitched block-atlas sprite cannot support them.
 const MAX_MIP_LEVEL: u32 = 4;
 
-struct Source {
+pub(super) struct Source {
     name: String,
     data: Vec<u8>,
     w: u32,
@@ -193,6 +193,82 @@ struct Source {
 }
 
 impl Source {
+    pub(super) fn from_resource(
+        name: &str,
+        resource: &Resource,
+        retain_alpha_mask: bool,
+        block_mips: bool,
+    ) -> Option<Self> {
+        let input = SpriteInput {
+            content: resource.content().clone(),
+            metadata: resource.metadata().ok(),
+        };
+        Self::from_input(name, &input, retain_alpha_mask, block_mips)
+    }
+
+    fn from_input(
+        name: &str,
+        resource: &SpriteInput,
+        retain_alpha_mask: bool,
+        block_mips: bool,
+    ) -> Option<Self> {
+        let Some((data, width, height)) = util::load_resource_png(&resource.content) else {
+            tracing::warn!("Missing texture: {name}");
+            return None;
+        };
+        let Some(metadata) = read_texture_metadata(resource) else {
+            tracing::warn!("Invalid texture metadata: {name}");
+            return None;
+        };
+        let Some(animation) =
+            animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
+        else {
+            tracing::warn!("Invalid texture animation metadata: {name}");
+            return None;
+        };
+        let alpha_mask =
+            retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
+        let (opaque, translucent) = sprite_transparency(&data);
+        let display = extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
+        let sprite_animation = SpriteAnimation::new(&data, width, &animation);
+        let texture = metadata.texture.as_ref();
+        let mip_source = block_mips.then(|| MipSource {
+            full_data: data,
+            full_width: width,
+            full_height: height,
+            animation: animation.clone(),
+            strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
+            alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
+        });
+        Some(Self {
+            name: name.to_string(),
+            data: display,
+            w: animation.frame_width,
+            h: animation.frame_height,
+            opaque,
+            translucent,
+            alpha_mask,
+            mip_source,
+            animation: sprite_animation,
+        })
+    }
+
+    /// Transforms produce one static frame and never inherit PNG metadata.
+    pub(super) fn from_rgba(name: &str, data: Vec<u8>, width: u32, height: u32) -> Self {
+        let (opaque, translucent) = sprite_transparency(&data);
+        Self {
+            name: name.to_string(),
+            data,
+            w: width,
+            h: height,
+            opaque,
+            translucent,
+            alpha_mask: None,
+            mip_source: None,
+            animation: None,
+        }
+    }
+
     /// A texture that failed to load; packs as the missing tile.
     fn empty(name: &str) -> Self {
         Self {
@@ -622,50 +698,13 @@ fn load_source(name: &str, inputs: &AtlasInputs, retain_alpha_mask: bool) -> Sou
         tracing::warn!("Missing texture: {name}");
         return Source::empty(name);
     };
-    match util::load_resource_png(&resource.content) {
-        Some((data, width, height)) => {
-            let Some(metadata) = read_texture_metadata(resource) else {
-                tracing::warn!("Invalid texture metadata: {name}");
-                return Source::empty(name);
-            };
-            let Some(animation) =
-                animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
-            else {
-                tracing::warn!("Invalid texture animation metadata: {name}");
-                return Source::empty(name);
-            };
-            let alpha_mask =
-                retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
-            let (opaque, translucent) = sprite_transparency(&data);
-            let display =
-                extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
-            let sprite_animation = SpriteAnimation::new(&data, width, &animation);
-            let texture = metadata.texture.as_ref();
-            let mip_source = uses_block_atlas_mip_chain(name).then(|| MipSource {
-                full_data: data,
-                full_width: width,
-                full_height: height,
-                animation: animation.clone(),
-                strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
-                alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
-            });
-            Source {
-                name: name.to_string(),
-                data: display,
-                w: animation.frame_width,
-                h: animation.frame_height,
-                opaque,
-                translucent,
-                alpha_mask,
-                mip_source,
-                animation: sprite_animation,
-            }
-        }
-        None => {
-            tracing::warn!("Missing texture: {name}");
-            Source::empty(name)
-        }
-    }
+    Source::from_input(
+        name,
+        resource,
+        retain_alpha_mask,
+        uses_block_atlas_mip_chain(name),
+    )
+    .unwrap_or_else(|| Source::empty(name))
 }
 
 /// Every texture the block atlas packs for `render_assets`, and the
@@ -692,6 +731,52 @@ pub(crate) struct AtlasCpu {
     placements: HashMap<String, Option<(u32, u32)>>,
     /// The missing tile's level-0 origin.
     missing: (u32, u32),
+}
+
+impl AtlasCpu {
+    pub(super) fn realized_region(&self, key: &str) -> Option<AtlasRegion> {
+        self.placements.get(key).copied().flatten()?;
+        self.uv_map.regions.get(key).copied()
+    }
+
+    pub(super) fn resolve_source_list_missing_collision(&mut self) {
+        const NAME: &str = "minecraft:missingno";
+        let mip_align = 1 << self.mip_level;
+        let cell_key = |w: u32, h: u32, pad: u32| {
+            (
+                (h + 2 * pad).next_multiple_of(mip_align),
+                (w + 2 * pad).next_multiple_of(mip_align),
+            )
+        };
+        let builtin = cell_key(
+            MISSING_TILE,
+            MISSING_TILE,
+            sprite_padding(self.mip_level, true),
+        );
+        // Last realized duplicate wins in Pomme's shelf traversal: descending
+        // padded height/width, built-in first on ties; shelves never backfill.
+        // COMPAT: Vanilla's region-tree gather can resolve collisions differently.
+        let missing = self
+            .sources
+            .iter()
+            .find(|source| source.name == NAME)
+            .filter(|source| {
+                cell_key(source.w, source.h, source.padding(self.mip_level)) <= builtin
+            })
+            .and_then(|source| self.realized_region(&source.name))
+            .unwrap_or(self.uv_map.missing);
+        self.uv_map.missing = missing;
+        for region in self.uv_map.regions.values_mut() {
+            if region.sprite == 0 {
+                *region = missing;
+            }
+        }
+        self.uv_map.regions.insert(NAME.to_string(), missing);
+        self.uv_map.by_texture = TextureId::all_names()
+            .into_iter()
+            .map(|name| self.uv_map.get_region(name))
+            .collect();
+    }
 }
 
 impl TextureAtlas {
@@ -914,13 +999,17 @@ impl TextureAtlas {
     ) -> AtlasCpu {
         let names: Vec<&str> = texture_names.iter().copied().collect();
         LoadProgress::begin_stage(progress, LoadStage::Textures, names.len());
-        let mut sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
+        let sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
             let source = load_source(name, inputs, generated_item_textures.contains(name));
             LoadProgress::step(progress);
             source
         });
 
-        let mip_level = effective_mip_level(&sources);
+        Self::prepare_sources(sources, MAX_MIP_LEVEL)
+    }
+
+    pub(super) fn prepare_sources(mut sources: Vec<Source>, max_mip: u32) -> AtlasCpu {
+        let mip_level = max_mip.min(effective_mip_level(&sources));
         let mip_align = 1 << mip_level;
         let block_pad = sprite_padding(mip_level, true);
         // Vanilla `Stitcher.HOLDER_COMPARATOR`'s last key; the packer sorts by

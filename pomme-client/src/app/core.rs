@@ -24,14 +24,18 @@ use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
-use crate::particles::{MappedParticleResources, ParticleEngine};
+use crate::particles::{
+    MappedParticleResources, ParticleAtlasSprites, ParticleEngine, ParticleResources,
+    ParticleTypes, PreparedParticleDescriptions, register_builtin_providers,
+};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
+use crate::renderer::chunk::atlas::AtlasCpu;
+use crate::renderer::chunk::atlas_sources::{SpriteSourceList, SpriteSources};
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
-use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
 use crate::resources::pack_resources::PackType;
 use crate::resources::packs::{
@@ -39,6 +43,7 @@ use crate::resources::packs::{
     PackId, PackLocationInfo, PackPosition, PackRepository, PackSource, PhysicalPack,
     RegisteredRepositorySource, SymlinkPolicy, ThemeSpecification, download_server_pack,
 };
+use crate::resources::{ResourceManager, resource_id};
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -1004,6 +1009,12 @@ impl RepeatStepper {
     }
 }
 
+pub(super) struct PreparedParticleAssets {
+    pub(super) descriptions: PreparedParticleDescriptions,
+    pub(super) cpu: AtlasCpu,
+    pub(super) sprites: ParticleAtlasSprites,
+}
+
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -1036,6 +1047,9 @@ pub struct AppCore {
     /// Canonical client-lifetime engine; world changes and reloads clear it in
     /// place.
     pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
+    particle_resources: Rc<MappedParticleResources>,
+    sprite_sources: SpriteSources,
+    _particle_types: ParticleTypes,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1165,7 +1179,7 @@ impl AppCore {
         presence: Option<DiscordPresence>,
         user: UserData,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let pack_type = PackType::ClientResources;
         let builtin_resources = BuiltinRepositorySource::new(None);
         let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
@@ -1206,9 +1220,12 @@ impl AppCore {
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
-        // Phase 7 must register providers before sharing these resources and bind
-        // real atlas sprites before spawning. The empty registry is valid meanwhile.
-        let particle_engine = ParticleEngine::new(Rc::new(MappedParticleResources::new()));
+        let particle_types = ParticleTypes::new()?;
+        let sprite_sources = SpriteSources::bootstrap();
+        let mut particle_resources = MappedParticleResources::new();
+        register_builtin_providers(&particle_types, &mut particle_resources);
+        let particle_resources = Rc::new(particle_resources);
+        let particle_engine = ParticleEngine::new(Rc::clone(&particle_resources));
         let mut core = Self {
             user,
             presence,
@@ -1235,6 +1252,9 @@ impl AppCore {
             resources,
             block_definitions: Rc::new(BlockDefinitions::new()),
             particle_engine,
+            particle_resources,
+            sprite_sources,
+            _particle_types: particle_types,
             pending_pack_download: None,
             audio,
             tick_accumulator: 0.0,
@@ -1265,7 +1285,7 @@ impl AppCore {
         };
         core.menu.load_splash(&core.resources);
         core.configure_resources();
-        core
+        Ok(core)
     }
 
     fn configure_resources(&mut self) {
@@ -2035,7 +2055,6 @@ impl AppCore {
         // must retire chunk geometry before repacking the atlas. Recreate the
         // CPU mesher and particle atlas state from the same freshly-reloaded
         // registry/UV map, then let the normal rescan rebuild loaded columns.
-        renderer.clear_chunk_meshes();
         self.reload_pack_assets(renderer)?;
         game.block_registry
             .replace_render_assets(renderer.shared_render_assets());
@@ -2177,8 +2196,10 @@ impl AppCore {
     }
 
     fn reload_pack_assets(&mut self, renderer: &mut Renderer) -> std::io::Result<()> {
-        renderer.reload_assets(self.font_sources())?;
-        self.particle_engine.clear_particles();
+        let prepared = self.prepare_particle_assets()?;
+        renderer.clear_chunk_meshes();
+        renderer.reload_assets(self.font_sources(), prepared.cpu)?;
+        self.apply_particle_assets(prepared.descriptions, prepared.sprites);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
@@ -2186,6 +2207,34 @@ impl AppCore {
         self.asset_reload_revision = self.asset_reload_revision.wrapping_add(1);
         self.complete_resource_selection();
         Ok(())
+    }
+
+    pub(super) fn prepare_particle_assets(&self) -> std::io::Result<PreparedParticleAssets> {
+        let descriptions = self.particle_resources.prepare(&self.resources)?;
+        let prepared = SpriteSourceList::load(
+            &self.resources,
+            &resource_id!("minecraft:particles"),
+            &self.sprite_sources,
+        )?
+        .prepare(&self.resources, 0)?;
+        let sprites =
+            ParticleAtlasSprites::new(prepared.sprites, prepared.cpu.uv_map.missing_region());
+        Ok(PreparedParticleAssets {
+            descriptions,
+            cpu: prepared.cpu,
+            sprites,
+        })
+    }
+
+    pub(super) fn apply_particle_assets(
+        &mut self,
+        descriptions: PreparedParticleDescriptions,
+        sprites: ParticleAtlasSprites,
+    ) {
+        self.particle_resources
+            .apply(descriptions, &sprites, &mut || {
+                self.particle_engine.clear_particles();
+            });
     }
 
     /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
