@@ -2,6 +2,8 @@
 
 use glam::{DVec3, Quat, Vec3};
 
+use crate::renderer::camera::CameraFrustum;
+
 /// Engine grouping, unrelated to atlas selection or a provider's Rust type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParticleRenderType {
@@ -39,17 +41,11 @@ pub struct ParticleLight {
     pub sky: u8,
 }
 
-/// Narrow extraction input. Quad groups point-test current world positions;
-/// culling affects extraction only, never ticking or lifetime.
-pub trait ParticleFrustum {
-    fn contains(&self, position: DVec3) -> bool;
-}
-
 pub struct ParticleView<'a> {
     pub position: DVec3,
     pub rotation: Quat,
     pub partial_tick: f32,
-    pub frustum: &'a dyn ParticleFrustum,
+    pub frustum: &'a CameraFrustum,
 }
 
 /// One owned quad entry, not the group's accumulator or a mandatory

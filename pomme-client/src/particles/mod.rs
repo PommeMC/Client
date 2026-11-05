@@ -48,8 +48,8 @@ pub use self::{
     particle_provider::ParticleProvider,
     registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError},
     render::{
-        ParticleFacing, ParticleFrustum, ParticleLayer, ParticleLight, ParticleRenderType,
-        ParticleView, ParticlesRenderState, QuadParticleRenderState,
+        ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
+        ParticlesRenderState, QuadParticleRenderState,
     },
     resources::{
         MappedParticleResources, ParticleAtlasSprites, ParticleDescription, ParticleResources,
