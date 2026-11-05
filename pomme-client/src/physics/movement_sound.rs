@@ -303,8 +303,6 @@ pub(super) fn land(
 
 /// `Player.causeFallDamage`'s sounds: whether the fall hurts, playing the
 /// player's fall sound and the landed-on block's when it does.
-// TODO: `isIgnoringFallDamageFromCurrentImpulse` (wind charge and mace
-// launches).
 fn cause_fall_damage(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,

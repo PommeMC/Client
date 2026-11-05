@@ -1246,6 +1246,9 @@ impl InteractionState {
         chunks.set_block_state(pos.x, pos.y, pos.z, state, block_state_table);
         mark_dirty(&pos, dirty_chunks);
         // `BlockItem.place`, which the server sends only to other players.
+        // TODO: placements this can't predict (multi-state blocks, items
+        // named apart from their block, replaceable cells) play no place
+        // sound until each block's `getStateForPlacement` is ported.
         let sounds = block_sounds_for_id(
             block_state_table,
             block_state_table.block_state_data(state).id(),
