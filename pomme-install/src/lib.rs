@@ -1,7 +1,7 @@
 //! Installs a Minecraft version's assets the way the client reads them: the
 //! asset index and objects under `assets/`, and the client jar's `assets/`
-//! extracted under `versions/<version>/extracted/`. The verified client JAR is
-//! cached alongside the extraction for installed version metadata.
+//! extracted under `versions/<version>/extracted/`, with the jar's
+//! `version.json` for its resource pack format.
 //!
 //! Every download is checked against the sha1 Mojang publishes, retried, and
 //! written beside its final path then renamed, so an interrupted install
@@ -91,28 +91,29 @@ fn extracted_dir(versions_dir: &Path, version: &str) -> PathBuf {
     versions_dir.join(version).join("extracted")
 }
 
-/// Cached client JAR; resource content still comes from extracted assets.
-pub fn client_jar_path(versions_dir: &Path, version: &str) -> PathBuf {
-    versions_dir.join(version).join(format!("{version}.jar"))
+const VERSION_METADATA: &str = "version.json";
+
+/// Where the extracted `version.json` lives; installs extracted before it
+/// was kept don't have one.
+pub fn version_metadata_path(versions_dir: &Path, version: &str) -> PathBuf {
+    extracted_dir(versions_dir, version).join(VERSION_METADATA)
 }
 
 /// Written into a version's extraction once it's complete.
 const EXTRACTED_MARKER: &str = ".extracted";
 
-fn extracted_marker(versions_dir: &Path, version: &str) -> PathBuf {
-    extracted_dir(versions_dir, version).join(EXTRACTED_MARKER)
+/// The jar's extraction finished: its marker and its `assets` are there.
+fn is_extracted(versions_dir: &Path, version: &str) -> bool {
+    let dir = extracted_dir(versions_dir, version);
+    dir.join(EXTRACTED_MARKER).exists() && dir.join("assets").is_dir()
 }
 
 /// The version's index and its jar's extraction are in place. Each is
 /// written only once it's complete, the extraction with its `.extracted`
 /// marker; older launchers extracted in place and wrote the marker last, so
-/// one without it may be half done. This extraction-readiness check remains
-/// compatible with older installs; clients needing JAR metadata also check
-/// `client_jar_path` and run `install` to provision a missing cache.
+/// one without it may be half done.
 pub fn is_installed(assets_dir: &Path, versions_dir: &Path, version: &str) -> bool {
-    index_path(assets_dir, version).exists()
-        && extracted_marker(versions_dir, version).exists()
-        && extracted_dir(versions_dir, version).join("assets").is_dir()
+    index_path(assets_dir, version).exists() && is_extracted(versions_dir, version)
 }
 
 /// Downloads whatever of `version` is missing or damaged, reporting through
@@ -161,17 +162,10 @@ pub async fn install(
     write_atomic(&index_path(assets_dir, version), &index_bytes).await?;
 
     let out = extracted_dir(versions_dir, version);
-    let needs_extraction =
-        !extracted_marker(versions_dir, version).exists() || !out.join("assets").is_dir();
-    let jar_path = client_jar_path(versions_dir, version);
-    if needs_extraction || !jar_path.is_file() {
+    if !is_extracted(versions_dir, version) {
         report(0, 1, "Downloading the client jar...");
         let client = &version_json.downloads.client;
         let jar = fetch_verified(http, &client.url, &client.sha1, Hash::Sha1).await?;
-        write_atomic(&jar_path, &jar).await?;
-        if !needs_extraction {
-            return Ok(());
-        }
         let mut part = out.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
@@ -377,7 +371,7 @@ fn extract_assets(jar: &[u8], out: &Path, report: &dyn Fn(u32, u32)) -> Result<(
         let Some(name) = entry.enclosed_name() else {
             continue;
         };
-        if entry.is_dir() || !name.starts_with("assets") {
+        if entry.is_dir() || !(name.starts_with("assets") || name == Path::new(VERSION_METADATA)) {
             continue;
         }
         let path = out.join(name);
@@ -445,15 +439,17 @@ mod tests {
     }
 
     #[test]
-    fn only_assets_extract_and_escapes_are_refused() {
+    fn only_assets_and_version_json_extract_and_escapes_are_refused() {
         let dir = temp_dir("extract");
         let jar = jar(&[
             ("assets/minecraft/lang/en_us.json", "{}"),
+            ("version.json", "{}"),
             ("net/minecraft/Main.class", "code"),
             ("assets/../../escaped.txt", "nope"),
         ]);
         extract_assets(&jar, &dir, &|_, _| {}).unwrap();
         assert!(dir.join("assets/minecraft/lang/en_us.json").exists());
+        assert!(dir.join("version.json").exists());
         assert!(!dir.join("net").exists());
         assert!(!dir.parent().unwrap().join("escaped.txt").exists());
         std::fs::remove_dir_all(dir).unwrap();

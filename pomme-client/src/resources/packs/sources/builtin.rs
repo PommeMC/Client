@@ -76,8 +76,9 @@ fn panorama_id(face: u32) -> Result<ResourceId, ResourceError> {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct InstallationLocation {
     pub version: String,
-    pub client_jar: PathBuf,
-    /// Parent of the extracted `assets` directory; the JAR is metadata-only.
+    /// The jar's `version.json`, extracted beside its assets.
+    pub version_metadata: PathBuf,
+    /// Parent of the extracted `assets` directory.
     pub extracted_root: PathBuf,
     pub index_file: PathBuf,
     pub objects_dir: PathBuf,
@@ -122,7 +123,7 @@ impl BuiltinRepositorySource {
     /// reload the repository; there is deliberately no cross-source controller.
     pub(crate) fn set_installation(&self, location: Option<InstallationLocation>) {
         let format = location.as_ref().and_then(|location| {
-            match read_installed_pack_format(&location.client_jar, &location.version) {
+            match read_installed_pack_format(&location.version_metadata, &location.version) {
                 Ok(format) => Some(format),
                 Err(error) => {
                     tracing::warn!(%error, "Installed pack format unavailable; compatibility is unknown");
@@ -331,8 +332,7 @@ fn vanilla_metadata(format: Option<PackFormat>) -> Map<String, Value> {
     Map::from_iter([(PACK_SECTION.to_owned(), Value::Object(pack))])
 }
 
-// Installed JAR version.json, distinct from selected-pack metadata.
-const VERSION_METADATA_FILE: &str = "version.json";
+// Installed version.json, distinct from selected-pack metadata.
 const VERSION_RESOURCE_FORMAT: &str = "resource";
 const VERSION_RESOURCE_MAJOR: &str = "resource_major";
 const VERSION_RESOURCE_MINOR: &str = "resource_minor";
@@ -353,8 +353,6 @@ struct InstalledFormatError {
 enum FormatReadError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("ZIP error: {0}")]
-    Zip(#[from] zip::result::ZipError),
     #[error("invalid version.json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("version.json exceeds the {MAX_VERSION_JSON_SIZE}-byte limit")]
@@ -365,8 +363,9 @@ enum FormatReadError {
     InvalidFormat(&'static str),
 }
 
-/// Read the selected installed JAR, never selected packs or protocol metadata.
-/// Missing first-run assets and corrupt metadata are both explicit errors.
+/// Read the installed version.json, never selected packs or protocol metadata.
+/// Missing (installs extracted before it was kept) and corrupt metadata are
+/// both explicit errors.
 fn read_installed_pack_format(
     path: &Path,
     expected_version: &str,
@@ -385,13 +384,8 @@ fn read_format(path: &Path, expected_version: &str) -> Result<PackFormat, Format
         pack_version: Value,
     }
 
-    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-    let entry = archive.by_name(VERSION_METADATA_FILE)?;
-    if entry.size() > MAX_VERSION_JSON_SIZE {
-        return Err(FormatReadError::TooLarge);
-    }
     let mut bytes = Vec::new();
-    entry
+    std::fs::File::open(path)?
         .take(MAX_VERSION_JSON_SIZE + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_VERSION_JSON_SIZE {
@@ -424,12 +418,35 @@ fn read_format(path: &Path, expected_version: &str) -> Result<PackFormat, Format
 #[cfg(test)]
 mod repository_source_tests {
     use super::super::tests;
-    use super::{BuiltinRepositorySource, MappedResourcesSupplier, ThemeSpecification};
+    use super::{
+        BuiltinRepositorySource, MappedResourcesSupplier, PackFormat, ThemeSpecification,
+        read_installed_pack_format,
+    };
 
     #[test]
     fn test_load_packs() {
         let mut source = BuiltinRepositorySource::new(None);
         tests::test_load_packs(&mut source, &["pomme"]);
+    }
+
+    #[test]
+    fn installed_format_reads_either_pack_version_layout() {
+        let path =
+            std::env::temp_dir().join(format!("pomme-version-json-{}.json", std::process::id()));
+        for (pack_version, (major, minor)) in [
+            (r#"{"resource": 34}"#, (34, 0)),
+            (r#"{"resource_major": 75, "resource_minor": 1}"#, (75, 1)),
+        ] {
+            let json = format!(r#"{{"id": "26.2", "pack_version": {pack_version}}}"#);
+            std::fs::write(&path, json).unwrap();
+            assert_eq!(
+                read_installed_pack_format(&path, "26.2").unwrap(),
+                PackFormat::new(major, minor).unwrap()
+            );
+        }
+        assert!(read_installed_pack_format(&path, "26.1").is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_installed_pack_format(&path, "26.2").is_err());
     }
 
     #[test]
