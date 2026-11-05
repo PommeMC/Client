@@ -1589,33 +1589,46 @@ impl LivingEntity {
         }
     }
 
-    /// Vanilla `LivingEntity.tickHeadTurn`.
+    /// [`turn_body`] for this tick's move.
     // TODO: a `Mob` turns its body through `BodyRotationControl.clientTick`
     // instead: the body snaps to its yaw while moving, follows the head past
     // `getMaxHeadYRot` (75 by default, 15 for a goat, 1 for an axolotl), and
     // turns to face the head after it holds still for 10 ticks.
     pub fn tick_body_rotation(&mut self) {
-        let dx = self.position.x - self.prev_position.x;
-        let dz = self.position.z - self.prev_position.z;
-        let dist_sq = (dx * dx + dz * dz) as f32;
-
-        if dist_sq > 0.0025 {
-            let walk_dir = -(dx as f32).atan2(dz as f32).to_degrees();
-            let diff_from_look = wrap_degrees(self.look_dir.y_rot_deg() - walk_dir).abs();
-            let body_target = if diff_from_look > 95.0 && diff_from_look < 265.0 {
-                walk_dir - 180.0
-            } else {
-                walk_dir
-            };
-            let diff = wrap_degrees(body_target - self.body_y_rot_deg);
-            self.body_y_rot_deg += diff * 0.3;
-        }
-
-        let head_diff = wrap_degrees(self.head_y_rot_deg - self.body_y_rot_deg);
-        if head_diff.abs() > 50.0 {
-            self.body_y_rot_deg += head_diff - head_diff.signum() * 50.0;
-        }
+        self.body_y_rot_deg = turn_body(
+            self.body_y_rot_deg,
+            self.look_dir.y_rot_deg(),
+            self.position.x - self.prev_position.x,
+            self.position.z - self.prev_position.z,
+            self.swing_time > 0,
+        );
     }
+}
+
+/// Vanilla `LivingEntity.tick`'s body turn into `tickHeadTurn`: the body
+/// turns toward a move of (`dx`, `dz`), facing backwards when the move is
+/// behind `yaw`, or toward `yaw` while the arm swings, and stays within 50
+/// degrees of `yaw`.
+pub fn turn_body(body: f32, yaw: f32, dx: f64, dz: f64, swinging: bool) -> f32 {
+    let mut target = body;
+    if ((dx * dx + dz * dz) as f32) > 0.0025000002 {
+        let walk = dz.atan2(dx) as f32 * 57.295776 - 90.0;
+        let diff = (wrap_degrees(yaw) - walk).abs();
+        target = if 95.0 < diff && diff < 265.0 {
+            walk - 180.0
+        } else {
+            walk
+        };
+    }
+    if swinging {
+        target = yaw;
+    }
+    let mut body = body + wrap_degrees(target - body) * 0.3;
+    let head_diff = wrap_degrees(yaw - body);
+    if head_diff.abs() > 50.0 {
+        body += head_diff - head_diff.signum() * 50.0;
+    }
+    body
 }
 
 pub struct ItemEntity {
@@ -2604,6 +2617,34 @@ mod tests {
     use azalea_registry::builtin::ItemKind;
 
     use super::*;
+
+    #[test]
+    fn the_body_turns_toward_a_sideways_walk() {
+        // Facing south (yaw 0) and moving east: the walk direction is -90.
+        let body = turn_body(0.0, 0.0, 0.2, 0.0, false);
+        assert!((body + 27.0).abs() < 1e-4, "{body}");
+    }
+
+    #[test]
+    fn walking_backwards_keeps_the_body_facing_forwards() {
+        let body = turn_body(0.0, 0.0, 0.0, -0.2, false);
+        assert!(body.abs() < 1e-4, "{body}");
+    }
+
+    #[test]
+    fn the_head_drags_the_body_past_50_degrees() {
+        assert_eq!(turn_body(0.0, 120.0, 0.0, 0.0, false), 70.0);
+    }
+
+    #[test]
+    fn a_swing_turns_the_body_toward_the_yaw() {
+        assert!((turn_body(0.0, 40.0, 0.0, 0.0, true) - 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_tiny_move_leaves_the_body_alone() {
+        assert_eq!(turn_body(10.0, 0.0, 0.04, 0.0, false), 10.0);
+    }
 
     #[test]
     fn copper_golem_spins_its_head_once_per_idle_cycle() {

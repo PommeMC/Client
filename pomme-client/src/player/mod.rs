@@ -396,6 +396,9 @@ impl LocalPlayer {
         self.was_jump_pressed = false;
         self.jump_riding_ticks = 0;
         self.jump_riding_scale = 0.0;
+        // Vanilla's new `LocalPlayer` starts with `yBodyRot` 0.
+        self.body_y_rot = 0.0;
+        self.prev_body_y_rot = 0.0;
         self.abilities_dirty = false;
         self.eye_height = STANDING_EYE_HEIGHT;
         self.prev_eye_height = STANDING_EYE_HEIGHT;
@@ -546,25 +549,10 @@ impl LocalPlayer {
         self.eye_height += (self.target_eye_height() - self.eye_height) * 0.5;
     }
 
-    pub fn tick_body_rotation(&mut self, dx: f64, dz: f64) {
-        let dist_sq = (dx * dx + dz * dz) as f32;
-        if dist_sq > 0.0025 {
-            let walk_dir = -(dx as f32).atan2(dz as f32).to_degrees();
-            let diff_from_look =
-                crate::entity::wrap_degrees(self.look_dir.y_rot_deg() - walk_dir).abs();
-            let body_target = if diff_from_look > 95.0 && diff_from_look < 265.0 {
-                walk_dir - 180.0
-            } else {
-                walk_dir
-            };
-            let diff = crate::entity::wrap_degrees(body_target - self.body_y_rot);
-            self.body_y_rot += diff * 0.3;
-        }
-
-        let head_diff = crate::entity::wrap_degrees(self.look_dir.y_rot_deg() - self.body_y_rot);
-        if head_diff.abs() > 50.0 {
-            self.body_y_rot += head_diff - head_diff.signum() * 50.0;
-        }
+    /// [`crate::entity::turn_body`] for this tick's move of (`dx`, `dz`).
+    pub fn tick_body_rotation(&mut self, dx: f64, dz: f64, swinging: bool) {
+        self.body_y_rot =
+            crate::entity::turn_body(self.body_y_rot, self.look_dir.y_rot_deg(), dx, dz, swinging);
     }
 
     /// Accumulates walk distance and a smoothed bob amplitude for view bobbing,

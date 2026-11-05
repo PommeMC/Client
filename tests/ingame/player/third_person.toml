@@ -1,0 +1,38 @@
+# The third-person cameras sit 4 blocks from the eye, behind and in front;
+# the stone block gives the scale to compare against the reference client.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/fill 90 -60 0 92 -58 2 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 91.5 -60 8.5 180 20"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "back"
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "front"
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+chat = "/fill 90 -60 0 92 -58 2 minecraft:air"

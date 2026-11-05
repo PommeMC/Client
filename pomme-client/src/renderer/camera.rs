@@ -603,7 +603,7 @@ impl Camera {
         let (forward, up) = self.view_basis();
         let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(fov, self.aspect_ratio, near, far);
-        proj.y_axis.y *= -1.0;
+        proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
 }
