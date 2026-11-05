@@ -110,6 +110,9 @@ pub enum RendererError {
 
     #[error("failed to build the texture atlas: {0}")]
     Atlas(String),
+
+    #[error("failed to prepare particles: {0}")]
+    Particle(String),
 }
 
 /// The loading splash: logo, progress bar and status line.
@@ -2324,6 +2327,12 @@ impl Renderer {
         }
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
+        if let RenderMode::World { particles, .. } = &mode {
+            self.particle_pipeline
+                .prepare(&self.ctx.device, frame, &self.camera, particles)
+                .map_err(RendererError::Particle)?;
+        }
+
         let t_acquire = std::time::Instant::now();
         let (image_index, suboptimal) =
             match self.frames.acquire(&self.ctx.device, &self.swapchain)? {
@@ -2584,14 +2593,11 @@ impl Renderer {
 
         let frame_start = std::time::Instant::now();
         if let RenderMode::World {
-            particles,
             nameplates,
             signs,
             ..
         } = &mode
         {
-            self.particle_pipeline
-                .prepare(frame, &self.camera, particles);
             let camera = (self.camera_render_position() - self.camera.anchor()).as_vec3();
             let custom = std::mem::take(&mut self.custom_quads);
             self.custom_geometry_pipeline

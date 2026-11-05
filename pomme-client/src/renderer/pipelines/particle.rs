@@ -7,10 +7,13 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{rhi, shader, util};
 
-/// Vanilla `ParticleGroup.MAX_PARTICLES`: the particle store's hard cap,
-/// and thus the per-frame vertex buffer size.
+/// The legacy `ParticleStore`'s admission cap.
 pub const MAX_PARTICLE_QUADS: usize = 16384;
-const MAX_VERTS: usize = MAX_PARTICLE_QUADS * 6;
+const INITIAL_PARTICLE_QUADS: usize = 16384;
+const QUAD_INDICES: &[usize] = &[0, 1, 2, 0, 2, 3];
+const VERTICES_PER_QUAD: usize = QUAD_INDICES.len();
+const INITIAL_VERTEX_BYTES: usize =
+    INITIAL_PARTICLE_QUADS * VERTICES_PER_QUAD * std::mem::size_of::<ParticleVertex>();
 
 /// One camera-facing particle billboard, extracted per frame from the
 /// particle store.
@@ -59,6 +62,7 @@ pub struct ParticlePipeline {
     /// The shared [`Lightmap`]'s group, set 2.
     lightmap_set: rhi::backend::BindGroup,
     vertex_buffers: Vec<rhi::backend::Buffer>,
+    vertex_buffer_capacities: Vec<usize>,
     /// This frame's opaque and translucent vertex ranges.
     layers: [Range<u32>; 2],
 }
@@ -93,7 +97,7 @@ impl ParticlePipeline {
 
         let vertex_buffers = util::create_per_frame_host_buffers(
             device,
-            (MAX_VERTS * std::mem::size_of::<ParticleVertex>()) as u64,
+            INITIAL_VERTEX_BYTES as u64,
             rhi::BufferUsages::VERTEX,
             "particle_vertices",
         );
@@ -109,6 +113,7 @@ impl ParticlePipeline {
             atlas_sampler,
             camera_buffers,
             lightmap_set: lightmap.group,
+            vertex_buffer_capacities: vec![INITIAL_VERTEX_BYTES; vertex_buffers.len()],
             vertex_buffers,
             layers: [0..0, 0..0],
         };
@@ -130,22 +135,55 @@ impl ParticlePipeline {
     }
 
     /// Builds this frame's billboards facing `camera`.
-    pub fn prepare(&mut self, frame: usize, camera: &Camera, quads: &[ParticleQuad]) {
+    /// `frame`'s previous GPU use must have completed; its buffer may be
+    /// replaced.
+    pub fn prepare(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame: usize,
+        camera: &Camera,
+        quads: &[ParticleQuad],
+    ) -> Result<(), String> {
         self.layers = [0..0, 0..0];
         if quads.is_empty() {
-            return;
+            return Ok(());
         }
 
+        let required_vertices = quads
+            .len()
+            .checked_mul(VERTICES_PER_QUAD)
+            .ok_or_else(|| "particle vertex count overflows usize".to_owned())?;
+        let total_end = u32::try_from(required_vertices)
+            .map_err(|_| "particle vertex range exceeds u32".to_owned())?;
+        let required_bytes = required_vertices
+            .checked_mul(std::mem::size_of::<ParticleVertex>())
+            .ok_or_else(|| "particle vertex byte size overflows usize".to_owned())?;
+        isize::try_from(required_bytes)
+            .map_err(|_| "particle vertex byte size exceeds isize".to_owned())?;
+        u64::try_from(required_bytes)
+            .map_err(|_| "particle vertex byte size exceeds u64".to_owned())?;
+        let growth = if required_bytes > self.vertex_buffer_capacities[frame] {
+            let capacity = required_bytes
+                .checked_next_power_of_two()
+                .ok_or_else(|| "particle vertex buffer capacity overflows usize".to_owned())?;
+            isize::try_from(capacity)
+                .map_err(|_| "particle vertex buffer capacity exceeds isize".to_owned())?;
+            let capacity_u64 = u64::try_from(capacity)
+                .map_err(|_| "particle vertex buffer capacity exceeds u64".to_owned())?;
+            Some((capacity, capacity_u64))
+        } else {
+            None
+        };
+
+        let mut verts: Vec<ParticleVertex> = Vec::new();
+        verts
+            .try_reserve_exact(required_vertices)
+            .map_err(|error| format!("failed to reserve particle vertices: {error}"))?;
         let (right, up) = camera.billboard_axes();
-        let mut verts: Vec<ParticleVertex> =
-            Vec::with_capacity(quads.len().min(MAX_PARTICLE_QUADS) * 6);
         // Opaque quads first, then translucent, so each layer is one
         // contiguous draw range (vanilla renders the layers separately).
         let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
             for quad in quads.iter().filter(|q| q.translucent == translucent) {
-                if verts.len() >= MAX_VERTS {
-                    return;
-                }
                 let center = Vec3::from(quad.pos);
                 let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
                     position: (center + (right * nx + up * ny) * quad.size).into(),
@@ -160,7 +198,7 @@ impl ParticlePipeline {
                     corner(-1.0, 1.0, quad.u0, quad.v0),
                     corner(-1.0, -1.0, quad.u0, quad.v1),
                 ];
-                for &i in &[0usize, 1, 2, 0, 2, 3] {
+                for &i in QUAD_INDICES {
                     verts.push(corners[i]);
                 }
             }
@@ -169,10 +207,25 @@ impl ParticlePipeline {
         let opaque_verts = verts.len();
         emit(&mut verts, true);
 
+        let opaque_end = u32::try_from(opaque_verts)
+            .map_err(|_| "opaque particle vertex range exceeds u32".to_owned())?;
+        if let Some((capacity, capacity_u64)) = growth {
+            let buffer = rhi::backend::Buffer::try_new(
+                device,
+                "particle_vertices",
+                capacity_u64,
+                rhi::BufferUsages::VERTEX,
+                rhi::MemoryLocation::Host,
+            )?;
+            let old = std::mem::replace(&mut self.vertex_buffers[frame], buffer);
+            old.destroy(device);
+            self.vertex_buffer_capacities[frame] = capacity;
+        }
+
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         self.vertex_buffers[frame].write(bytes);
-        let opaque_verts = opaque_verts as u32;
-        self.layers = [0..opaque_verts, opaque_verts..verts.len() as u32];
+        self.layers = [0..opaque_end, opaque_end..total_end];
+        Ok(())
     }
 
     /// Draws [`Self::prepare`]'s billboards.
