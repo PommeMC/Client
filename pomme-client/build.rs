@@ -183,6 +183,8 @@ fn main() {
         ("clouds.frag", shaderc::ShaderKind::Fragment),
         ("entity_shadow.vert", shaderc::ShaderKind::Vertex),
         ("entity_shadow.frag", shaderc::ShaderKind::Fragment),
+        ("sign_text.vert", shaderc::ShaderKind::Vertex),
+        ("sign_text.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

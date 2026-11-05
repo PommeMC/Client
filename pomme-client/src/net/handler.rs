@@ -174,6 +174,15 @@ pub fn handle_game_packet(
         ClientboundGamePacket::SetCamera(p) => {
             send_ordered(event_tx, NetworkEvent::SetCamera { id: p.camera_id.0 });
         }
+        ClientboundGamePacket::OpenSignEditor(p) => {
+            send_ordered(
+                event_tx,
+                NetworkEvent::OpenSignEditor {
+                    pos: p.pos,
+                    is_front_text: p.is_front_text,
+                },
+            );
+        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",

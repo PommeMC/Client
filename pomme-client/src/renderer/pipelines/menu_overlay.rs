@@ -591,6 +591,30 @@ impl MenuGeometry {
                         push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 2.0);
                     }
                 }
+                MenuElement::SubImage {
+                    x,
+                    y,
+                    w,
+                    h,
+                    sprite,
+                    src_rect,
+                    tint,
+                } => {
+                    if let Some(region) = self.sprite_atlas.regions.get(sprite) {
+                        let u_span = region.u1 - region.u0;
+                        let v_span = region.v1 - region.v0;
+                        let sub = SpriteRegion {
+                            u0: region.u0 + src_rect[0] * u_span,
+                            v0: region.v0 + src_rect[1] * v_span,
+                            u1: region.u0 + src_rect[2] * u_span,
+                            v1: region.v0 + src_rect[3] * v_span,
+                            src_w: region.src_w * (src_rect[2] - src_rect[0]),
+                            src_h: region.src_h * (src_rect[3] - src_rect[1]),
+                            nine_slice_border: 0.0,
+                        };
+                        push_textured_quad(&mut vertices, *x, *y, *w, *h, &sub, *tint, 2.0);
+                    }
+                }
                 MenuElement::NineSlice {
                     x,
                     y,
@@ -1688,6 +1712,22 @@ impl MenuOverlayPipeline {
         Ok(())
     }
 
+    pub fn mc_font_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font.texture.handle()
+    }
+
+    pub fn mc_font_color_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font_color.texture.handle()
+    }
+
+    pub fn mc_font_sampler(&self) -> rhi::backend::Sampler {
+        self.mc_font.sampler
+    }
+
+    pub fn mc_glyph_map(&self) -> Option<&GlyphMap> {
+        self.geometry.mc_glyph_map.as_ref()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -2053,6 +2093,15 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         sprite: SpriteId,
+        tint: [f32; 4],
+    },
+    SubImage {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sprite: SpriteId,
+        src_rect: [f32; 4],
         tint: [f32; 4],
     },
     NineSlice {
@@ -2477,7 +2526,14 @@ pub enum SpriteId {
     SpectatorScrollRight,
     SpectatorTeleportToPlayer,
     SpectatorTeleportToTeam,
+    Sign(u8),
+    HangingSign(u8),
 }
+
+pub const SIGN_WOOD_TYPES: [&str; 12] = [
+    "dark_oak", "pale_oak", "acacia", "bamboo", "birch", "cherry", "crimson", "jungle", "mangrove",
+    "spruce", "warped", "oak",
+];
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
     [
@@ -3637,11 +3693,26 @@ fn build_sprite_atlas(
         boss_bar_sprite(SpriteId::BossBarNotchedProgress(i as u8), name, "progress");
     }
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
+    let sign_sprites = SIGN_WOOD_TYPES.iter().enumerate().flat_map(|(i, name)| {
+        [
+            (
+                SpriteId::Sign(i as u8),
+                format!("minecraft/textures/gui/signs/{name}.png"),
+                0.0,
+            ),
+            (
+                SpriteId::HangingSign(i as u8),
+                format!("minecraft/textures/gui/hanging_signs/{name}.png"),
+                0.0,
+            ),
+        ]
+    });
     for (id, asset_key, border) in sprites
         .iter()
         .map(|&(id, key, border)| (id, key.to_string(), border))
         .chain(effect_icons)
         .chain(boss_bar_sprites)
+        .chain(sign_sprites)
     {
         let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
         match crate::assets::load_image(&path) {

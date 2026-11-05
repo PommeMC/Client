@@ -2347,6 +2347,10 @@ impl AppCore {
                 NetworkEvent::ServerLinks { links } => {
                     game.server_links = links;
                 }
+                NetworkEvent::OpenSignEditor { pos, is_front_text } => {
+                    game.open_sign_editor(pos.into(), is_front_text);
+                    self.apply_cursor_grab(window, Some(game));
+                }
                 NetworkEvent::ShowDialog { dialog } => {
                     // The screen under the dialog is vanilla's `previousScreen`:
                     // it keeps its state (an open container included) and comes

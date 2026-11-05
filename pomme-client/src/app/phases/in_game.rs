@@ -262,6 +262,10 @@ pub struct GameState {
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub sign_editor: Option<crate::ui::sign_edit::SignEditState>,
+    /// The GUI scale the game UI is currently built at; screens opened from
+    /// network events initialize with it.
+    pub gui_scale: f32,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     /// The connection is in the configuration phase (the join, or a
@@ -608,6 +612,8 @@ impl GameState {
                 chat
             },
             server_dialog: None,
+            sign_editor: None,
+            gui_scale: 1.0,
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
             configuring: true,
@@ -746,6 +752,149 @@ impl GameState {
             || self.open_container.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
+            || self.sign_editor.is_some()
+    }
+
+    pub fn open_sign_editor(&mut self, pos: BlockPos, is_front_text: bool) {
+        self.paused = false;
+        self.close_menu();
+        self.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
+        let (lines, is_hanging, is_wall, wood_index, text_color) =
+            self.read_sign_data(pos, is_front_text);
+        self.sign_editor = Some(crate::ui::sign_edit::SignEditState::new(
+            pos,
+            is_front_text,
+            is_hanging,
+            is_wall,
+            wood_index,
+            lines,
+            text_color,
+            self.gui_scale,
+        ));
+    }
+
+    pub fn close_sign_editor(&mut self, connection: Option<&ConnectionHandle>) {
+        if let Some(editor) = self.sign_editor.take() {
+            let lines = editor.lines_as_strings();
+            if let Some(conn) = connection {
+                conn.packet_tx.send(ServerboundGamePacket::SignUpdate(
+                    azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
+                        pos: editor.pos.into(),
+                        is_front_text: editor.is_front_text,
+                        lines: lines.clone(),
+                    },
+                ));
+            }
+            self.apply_local_sign_text(editor.pos, editor.is_front_text, lines);
+        }
+    }
+
+    pub fn read_sign_data(
+        &self,
+        pos: BlockPos,
+        is_front_text: bool,
+    ) -> ([String; 4], bool, bool, u8, [f32; 4]) {
+        let mut lines = [String::new(), String::new(), String::new(), String::new()];
+        let mut text_color = [0.0, 0.0, 0.0, 1.0];
+
+        if let Some(be) = self.chunk_store.block_entities.get(&pos) {
+            let side_key = if is_front_text {
+                "front_text"
+            } else {
+                "back_text"
+            };
+            if let Some(side) = be.nbt.compound(side_key) {
+                if let Some(color_name) = side.string("color")
+                    && let Some(rgb) =
+                        crate::world::block_entity::dye_color_rgb(&color_name.to_str())
+                {
+                    text_color = crate::ui::common::rgb(rgb);
+                }
+                if let Some(list) = side.list("messages")
+                    && let Some(strings) = list.strings()
+                {
+                    for (i, s) in strings.iter().enumerate().take(4) {
+                        let parsed = crate::world::block_entity::parse_line(&s.to_str());
+                        lines[i] = parsed.text;
+                    }
+                }
+            } else {
+                for (i, key) in ["Text1", "Text2", "Text3", "Text4"].iter().enumerate() {
+                    if let Some(s) = be.nbt.string(key) {
+                        let parsed = crate::world::block_entity::parse_line(&s.to_str());
+                        lines[i] = parsed.text;
+                    }
+                }
+            }
+        }
+
+        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+        let block_data = self.block_registry.block_state_data(state);
+        let name = block_data.id();
+        let is_hanging = name.contains("hanging_sign");
+        let is_wall = name.contains("wall");
+        let wood_index = crate::renderer::pipelines::menu_overlay::SIGN_WOOD_TYPES
+            .iter()
+            .position(|&w| name.contains(w))
+            .unwrap_or(11) as u8;
+
+        (lines, is_hanging, is_wall, wood_index, text_color)
+    }
+
+    pub fn apply_local_sign_text(
+        &mut self,
+        pos: BlockPos,
+        is_front_text: bool,
+        lines: [String; 4],
+    ) {
+        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+
+        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+        let block_data = self.block_registry.block_state_data(state);
+        let kind = if block_data.id().contains("hanging_sign") {
+            azalea_registry::builtin::BlockEntityKind::HangingSign
+        } else {
+            azalea_registry::builtin::BlockEntityKind::Sign
+        };
+
+        let entry = self
+            .chunk_store
+            .block_entities
+            .entry(pos)
+            .or_insert_with(|| crate::world::block_entity::StoredBlockEntity {
+                kind,
+                nbt: NbtCompound::new(),
+            });
+        entry.kind = kind;
+
+        let side_key = if is_front_text {
+            "front_text"
+        } else {
+            "back_text"
+        };
+        let mut side = entry
+            .nbt
+            .compound(side_key)
+            .cloned()
+            .unwrap_or_else(NbtCompound::new);
+        let string_list: Vec<_> = lines.iter().map(|line| line.as_str().into()).collect();
+        side.insert("messages", NbtTag::List(NbtList::String(string_list)));
+        entry.nbt.insert(side_key, NbtTag::Compound(side));
+        if is_front_text {
+            entry
+                .nbt
+                .insert("Text1", NbtTag::String(lines[0].as_str().into()));
+            entry
+                .nbt
+                .insert("Text2", NbtTag::String(lines[1].as_str().into()));
+            entry
+                .nbt
+                .insert("Text3", NbtTag::String(lines[2].as_str().into()));
+            entry
+                .nbt
+                .insert("Text4", NbtTag::String(lines[3].as_str().into()));
+        }
     }
 
     /// The container menu the player currently has open (0 = survival
@@ -842,6 +991,7 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
+        self.sign_editor = None;
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
@@ -902,6 +1052,9 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self.sign_editor.is_some() {
+            return true;
+        }
         if self
             .server_dialog
             .as_ref()
@@ -2936,6 +3089,7 @@ pub fn update_game(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = core.menu.gui_scale(sw, sh);
+    game.gui_scale = gs;
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -4200,6 +4354,26 @@ pub fn update_game(
         &text_events,
     );
 
+    if let Some(editor) = game.sign_editor.as_mut() {
+        let fs = common::FONT_SIZE * gs;
+        let finish_typing =
+            editor.handle_text_input(&text_events, &|s| gfx.renderer.menu_text_width(s, fs));
+        let submitted = editor.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+            &|s| gfx.renderer.menu_text_width(s, fs),
+        );
+        if submitted || finish_typing {
+            game.close_sign_editor(Some(connection));
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        core.input.clear_just_pressed_actions();
+    }
+
     if screen_pointer != game.screen_pointer {
         game.screen_pointer = screen_pointer;
         gfx.window
@@ -4529,6 +4703,25 @@ pub fn update_game(
         Vec::new()
     };
 
+    let sign_renders: Vec<crate::world::block_entity::SignRenderInfo> = if benchmark_running {
+        Vec::new()
+    } else {
+        game.chunk_store
+            .block_entities
+            .iter()
+            .filter_map(|(pos, be)| {
+                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let block_state_data = game.block_registry.block_state_data(state);
+                let id = block_state_data.id();
+                let props = block_state_data.properties();
+                let light = block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]);
+                crate::world::block_entity::parse_sign_render_info(
+                    *pos, be.kind, &be.nbt, id, props, light,
+                )
+            })
+            .collect()
+    };
+
     let (block_entity_renders, camera_block_entities) = if benchmark_running {
         (Vec::new(), 0)
     } else {
@@ -4569,6 +4762,9 @@ pub fn update_game(
                 // A predicted break leaves a stale entry until the server
                 // confirms; don't render entries whose block is gone.
                 if !crate::world::block_entity::is_block_entity_block(id) {
+                    return None;
+                }
+                if id.contains("sign") {
                     return None;
                 }
                 let props = block_state_data.properties();
@@ -4767,6 +4963,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &sign_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off
