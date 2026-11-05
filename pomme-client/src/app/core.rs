@@ -374,8 +374,6 @@ pub(super) fn play_entity_sound(
     let pos = (entity_id == game.player.entity_id)
         .then_some(game.player.position)
         .or_else(|| game.entity_positions.get(&entity_id).copied())?;
-    #[cfg(feature = "test-harness")]
-    game.record_sound(sound);
     audio.play_entity_sound(
         sound,
         category,
@@ -396,11 +394,8 @@ fn play_local_player_sound(
     volume: f32,
     pitch: f32,
 ) {
-    let sound = crate::audio::SoundRef::event(event);
-    #[cfg(feature = "test-harness")]
-    game.record_sound(&sound);
     audio.play_world_sound(
-        &sound,
+        &crate::audio::SoundRef::event(event),
         crate::audio::CATEGORY_PLAYERS,
         game.player.position,
         volume,
@@ -2556,8 +2551,6 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
-                    #[cfg(feature = "test-harness")]
-                    game.record_sound(&sound);
                     self.audio
                         .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }
@@ -3754,8 +3747,11 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
+        let silent = game.silent_entities.contains(&game.player.entity_id);
         for sound in std::mem::take(&mut game.player.movement_sounds.pending) {
-            play_local_player_sound(&self.audio, game, sound.event, sound.volume, sound.pitch);
+            if !(sound.unless_silent && silent) {
+                play_local_player_sound(&self.audio, game, sound.event, sound.volume, sound.pitch);
+            }
         }
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;

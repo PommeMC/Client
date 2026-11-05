@@ -204,6 +204,9 @@ pub struct AudioEngine {
     volumes: [f32; SoundCategory::COUNT],
     subtitles_enabled: bool,
     subtitle_events: std::sync::Mutex<Vec<QueuedSubtitle>>,
+    /// The last 64 sound events played, oldest first, for the harness.
+    #[cfg(feature = "test-harness")]
+    recent_sounds: std::sync::Mutex<std::collections::VecDeque<String>>,
     next_id: AtomicU64,
     /// Entity ids to the number of dispatched sounds the worker has not yet
     /// reported ended. Only these entities get position updates. The worker
@@ -305,6 +308,8 @@ impl AudioEngine {
             volumes,
             subtitles_enabled: false,
             subtitle_events: std::sync::Mutex::new(Vec::new()),
+            #[cfg(feature = "test-harness")]
+            recent_sounds: Default::default(),
             next_id: AtomicU64::new(1),
             entity_sound_targets: HashMap::new(),
             music_id: None,
@@ -396,6 +401,8 @@ impl AudioEngine {
         let Some(sound) = self.resolve_event(event, None) else {
             return;
         };
+        #[cfg(feature = "test-harness")]
+        self.record(event);
         let id = self.allocate_id();
         self.send(AudioCommand::Play(PlayCommand {
             id,
@@ -466,6 +473,8 @@ impl AudioEngine {
     ) -> Option<u64> {
         let sound = self.resolve_sound(sound_ref, Some(seed))?;
         let instance_volume = volume * sound.entry_volume;
+        #[cfg(feature = "test-harness")]
+        self.record(sound_ref.event_name());
 
         // Vanilla notifies subtitle listeners before category-volume/distance
         // culling. The subtitle's own range uses the resolved sound's distance.
@@ -497,6 +506,27 @@ impl AudioEngine {
             report_completion: false,
         }));
         self.command_tx.is_some().then_some(id)
+    }
+
+    /// Notes a played sound for the harness, keeping the last 64, as vanilla's
+    /// `SoundEventListener`s hear them.
+    #[cfg(feature = "test-harness")]
+    fn record(&self, event: &str) {
+        if let Ok(mut recent) = self.recent_sounds.lock() {
+            if recent.len() == 64 {
+                recent.pop_front();
+            }
+            recent.push_back(event.to_owned());
+        }
+    }
+
+    /// The sound events most recently played, oldest first.
+    #[cfg(feature = "test-harness")]
+    pub fn recent_sounds(&self) -> Vec<String> {
+        self.recent_sounds
+            .lock()
+            .map(|recent| recent.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Stops one playing instance; a finished one is ignored.

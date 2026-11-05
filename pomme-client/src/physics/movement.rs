@@ -100,6 +100,7 @@ pub fn tick(
     // refreshes fluid contact (and applies its current).
     player.under_water = player.eyes_in_water;
     player.update_water_state(world.chunks, world.block_state_table, is_passenger);
+    player.movement_sounds.first_tick = false;
 
     if player.flying {
         // Vanilla `Player.aiStep`.
@@ -681,6 +682,7 @@ fn settle_after_move(
 ) {
     player.on_ground = on_ground;
     update_supporting_block(player, world, on_ground, resolved, ctx);
+    let effect_pos = on_pos(player, world, 0.2);
 
     // `LivingEntity.checkFallDamage` refreshes a dry player's fluid contact
     // (adding any current) before collided axes are zeroed; the fall distance
@@ -692,6 +694,14 @@ fn settle_after_move(
         player.fall_distance -= f64::from(resolved.y as f32);
     }
     if on_ground {
+        if player.fall_distance > 0.0 {
+            movement_sound::land(
+                player,
+                world,
+                world.block_data(effect_pos),
+                ctx.descending(),
+            );
+        }
         player.fall_distance = 0.0;
     }
 

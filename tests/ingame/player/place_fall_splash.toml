@@ -1,0 +1,83 @@
+# Sounds the client plays for its own player, which the server sends only to
+# others: placing a block, landing from a hurting fall and splashing into
+# water.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/tp @s 120.5 -60 110.5 0 0"
+
+[[step]]
+expect = { player = { position = [120.5, -60.0, 110.5] } }
+
+[[step]]
+chat = "/forceload add 120 110 124 112"
+
+[[step]]
+chat = "/setblock 124 -61 110 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [124, -61, 110] }
+
+[[step]]
+chat = "/give @s minecraft:stone"
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 1 }
+
+[[step]]
+look_at = [120.5, -60.5, 113.0]
+
+# The crosshair target updates on the next frame.
+[[step]]
+wait_ms = 200
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { block = "stone", at = [120, -60, 112] }
+
+[[step]]
+expect = { sound = "block.stone.place" }
+
+# Six blocks onto grass deal 3: the small fall, and the grass's fall sound.
+[[step]]
+chat = "/tp @s 122.5 -54 110.5"
+
+[[step]]
+expect = { sound = "entity.player.small_fall" }
+
+[[step]]
+expect = { sound = "block.grass.fall" }
+
+[[step]]
+chat = "/tp @s 124.5 -57 110.5"
+
+[[step]]
+expect = { sound = "entity.player.splash" }
+
+[[step]]
+chat = "/setblock 120 -60 112 minecraft:air"
+
+[[step]]
+chat = "/setblock 124 -61 110 minecraft:grass_block"
+
+[[step]]
+chat = "/forceload remove 120 110 124 112"
+
+[[step]]
+chat = "/clear @s"

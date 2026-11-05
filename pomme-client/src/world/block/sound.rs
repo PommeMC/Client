@@ -22,9 +22,9 @@ pub struct BlockSounds {
     pub pitch: f32,
     pub break_event: String,
     pub step_event: String,
-    _place_event: serde::de::IgnoredAny,
+    pub place_event: String,
     pub hit_event: String,
-    _fall_event: serde::de::IgnoredAny,
+    pub fall_event: String,
 }
 
 /// The distinct sound types, and each block id (no namespace)'s index into
@@ -71,6 +71,8 @@ mod tests {
         let stone = block_sounds_for_id("stone");
         assert_eq!(stone.hit_event, "block.stone.hit");
         assert_eq!(stone.step_event, "block.stone.step");
+        assert_eq!(stone.place_event, "block.stone.place");
+        assert_eq!(stone.fall_event, "block.stone.fall");
         // `BlockSetType.OAK`, and `SoundType.GRAVEL` on dirt.
         assert_eq!(
             block_sounds_for_id("oak_door").step_event,

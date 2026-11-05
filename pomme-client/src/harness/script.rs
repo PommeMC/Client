@@ -565,7 +565,7 @@ impl Script {
                 exec::screenshot_progress(phase, &path, started)
             }
             Step::MatchScreenshots(names, allowed) => Some(self.match_screenshots(names, *allowed)),
-            Step::Expect(expect, timeout) => match check(expect, phase) {
+            Step::Expect(expect, timeout) => match check(expect, core, phase) {
                 Ok(()) => Some(Ok(())),
                 Err(e) if started.elapsed() > *timeout => Some(Err(e)),
                 Err(_) => None,
@@ -669,7 +669,7 @@ impl Script {
 }
 
 /// Whether `expect` holds now; the error describes what was seen instead.
-fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
+fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String> {
     let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
@@ -787,9 +787,12 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("player is {seen:?}"),
             )
         }
-        Expect::Sound(SoundExpect { sound }) => ensure(game.recent_sounds.contains(sound), || {
-            format!("{sound} not played; recent: {:?}", game.recent_sounds)
-        }),
+        Expect::Sound(SoundExpect { sound }) => {
+            let recent = core.audio.recent_sounds();
+            ensure(recent.contains(sound), || {
+                format!("{sound} not played; recent: {recent:?}")
+            })
+        }
         Expect::Hud(HudExpect { hud: want }) => {
             let seen = protocol::hud(game);
             let shown = |text: &Option<String>| text.as_deref().unwrap_or("").to_owned();
