@@ -475,7 +475,7 @@ pub struct ChunkRing<T> {
     slots: Box<[T]>,
 }
 
-const RING_SIDE: i32 = MAX_VIEW_DISTANCE as i32 * 2 + 1;
+pub(crate) const RING_SIDE: i32 = MAX_VIEW_DISTANCE as i32 * 2 + 1;
 
 /// A column's slot in a `side`×`side` square that wraps around the world.
 fn ring_index(pos: ChunkPos, side: i32) -> usize {
@@ -685,28 +685,15 @@ impl ChunkStore {
         self.min_y
     }
 
+    /// The lowest section's y (vanilla `LevelHeightAccessor.getMinSectionY`).
+    pub fn min_section_y(&self) -> i32 {
+        self.min_y >> 4
+    }
+
     /// Number of 16³ block sections in a column (zero-based section index range
     /// `0..section_count`).
     pub fn section_count(&self) -> i32 {
         (self.height() / 16) as i32
-    }
-
-    /// Whether the block section at world section-y has only air (vanilla
-    /// `LevelChunkSection.hasOnlyAir`, from its block count). Missing chunks
-    /// and out-of-range sections read as empty.
-    pub fn section_is_empty(&self, pos: (i32, i32), section_y: i32) -> bool {
-        let Some(chunk) = self.get_chunk(&ChunkPos::new(pos.0, pos.1)) else {
-            return true;
-        };
-        let index = section_y - (self.min_y() >> 4);
-        let chunk = chunk.read();
-        match usize::try_from(index)
-            .ok()
-            .and_then(|i| chunk.sections.get(i))
-        {
-            Some(section) => section.block_count == 0,
-            None => true,
-        }
     }
 
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING

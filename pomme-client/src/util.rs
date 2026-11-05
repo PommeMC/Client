@@ -109,6 +109,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// `rx`'s next message from a worker thread, `None` while none waits. The
+/// thread only ends early by panicking, so this panics with `gone` then and
+/// the game goes down with it.
+pub fn try_recv_live<T>(rx: &crossbeam_channel::Receiver<T>, gone: &str) -> Option<T> {
+    match rx.try_recv() {
+        Ok(message) => Some(message),
+        Err(crossbeam_channel::TryRecvError::Empty) => None,
+        Err(crossbeam_channel::TryRecvError::Disconnected) => panic!("{gone}"),
+    }
+}
+
 /// The Android app, for calls into its Java side (`open_url`). Replaced on
 /// each `android_main`, since a recreated activity gets a new one.
 #[cfg(target_os = "android")]

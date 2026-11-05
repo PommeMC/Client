@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::offset_of;
+use std::sync::Arc;
 
 use glam::DVec3;
 
@@ -79,8 +80,8 @@ const CULL_BINDINGS: &[rhi::BindGroupLayoutEntry] = &[
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
     rhi::BindGroupLayoutEntry::storage(rhi::ShaderStages::COMPUTE),
 ];
-/// A draw count per arena.
-const COUNTS_SIZE: u64 = (MAX_ARENAS * size_of::<u32>()) as u64;
+/// A draw count per arena, then an index count per arena.
+const COUNTS_SIZE: u64 = (2 * MAX_ARENAS * size_of::<u32>()) as u64;
 const FRUSTUM_SIZE: u64 = size_of::<FrustumData>() as u64;
 /// Column slots the visibility masks start with room for.
 const INITIAL_COLUMNS: usize = 1 << 14;
@@ -90,6 +91,7 @@ const MIN_SEGMENT: u32 = 64;
 /// Staging buffers in flight: one per frame that may still read one, and one
 /// written while they do.
 const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
+
 /// Columns within this squared X/Z distance of the camera render opaque
 /// immediately and never fade in; `cull.comp` has the same.
 const NEARBY_DIST_SQ: f32 = 768.0;
@@ -311,14 +313,15 @@ const fn chunk_vertex_buffers(
     ]
 }
 
+/// `VkDrawIndexedIndirectCommand`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct DrawCommand {
-    index_count: u32,
-    instance_count: u32,
-    first_index: u32,
-    vertex_offset: i32,
-    first_instance: u32,
+pub(crate) struct DrawCommand {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    pub first_instance: u32,
 }
 
 /// An integer section origin widened for f64 math.
@@ -905,6 +908,9 @@ pub struct ChunkUploads {
     pub remesh: Vec<(ChunkPos, Vec<i32>)>,
     /// Sections that found no room, or were evicted for nearer ones.
     pub starved: Vec<(ChunkPos, Vec<i32>)>,
+    /// How many meshes were taken, from the front; the rest didn't fit the
+    /// frame's staging room.
+    pub taken: usize,
 }
 
 /// What a column's sections take: in total, and the largest one's slices.
@@ -1393,7 +1399,7 @@ pub struct ChunkBufferStore {
     /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
-    chunk_visibility: HashMap<ChunkPos, u32>,
+    chunk_visibility: Arc<HashMap<ChunkPos, u32>>,
     /// The masks by column slot, as the cull reads them, and the frame slots
     /// still to receive them.
     column_visibility: Vec<u32>,
@@ -1430,6 +1436,8 @@ pub struct ChunkBufferStore {
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
     last_draw_count: u32,
+    /// Indices the last cull's draws of every layer covered.
+    last_index_count: u32,
 
     /// Monotonic frame counter, bumped once per rendered frame in
     /// `begin_frame`.
@@ -1519,7 +1527,7 @@ impl ChunkBufferStore {
             add_arena_after: 0,
             add_arena_failures: 0,
             lists: Lists::default(),
-            chunk_visibility: HashMap::new(),
+            chunk_visibility: Arc::default(),
             column_visibility: Vec::new(),
             visibility_pending: 0,
             bare_uploads: HashMap::new(),
@@ -1534,7 +1542,7 @@ impl ChunkBufferStore {
                     rhi::backend::Buffer::new(
                         device,
                         "draw_count_readback",
-                        2 * COUNTS_SIZE,
+                        3 * COUNTS_SIZE,
                         rhi::BufferUsages::COPY_DST,
                         rhi::MemoryLocation::Readback,
                     )
@@ -1547,6 +1555,7 @@ impl ChunkBufferStore {
             cull_layout,
             fade_enabled: false,
             last_draw_count: 0,
+            last_index_count: 0,
             frame_seq: 0,
             pending_free: VecDeque::new(),
         }
@@ -1556,6 +1565,11 @@ impl ChunkBufferStore {
     /// cull). Read back from the GPU count buffer, so it lags a few frames.
     pub fn sections_drawn(&self) -> u32 {
         self.last_draw_count
+    }
+
+    /// Triangles the last cull drew, every layer.
+    pub fn triangles_drawn(&self) -> u32 {
+        self.last_index_count / 3
     }
 
     /// Milliseconds since the store was made, never 0 (no fade).
@@ -1619,15 +1633,17 @@ impl ChunkBufferStore {
     /// Upload a batch of mesh results, each replacing the sections in its
     /// `mesh.replaced` range. The vertices go to this frame's staging buffer
     /// and the copies into the arenas are recorded as the frame starts, so a
-    /// streaming frame never waits for the GPU; only a batch outgrowing the
-    /// staging buffer is flushed and waited for on the spot.
+    /// streaming frame never waits for the GPU: a batch outgrowing the
+    /// staging buffer stops there, and the rest is the caller's to send next
+    /// frame. Also returns the starved sections that may fit now, per column,
+    /// for re-meshing.
     pub fn upload_batch(
         &mut self,
         device: &rhi::backend::Device,
         meshes: &[ChunkMeshData],
     ) -> ChunkUploads {
         if meshes.is_empty() {
-            return self.uploads(device);
+            return self.uploads(device, 0);
         }
 
         // Sub-allocate an exact-size vertex + index slice for each non-empty
@@ -1689,7 +1705,8 @@ impl ChunkBufferStore {
         }
         let now_ms = self.now_ms();
 
-        for mesh in meshes {
+        let mut taken = meshes.len();
+        for (i, mesh) in meshes.iter().enumerate() {
             // The covered sections this job is authoritative for: reject any where
             // a newer upload (higher epoch) already landed. See
             // `ChunkMeshData::upload_epoch`.
@@ -1707,9 +1724,6 @@ impl ChunkBufferStore {
                     mesh.upload_epoch >= stored
                 })
                 .collect();
-            // Placed or starved again below, they no longer hold the room.
-            let unheld = self.waiting.settle(mesh.pos, &accepted);
-
             // A mesh from before a format change is remeshed anyway.
             let upload_secs: Vec<&SectionMesh> = mesh
                 .sections
@@ -1717,16 +1731,27 @@ impl ChunkBufferStore {
                 .filter(|s| accepted.contains(&s.section_index))
                 .filter(|s| s.vertices.format() == self.format)
                 .collect();
+            let v_bytes: usize = upload_secs.iter().map(|s| s.vertices.bytes().len()).sum();
+            let i_bytes: usize = upload_secs
+                .iter()
+                .map(|s| s.index_len() as usize * INDEX_SIZE as usize)
+                .sum();
+            let (stg_v, stg_i) = self.staging_used[slot];
+            if self.use_staging
+                && i > 0
+                && (stg_v + v_bytes > staging_half || stg_i + i_bytes > staging_half)
+            {
+                // The rest go next frame, their waitlist claims still held.
+                taken = i;
+                break;
+            }
+            // Placed or starved again below, they no longer hold the room.
+            let unheld = self.waiting.settle(mesh.pos, &accepted);
 
             if self.use_staging && !upload_secs.is_empty() {
                 // Verts and indices share the staging buffer (two halves). A chunk
                 // too large for one half is dropped rather than overflowing the
                 // buffer. This is permanent, so it's not reported for retry.
-                let v_bytes: usize = upload_secs.iter().map(|s| s.vertices.bytes().len()).sum();
-                let i_bytes: usize = upload_secs
-                    .iter()
-                    .map(|s| s.index_len() as usize * INDEX_SIZE as usize)
-                    .sum();
                 if v_bytes > staging_half || i_bytes > staging_half {
                     tracing::warn!(
                         "Chunk {:?} too large for staging ({} v / {} i bytes), skipping",
@@ -1838,8 +1863,9 @@ impl ChunkBufferStore {
                     .iter()
                     .map(|p| p.index_len as usize * INDEX_SIZE as usize)
                     .sum();
-                // This mesh alone fits a half (checked above), so a flush always
-                // makes room.
+                // Only the batch's first mesh gets here with the half short
+                // (an edit uploaded earlier in the frame); it alone fits a half
+                // (checked above), so a flush always makes room.
                 let (stg_v, stg_i) = self.staging_used[slot];
                 if stg_v + mv > staging_half || stg_i + mi > staging_half {
                     self.flush_now(device);
@@ -1905,13 +1931,13 @@ impl ChunkBufferStore {
 
         self.ensure_meta_capacity(device);
 
-        self.uploads(device)
+        self.uploads(device, taken)
     }
 
     /// The batch's starved sections, and those to retry: after the batch, so
     /// the retry sees the room it took and nothing it hands back is placed
     /// in the same batch.
-    fn uploads(&mut self, device: &rhi::backend::Device) -> ChunkUploads {
+    fn uploads(&mut self, device: &rhi::backend::Device, taken: usize) -> ChunkUploads {
         let mut remesh = Vec::new();
         // Until something changes, the arenas are as full as before and the
         // retry would fail too.
@@ -1921,6 +1947,7 @@ impl ChunkBufferStore {
         ChunkUploads {
             remesh,
             starved: std::mem::take(&mut self.starved),
+            taken,
         }
     }
 
@@ -2655,7 +2682,7 @@ impl ChunkBufferStore {
     /// Push the CPU visibility graph's per-column visible-section masks.
     /// Columns not present default to fully visible, so the cull only omits
     /// sections the graph proved occluded.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+    pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
         self.chunk_visibility = vis;
         for (slot, column) in self.lists.columns.iter() {
             self.column_visibility[slot as usize] = self
@@ -2736,10 +2763,21 @@ impl ChunkBufferStore {
         }
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
-        // so its readback holds the previous cull's totals (solid + cutout draws).
-        self.last_draw_count = self.count_readbacks[frame].read(|bytes| {
-            let (counts, _) = bytes.as_chunks::<4>();
-            counts.iter().map(|&count| u32::from_ne_bytes(count)).sum()
+        // so its readback holds the previous cull's totals: per layer, the
+        // draws per arena then the indices per arena.
+        (self.last_draw_count, self.last_index_count) = self.count_readbacks[frame].read(|bytes| {
+            let words: &[u32] = bytemuck::cast_slice(bytes);
+            let (layers, _) = words.as_chunks::<{ 2 * MAX_ARENAS }>();
+            let mut draws = 0;
+            let mut indices = 0;
+            for (layer, counts) in layers.iter().enumerate() {
+                let (per_arena, per_arena_indices) = counts.split_at(MAX_ARENAS);
+                if layer != Layer::Water as usize {
+                    draws += per_arena.iter().sum::<u32>();
+                }
+                indices += per_arena_indices.iter().sum::<u32>();
+            }
+            (draws, indices)
         });
         let data = self.frustum_data(frustum, anchor, eye, true);
         self.camera.cull(
@@ -2751,12 +2789,12 @@ impl ChunkBufferStore {
         );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::CopySrc);
         let readback = self.count_readbacks[frame].handle();
-        for (i, count) in [
-            &self.camera.counts[Layer::Solid as usize][frame],
-            &self.camera.counts[Layer::Cutout as usize][frame],
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, count) in self
+            .camera
+            .counts
+            .iter()
+            .map(|counts| &counts[frame])
+            .enumerate()
         {
             encoder.copy_buffer(
                 count.handle(),
@@ -3260,6 +3298,7 @@ impl DrawList {
         encoder.dispatch(
             pipeline,
             self.cull_sets[frame],
+            &[],
             [data.chunk_count.div_ceil(64), 1, 1],
         );
         encoder.transition_buffers(rhi::BufferUse::StorageWrite, rhi::BufferUse::DrawInput);

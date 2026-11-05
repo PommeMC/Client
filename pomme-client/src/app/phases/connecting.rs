@@ -1,4 +1,3 @@
-use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
@@ -37,6 +36,10 @@ pub fn update_connecting(
         return ConnectingUpdateResult::Disconnected { reason };
     }
 
+    // Added before the drain, which takes everything once a tick is owed.
+    if matches!(connect_phase, ConnectionPhase::Loading) && game.level_load.is_some() {
+        core.tick_accumulator += dt;
+    }
     let disconnect_reason = core.drain_network_events(
         connection,
         Some(connect_phase),
@@ -59,18 +62,18 @@ pub fn update_connecting(
         // `LocalPlayer.tick` stays parked. Those ticks need a level, which
         // arrives with the login that also starts the tracker.
         if game.level_load.is_some() {
-            core.tick_accumulator += dt;
-            while core.tick_accumulator >= TICK_RATE {
+            let ticks = super::in_game::ticks_to_run(&mut core.tick_accumulator);
+            for done in 0..ticks {
                 AppCore::tick_level_load(gfx.renderer.camera_render_position(), connection, game);
                 if game.client_loaded {
                     // Vanilla closes `LevelLoadingScreen` on the same tick that
                     // sends `player_loaded`, and the local player then ticks
-                    // (and moves) later in it. Hand this tick to the game phase
-                    // unspent so it plays out there.
+                    // (and moves) later in it. Hand this tick and the rest to
+                    // the game phase, which runs them before handling packets.
+                    core.carried_ticks = ticks - done;
                     return ConnectingUpdateResult::JoinGame;
                 }
                 AppCore::send_client_tick_end(connection);
-                core.tick_accumulator -= TICK_RATE;
             }
         } else {
             core.tick_accumulator = 0.0;

@@ -2,6 +2,7 @@ pub mod block_entity_model;
 pub mod boot;
 pub mod camera;
 pub mod chunk;
+pub(crate) mod distant;
 pub mod entity_model;
 pub(crate) mod fog;
 pub(crate) mod packing;
@@ -12,6 +13,11 @@ pub(crate) mod shader;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
+/// The overworld's ambient haze end (`fog_end_distance`), which distant
+/// terrain scales up to its own distance.
+const AMBIENT_HAZE_END: f32 = 1024.0;
+
 /// iOS keeps a backgrounded app's view and Metal layer, so its surface
 /// outlives a suspend; Android takes the native window away.
 const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
@@ -215,6 +221,8 @@ enum RenderMode<'a> {
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        /// How far distant terrain draws, in chunks; 0 for none.
+        distant_terrain: u32,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
@@ -237,6 +245,12 @@ pub struct MenuSkin {
 
 #[derive(Default, Clone)]
 pub struct RenderTimings {
+    /// The GPU's own time per pass, from the frame whose fence signalled
+    /// last: what finished before each named stamp.
+    pub gpu: Vec<(&'static str, f32)>,
+    /// Chunk sections and triangles the last cull drew.
+    pub sections: u32,
+    pub triangles: u32,
     pub pace_ms: f32,
     /// Encoding a world frame, the shader pack's passes included.
     pub frame_ms: f32,
@@ -298,7 +312,10 @@ pub struct Renderer {
     /// What the selected pack reads about the player's surroundings.
     pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
+    distant_buffers: distant::gpu::DistantBuffers,
+    distant_pipeline: pipelines::distant::DistantPipeline,
     frames: rhi::backend::Frames,
+    gpu_timer: Option<rhi::backend::GpuTimer>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
     /// The native window is gone (Android backgrounded the app), and with it
@@ -565,6 +582,14 @@ impl Renderer {
         );
 
         let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
+        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device, ctx.indirect_draw);
+        let distant_pipeline = pipelines::distant::DistantPipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            &lightmap,
+            &distant_buffers,
+            ctx.indirect_draw.fragment_stores,
+        );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -601,6 +626,7 @@ impl Renderer {
             &atlas.uv_map,
             &render_assets,
         );
+        let gpu_timer = rhi::backend::GpuTimer::new(&ctx, 16);
 
         Ok(Self {
             ctx,
@@ -640,7 +666,10 @@ impl Renderer {
             gui_item_atlas,
             font_options,
             chunk_buffers,
+            distant_buffers,
+            distant_pipeline,
             frames,
+            gpu_timer,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
             suspended: false,
@@ -1091,6 +1120,8 @@ impl Renderer {
             self.height,
             self.vsync,
         )?;
+        // Its targets read the old swapchain's depth.
+        self.distant_pipeline.drop_targets(&self.ctx.device);
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -1106,6 +1137,7 @@ impl Renderer {
             self.chunk_pipeline.destroy(&self.ctx.device);
             self.chunk_pipeline =
                 ChunkPipeline::new(&self.ctx.device, targets, &self.atlas, &self.lightmap);
+            self.distant_pipeline.rebuild(&self.ctx.device, targets);
 
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1182,6 +1214,17 @@ impl Renderer {
     #[inline]
     pub const fn last_timings(&self) -> &RenderTimings {
         &self.last_timings
+    }
+
+    fn gpu_stamp(
+        &mut self,
+        encoder: &rhi::backend::CommandEncoder,
+        frame: usize,
+        what: &'static str,
+    ) {
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.stamp(encoder, frame, what);
+        }
     }
 
     pub fn update_camera(
@@ -1451,8 +1494,10 @@ impl Renderer {
     }
 
     /// Push the CPU visibility graph's per-column visible-section masks to the
-    /// chunk buffer store, which omits occluded sections from the GPU cull.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+    /// chunk buffer store, which omits occluded sections from the GPU cull,
+    /// and to the distant bounds, which follow what it draws.
+    pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
+        self.distant_buffers.set_visibility(&self.ctx.device, &vis);
         self.chunk_buffers.set_chunk_visibility(vis);
     }
 
@@ -1482,7 +1527,8 @@ impl Renderer {
         self.frames.wait_all(&self.ctx.device);
     }
 
-    /// Upload a batch of chunk meshes in a single coalesced transfer.
+    /// Upload as many of a batch of chunk meshes as fit the frame's staging
+    /// buffer, in a single coalesced transfer.
     pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> chunk::buffer::ChunkUploads {
         self.chunk_buffers.set_eye(self.camera_render_position());
         self.chunk_buffers.upload_batch(&self.ctx.device, meshes)
@@ -1495,6 +1541,76 @@ impl Renderer {
     pub fn clear_chunk_meshes(&mut self) {
         self.wait_for_all_frames();
         self.chunk_buffers.clear();
+    }
+
+    /// Newly meshed distant terrain sections
+    /// ([`distant::gpu::DistantBuffers::upload`]).
+    pub(crate) fn upload_distant(
+        &mut self,
+        updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
+    ) {
+        self.distant_buffers.upload(updates);
+    }
+
+    /// The distant sections the last frame's traversal asked for, and those
+    /// it dropped ([`distant::gpu::DistantBuffers::take_requests`]).
+    pub(crate) fn take_distant_requests(
+        &mut self,
+    ) -> (
+        Vec<distant::section::SectionKey>,
+        Vec<distant::section::SectionKey>,
+    ) {
+        self.distant_buffers.take_requests()
+    }
+
+    /// Where distant terrain draws from and how far; `None` for not at all.
+    pub(crate) fn set_distant_view(&mut self, view: Option<distant::gpu::View>) {
+        self.distant_buffers.set_view(view);
+    }
+
+    /// Which of column `pos`'s sections draw (a bit per section from
+    /// `min_section` up), where distant terrain gives way to them.
+    pub fn set_distant_column_sections(&mut self, pos: ChunkPos, sections: u32, min_section: i32) {
+        self.distant_buffers
+            .set_column_sections(&self.ctx.device, pos, sections, min_section);
+    }
+
+    /// Drops all distant terrain and forgets every loaded chunk, for a new
+    /// level.
+    pub fn reset_distant(&mut self) {
+        self.wait_for_all_frames();
+        self.distant_buffers.clear();
+        self.distant_buffers.clear_bounds();
+    }
+
+    /// Whether distant terrain is uploaded at block column `x`/`z`.
+    #[cfg(feature = "test-harness")]
+    pub fn has_distant_column(&self, x: i32, z: i32) -> bool {
+        self.distant_buffers.has_column(x, z)
+    }
+
+    /// Whether distant terrain out to `chunks` draws this frame: on, and
+    /// the vanilla terrain path drawing (not a shader pack's, nor the
+    /// top-down benchmark view).
+    fn distant_draws(&self, chunks: u32) -> bool {
+        chunks > 0
+            && self.shader_pack.is_none()
+            && self.chunk_buffers.format() == TerrainFormat::Vanilla
+            && self.camera.top_down().is_none()
+    }
+
+    /// The render distance the fog bands use, in chunks, and the scale of
+    /// the ambient haze: pushed out to distant terrain's distance while it
+    /// draws, so real chunks run into it without a wall of fog.
+    fn distant_fog(&self, render_distance: u32, distant_terrain: u32) -> (u32, f32) {
+        if !self.distant_draws(distant_terrain) {
+            return (render_distance, 1.0);
+        }
+        let blocks = (distant_terrain * 16) as f32;
+        (
+            render_distance.max(distant_terrain),
+            (blocks / AMBIENT_HAZE_END).max(1.0),
+        )
     }
 
     /// The block ids to mesh terrain for: the shader pack's while one can
@@ -1553,6 +1669,7 @@ impl Renderer {
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        distant_terrain: u32,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
@@ -1611,6 +1728,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                distant_terrain,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -1918,10 +2036,16 @@ impl Renderer {
         let t_fence = std::time::Instant::now();
         self.frames.wait(&self.ctx.device)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
+        self.last_timings.gpu = self
+            .gpu_timer
+            .as_ref()
+            .map(|timer| timer.read(&self.ctx.device, frame))
+            .unwrap_or_default();
 
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
+        self.distant_buffers.begin_frame(&self.ctx.device, frame);
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -1939,11 +2063,15 @@ impl Renderer {
         if let RenderMode::World {
             ref sky,
             render_distance,
+            distant_terrain,
             eyes_in_water,
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(&self.camera, sky, render_distance, eyes_in_water);
+            let (fog_distance, haze_scale) = self.distant_fog(render_distance, distant_terrain);
+            let uniform =
+                CameraUniform::new(&self.camera, sky, fog_distance, eyes_in_water, haze_scale);
+            self.distant_pipeline.update_camera(frame, &uniform);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.block_outline_pipeline.update_camera(frame, &uniform);
@@ -1962,8 +2090,14 @@ impl Renderer {
         }
 
         let encoder = self.frames.begin(&self.ctx.device)?;
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.begin_frame(&encoder, frame);
+        }
         self.atlas.record_animation_upload(&encoder, frame);
+        self.distant_buffers.record_model_upload(&encoder, frame);
+        self.distant_buffers.record_uploads(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
+        self.gpu_stamp(&encoder, frame, "uploads");
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 
@@ -1978,6 +2112,9 @@ impl Renderer {
                 self.camera.anchor(),
                 self.camera_render_position(),
             );
+            self.gpu_stamp(&encoder, frame, "cull");
+            self.last_timings.sections = self.chunk_buffers.sections_drawn();
+            self.last_timings.triangles = self.chunk_buffers.triangles_drawn();
         }
 
         let player_team_color = match &mode {
@@ -2138,11 +2275,15 @@ impl Renderer {
         }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
+        // Depth kept past the pass: distant terrain draws against it in
+        // passes of its own, then the frame goes on.
         let mut pass = encoder.begin_render_pass(
             &self.ctx.device,
-            &self
-                .swapchain
-                .pass(image_index, rhi::LoadOp::Clear(clear_color)),
+            &self.swapchain.pass_keeping_depth(
+                image_index,
+                rhi::LoadOp::Clear(clear_color),
+                rhi::LoadOp::Clear(1.0),
+            ),
         );
 
         let sw = self.swapchain.extent.width as f32;
@@ -2173,6 +2314,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                distant_terrain,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -2188,16 +2330,17 @@ impl Renderer {
                     // Vanilla water fog hides the sky dome and clouds; the framebuffer
                     // is cleared to the water fog color, so skipping them tints the view
                     // when looking up out of geometry.
+                    let (fog_distance, _) = self.distant_fog(*render_distance, *distant_terrain);
                     if !*eyes_in_water {
                         self.sky_pipeline.update_and_draw(
                             &mut pass,
                             frame,
                             &self.camera,
                             sky,
-                            *render_distance,
+                            fog_distance,
                         );
                     }
-
+                    self.gpu_stamp(&encoder, frame, "sky");
                     let t_cull = std::time::Instant::now();
                     // A pack that failed to build leaves its vertex format until
                     // the next frame remeshes; skip those.
@@ -2218,9 +2361,52 @@ impl Renderer {
                         self.moving_block_buffers.draw(&pass, frame, true);
                     }
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
+                    self.gpu_stamp(&encoder, frame, "terrain");
+
+                    let eye = self.camera_render_position();
+                    let distant = self.distant_draws(*distant_terrain);
+                    if distant {
+                        self.distant_buffers.update_roots(eye);
+                    }
+                    // Distant terrain draws after the chunks' solid and cutout
+                    // passes: bounded by their depth, into its own image, then
+                    // laid into the frame. Nothing to traverse means nothing
+                    // to draw or request.
+                    if distant && self.distant_buffers.top_count() > 0 {
+                        let extent = self.swapchain.extent;
+                        pass.end();
+                        self.distant_pipeline.render(
+                            &self.ctx.device,
+                            &encoder,
+                            frame,
+                            &mut self.distant_buffers,
+                            &self.camera,
+                            eye,
+                            *render_distance,
+                            self.swapchain.depth.handle(),
+                            extent,
+                            sky.cardinal_light.table(),
+                        );
+                        pass = encoder.begin_render_pass(
+                            &self.ctx.device,
+                            &self.swapchain.pass_keeping_depth(
+                                image_index,
+                                rhi::LoadOp::Load,
+                                rhi::LoadOp::Load,
+                            ),
+                        );
+                        self.distant_pipeline.composite(
+                            &mut pass,
+                            frame,
+                            &self.camera,
+                            (*render_distance * 16) as f32,
+                            (*distant_terrain * 16) as f32,
+                        );
+                    }
+
+                    self.gpu_stamp(&encoder, frame, "distant");
 
                     let anchor = self.camera.anchor();
-                    let eye = self.camera_render_position();
 
                     if let Some((block_pos, stage, state)) = destroy_info {
                         self.block_overlay_pipeline.draw(
@@ -2280,6 +2466,8 @@ impl Renderer {
                             .draw(&mut pass, frame, boxes, origin, screen);
                     }
 
+                    self.gpu_stamp(&encoder, frame, "entities");
+
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
                     // but doesn't write depth.
@@ -2288,6 +2476,7 @@ impl Renderer {
                         self.chunk_buffers
                             .draw_indirect(&pass, frame, Layer::Water, View::Camera);
                     }
+                    self.gpu_stamp(&encoder, frame, "water");
 
                     // Clouds draw after opaque world geometry (so terrain occludes
                     // them) and before weather, depth-tested against the scene.
@@ -2314,6 +2503,7 @@ impl Renderer {
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
                     }
+                    self.gpu_stamp(&encoder, frame, "clouds");
                     cull_ms
                 };
 
@@ -2380,6 +2570,8 @@ impl Renderer {
                     }
                 }
 
+                self.gpu_stamp(&encoder, frame, "hand");
+
                 // Vanilla blits the outline after the hand, before the GUI.
                 if self.entity_renderer.has_outlines() || self.item_entity_pipeline.has_outlines() {
                     pass.end();
@@ -2403,6 +2595,8 @@ impl Renderer {
                     pass = self.resume_frame_pass(&encoder, image_index);
                     self.post_effects.finish(&mut pass);
                 }
+
+                self.gpu_stamp(&encoder, frame, "post");
 
                 let (blurred_pass, vbase, overlay) = self.draw_until_blur(
                     &encoder,
@@ -2496,6 +2690,7 @@ impl Renderer {
 
         pass.end();
         self.swapchain.ready_to_present(&encoder, image_index);
+        self.gpu_stamp(&encoder, frame, "hud");
 
         // The image is ready to present; grab it first if F2 was pressed.
         self.screenshot.record_if_armed(
@@ -2510,10 +2705,13 @@ impl Renderer {
         self.gui_item_atlas.end_frame();
 
         let t_present = std::time::Instant::now();
-        match self
-            .frames
-            .submit_and_present(encoder, &self.ctx, &self.swapchain, image_index)?
-        {
+        let presented =
+            self.frames
+                .submit_and_present(encoder, &self.ctx, &self.swapchain, image_index)?;
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.submitted(frame);
+        }
+        match presented {
             rhi::Presented::Done => {}
             rhi::Presented::OutOfDate => self.swapchain_dirty = true,
             rhi::Presented::Suboptimal => {
@@ -2872,6 +3070,8 @@ impl Drop for Renderer {
         }
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
+        self.distant_buffers.destroy(&self.ctx.device);
+        self.distant_pipeline.destroy(&self.ctx.device);
         self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);
@@ -2898,6 +3098,9 @@ impl Drop for Renderer {
         self.gui_item_atlas.destroy(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
 
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.destroy(&self.ctx.device);
+        }
         self.frames.destroy(&self.ctx.device);
 
         self.swapchain.destroy(&self.ctx);

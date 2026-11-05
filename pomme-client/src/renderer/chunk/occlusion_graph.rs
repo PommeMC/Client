@@ -2,10 +2,13 @@
 //! 6x6 face-to-face connectivity set at mesh time (vanilla's `VisGraph` flood
 //! fill); the per-frame occlusion walk (`SectionOcclusionGraph`) consumes it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
+use crossbeam_channel::{Receiver, Sender};
 use glam::DVec3;
 
+use super::buffer::column_is_near;
 use crate::position::ChunkPos;
 
 /// The six block faces, ordinals matching vanilla `Direction`
@@ -356,6 +359,263 @@ fn ray_occluded(
     false
 }
 
+/// Extra FOV (radians) for the tier-1 "about to be seen" margin frustum, so
+/// small camera turns reveal already-meshed terrain instead of a meshing
+/// curtain.
+pub const VIS_MARGIN_RADIANS: f32 = 0.6;
+
+/// Frustum tier for a column: 0 in view, 1 in the dilated margin, 2 behind the
+/// camera. (Nearby columns are forced to 0 by the caller.)
+fn column_frustum_tier(
+    pos: ChunkPos,
+    eye: DVec3,
+    planes: &[[f32; 4]; 6],
+    planes_wide: &[[f32; 4]; 6],
+    min_y: f32,
+    max_y: f32,
+) -> u8 {
+    // Camera-relative full-height column box, matching how the GPU cull
+    // subtracts the eye before its plane test (cull.comp); f64 first for
+    // precision at extreme coordinates.
+    let dx = (pos.x as f64 * 16.0 - eye.x) as f32;
+    let dz = (pos.z as f64 * 16.0 - eye.z) as f32;
+    let mn = [dx, (min_y as f64 - eye.y) as f32, dz];
+    let mx = [dx + 16.0, (max_y as f64 - eye.y) as f32, dz + 16.0];
+    if aabb_in_frustum(&mn, &mx, planes) {
+        0
+    } else if aabb_in_frustum(&mn, &mx, planes_wide) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Full mask for an `n`-section column (bits `0..n` set).
+pub fn section_mask(n: i32) -> u32 {
+    if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
+}
+
+/// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
+/// `cull.comp`): true unless the box is fully behind some plane.
+fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool {
+    for p in planes {
+        let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
+            + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }
+            + p[2] * if p[2] >= 0.0 { mx[2] } else { mn[2] }
+            + p[3];
+        if d < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// What the walk thread is told about the world: a section's visibility set
+/// from its mesh, a column loading or unloading, the meshes or the level gone.
+pub enum Update {
+    Section {
+        pos: ChunkPos,
+        si: i32,
+        vis: VisibilitySet,
+    },
+    Load(ChunkPos),
+    Unload {
+        pos: ChunkPos,
+        sections: i32,
+    },
+    /// The meshes went: every section's set goes, the columns stay loaded.
+    ClearSections,
+    /// The level went, columns and all.
+    Clear,
+}
+
+/// One walk from the camera, applied against the frustum it was asked with.
+pub struct Walk {
+    /// Matched against the result's, so a walk asked before the level was
+    /// cleared is dropped.
+    pub generation: u64,
+    pub cam_col: ChunkPos,
+    pub eye: DVec3,
+    pub planes: [[f32; 4]; 6],
+    pub planes_wide: [[f32; 4]; 6],
+    pub min_y: i32,
+    pub section_count: i32,
+    /// Whether occluded sections are left out of what the renderer draws.
+    pub occlusion: bool,
+}
+
+/// A walk's outcome, per loaded column.
+pub struct Visibility {
+    pub generation: u64,
+    /// What the renderer draws: bit `si` set for a section not occluded, or
+    /// every section with occlusion off.
+    pub draw: Arc<HashMap<ChunkPos, u32>>,
+    /// The in-frustum columns with a visible section, and their masks.
+    pub in_view: HashMap<ChunkPos, u32>,
+}
+
+impl Walk {
+    fn run(
+        &self,
+        section_vis: &HashMap<(ChunkPos, i32), VisibilitySet>,
+        columns: &HashSet<ChunkPos>,
+    ) -> Visibility {
+        let cam_si = ((self.eye.y - self.min_y as f64) / 16.0).floor() as i32;
+        // Bound the walk by the loaded radius (a server can stream terrain
+        // past the client render distance).
+        let rd = columns
+            .iter()
+            .map(|p| {
+                (p.x - self.cam_col.x)
+                    .abs()
+                    .max((p.z - self.cam_col.z).abs())
+            })
+            .max()
+            .unwrap_or(0);
+        let bfs = compute_visible_mask(
+            section_vis,
+            self.cam_col,
+            cam_si,
+            self.eye,
+            self.min_y,
+            self.section_count,
+            rd,
+        );
+        let min_y = self.min_y as f32;
+        let max_y = min_y + (self.section_count * 16) as f32;
+        let full = section_mask(self.section_count);
+        let mut in_view = HashMap::new();
+        let mut masks = HashMap::with_capacity(columns.len());
+        for &pos in columns {
+            let near = column_is_near(pos, self.eye);
+            // Near columns always draw fully; otherwise a column draws only the
+            // sections the graph proved occlusion-visible (none => fully hidden).
+            let mask = if near {
+                full
+            } else {
+                bfs.get(&pos).copied().unwrap_or(0)
+            };
+            if mask != 0
+                && (near
+                    || column_frustum_tier(
+                        pos,
+                        self.eye,
+                        &self.planes,
+                        &self.planes_wide,
+                        min_y,
+                        max_y,
+                    ) == 0)
+            {
+                in_view.insert(pos, mask);
+            }
+            masks.insert(pos, mask);
+        }
+        let draw = if self.occlusion {
+            Arc::new(masks)
+        } else {
+            Arc::new(columns.iter().map(|&pos| (pos, full)).collect())
+        };
+        Visibility {
+            generation: self.generation,
+            draw,
+            in_view,
+        }
+    }
+}
+
+enum Message {
+    Update(Update),
+    Walk(Box<Walk>),
+}
+
+/// The thread that owns the section visibility sets and walks them. Updates
+/// and walks arrive in order, so a walk sees every update sent before it,
+/// and the game thread never copies the sets. Vanilla's
+/// `SectionOcclusionGraph` runs its walk on a thread the same way.
+pub struct Walker {
+    tx: Sender<Message>,
+    rx: Receiver<Visibility>,
+}
+
+/// The thread only ends early by panicking; the game goes down with it.
+const THREAD_GONE: &str = "the chunk occlusion thread panicked";
+
+impl Walker {
+    pub fn spawn() -> Self {
+        let (tx, messages) = crossbeam_channel::unbounded();
+        let (results, rx) = crossbeam_channel::unbounded();
+        std::thread::Builder::new()
+            .name("chunk-occlusion".into())
+            .spawn(move || run(&messages, &results))
+            .expect("failed to spawn the chunk occlusion thread");
+        Self { tx, rx }
+    }
+
+    pub fn update(&self, update: Update) {
+        self.tx.send(Message::Update(update)).expect(THREAD_GONE);
+    }
+
+    pub fn walk(&self, walk: Walk) {
+        self.tx
+            .send(Message::Walk(Box::new(walk)))
+            .expect(THREAD_GONE);
+    }
+
+    pub fn try_result(&self) -> Option<Visibility> {
+        crate::util::try_recv_live(&self.rx, THREAD_GONE)
+    }
+}
+
+/// The walk thread's view of the world.
+#[derive(Default)]
+struct WalkState {
+    section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    columns: HashSet<ChunkPos>,
+}
+
+impl WalkState {
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Section { pos, si, vis } => {
+                self.section_vis.insert((pos, si), vis);
+            }
+            Update::Load(pos) => {
+                self.columns.insert(pos);
+            }
+            Update::Unload { pos, sections } => {
+                self.columns.remove(&pos);
+                for si in 0..sections {
+                    self.section_vis.remove(&(pos, si));
+                }
+            }
+            Update::ClearSections => self.section_vis.clear(),
+            Update::Clear => {
+                self.section_vis.clear();
+                self.columns.clear();
+            }
+        }
+    }
+
+    fn walk(&self, walk: &Walk) -> Visibility {
+        walk.run(&self.section_vis, &self.columns)
+    }
+}
+
+/// Ends when the game drops its [`Walker`].
+fn run(messages: &Receiver<Message>, results: &Sender<Visibility>) {
+    let mut state = WalkState::default();
+    for message in messages {
+        match message {
+            Message::Update(update) => state.apply(update),
+            Message::Walk(walk) => {
+                if results.send(state.walk(&walk)).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +684,48 @@ mod tests {
         assert!(mask.get(&ChunkPos::new(0, -1)).copied().unwrap_or(0) & (1 << 4) != 0);
         // ...but the section directly behind it on the same row/height is not.
         assert!(mask.get(&ChunkPos::new(0, -2)).copied().unwrap_or(0) & (1 << 4) == 0);
+    }
+
+    fn far_walk() -> Walk {
+        // Every plane passes everything, so only occlusion decides.
+        let open = [[0.0, 0.0, 0.0, 1.0]; 6];
+        Walk {
+            generation: 0,
+            cam_col: ChunkPos::new(0, 0),
+            eye: DVec3::new(8.0, 72.0, 8.0),
+            planes: open,
+            planes_wide: open,
+            min_y: 0,
+            section_count: 8,
+            occlusion: true,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "occlusion thread panicked")]
+    fn a_dead_thread_takes_the_game_down() {
+        let (tx, _messages) = crossbeam_channel::unbounded();
+        let (results, rx) = crossbeam_channel::unbounded::<Visibility>();
+        drop(results);
+        Walker { tx, rx }.try_result();
+    }
+
+    #[test]
+    fn clearing_sections_keeps_loaded_columns() {
+        let pos = ChunkPos::new(6, 0);
+        let mut state = WalkState::default();
+        state.apply(Update::Load(ChunkPos::new(0, 0)));
+        state.apply(Update::Load(pos));
+        state.apply(Update::Section {
+            pos,
+            si: 4,
+            vis: VisibilitySet::none(),
+        });
+        state.apply(Update::ClearSections);
+        let vis = state.walk(&far_walk());
+        assert_eq!(vis.draw.get(&pos), Some(&section_mask(8)));
+
+        state.apply(Update::Clear);
+        assert!(state.walk(&far_walk()).draw.is_empty());
     }
 }

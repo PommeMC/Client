@@ -81,15 +81,9 @@ impl Swapchain {
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
         } else {
-            // MoltenVK's Mailbox stays synced to the display refresh, so on
-            // Apple only Immediate (displaySyncEnabled = NO) truly uncaps;
-            // elsewhere Mailbox is preferred (uncapped and tear-free).
-            let prefer = if cfg!(target_vendor = "apple") {
-                [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
-            } else {
-                [vk::PresentModeKHR::Mailbox, vk::PresentModeKHR::Immediate]
-            };
-            prefer
+            // Vanilla `GpuSurface.PresentMode`: vsync off takes Immediate,
+            // then Mailbox, then Fifo.
+            [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
                 .into_iter()
                 .find(|m| present_modes.contains(m))
                 .unwrap_or(vk::PresentModeKHR::Fifo)
@@ -226,6 +220,24 @@ impl Swapchain {
             self.depth.handle(),
             self.extent,
         )
+    }
+
+    /// As [`Self::pass`], but the depth buffer loads as `depth` says and is
+    /// kept after the pass, for a frame drawn in several passes.
+    pub fn pass_keeping_depth(
+        &self,
+        index: u32,
+        color: rhi::LoadOp<[f32; 4]>,
+        depth: rhi::LoadOp<f32>,
+    ) -> super::RenderPassDesc {
+        super::RenderPassDesc {
+            depth: Some(super::DepthAttachment {
+                texture: self.depth.handle(),
+                load: depth,
+                store: rhi::StoreOp::Store,
+            }),
+            ..self.pass(index, color)
+        }
     }
 
     pub fn is_fifo(&self) -> bool {

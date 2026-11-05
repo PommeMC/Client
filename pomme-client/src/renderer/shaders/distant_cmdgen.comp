@@ -1,0 +1,100 @@
+#version 450
+
+// A draw per face group of every listed section the occlusion pass saw this
+// frame, face groups turned away from the camera left out; the same draws
+// again in the temporal region for sections it didn't see last frame, since
+// this frame's opaque pass drew last frame's list; translucent sections
+// counted into distance buckets for distant_translucents.comp.
+
+#define DISTANT_SET 0
+#define SCENE_BINDING 0
+#define DRAW_BUFFER_BINDING 1
+#define DRAW_COUNTS_BINDING 2
+#define SECTION_METADATA_BINDING 3
+#define VISIBILITY_BINDING 4
+#define RENDER_LIST_BINDING 5
+#define POSITION_BINDING 6
+#define TRANSLUCENT_DATA_BINDING 7
+#include "distant_section.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
+
+void main() {
+    uint draw_id = gl_GlobalInvocationID.x;
+    if (draw_id >= listed_count()) {
+        return;
+    }
+    uint section_id = render_list[draw_id];
+    SectionMeta meta = section_data[section_id];
+    uint detail = section_detail(meta);
+    ivec3 ipos = section_position(meta);
+
+    uint seen = visibility_data[section_id];
+    if (occlusion_skipped != 0u) {
+        // No occlusion pass: every listed section counts as seen.
+        seen = seen_now(seen);
+        visibility_data[section_id] = seen;
+    }
+    bool should_render = (seen & ~SEEN_BEFORE_BIT) == frame_id;
+    bool render_temporally = (seen & SEEN_BEFORE_BIT) == 0u;
+    if (!should_render) {
+        return;
+    }
+
+    uint ptr = section_quad_start(meta);
+    ivec3 relative = ipos - (camera_section >> detail);
+    position_buffer[draw_id] = meta.a.xy;
+    uvec4 counts = meta.b;
+
+    // Down, up, north, south, west, east: only the groups facing the camera.
+    uint mask = 0u;
+    mask |= uint((counts.y & 0xFFFFu) != 0u && relative.y > -1) << 0u;
+    mask |= uint((counts.y >> 16u) != 0u && relative.y < 1) << 1u;
+    mask |= uint((counts.z & 0xFFFFu) != 0u && relative.z > -1) << 2u;
+    mask |= uint((counts.z >> 16u) != 0u && relative.z < 1) << 3u;
+    mask |= uint((counts.w & 0xFFFFu) != 0u && relative.x > -1) << 4u;
+    mask |= uint((counts.w >> 16u) != 0u && relative.x < 1) << 5u;
+    mask |= uint((counts.x >> 16u) != 0u) << 6u;
+
+    uint cmd_count = bitCount(mask);
+    uint cmd_ptr = atomicAdd(opaque_draw_count, cmd_count);
+    uint temporal_ptr = 0u;
+    if (render_temporally) {
+        temporal_ptr = atomicAdd(temporal_draw_count, cmd_count) + TEMPORAL_OFFSET;
+    }
+
+    // Translucent quads: bucketed by distance, nearest in the last bucket;
+    // past a full list neither listed nor counted, so the buckets' sums stay
+    // within it.
+    uint count = counts.x & 0xFFFFu;
+    uint slot = count != 0u ? atomicAdd(translucent_draw_count, 1u) : TRANSLUCENT_DRAWS;
+    if (slot < TRANSLUCENT_DRAWS) {
+        translucent_data[slot + TRANSLUCENT_BUCKETS] = draw_id;
+        uvec3 abs_rel = abs(relative);
+        uint distance = (abs_rel.x + abs_rel.y + abs_rel.z) << detail;
+        distance = (TRANSLUCENT_BUCKETS - 1u) - min(distance, TRANSLUCENT_BUCKETS - 1u);
+        atomicAdd(translucent_data[distance], 1u);
+    }
+    ptr += count;
+
+    // Double-sided quads, then the six face groups.
+    count = counts.x >> 16u;
+    if ((mask & (1u << 6u)) != 0u) {
+        write_draw(cmd_ptr++, OPAQUE_END, draw_id, ptr, count);
+        if (render_temporally) {
+            write_draw(temporal_ptr++, TEMPORAL_END, draw_id, ptr, count);
+        }
+    }
+    ptr += count;
+    for (uint face = 0u; face < 6u; face++) {
+        uint word = counts[1u + (face >> 1u)];
+        count = (face & 1u) == 0u ? word & 0xFFFFu : word >> 16u;
+        if ((mask & (1u << face)) != 0u) {
+            write_draw(cmd_ptr++, OPAQUE_END, draw_id, ptr, count);
+            if (render_temporally) {
+                write_draw(temporal_ptr++, TEMPORAL_END, draw_id, ptr, count);
+            }
+        }
+        ptr += count;
+    }
+}

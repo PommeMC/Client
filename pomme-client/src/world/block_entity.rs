@@ -139,10 +139,6 @@ pub fn is_invisible_block(name: &str) -> bool {
     )
 }
 
-pub fn is_fluid_block(name: &str) -> bool {
-    matches!(name, "water" | "lava" | "bubble_column")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

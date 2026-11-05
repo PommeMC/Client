@@ -1,0 +1,60 @@
+#version 450
+
+// The translucent distance buckets turned into exclusive prefix sums in
+// place, one workgroup over the counts as `uvec4`s.
+
+#include "distant_consts.glsl"
+
+#define WORK_SIZE 256
+#if WORK_SIZE * 4 != TRANSLUCENT_BUCKETS
+#error "a uvec4 of buckets per invocation"
+#endif
+layout(local_size_x = WORK_SIZE) in;
+
+layout(set = 0, binding = 0, std430) buffer Counts {
+    uvec4 io_count[];
+};
+
+shared uint prefix_sum[WORK_SIZE];
+
+#define STEP(i) if ((I & (1u << i)) != 0u) prefix_sum[I] += prefix_sum[(I & ~((1u << (i + 1)) - 1u)) + ((1u << i) - 1u)];
+
+uint prefix_sum_exclusive(uint value) {
+    uint I = gl_LocalInvocationID.x;
+    prefix_sum[I] = value;
+    barrier();
+    STEP(0)
+    barrier();
+    STEP(1)
+    barrier();
+    STEP(2)
+    barrier();
+    STEP(3)
+    barrier();
+    STEP(4)
+    barrier();
+    STEP(5)
+    barrier();
+    STEP(6)
+    barrier();
+    STEP(7)
+    barrier();
+    return prefix_sum[I] - value;
+}
+
+void main() {
+    uint gid = gl_LocalInvocationID.x;
+    prefix_sum[gid] = 0u;
+    uvec4 count = uvec4(0u);
+    uint sum = 0u;
+    {
+        uvec4 dat = io_count[gid];
+        count.yzw = dat.xyz;
+        count.z += count.y;
+        count.w += count.z;
+        sum = count.w + dat.w;
+    }
+    barrier();
+    count += prefix_sum_exclusive(sum);
+    io_count[gid] = count;
+}

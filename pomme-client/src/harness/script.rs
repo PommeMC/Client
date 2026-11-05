@@ -87,6 +87,7 @@ enum Expect {
     Block(BlockExpect),
     Biome(BiomeExpect),
     Terrain(TerrainExpect),
+    Distant(DistantExpect),
     Menu(MenuExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -241,6 +242,23 @@ struct TerrainExpect {
     terrain: String,
 }
 
+/// Distant terrain is drawn at a block column, `{ at = [x, z] }`: the
+/// finest section holding it is meshed and uploaded; with `gone = true`,
+/// it isn't.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistantExpect {
+    distant_terrain: DistantAt,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DistantAt {
+    at: [i32; 2],
+    #[serde(default)]
+    gone: bool,
+}
+
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
 /// `creative`, `pause` or `none`, and optionally its title.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -387,10 +405,14 @@ struct FrameSample {
     interval_ms: f32,
     frame_ms: f32,
     fence_ms: f32,
+    gpu: Vec<(&'static str, f32)>,
+    sections: u32,
+    triangles: u32,
 }
 
 /// `samples` summed up: the frame rate, its 1% low, the time the renderer
-/// takes to encode a world frame, and the wait for the GPU.
+/// takes to encode a world frame, the wait for the GPU, the GPU's own time
+/// per pass, and what the chunk draws covered.
 fn summarize(samples: &[FrameSample]) -> String {
     let mean =
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
@@ -398,13 +420,44 @@ fn summarize(samples: &[FrameSample]) -> String {
     intervals.sort_by(f32::total_cmp);
     let slowest = &intervals[intervals.len() - intervals.len().div_ceil(100)..];
     let low = slowest.iter().sum::<f32>() / slowest.len() as f32;
+    // Per pass, in the order the frame stamps them.
+    let mut passes: Vec<(&str, f32, u32)> = Vec::new();
+    for &(name, ms) in samples.iter().flat_map(|s| &s.gpu) {
+        match passes.iter_mut().find(|pass| pass.0 == name) {
+            Some(pass) => {
+                pass.1 += ms;
+                pass.2 += 1;
+            }
+            None => passes.push((name, ms, 1)),
+        }
+    }
+    let passes: Vec<(&str, f32)> = passes
+        .into_iter()
+        .map(|(name, sum, count)| (name, sum / count as f32))
+        .collect();
+    // A device without timestamps stamps nothing.
+    let gpu = if passes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; gpu {:.2} ms: {}",
+            passes.iter().map(|(_, ms)| ms).sum::<f32>(),
+            passes
+                .iter()
+                .map(|(name, ms)| format!("{name} {ms:.2}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
     format!(
-        "{} frames: {:.1} fps, 1% low {:.1} fps; encode {:.2} ms, gpu wait {:.2} ms",
+        "{} frames: {:.1} fps, 1% low {:.1} fps; encode {:.2} ms, gpu wait {:.2} ms{gpu}; {:.0} sections, {:.0}k triangles",
         samples.len(),
         1000.0 / mean(|s| s.interval_ms),
         1000.0 / low,
         mean(|s| s.frame_ms),
         mean(|s| s.fence_ms),
+        mean(|s| s.sections as f32),
+        mean(|s| s.triangles as f32) / 1000.0,
     )
 }
 
@@ -483,6 +536,9 @@ impl Script {
                         interval_ms: (now - last).as_secs_f32() * 1000.0,
                         frame_ms: timings.frame_ms,
                         fence_ms: timings.fence_ms,
+                        gpu: timings.gpu.clone(),
+                        sections: timings.sections,
+                        triangles: timings.triangles,
                     });
                 }
                 self.last_frame = Some(now);
@@ -791,6 +847,12 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || "the chunk arenas are still compacting".into(),
             )
         }
+        Expect::Distant(DistantExpect {
+            distant_terrain: DistantAt { at: [x, z], gone },
+        }) => ensure(gfx.renderer.has_distant_column(*x, *z) != *gone, || {
+            let state = if *gone { "still" } else { "no" };
+            format!("{state} distant terrain at {x}, {z}")
+        }),
         Expect::Biome(BiomeExpect { biome, at }) => {
             let seen = protocol::biome(game, *at);
             ensure(seen == *biome, || format!("{at:?} is in {seen}"))
@@ -920,6 +982,7 @@ mod tests {
                 brightness: None,
                 shader_pack: None,
                 render_distance: None,
+                distant_terrain: None,
             }))
         );
         assert_eq!(
@@ -1006,11 +1069,18 @@ mod tests {
                 interval_ms: if i < 2 { 50.0 } else { 10.0 },
                 frame_ms: 1.0,
                 fence_ms: 0.5,
+                gpu: if i % 2 == 0 {
+                    vec![("chunks", 0.25), ("distant", 0.5)]
+                } else {
+                    vec![("chunks", 0.75)]
+                },
+                sections: 10,
+                triangles: 2000,
             })
             .collect();
         assert_eq!(
             summarize(&samples),
-            "200 frames: 96.2 fps, 1% low 20.0 fps; encode 1.00 ms, gpu wait 0.50 ms"
+            "200 frames: 96.2 fps, 1% low 20.0 fps; encode 1.00 ms, gpu wait 0.50 ms; gpu 1.00 ms: chunks 0.50, distant 0.50; 10 sections, 2k triangles"
         );
     }
 }

@@ -509,6 +509,9 @@ fn buffer_usage_flags(usage: BufferUsages) -> vk::BufferUsageFlags {
 pub struct Texture {
     raw: vk::Image,
     view: vk::ImageView,
+    /// A view per level when there are several, for attaching or sampling
+    /// one level alone ([`Self::mip_handle`]).
+    mip_views: Vec<vk::ImageView>,
     allocation: Allocation,
 }
 
@@ -559,9 +562,10 @@ impl Texture {
                 return Err(error);
             }
         };
-        let texture = Self {
+        let mut texture = Self {
             raw,
             view: vk::ImageView::null(),
+            mip_views: Vec::new(),
             allocation,
         };
         if let Err(error) = unsafe {
@@ -574,26 +578,45 @@ impl Texture {
             texture.destroy(device);
             return Err(format!("failed to bind image memory for {label}: {error}"));
         }
-        let view_info = vk::ImageViewCreateInfo {
-            image: raw,
-            view_type: match desc.dimension {
-                TextureViewDimension::D2 => vk::ImageViewType::Type2D,
-                TextureViewDimension::D2Array => vk::ImageViewType::Type2DArray,
-                TextureViewDimension::Cube => vk::ImageViewType::Cube,
-            },
-            format,
-            subresource_range: vk::ImageSubresourceRange {
-                level_count: desc.mip_levels,
-                layer_count: desc.layers,
-                ..subresource_range(desc.format)
-            },
-            ..Default::default()
+        let view = |first_mip, mips| {
+            let info = vk::ImageViewCreateInfo {
+                image: raw,
+                view_type: match desc.dimension {
+                    TextureViewDimension::D2 => vk::ImageViewType::Type2D,
+                    TextureViewDimension::D2Array => vk::ImageViewType::Type2DArray,
+                    TextureViewDimension::Cube => vk::ImageViewType::Cube,
+                },
+                format,
+                subresource_range: vk::ImageSubresourceRange {
+                    base_mip_level: first_mip,
+                    level_count: mips,
+                    layer_count: desc.layers,
+                    ..subresource_range(desc.format)
+                },
+                ..Default::default()
+            };
+            device
+                .raw
+                .create_image_view(&info, None)
+                .map_err(|error| format!("failed to create image view for {label}: {error}"))
         };
-        match device.raw.create_image_view(&view_info, None) {
-            Ok(view) => Ok(Self { view, ..texture }),
+        let views = view(0, desc.mip_levels).and_then(|whole| {
+            texture.view = whole;
+            let levels = if desc.mip_levels > 1 {
+                0..desc.mip_levels
+            } else {
+                0..0
+            };
+            levels.map(|level| view(level, 1)).collect()
+        });
+        match views {
+            Ok(mip_views) => {
+                texture.mip_views = mip_views;
+                Ok(texture)
+            }
             Err(error) => {
                 texture.destroy(device);
-                Err(format!("failed to create image view for {label}: {error}"))
+                Err(error)
             }
         }
     }
@@ -605,10 +628,34 @@ impl Texture {
         }
     }
 
+    /// One level of the texture; a texture made with one level is its whole
+    /// view.
+    pub fn mip_handle(&self, level: u32) -> TextureHandle {
+        TextureHandle {
+            image: self.raw,
+            view: match self.mip_views.get(level as usize) {
+                Some(&view) => view,
+                None => {
+                    assert!(
+                        self.mip_views.is_empty() && level == 0,
+                        "no mip level {level}"
+                    );
+                    self.view
+                }
+            },
+        }
+    }
+
     /// Frees the texture and any cached framebuffers holding it.
     pub fn destroy(self, device: &Device) {
-        device.targets.forget(device, &[self.handle()]);
-        device.raw.destroy_image_view(self.view, None);
+        let handles: Vec<TextureHandle> = (0..self.mip_views.len() as u32)
+            .map(|level| self.mip_handle(level))
+            .chain([self.handle()])
+            .collect();
+        device.targets.forget(device, &handles);
+        for view in self.mip_views.iter().chain([&self.view]) {
+            device.raw.destroy_image_view(*view, None);
+        }
         device.raw.destroy_image(self.raw, None);
         device.allocator().free(self.allocation).ok();
     }
@@ -705,6 +752,8 @@ pub fn try_create_sampler(device: &Device, desc: &SamplerDesc) -> Result<Sampler
         compare_op: match desc.compare {
             Some(CompareFunction::Less) => vk::CompareOp::Less,
             Some(CompareFunction::LessEqual) | None => vk::CompareOp::LessOrEqual,
+            Some(CompareFunction::Greater) => vk::CompareOp::Greater,
+            Some(CompareFunction::Always) => vk::CompareOp::Always,
         },
         ..Default::default()
     };
@@ -1033,6 +1082,8 @@ pub fn try_create_render_pipeline(
             depth_compare_op: match depth.compare {
                 CompareFunction::Less => vk::CompareOp::Less,
                 CompareFunction::LessEqual => vk::CompareOp::LessOrEqual,
+                CompareFunction::Greater => vk::CompareOp::Greater,
+                CompareFunction::Always => vk::CompareOp::Always,
             },
             ..Default::default()
         },
@@ -1107,7 +1158,7 @@ impl TextureUse {
             Self::Undefined => vk::ImageLayout::Undefined,
             Self::CopySrc | Self::DepthCopySrc => vk::ImageLayout::TransferSrcOptimal,
             Self::CopyDst | Self::DepthCopyDst => vk::ImageLayout::TransferDstOptimal,
-            Self::ShaderRead => vk::ImageLayout::ShaderReadOnlyOptimal,
+            Self::ShaderRead | Self::ComputeRead => vk::ImageLayout::ShaderReadOnlyOptimal,
             Self::ColorAttachment => vk::ImageLayout::ColorAttachmentOptimal,
             Self::Present => vk::ImageLayout::PresentSrcKHR,
             Self::DepthAttachment => vk::ImageLayout::DepthStencilAttachmentOptimal,
@@ -1151,6 +1202,10 @@ impl TextureUse {
                 vk::AccessFlags::ShaderRead,
                 vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
             ),
+            Self::ComputeRead => (
+                vk::AccessFlags::ShaderRead,
+                vk::PipelineStageFlags::ComputeShader,
+            ),
             Self::DepthAttachment => (
                 vk::AccessFlags::DepthStencilAttachmentRead
                     | vk::AccessFlags::DepthStencilAttachmentWrite,
@@ -1183,6 +1238,18 @@ impl BufferUse {
             Self::StorageWrite => (
                 vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
                 vk::PipelineStageFlags::ComputeShader,
+            ),
+            Self::Storage => (
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+                vk::PipelineStageFlags::ComputeShader,
+            ),
+            Self::FragmentWrite => (
+                vk::AccessFlags::ShaderWrite,
+                vk::PipelineStageFlags::FragmentShader,
+            ),
+            Self::ShaderRead => (
+                vk::AccessFlags::ShaderRead,
+                vk::PipelineStageFlags::VertexShader | vk::PipelineStageFlags::FragmentShader,
             ),
             Self::DrawInput => (
                 vk::AccessFlags::IndirectCommandRead
@@ -1249,8 +1316,22 @@ impl CommandEncoder {
 
     /// Makes every buffer write of `from` visible to `to`.
     pub fn transition_buffers(&self, from: BufferUse, to: BufferUse) {
-        let (src_access_mask, src_stage) = from.masks();
-        let (dst_access_mask, dst_stage) = to.masks();
+        self.transition_buffers_many(&[(from, to)]);
+    }
+
+    /// Several buffer transitions as one barrier: the whole of each use's
+    /// stages and accesses waits on the whole of the others', once.
+    pub fn transition_buffers_many(&self, transitions: &[(BufferUse, BufferUse)]) {
+        let (mut src_access_mask, mut src_stage) = Default::default();
+        let (mut dst_access_mask, mut dst_stage) = Default::default();
+        for &(from, to) in transitions {
+            let (access, stage) = from.masks();
+            src_access_mask |= access;
+            src_stage |= stage;
+            let (access, stage) = to.masks();
+            dst_access_mask |= access;
+            dst_stage |= stage;
+        }
         self.cmd.pipeline_barrier(
             src_stage,
             dst_stage,
@@ -1263,6 +1344,12 @@ impl CommandEncoder {
             &[],
             &[],
         );
+    }
+
+    /// Fills `size` bytes of `buffer` from `offset` with `value`, as a
+    /// transfer ([`BufferUse::CopyDst`]).
+    pub fn fill_buffer(&self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+        self.cmd.fill_buffer(buffer.0, offset, size, value);
     }
 
     pub fn copy_buffer(&self, src: BufferHandle, dst: BufferHandle, copies: &[BufferCopy]) {
@@ -1443,8 +1530,34 @@ impl CommandEncoder {
         )
     }
 
-    /// Dispatches `groups` workgroups of `pipeline` with `group` bound at 0.
-    pub fn dispatch(&self, pipeline: &ComputePipeline, group: BindGroup, groups: [u32; 3]) {
+    /// Dispatches `groups` workgroups of `pipeline` with `group` bound at 0
+    /// and `push` as its push constants.
+    pub fn dispatch(
+        &self,
+        pipeline: &ComputePipeline,
+        group: BindGroup,
+        push: &[u8],
+        groups: [u32; 3],
+    ) {
+        self.bind_compute(pipeline, group, push);
+        self.cmd.dispatch(groups[0], groups[1], groups[2]);
+    }
+
+    /// As [`Self::dispatch`], the workgroup counts read from `buffer` at
+    /// `offset` ([`BufferUse::DrawInput`]).
+    pub fn dispatch_indirect(
+        &self,
+        pipeline: &ComputePipeline,
+        group: BindGroup,
+        push: &[u8],
+        buffer: BufferHandle,
+        offset: u64,
+    ) {
+        self.bind_compute(pipeline, group, push);
+        self.cmd.dispatch_indirect(buffer.0, offset);
+    }
+
+    fn bind_compute(&self, pipeline: &ComputePipeline, group: BindGroup, push: &[u8]) {
         self.cmd
             .bind_pipeline(vk::PipelineBindPoint::Compute, pipeline.raw);
         self.cmd.bind_descriptor_sets(
@@ -1454,7 +1567,10 @@ impl CommandEncoder {
             &[group.raw],
             &[],
         );
-        self.cmd.dispatch(groups[0], groups[1], groups[2]);
+        if !push.is_empty() {
+            self.cmd
+                .push_constants(pipeline.layout.0, vk::ShaderStageFlags::Compute, 0, push);
+        }
     }
 }
 
@@ -1980,6 +2096,125 @@ impl Frames {
         }
         destroy_semaphores(&device.raw, self.image_available);
         destroy_semaphores(&device.raw, self.render_finished.drain(..));
+    }
+}
+
+/// GPU timestamps between a frame's passes: one set of queries per frame in
+/// flight, read back once that frame's fence has signalled.
+pub struct GpuTimer {
+    pool: vk::QueryPool,
+    /// Nanoseconds per tick.
+    period: f32,
+    /// The bits a stamp holds; the counter wraps past them.
+    valid_mask: u64,
+    per_frame: u32,
+    /// Each frame's stamps, named by what finished before them, as it
+    /// records them.
+    written: [Vec<&'static str>; MAX_FRAMES_IN_FLIGHT],
+    /// The names of each frame's last submitted stamps, which its queries
+    /// hold; a frame recorded but never submitted leaves them.
+    submitted: [Vec<&'static str>; MAX_FRAMES_IN_FLIGHT],
+}
+
+impl GpuTimer {
+    /// None where the graphics queue has no timestamps.
+    pub fn new(ctx: &Context, per_frame: u32) -> Option<Self> {
+        let families = ctx.physical_device.get_queue_family_properties();
+        let valid_bits = families
+            .get(ctx.graphics_family as usize)
+            .map_or(0, |family| family.timestamp_valid_bits);
+        if valid_bits == 0 {
+            return None;
+        }
+        let pool = ctx
+            .device
+            .raw
+            .create_query_pool(
+                &vk::QueryPoolCreateInfo {
+                    query_type: vk::QueryType::Timestamp,
+                    query_count: per_frame * MAX_FRAMES_IN_FLIGHT as u32,
+                    ..Default::default()
+                },
+                None,
+            )
+            .ok()?;
+        Some(Self {
+            pool,
+            period: ctx.physical_device.get_properties().limits.timestamp_period,
+            valid_mask: u64::MAX >> (64 - valid_bits.min(64)),
+            per_frame,
+            written: Default::default(),
+            submitted: Default::default(),
+        })
+    }
+
+    fn base(&self, frame: usize) -> u32 {
+        frame as u32 * self.per_frame
+    }
+
+    /// Resets the frame's queries and stamps its start.
+    pub fn begin_frame(&mut self, encoder: &CommandEncoder, frame: usize) {
+        encoder
+            .cmd
+            .reset_query_pool(self.pool, self.base(frame), self.per_frame);
+        self.written[frame].clear();
+        self.stamp(encoder, frame, "begin");
+    }
+
+    /// Stamps the end of `what`: the moment everything recorded so far is
+    /// done.
+    pub fn stamp(&mut self, encoder: &CommandEncoder, frame: usize, what: &'static str) {
+        let index = self.written[frame].len() as u32;
+        if index >= self.per_frame {
+            return;
+        }
+        encoder.cmd.write_timestamp(
+            vk::PipelineStageFlags::BottomOfPipe,
+            self.pool,
+            self.base(frame) + index,
+        );
+        self.written[frame].push(what);
+    }
+
+    /// Marks the frame's recorded stamps as submitted.
+    pub fn submitted(&mut self, frame: usize) {
+        self.submitted[frame] = std::mem::take(&mut self.written[frame]);
+    }
+
+    /// The frame's stamps as milliseconds since the one before each, once
+    /// its fence signalled; empty while the results aren't in.
+    pub fn read(&self, device: &Device, frame: usize) -> Vec<(&'static str, f32)> {
+        let names = &self.submitted[frame];
+        let mut ticks = vec![0u64; names.len()];
+        if names.len() < 2
+            || device
+                .raw
+                .get_query_pool_results(
+                    self.pool,
+                    self.base(frame),
+                    names.len() as u32,
+                    bytemuck::cast_slice_mut(&mut ticks),
+                    size_of::<u64>() as u64,
+                    vk::QueryResultFlags::Type64,
+                )
+                .is_err()
+        {
+            return Vec::new();
+        }
+        ticks
+            .windows(2)
+            .zip(names.iter().skip(1))
+            .map(|(pair, &name)| {
+                (
+                    name,
+                    (pair[1].wrapping_sub(pair[0]) & self.valid_mask) as f32 * self.period / 1e6,
+                )
+            })
+            .collect()
+    }
+
+    pub fn destroy(&mut self, device: &Device) {
+        device.raw.destroy_query_pool(self.pool, None);
     }
 }
 

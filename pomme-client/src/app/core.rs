@@ -30,6 +30,7 @@ use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
+use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -143,6 +144,16 @@ enum InlineObjectContent {
 
 /// Vanilla `PlayerSkinRenderCache.CACHE_DURATION`.
 const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// How long a frame spends on chunk packets before the rest wait for the
+/// next.
+const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
+
+/// Whether the rest of the queue may wait for the next frame: only once the
+/// chunk budget is spent and while this frame owes no tick, so every packet
+/// received before a tick is handled before it runs.
+fn defer_packets(chunk_work: std::time::Duration, tick_accumulator: f32) -> bool {
+    chunk_work >= CHUNK_PACKET_BUDGET && tick_accumulator < crate::app::TICK_RATE
+}
 
 /// Applies a server-driven block change: block-entity sync, prediction
 /// absorption, the block + light write, and the remesh cascade. The block
@@ -207,6 +218,8 @@ fn write_block(
         pos.z,
         state,
     );
+    game.edited_columns
+        .insert(crate::position::ChunkPos::containing(pos));
     dirty_sections_for_block(
         priority_remesh,
         pos.x,
@@ -423,6 +436,13 @@ fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
 /// The level's chunk, light and position updates, shared by the windowed
 /// client and the headless chunk benchmark; the caller does any renderer work.
 impl GameState {
+    /// The distant mesher tints with the chunk mesher's colours, so it takes
+    /// them again whenever the dispatcher or its biomes change.
+    fn sync_distant_colors(&mut self) {
+        self.distant
+            .set_colors(self.mesh_dispatcher.distant_colors());
+    }
+
     pub fn select_protocol(&mut self, protocol: i32) {
         let previous_slot = self.block_registry.block_state_table().table_slot();
         self.block_registry.select_protocol(protocol);
@@ -430,6 +450,44 @@ impl GameState {
             self.mesh_dispatcher = self
                 .mesh_dispatcher
                 .recreate_for_version(self.block_registry.owned_render_view());
+            self.sync_distant_colors();
+            self.set_distant_cache_key();
+            self.respawn_light(self.light_engine.has_sky());
+        }
+    }
+
+    /// A fresh light engine for the chunk store's level, reading the current
+    /// block table.
+    fn respawn_light(&mut self, has_sky: bool) {
+        self.light_engine = crate::world::light::LightWorker::spawn(
+            self.chunk_store.height(),
+            self.chunk_store.min_y(),
+            has_sky,
+            self.block_registry.block_state_table(),
+        );
+    }
+
+    /// Distant terrain stores block states and biomes by id, so it keeps
+    /// them apart per block table and biome registry.
+    fn set_distant_cache_key(&mut self) {
+        if let Some(biomes) = crate::net::connection::biome_registry(&self.registries) {
+            self.distant.set_cache_key(
+                self.block_registry.block_state_table().table_slot(),
+                biomes.map.keys(),
+            );
+        }
+    }
+
+    /// Keeps `pos`'s column as distant terrain of the current dimension.
+    pub fn keep_column(&self, pos: crate::position::ChunkPos) {
+        self.distant
+            .capture(&self.dimension, pos, &self.chunk_store);
+    }
+
+    /// Keeps the columns edited since the distant terrain took them.
+    pub fn keep_edited_columns(&mut self) {
+        for pos in std::mem::take(&mut self.edited_columns) {
+            self.keep_column(pos);
         }
     }
 
@@ -441,6 +499,7 @@ impl GameState {
         self.biome_climate = Arc::new(colors);
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
+        self.sync_distant_colors();
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -473,8 +532,11 @@ impl GameState {
         // next tick samples the new level's.
         self.biome_weights = Default::default();
         self.environment_probe = EnvironmentProbe::new(self.resolve_environment());
+        // The old level's columns stay as its distant terrain; the name
+        // still names it until `DimensionName`.
+        self.keep_edited_columns();
         self.chunk_store = ChunkStore::new_with_dimension(render_distance, height, min_y);
-        self.light_engine = crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
+        self.respawn_light(has_skylight);
         // The old level's block entities, moving blocks among them.
         self.block_entity_anim = Default::default();
         self.position_set = false;
@@ -489,8 +551,7 @@ impl GameState {
         // The meshes went with the old level, so their bookkeeping
         // has to go too, or the new level's camera section reads as
         // already meshed.
-        self.section_vis.clear();
-        self.section_vis_epoch.clear();
+        self.forget_visibility(VisUpdate::Clear);
         self.compiled.clear();
         self.clear_visibility();
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
@@ -499,6 +560,7 @@ impl GameState {
             None,
             cardinal_light,
         );
+        self.sync_distant_colors();
         self.reset_mesh_columns();
     }
 
@@ -520,11 +582,10 @@ impl GameState {
             tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
             return;
         }
-        self.light_engine.on_chunk_loaded(
-            &mut self.chunk_store,
-            self.block_registry.block_state_table(),
-            (pos.x, pos.z),
-        );
+        if let Some(chunk) = self.chunk_store.get_chunk(&pos) {
+            self.light_engine.chunk_loaded((pos.x, pos.z), chunk);
+        }
+        self.walker.update(VisUpdate::Load(pos));
         // The column meshes once its queued light applies (vanilla
         // schedules the rebuild from enableChunkLight, not here).
         queue_light_apply(self, pos, light, true);
@@ -559,21 +620,21 @@ impl GameState {
 
     /// The caller removes the column's mesh.
     pub fn unload_chunk(&mut self, pos: crate::position::ChunkPos) {
+        self.keep_column(pos);
+        self.edited_columns.remove(&pos);
         self.chunk_store.unload_chunk(&pos);
         self.block_entity_anim.drop_chunk(pos.x, pos.z);
-        self.light_engine.on_chunk_unloaded((pos.x, pos.z));
-        self.light_engine
-            .queue_task(crate::world::light::LightTask::Remove {
-                pos: (pos.x, pos.z),
-            });
+        self.light_engine.chunk_unloaded((pos.x, pos.z));
         self.forget_mesh_column(pos);
         self.compiled.remove(&pos);
+        let sections = self.chunk_store.section_count();
         if let Some(mask) = self.in_view_masks.remove(&pos) {
-            let sections = self.chunk_store.section_count() as u32;
-            self.mesh_gate.remove(mask, sections);
+            self.mesh_gate.remove(mask, sections as u32);
         }
-        self.section_vis.retain(|(p, _), _| *p != pos);
-        self.section_vis_epoch.retain(|(p, _), _| *p != pos);
+        for si in 0..sections {
+            self.section_vis_epoch.remove(&(pos, si));
+        }
+        self.walker.update(VisUpdate::Unload { pos, sections });
     }
 
     /// Vanilla `handleMovePlayer`. Returns whether the player moved, for the
@@ -630,11 +691,11 @@ impl GameState {
         correction.is_some()
     }
 
+    /// Vanilla `Options.setServerRenderDistance`, from the login and
+    /// `SetChunkCacheRadius`; clamped to the chunk grid.
     pub fn set_server_view_distance(&mut self, distance: u32) {
         tracing::info!("Server view distance: {distance}");
-        if let Some(d) = server_view_distance_update(distance, self.last_render_distance) {
-            self.server_render_distance = d;
-        }
+        self.server_render_distance = distance.min(crate::world::chunk::MAX_VIEW_DISTANCE);
     }
 }
 
@@ -925,6 +986,9 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    /// Ticks the loading screen handed to the game phase: the join tick, which
+    /// sent `player_loaded`, and the rest of its frame's.
+    pub carried_ticks: u32,
     menu_dpad: RepeatStepper,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
@@ -1097,6 +1161,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            carried_ticks: 0,
             menu_dpad: RepeatStepper::default(),
             unfocused_since: None,
             deferred_quick_play: None,
@@ -1247,6 +1312,7 @@ impl AppCore {
         self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
         gfx.renderer.clear_chunk_meshes();
+        gfx.renderer.reset_distant();
         if let Some(p) = &mut self.presence {
             p.set_in_menu(&self.version);
         }
@@ -1676,6 +1742,7 @@ impl AppCore {
         );
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
+        game.sync_distant_colors();
         game.particle_store = crate::particle::ParticleStore::new(
             renderer.uv_map().clone(),
             grass,
@@ -1776,9 +1843,26 @@ impl AppCore {
         let mut disconnect_reason: Option<String> = None;
         self.drain_player_skin_results(renderer);
 
-        // Vanilla `PacketProcessor.processQueuedPackets`: drain everything
-        // before this frame's ticks.
-        while let Ok(event) = rx.try_recv() {
+        // Vanilla `PacketProcessor.processQueuedPackets` drains everything
+        // before this frame's ticks. A departure: after `CHUNK_PACKET_BUDGET`
+        // of chunk packets the rest wait, in order, for the next frame, so a
+        // burst of chunks is a few short frames instead of one long one. Only
+        // frames that owe no tick split it (`defer_packets`; callers add the
+        // frame's time first), so they render and nothing more.
+        // `ChunkBatchReceived` is answered on the network thread as vanilla
+        // does, so this doesn't pace the server.
+        let mut chunk_work = std::time::Duration::ZERO;
+        while !defer_packets(chunk_work, self.tick_accumulator)
+            && let Ok(event) = rx.try_recv()
+        {
+            let chunk_packet = matches!(
+                event,
+                NetworkEvent::ChunkLoaded { .. }
+                    | NetworkEvent::ChunkUnloaded { .. }
+                    | NetworkEvent::LightUpdate { .. }
+                    | NetworkEvent::ChunkBiomes { .. }
+            )
+            .then(std::time::Instant::now);
             match event {
                 NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
                 NetworkEvent::Connected => {
@@ -1786,6 +1870,7 @@ impl AppCore {
                         tracing::info!("Connected to server");
                         // Ticks restart from zero with the play state.
                         self.tick_accumulator = 0.0;
+                        self.carried_ticks = 0;
                         *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
@@ -1800,6 +1885,7 @@ impl AppCore {
                 NetworkEvent::DimensionInfo(dim) => {
                     game.enter_dimension(dim, self.menu.render_distance, &*renderer);
                     renderer.clear_chunk_meshes();
+                    renderer.reset_distant();
                 }
                 NetworkEvent::DimensionName { name } => {
                     game.dimension = name;
@@ -1809,12 +1895,15 @@ impl AppCore {
                     data,
                     heightmaps,
                     light,
-                } => game.load_chunk(pos, &data, &heightmaps, &light),
+                } => {
+                    game.load_chunk(pos, &data, &heightmaps, &light);
+                }
                 NetworkEvent::LightUpdate { pos, light } => game.apply_light_update(pos, &light),
                 NetworkEvent::ChunkBiomes { chunks } => game.replace_biomes(&chunks),
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.unload_chunk(pos);
                     renderer.remove_chunk_mesh(&pos);
+                    renderer.set_distant_column_sections(pos, 0, game.chunk_store.min_section_y());
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");
@@ -2008,6 +2097,7 @@ impl AppCore {
                 }
                 NetworkEvent::Registries(registries) => {
                     game.registries = registries;
+                    game.set_distant_cache_key();
                 }
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
@@ -2559,13 +2649,7 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
-                        game.light_engine.on_block_dirty(
-                            &game.chunk_store,
-                            game.block_registry.block_state_table(),
-                            b.x,
-                            b.y,
-                            b.z,
-                        );
+                        game.light_engine.block_dirty(b.x, b.y, b.z);
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
@@ -3121,6 +3205,9 @@ impl AppCore {
                     game.tab_list.set_header_footer(header, footer);
                 }
             }
+            if let Some(started) = chunk_packet {
+                chunk_work += started.elapsed();
+            }
         }
 
         if let Some(pending) = &self.pending_pack_download
@@ -3672,13 +3759,7 @@ impl AppCore {
                 // Light lands in this frame's update_light, matching vanilla's
                 // prediction timing (setBlockState queues; the per-frame
                 // ClientLevel.update drains).
-                game.light_engine.on_block_dirty(
-                    &game.chunk_store,
-                    game.block_registry.block_state_table(),
-                    b.x,
-                    b.y,
-                    b.z,
-                );
+                game.light_engine.block_dirty(b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
             // One span per column so each column builds its mesh snapshot
@@ -3952,17 +4033,6 @@ fn sync_player_attribute_mirrors(player: &mut LocalPlayer, dirty: impl Fn(Attrib
     }
 }
 
-/// New `server_render_distance` for a server view-distance announcement, or
-/// `None` to keep the current one. Some servers announce min(our request,
-/// server max); an echo of our own request carries no cap information and
-/// would ratchet the render distance slider down, so only a differing value
-/// counts. It can't be an echo above the request: any such value is the
-/// server's actual view distance, including later reductions.
-fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
-    let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
-    (announced != last_request).then_some(announced)
-}
-
 /// LOD level for a column: full detail within `detail` chunks (the Chunk
 /// Detail setting), half resolution to twice that, quarter beyond. Off keeps
 /// every column at full detail.
@@ -4044,11 +4114,11 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY, MENU_REPEAT_INTERVAL, RepeatStepper,
-        accepted_player_chat_tag, cursor_step, death_route, player_input_state,
-        resolve_corrected_look, resolve_head_profile, resolve_player_position_correction,
-        server_view_distance_update, serverbound_player_input, sync_living_attribute_mirrors,
-        sync_player_attribute_mirrors, sync_respawn_attributes,
+        CHUNK_PACKET_BUDGET, CursorOp, DeathRoute, HeadProfile, MENU_REPEAT_DELAY,
+        MENU_REPEAT_INTERVAL, RepeatStepper, accepted_player_chat_tag, cursor_step, death_route,
+        player_input_state, resolve_corrected_look, resolve_head_profile,
+        resolve_player_position_correction, serverbound_player_input,
+        sync_living_attribute_mirrors, sync_player_attribute_mirrors, sync_respawn_attributes,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::attribute::{
@@ -4081,6 +4151,16 @@ mod tests {
             }],
         );
         tab_list
+    }
+
+    #[test]
+    fn packets_wait_only_on_a_frame_that_owes_no_tick() {
+        use crate::app::TICK_RATE;
+        let spent = CHUNK_PACKET_BUDGET;
+        assert!(!super::defer_packets(spent / 2, 0.0));
+        assert!(super::defer_packets(spent, 0.9 * TICK_RATE));
+        assert!(!super::defer_packets(spent, TICK_RATE));
+        assert!(!super::defer_packets(spent * 10, 3.0 * TICK_RATE));
     }
 
     #[test]
@@ -4385,20 +4465,6 @@ mod tests {
             serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, false));
         assert!(pressed.sprint);
         assert!(!released.sprint);
-    }
-
-    #[test]
-    fn server_view_distance_updates() {
-        // Echo of our own request carries no cap information.
-        assert_eq!(server_view_distance_update(12, 12), None);
-        // Below the request: min(request, cap) revealed the server cap.
-        assert_eq!(server_view_distance_update(10, 12), Some(10));
-        // Above the request: the server's actual view distance, including a
-        // reduction from an earlier higher announcement.
-        assert_eq!(server_view_distance_update(64, 12), Some(64));
-        assert_eq!(server_view_distance_update(20, 12), Some(20));
-        // Wire values past the chunk grid's extent clamp to it.
-        assert_eq!(server_view_distance_update(300, 12), Some(128));
     }
 
     #[test]

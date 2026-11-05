@@ -1,0 +1,40 @@
+#version 450
+
+// Section records and nodes written where the frame's scatter list says, so
+// a frame's uploads land at one point of the frame. The list is 80-byte
+// chunks: a `uvec4` of four destination indices (bit 31 picks the node
+// buffer), then the four `uvec4`s to write there.
+
+#include "distant_consts.glsl"
+
+layout(local_size_x = LIST_GROUP) in;
+
+layout(set = 0, binding = 0, std430) readonly restrict buffer Input {
+    uvec4 in_data[];
+};
+layout(set = 0, binding = 1, std430) writeonly restrict buffer Sections {
+    uvec4 section_data[];
+};
+layout(set = 0, binding = 2, std430) writeonly restrict buffer Nodes {
+    uvec4 node_data[];
+};
+
+layout(push_constant) uniform ScatterPc {
+    uint count;
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (count <= id) {
+        return;
+    }
+    uint chunk = (id >> 2u) * 5u;
+    uint inner = id & 3u;
+    uint location = in_data[chunk][inner];
+    uvec4 data = in_data[chunk + 1u + inner];
+    if ((location & NODE_SCATTER_BIT) != 0u) {
+        node_data[location & ~NODE_SCATTER_BIT] = data;
+    } else {
+        section_data[location] = data;
+    }
+}

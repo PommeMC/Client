@@ -28,6 +28,7 @@ pub enum ContextualBarKind<'a> {
 }
 
 pub struct FrameTimings {
+    pub gpu: Vec<(&'static str, f32)>,
     pub pace_ms: f32,
     pub frame_ms: f32,
     pub fence_ms: f32,
@@ -383,6 +384,7 @@ pub struct DebugInfo<'a> {
     )>,
     pub chunk_count: u32,
     pub sections_drawn: u32,
+    pub triangles_drawn: u32,
     pub occlusion_on: bool,
     /// Mesh-scheduling tiers (visible, margin, hidden) of loaded columns when
     /// the visibility gate is active; `None` while it falls back to meshing
@@ -1648,9 +1650,10 @@ pub fn build_debug_overlay(
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
-            "Sections drawn: {} (occlusion {})",
+            "Sections drawn: {} (occlusion {}), {}k triangles",
             info.sections_drawn,
-            if info.occlusion_on { "on" } else { "off" }
+            if info.occlusion_on { "on" } else { "off" },
+            info.triangles_drawn / 1000
         ),
         match info.mesh_gate {
             Some((vis, margin, hidden)) => {
@@ -1688,6 +1691,13 @@ pub fn build_debug_overlay(
         right_lines.push(format!("  Cull: {:.2}ms", t.cull_ms));
         right_lines.push(format!("  Draw: {:.2}ms", t.draw_ms));
         right_lines.push(format!("  Present: {:.2}ms", t.present_ms));
+        if !t.gpu.is_empty() {
+            let gpu_total: f32 = t.gpu.iter().map(|(_, ms)| ms).sum();
+            right_lines.push(format!("GPU: {gpu_total:.2}ms"));
+        }
+        for (name, ms) in &t.gpu {
+            right_lines.push(format!("  {name}: {ms:.2}ms"));
+        }
     }
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(
