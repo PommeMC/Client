@@ -52,7 +52,8 @@ impl ThemeSpecification {
             .map(|face| {
                 Ok((
                     panorama_id(face)?,
-                    PathBuf::from(directory).join(format!("panorama_{face}.png")),
+                    // `/` on every platform: mapped targets reject `\`.
+                    PathBuf::from(format!("{directory}/panorama_{face}.png")),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, ResourceError>>()?;
@@ -423,11 +424,28 @@ fn read_format(path: &Path, expected_version: &str) -> Result<PackFormat, Format
 #[cfg(test)]
 mod repository_source_tests {
     use super::super::tests;
-    use super::BuiltinRepositorySource;
+    use super::{BuiltinRepositorySource, MappedResourcesSupplier, ThemeSpecification};
 
     #[test]
     fn test_load_packs() {
         let mut source = BuiltinRepositorySource::new(None);
         tests::test_load_packs(&mut source, &["pomme"]);
+    }
+
+    #[test]
+    fn every_theme_mount_prepares_its_mapping() {
+        let root = std::env::temp_dir();
+        for theme in [
+            ThemeSpecification::Pomme { root: root.clone() },
+            ThemeSpecification::Bedrock { root: root.clone() },
+        ] {
+            let mount = theme.mount().unwrap().unwrap();
+            MappedResourcesSupplier::new(
+                mount.root.to_owned(),
+                mount.namespace.to_owned(),
+                mount.remappings,
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", mount.id));
+        }
     }
 }
