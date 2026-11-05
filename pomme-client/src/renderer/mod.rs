@@ -27,7 +27,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use camera::CloudMode;
-use camera::{Camera, CameraUniform};
+use camera::{Camera, CameraFrustum, CameraUniform, FrustumPlanes};
 use chunk::atlas::{AtlasCpu, AtlasUVMap, TextureAtlas};
 use chunk::buffer::{ChunkBufferStore, Layer, View};
 use chunk::mesh_source::MeshSource;
@@ -63,6 +63,7 @@ use winit::window::Window;
 
 use crate::app::input::InputState;
 use crate::entity::components::{LookDirection, Position};
+use crate::particles::render::ParticlesRenderState;
 use crate::physics::block_shape::LocalBox;
 use crate::player::skin::{SkinData, fetch_skin_texture};
 use crate::position::{BlockPos, ChunkPos};
@@ -229,6 +230,8 @@ enum RenderMode<'a> {
         particles: &'a [ParticleQuad],
         nameplates: &'a [NameplateRenderInfo],
         signs: &'a [SignRenderInfo],
+        engine_particles: &'a ParticlesRenderState,
+        frustum: &'a CameraFrustum,
         weather: &'a [WeatherColumn],
         world_border: &'a crate::world::border::BorderRenderState,
         cloud_mode: CloudMode,
@@ -542,9 +545,6 @@ impl Renderer {
             &lightmap,
         );
 
-        let particle_pipeline =
-            ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
-
         let cloud_pipeline = CloudPipeline::new(&ctx.device, swapchain_state.targets(), resources);
         let world_text_pipeline = WorldTextPipeline::new(
             &ctx.device,
@@ -642,6 +642,13 @@ impl Renderer {
 
         let particle_atlas = TextureAtlas::upload(&ctx.device, particle_cpu)
             .map_err(|error| RendererError::Atlas(format!("upload particle atlas: {error}")))?;
+        let particle_pipeline = ParticlePipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            &atlas,
+            &particle_atlas,
+            &lightmap,
+        );
 
         Ok(Self {
             ctx,
@@ -907,6 +914,7 @@ impl Renderer {
         use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
         let RenderMode::World {
             sky,
+            frustum,
             moving_blocks,
             entities,
             block_entities,
@@ -1022,7 +1030,7 @@ impl Renderer {
         let cull_distance = entity_cull_distance(*render_distance);
         let entity_renderer = &mut self.entity_renderer;
         let mut draw_entities =
-            |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6], shadow| {
+            |pack: &mut PackRenderer, geometry, frustum: &FrustumPlanes, shadow| {
                 if let Some((mut pass, binding)) =
                     pack.begin_geometry(device, encoder, frame, geometry)
                 {
@@ -1099,9 +1107,8 @@ impl Renderer {
             .collect();
         pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
-        let frustum = self.camera.frustum_planes();
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
-        draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
+        draw_entities(&mut pack, PackGeometry::Entities, frustum.planes(), None);
         draw_block_entities(&mut pack, PackGeometry::BlockEntities);
         // TODO: `separateEntityDraws`, which draws these after translucent
         // terrain instead.
@@ -1134,6 +1141,15 @@ impl Renderer {
             *slot = Some(pack);
         }
         true
+    }
+
+    /// Finalizes the drawable extent and camera aspect before world culling is
+    /// captured.
+    pub(crate) fn prepare_swapchain(&mut self) -> Result<(), RendererError> {
+        if !self.suspended && self.swapchain_dirty {
+            self.recreate_swapchain()?;
+        }
+        Ok(())
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
@@ -1439,6 +1455,14 @@ impl Renderer {
         self.camera.position
     }
 
+    pub(crate) fn set_render_distance(&mut self, chunks: u32) {
+        self.camera.set_render_distance(chunks);
+    }
+
+    pub(crate) fn camera_billboard_rotation(&self) -> glam::Quat {
+        self.camera.billboard_rotation()
+    }
+
     /// Camera position used for rendering (eye plus any third-person offset).
     pub fn camera_render_position(&self) -> glam::DVec3 {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
@@ -1455,15 +1479,19 @@ impl Renderer {
         self.camera.anchor()
     }
 
+    pub(crate) fn camera_frustum(&self) -> camera::CameraFrustum {
+        self.camera.frustum()
+    }
+
     /// Six normalized frustum planes (camera-relative, same convention as the
     /// GPU cull), for CPU-side visibility classification of
     /// mesh-scheduling.
-    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
+    pub fn frustum_planes(&self) -> FrustumPlanes {
         self.camera.frustum_planes()
     }
 
     /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
+    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> FrustumPlanes {
         self.camera.frustum_planes_dilated(extra_radians)
     }
 
@@ -1746,7 +1774,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn render_world(
+    pub(crate) fn render_world(
         &mut self,
         block_render: BlockRenderView<'_>,
         window: &Window,
@@ -1772,6 +1800,8 @@ impl Renderer {
         particles: &[ParticleQuad],
         nameplates: &[NameplateRenderInfo],
         signs: &[SignRenderInfo],
+        engine_particles: &ParticlesRenderState,
+        frustum: &CameraFrustum,
         weather: &[WeatherColumn],
         world_border: &crate::world::border::BorderRenderState,
         cloud_mode: CloudMode,
@@ -1781,8 +1811,6 @@ impl Renderer {
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     ) -> Result<(), RendererError> {
-        // Refresh the far plane before this frame's view/projection and fog.
-        self.camera.set_render_distance(render_distance);
         let held_items = held_items
             .map(|held| held.map(|(name, stack)| self.held_item(name, &stack, player_team_color)));
         let item_entities = &*self.with_mob_held_items(item_entities, entities);
@@ -1821,6 +1849,8 @@ impl Renderer {
                 particles,
                 nameplates,
                 signs,
+                engine_particles,
+                frustum,
                 weather,
                 world_border,
                 cloud_mode,
@@ -1941,6 +1971,8 @@ impl Renderer {
 
         let particle_atlas = TextureAtlas::upload(&self.ctx.device, particle_cpu)
             .expect("failed to rebuild particle atlas");
+        self.particle_pipeline
+            .rebind_particle_atlas(&self.ctx.device, &particle_atlas);
         let mut retired = std::mem::replace(&mut self.particle_atlas, particle_atlas);
         retired.destroy(&self.ctx.device);
 
@@ -2304,9 +2336,7 @@ impl Renderer {
             return Ok(());
         }
         self.apply_fetched_skin();
-        if self.swapchain_dirty {
-            self.recreate_swapchain()?;
-        }
+        self.prepare_swapchain()?;
 
         let frame = self.frames.index();
 
@@ -2327,9 +2357,22 @@ impl Renderer {
         }
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
-        if let RenderMode::World { particles, .. } = &mode {
+        if let RenderMode::World {
+            particles,
+            engine_particles,
+            ..
+        } = &mode
+        {
+            let eye_to_anchor = (self.camera_render_position() - self.camera_anchor()).as_vec3();
             self.particle_pipeline
-                .prepare(&self.ctx.device, frame, &self.camera, particles)
+                .prepare(
+                    &self.ctx.device,
+                    frame,
+                    &self.camera,
+                    particles,
+                    engine_particles,
+                    eye_to_anchor,
+                )
                 .map_err(RendererError::Particle)?;
         }
 
@@ -2394,14 +2437,13 @@ impl Renderer {
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 
-        if matches!(&mode, RenderMode::World { .. }) {
-            let frustum = self.camera.frustum_planes();
+        if let RenderMode::World { frustum, .. } = &mode {
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
             self.chunk_buffers.dispatch_cull(
                 &encoder,
                 frame,
-                &frustum,
+                frustum.planes(),
                 self.camera.anchor(),
                 self.camera_render_position(),
             );
@@ -2657,6 +2699,8 @@ impl Renderer {
                 particles: _,
                 nameplates: _,
                 signs: _,
+                engine_particles: _,
+                frustum,
                 weather,
                 world_border,
                 cloud_mode,
@@ -2767,7 +2811,6 @@ impl Renderer {
                             *stage,
                         );
                     }
-                    let ent_frustum = self.camera.frustum_planes();
                     let ent_cull_dist = entity_cull_distance(*render_distance);
 
                     self.entity_shadow_pipeline
@@ -2777,7 +2820,7 @@ impl Renderer {
                         &mut pass,
                         frame,
                         entities,
-                        &ent_frustum,
+                        frustum.planes(),
                         anchor,
                         eye,
                         ent_cull_dist,

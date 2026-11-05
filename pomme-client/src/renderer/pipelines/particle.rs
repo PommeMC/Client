@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use glam::Vec3;
 
+use crate::particles::render::{ParticleLayer, ParticlesRenderState};
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::lightmap::Lightmap;
@@ -14,6 +15,19 @@ const QUAD_INDICES: &[usize] = &[0, 1, 2, 0, 2, 3];
 const VERTICES_PER_QUAD: usize = QUAD_INDICES.len();
 const INITIAL_VERTEX_BYTES: usize =
     INITIAL_PARTICLE_QUADS * VERTICES_PER_QUAD * std::mem::size_of::<ParticleVertex>();
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParticleAtlas {
+    Combined,
+    Particles,
+}
+
+const BATCHES: &[(ParticleAtlas, bool)] = &[
+    (ParticleAtlas::Combined, false),
+    (ParticleAtlas::Particles, false),
+    (ParticleAtlas::Combined, true),
+    (ParticleAtlas::Particles, true),
+];
 
 /// One camera-facing particle billboard, extracted per frame from the
 /// particle store.
@@ -57,14 +71,15 @@ pub struct ParticlePipeline {
     atlas_layout: rhi::backend::BindGroupLayout,
     camera_sets: Vec<rhi::backend::BindGroup>,
     atlas_set: rhi::backend::BindGroup,
+    particle_atlas_set: rhi::backend::BindGroup,
     atlas_sampler: rhi::backend::Sampler,
     camera_buffers: Vec<rhi::backend::Buffer>,
     /// The shared [`Lightmap`]'s group, set 2.
     lightmap_set: rhi::backend::BindGroup,
     vertex_buffers: Vec<rhi::backend::Buffer>,
     vertex_buffer_capacities: Vec<usize>,
-    /// This frame's opaque and translucent vertex ranges.
-    layers: [Range<u32>; 2],
+    /// This frame's vertex ranges in `BATCHES` order.
+    batches: [Range<u32>; BATCHES.len()],
 }
 
 impl ParticlePipeline {
@@ -72,6 +87,7 @@ impl ParticlePipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
+        particle_atlas: &TextureAtlas,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -91,8 +107,7 @@ impl ParticlePipeline {
             std::mem::size_of::<CameraUniform>() as u64,
             "particle_camera",
         );
-        // Vanilla's particles atlas has no mip chain. Pomme stores particle
-        // sprites in the combined atlas image, so clamp this consumer to LOD 0.
+        // Both particle atlas bindings sample only LOD 0.
         let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
         let vertex_buffers = util::create_per_frame_host_buffers(
@@ -110,14 +125,16 @@ impl ParticlePipeline {
             atlas_layout,
             camera_sets,
             atlas_set: rhi::backend::BindGroup::default(),
+            particle_atlas_set: rhi::backend::BindGroup::default(),
             atlas_sampler,
             camera_buffers,
             lightmap_set: lightmap.group,
             vertex_buffer_capacities: vec![INITIAL_VERTEX_BYTES; vertex_buffers.len()],
             vertex_buffers,
-            layers: [0..0, 0..0],
+            batches: std::array::from_fn(|_| 0..0),
         };
         this.rebind_atlas(device, atlas);
+        this.rebind_particle_atlas(device, particle_atlas);
         this
     }
 
@@ -129,12 +146,25 @@ impl ParticlePipeline {
         );
     }
 
+    pub fn rebind_particle_atlas(
+        &mut self,
+        device: &rhi::backend::Device,
+        particle_atlas: &TextureAtlas,
+    ) {
+        self.particle_atlas_set.replace(
+            device,
+            self.atlas_layout,
+            &util::texture_binding(particle_atlas.texture.handle(), self.atlas_sampler),
+        );
+    }
+
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
         self.camera_buffers[frame].write(bytes);
     }
 
-    /// Builds this frame's billboards facing `camera`.
+    /// Expands legacy `quads` with `camera`'s axes and `engine_particles` with
+    /// their own rotations. `eye_to_anchor` rebases engine centers for upload.
     /// `frame`'s previous GPU use must have completed; its buffer may be
     /// replaced.
     pub fn prepare(
@@ -143,17 +173,22 @@ impl ParticlePipeline {
         frame: usize,
         camera: &Camera,
         quads: &[ParticleQuad],
+        engine_particles: &ParticlesRenderState,
+        eye_to_anchor: Vec3,
     ) -> Result<(), String> {
-        self.layers = [0..0, 0..0];
-        if quads.is_empty() {
+        self.batches = std::array::from_fn(|_| 0..0);
+        if quads.is_empty() && engine_particles.quads.is_empty() {
             return Ok(());
         }
 
-        let required_vertices = quads
+        let quad_count = quads
             .len()
+            .checked_add(engine_particles.quads.len())
+            .ok_or_else(|| "particle quad count overflows usize".to_owned())?;
+        let required_vertices = quad_count
             .checked_mul(VERTICES_PER_QUAD)
             .ok_or_else(|| "particle vertex count overflows usize".to_owned())?;
-        let total_end = u32::try_from(required_vertices)
+        u32::try_from(required_vertices)
             .map_err(|_| "particle vertex range exceeds u32".to_owned())?;
         let required_bytes = required_vertices
             .checked_mul(std::mem::size_of::<ParticleVertex>())
@@ -180,8 +215,6 @@ impl ParticlePipeline {
             .try_reserve_exact(required_vertices)
             .map_err(|error| format!("failed to reserve particle vertices: {error}"))?;
         let (right, up) = camera.billboard_axes();
-        // Opaque quads first, then translucent, so each layer is one
-        // contiguous draw range (vanilla renders the layers separately).
         let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
             for quad in quads.iter().filter(|q| q.translucent == translucent) {
                 let center = Vec3::from(quad.pos);
@@ -203,12 +236,53 @@ impl ParticlePipeline {
                 }
             }
         };
-        emit(&mut verts, false);
-        let opaque_verts = verts.len();
-        emit(&mut verts, true);
-
-        let opaque_end = u32::try_from(opaque_verts)
-            .map_err(|_| "opaque particle vertex range exceeds u32".to_owned())?;
+        let mut batches = std::array::from_fn(|_| 0..0);
+        let mut start = 0;
+        for (range, &(atlas, translucent)) in batches.iter_mut().zip(BATCHES) {
+            if atlas == ParticleAtlas::Combined {
+                emit(&mut verts, translucent);
+            }
+            for quad in engine_particles.quads.iter().filter(|quad| {
+                let batch = match quad.layer {
+                    ParticleLayer::Opaque => (ParticleAtlas::Particles, false),
+                    ParticleLayer::Translucent => (ParticleAtlas::Particles, true),
+                    ParticleLayer::BlockOpaque | ParticleLayer::ItemOpaque => {
+                        (ParticleAtlas::Combined, false)
+                    }
+                    ParticleLayer::BlockTranslucent | ParticleLayer::ItemTranslucent => {
+                        (ParticleAtlas::Combined, true)
+                    }
+                };
+                batch == (atlas, translucent)
+            }) {
+                let center = quad.position + eye_to_anchor;
+                let color = u32::from_le_bytes(
+                    quad.color
+                        .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8),
+                );
+                let light = f32::from(quad.light.block) + f32::from(quad.light.sky) * 256.0;
+                let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
+                    position: (center + quad.rotation * Vec3::new(nx, ny, 0.0) * quad.size).into(),
+                    uv: [u, v],
+                    color,
+                    light,
+                };
+                let [u0, u1, v0, v1] = quad.uv;
+                let corners = [
+                    corner(1.0, -1.0, u1, v1),
+                    corner(1.0, 1.0, u1, v0),
+                    corner(-1.0, 1.0, u0, v0),
+                    corner(-1.0, -1.0, u0, v1),
+                ];
+                for &i in QUAD_INDICES {
+                    verts.push(corners[i]);
+                }
+            }
+            let end = u32::try_from(verts.len())
+                .map_err(|_| "particle batch vertex range exceeds u32".to_owned())?;
+            *range = start..end;
+            start = end;
+        }
         if let Some((capacity, capacity_u64)) = growth {
             let buffer = rhi::backend::Buffer::try_new(
                 device,
@@ -224,32 +298,38 @@ impl ParticlePipeline {
 
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         self.vertex_buffers[frame].write(bytes);
-        self.layers = [0..opaque_end, opaque_end..total_end];
+        self.batches = batches;
         Ok(())
     }
 
     /// Draws [`Self::prepare`]'s billboards.
     pub fn draw(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
         pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
-        for (pipeline, range) in [self.pipeline, self.translucent_pipeline]
-            .into_iter()
-            .zip(&self.layers)
-        {
+        for (&(atlas, translucent), range) in BATCHES.iter().zip(&self.batches) {
             if range.is_empty() {
                 continue;
             }
+            let pipeline = if translucent {
+                self.translucent_pipeline
+            } else {
+                self.pipeline
+            };
+            let atlas_set = match atlas {
+                ParticleAtlas::Combined => self.atlas_set,
+                ParticleAtlas::Particles => self.particle_atlas_set,
+            };
             pass.set_pipeline(&pipeline);
-            pass.set_bind_groups(
-                0,
-                &[self.camera_sets[frame], self.atlas_set, self.lightmap_set],
-            );
-            pass.draw(range.len() as u32, 1, range.start, 0);
+            pass.set_bind_groups(0, &[self.camera_sets[frame], atlas_set, self.lightmap_set]);
+            pass.draw(range.end - range.start, 1, range.start, 0);
         }
     }
 
     /// Whether [`Self::prepare`] built any billboards of the layer.
     pub fn has_layer(&self, translucent: bool) -> bool {
-        !self.layers[usize::from(translucent)].is_empty()
+        BATCHES
+            .iter()
+            .zip(&self.batches)
+            .any(|(&(_, opacity), range)| opacity == translucent && !range.is_empty())
     }
 
     /// Draws one layer through a shader pack's program, which the pass has
@@ -260,10 +340,18 @@ impl ParticlePipeline {
         frame: usize,
         translucent: bool,
     ) {
-        let range = self.layers[usize::from(translucent)].clone();
         pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
-        pass.set_bind_group(3, self.atlas_set);
-        pass.draw(range.len() as u32, 1, range.start, 0);
+        for (&(atlas, opacity), range) in BATCHES.iter().zip(&self.batches) {
+            if opacity != translucent || range.is_empty() {
+                continue;
+            }
+            let atlas_set = match atlas {
+                ParticleAtlas::Combined => self.atlas_set,
+                ParticleAtlas::Particles => self.particle_atlas_set,
+            };
+            pass.set_bind_group(3, atlas_set);
+            pass.draw(range.end - range.start, 1, range.start, 0);
+        }
     }
 
     pub fn recreate_pipeline(
@@ -287,6 +375,7 @@ impl ParticlePipeline {
         self.pipeline_layout.destroy(device);
         util::destroy_bind_groups(device, self.camera_sets.drain(..));
         self.atlas_set.destroy(device);
+        self.particle_atlas_set.destroy(device);
         self.camera_layout.destroy(device);
         self.atlas_layout.destroy(device);
     }
