@@ -4808,9 +4808,9 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 [[package]]
 name = "pyronyx"
 version = "0.5.0+1.4.357"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "244cd640fdd970100e686838b1a28022a109883be7fcd64e2e42da2bbf71664e"
+source = "git+https://github.com/Purdze/pyronyx?rev=326424a31f31bd09151e00216b4e5db077dd6c67#326424a31f31bd09151e00216b4e5db077dd6c67"
 dependencies = [
+ "libloading 0.8.9",
  "raw-window-handle",
  "raw-window-metal",
 ]

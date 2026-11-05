@@ -29,6 +29,15 @@ fn main() {
         println!("cargo:rustc-cfg=mobile");
     }
 
+    // Where pyronyx's `loaded` feature is on (see Cargo.toml): Vulkan is
+    // loaded at runtime rather than linked.
+    println!("cargo::rustc-check-cfg=cfg(vulkan_loaded)");
+    if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android")
+    {
+        println!("cargo:rustc-cfg=vulkan_loaded");
+    }
+
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

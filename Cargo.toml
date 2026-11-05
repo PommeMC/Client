@@ -61,6 +61,8 @@ azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6f
 azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-registry = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+# TODO: drop for the release with unschlagbar/pyronyx#7 (the `loaded` feature).
+pyronyx = { git = "https://github.com/Purdze/pyronyx", rev = "326424a31f31bd09151e00216b4e5db077dd6c67" }
 
 [patch."https://github.com/azalea-rs/azalea"]
 azalea-block = { path = "pomme-block" }
