@@ -3522,6 +3522,7 @@ impl AppCore {
                 let dx = game.player.position.x - game.player.prev_position.x;
                 let dz = game.player.position.z - game.player.prev_position.z;
                 game.player.tick_bob(dx, dz, true);
+                game.player.tick_body_rotation(dx, dz);
             }
             game.interaction
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
@@ -3767,6 +3768,7 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz, false);
+        game.player.tick_body_rotation(dx, dz);
         game.player.drop_spam.tick();
 
         game.interaction

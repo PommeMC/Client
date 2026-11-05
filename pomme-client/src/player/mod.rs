@@ -154,6 +154,8 @@ pub struct LocalPlayer {
     pub velocity: Velocity,
     pub look_dir: LookDirection,
     pub prev_look_dir: LookDirection,
+    pub body_y_rot: f32,
+    pub prev_body_y_rot: f32,
     pub on_ground: bool,
     /// Vanilla `Entity.fallDistance`.
     pub fall_distance: f64,
@@ -283,6 +285,8 @@ impl LocalPlayer {
             velocity: Velocity::default(),
             look_dir: LookDirection::default(),
             prev_look_dir: LookDirection::default(),
+            body_y_rot: 0.0,
+            prev_body_y_rot: 0.0,
             on_ground: false,
             fall_distance: 0.0,
             health: 20.0,
@@ -464,6 +468,7 @@ impl LocalPlayer {
         self.prev_position = self.position;
         self.prev_look_dir = self.look_dir;
         self.prev_eye_height = self.eye_height;
+        self.prev_body_y_rot = self.body_y_rot;
     }
 
     pub fn tick_death(&mut self) {
@@ -539,6 +544,27 @@ impl LocalPlayer {
     pub fn tick_eye_height(&mut self) {
         self.prev_eye_height = self.eye_height;
         self.eye_height += (self.target_eye_height() - self.eye_height) * 0.5;
+    }
+
+    pub fn tick_body_rotation(&mut self, dx: f64, dz: f64) {
+        let dist_sq = (dx * dx + dz * dz) as f32;
+        if dist_sq > 0.0025 {
+            let walk_dir = -(dx as f32).atan2(dz as f32).to_degrees();
+            let diff_from_look =
+                crate::entity::wrap_degrees(self.look_dir.y_rot_deg() - walk_dir).abs();
+            let body_target = if diff_from_look > 95.0 && diff_from_look < 265.0 {
+                walk_dir - 180.0
+            } else {
+                walk_dir
+            };
+            let diff = crate::entity::wrap_degrees(body_target - self.body_y_rot);
+            self.body_y_rot += diff * 0.3;
+        }
+
+        let head_diff = crate::entity::wrap_degrees(self.look_dir.y_rot_deg() - self.body_y_rot);
+        if head_diff.abs() > 50.0 {
+            self.body_y_rot += head_diff - head_diff.signum() * 50.0;
+        }
     }
 
     /// Accumulates walk distance and a smoothed bob amplitude for view bobbing,
