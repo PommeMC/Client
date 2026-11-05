@@ -226,7 +226,7 @@ soundgen:
     for v in $(ls pomme-client/src/world/block/data/state-*.json | sed 's/.*state-\(.*\)\.json/\1/' | sort -Vr); do
         out="reference/$v/generated/sounds.json"
         "$jdk/java.exe" -cp "$(just _vanilla-classpath "$v")" SoundDump "$out"
-        dumps+=("$out")
+        dumps+=("$v=$out")
     done
     cargo run -p blockgen -- sounds pomme-client/src/world/block/block_sounds.json "${dumps[@]}"
 

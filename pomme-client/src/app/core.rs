@@ -303,6 +303,7 @@ pub(crate) fn tick_moving_pistons(game: &mut GameState) {
             movement::push_by_moving_piston(
                 &mut game.player,
                 world,
+                game.block_registry.tags(),
                 pos,
                 piston,
                 new_progress,
@@ -419,7 +420,12 @@ fn block_break_effect(
 ) {
     let block_state_data = game.block_registry.block_state_data(state);
     if !block_state_data.is_air() {
-        crate::player::interaction::play_break_sound_for_id(audio, block_state_data.id(), pos);
+        crate::player::interaction::play_break_sound_for_id(
+            audio,
+            game.block_registry.block_state_table(),
+            block_state_data.id(),
+            pos,
+        );
     }
     game.particle_store.add_destroy_block_effect(
         pos,
