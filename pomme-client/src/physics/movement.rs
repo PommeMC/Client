@@ -2820,6 +2820,31 @@ mod tests {
     }
 
     #[test]
+    fn on_pos_keeps_a_tagged_fence_or_wall_as_the_block_underfoot() {
+        let table = BlockStateTable::native();
+        let tags = crate::world::block::block_tags_for_test(
+            table,
+            &[("fences", &["oak_fence"]), ("walls", &["cobblestone_wall"])],
+        );
+        let support = BlockPos::new(8, 63, 8);
+        for block in ["oak_fence", "cobblestone_wall"] {
+            let chunks = ChunkStore::with_origin_chunk();
+            chunks.set_block_state(8, 63, 8, table.find_state(block, &[]), table);
+            let world = CollisionWorld::new(&chunks, table);
+            // Standing on the 1.5-tall top, 0.2 below the feet is y 64.
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(8.5, 64.5, 8.5).into();
+            player.main_supporting_block_pos = Some(support);
+            assert_eq!(on_pos(&player, world, &tags, 0.2), support, "{block}");
+            assert_eq!(
+                on_pos(&player, world, &BlockTags::default(), 0.2),
+                BlockPos::new(8, 64, 8),
+                "{block} untagged"
+            );
+        }
+    }
+
+    #[test]
     fn piston_pushes_walk_toward_the_next_step() {
         let chunks = ChunkStore::with_origin_chunk();
         let table = BlockStateTable::native();

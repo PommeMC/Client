@@ -385,24 +385,25 @@ pub(super) fn play_entity_sound(
     )
 }
 
-/// A sound the local player makes, where it stands: vanilla
-/// `LocalPlayer.playSound`, which plays it locally while the server sends it
-/// only to other players.
-fn play_local_player_sound(
-    audio: &crate::audio::AudioEngine,
-    game: &mut GameState,
-    event: &str,
-    volume: f32,
-    pitch: f32,
-) {
-    audio.play_world_sound(
-        &crate::audio::SoundRef::event(event),
-        crate::audio::CATEGORY_PLAYERS,
-        game.player.position,
-        volume,
-        pitch,
-        fastrand::u64(..),
-    );
+/// Plays the sounds the player's moves queued this tick, its own and the
+/// pistons' pushes alike, where it stands: vanilla `LocalPlayer.playSound`,
+/// which plays them locally while the server sends them only to other
+/// players.
+pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut GameState) {
+    let silent = game.silent_entities.contains(&game.player.entity_id);
+    for queued in std::mem::take(&mut game.player.movement_sounds.pending) {
+        if queued.unless_silent && silent {
+            continue;
+        }
+        audio.play_world_sound(
+            &crate::audio::SoundRef::event(queued.event),
+            crate::audio::CATEGORY_PLAYERS,
+            game.player.position,
+            queued.volume,
+            queued.pitch,
+            fastrand::u64(..),
+        );
+    }
 }
 
 /// Vanilla `LevelEventHandler` case 2001: a broken block's sound and
@@ -3753,12 +3754,6 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
-        let silent = game.silent_entities.contains(&game.player.entity_id);
-        for sound in std::mem::take(&mut game.player.movement_sounds.pending) {
-            if !(sound.unless_silent && silent) {
-                play_local_player_sound(&self.audio, game, sound.event, sound.volume, sound.pitch);
-            }
-        }
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(

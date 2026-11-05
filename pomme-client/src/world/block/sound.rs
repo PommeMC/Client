@@ -104,6 +104,18 @@ mod tests {
     }
 
     #[test]
+    fn every_version_override_names_an_embedded_table() {
+        for version in BLOCK_SOUNDS.versions.keys() {
+            assert!(
+                crate::world::block::BLOCK_DATA
+                    .iter()
+                    .any(|d| d.version == version),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
     fn older_versions_keep_their_own_sound_types() {
         // Iron blocks took `SoundType.IRON` in 1.21.5; 1.20.1's 763 still
         // had them on `METAL`.

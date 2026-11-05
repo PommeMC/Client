@@ -2479,6 +2479,7 @@ fn run_ticks(
             .tick(&game.chunk_store, game.block_registry.block_state_table());
         game.block_entity_anim.tick();
         crate::app::core::tick_moving_pistons(game);
+        crate::app::core::play_movement_sounds(&core.audio, game);
         game.title.tick();
         tick_tool_highlight(core, game);
         // LocalPlayer.handlePortalTransitionEffect belongs to aiStep, which is
