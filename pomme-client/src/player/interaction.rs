@@ -35,10 +35,10 @@ use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAni
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
-use crate::world::block::render_assets::BlockRenderView;
 use crate::world::block::sound::{BlockSounds, block_sounds_for_id};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::chunk::ChunkStore;
+use crate::world::level::LevelContext;
 
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
@@ -54,8 +54,7 @@ const MAX_FOOD_LEVEL: u32 = 20;
 /// break particles alongside the sound).
 pub struct BreakEffects<'a> {
     pub particles: &'a mut ParticleStore,
-    pub registry: BlockRenderView<'a>,
-    pub biome_climate: &'a HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+    pub level: LevelContext<'a>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -300,13 +299,7 @@ impl InteractionState {
         mark_dirty(&pos, dirty_chunks);
         let table = block_registry.block_state_table();
         play_break_sound_for_id(audio, table, table.block_state_data(state).id(), pos);
-        effects.particles.add_destroy_block_effect(
-            pos,
-            state,
-            effects.registry,
-            chunks,
-            effects.biome_climate,
-        );
+        effects.level.add_destroy_block_effect(pos, state);
         self.destroy_delay = DESTROY_COOLDOWN;
     }
 
