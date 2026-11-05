@@ -39,6 +39,11 @@ pub struct CollisionContext {
 }
 
 impl CollisionContext {
+    /// Vanilla `isDescending`: the sneak key is down.
+    pub fn descending(&self) -> bool {
+        self.descending
+    }
+
     pub const EMPTY: Self = Self {
         entity_bottom: None,
         descending: false,

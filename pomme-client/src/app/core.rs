@@ -375,8 +375,6 @@ pub(super) fn play_entity_sound(
     let pos = (entity_id == game.player.entity_id)
         .then_some(game.player.position)
         .or_else(|| game.entity_positions.get(&entity_id).copied())?;
-    #[cfg(feature = "test-harness")]
-    game.record_sound(sound);
     audio.play_entity_sound(
         sound,
         category,
@@ -392,12 +390,13 @@ pub(super) fn play_entity_sound(
 /// which plays them locally while the server sends them only to other
 /// players.
 pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut GameState) {
+    let silent = game.silent_entities.contains(&game.player.entity_id);
     for queued in std::mem::take(&mut game.player.movement_sounds.pending) {
-        let sound = crate::audio::SoundRef::event(queued.event);
-        #[cfg(feature = "test-harness")]
-        game.record_sound(&sound);
+        if queued.unless_silent && silent {
+            continue;
+        }
         audio.play_world_sound(
-            &sound,
+            &crate::audio::SoundRef::event(queued.event),
             crate::audio::CATEGORY_PLAYERS,
             game.player.position,
             queued.volume,
@@ -2559,8 +2558,6 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
-                    #[cfg(feature = "test-harness")]
-                    game.record_sound(&sound);
                     self.audio
                         .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }

@@ -602,6 +602,7 @@ impl LocalPlayer {
         // deflated by 0.001; a block's fluid column is `amount / 9` of a
         // block, or a full block when more water sits directly above.
         const MARGIN: f64 = 0.001;
+        let velocity_before_current = *self.velocity;
         let feet_y = self.position.y;
         let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
         let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
@@ -685,7 +686,19 @@ impl LocalPlayer {
 
         self.fluid_height = fluid_height;
         // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
+        let was_in_water = self.in_water;
         self.in_water = fluid_height > 0.0;
+        // `Player.doWaterSplashEffect` skips spectators.
+        if self.in_water
+            && !was_in_water
+            && !self.movement_sounds.first_tick
+            && !is_spectator(self.game_mode)
+        {
+            crate::physics::movement_sound::splash(
+                &mut self.movement_sounds,
+                velocity_before_current,
+            );
+        }
         if self.in_water {
             // `Entity.updateFluidInteraction` resets fall distance.
             self.fall_distance = 0.0;

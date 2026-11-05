@@ -101,6 +101,7 @@ pub fn tick(
     // refreshes fluid contact (and applies its current).
     player.under_water = player.eyes_in_water;
     player.update_water_state(world.chunks, world.block_state_table, is_passenger);
+    player.movement_sounds.first_tick = false;
 
     if player.flying {
         // Vanilla `Player.aiStep`.
@@ -708,7 +709,7 @@ fn apply_collision(
     player.horizontal_collision = horizontal_collision;
     player.minor_horizontal_collision = horizontal_collision
         && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
-    let mv = settle_after_move(player, world, resolved, on_ground, collided, &ctx);
+    let mv = settle_after_move(player, world, tags, resolved, on_ground, collided, &ctx);
     if !is_passenger {
         movement_sound::emit(player, world, tags, shift_down, mv);
     }
@@ -732,6 +733,7 @@ fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
 fn settle_after_move(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
     resolved: DVec3,
     on_ground: bool,
     collided: [bool; 3],
@@ -739,6 +741,7 @@ fn settle_after_move(
 ) -> movement_sound::Move {
     player.on_ground = on_ground;
     update_supporting_block(player, world, on_ground, resolved, ctx);
+    let effect_pos = on_pos(player, world, tags, 0.2);
 
     // `LivingEntity.checkFallDamage` refreshes a dry player's fluid contact
     // (adding any current) before collided axes are zeroed; the fall distance
@@ -750,6 +753,14 @@ fn settle_after_move(
         player.fall_distance -= f64::from(resolved.y as f32);
     }
     if on_ground {
+        if player.fall_distance > 0.0 {
+            movement_sound::land(
+                player,
+                world,
+                world.block_data(effect_pos),
+                ctx.descending(),
+            );
+        }
         player.fall_distance = 0.0;
     }
 
@@ -1412,7 +1423,9 @@ fn move_by_piston(player: &mut LocalPlayer, mv: PistonMove<'_>, delta: DVec3) {
             cos_y_rot,
             resolved,
         );
-    let moved = settle_after_move(player, mv.world, resolved, on_ground, collided, &ctx);
+    let moved = settle_after_move(
+        player, mv.world, mv.tags, resolved, on_ground, collided, &ctx,
+    );
     movement_sound::emit(player, mv.world, mv.tags, mv.descending, moved);
     let speed_factor = f64::from(block_speed_factor(player, mv.world, mv.tags));
     player.velocity.x *= speed_factor;

@@ -264,9 +264,6 @@ pub struct GameState {
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
-    /// The sound events most recently played, oldest first.
-    #[cfg(feature = "test-harness")]
-    pub recent_sounds: std::collections::VecDeque<String>,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
@@ -480,15 +477,6 @@ impl GameState {
             });
     }
 
-    /// Notes a played sound for the harness, keeping the last 64.
-    #[cfg(feature = "test-harness")]
-    pub fn record_sound(&mut self, sound: &crate::audio::SoundRef) {
-        if self.recent_sounds.len() == 64 {
-            self.recent_sounds.pop_front();
-        }
-        self.recent_sounds.push_back(sound.event_name().to_owned());
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
@@ -615,8 +603,6 @@ impl GameState {
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
-            #[cfg(feature = "test-harness")]
-            recent_sounds: std::collections::VecDeque::new(),
             tick_count: 0,
             saving_indicator_value: 0.0,
             last_saving_indicator_value: 0.0,
