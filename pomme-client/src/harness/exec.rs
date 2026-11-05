@@ -76,6 +76,13 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Sounds => to_value(&game.recent_sounds),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::Press(press) => press_key(core, press),
+        Command::KeyDown(key) | Command::KeyUp(key) => {
+            keyboard_key(&key.action, &key.key).map(|code| {
+                core.input
+                    .hold_key(code, matches!(command, Command::KeyDown(_)));
+                Value::Null
+            })
+        }
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
         Command::Deterministic => {
@@ -188,18 +195,26 @@ fn input_key(id: &str) -> Result<InputKey, String> {
 
 /// A binding's default key, or a physical key, through the real key path.
 fn press_key(core: &mut AppCore, press: &protocol::Press) -> Result<Value, String> {
-    let code = match (&press.action, &press.key) {
-        (Some(id), None) => action(id)?
-            .default_key()
-            .ok_or_else(|| format!("{id} has no default key"))?,
-        (None, Some(id)) => match input_key(id)? {
-            InputKey::Keyboard(code) => code,
-            _ => return Err(format!("{id} isn't a keyboard key")),
-        },
-        _ => return Err("press takes one of action or key".into()),
-    };
+    let code = keyboard_key(&press.action, &press.key)?;
     core.input.press_key(code, press.ctrl);
     Ok(Value::Null)
+}
+
+/// The keyboard key a binding `action` defaults to, or the physical `key`.
+fn keyboard_key(
+    action_id: &Option<String>,
+    key: &Option<String>,
+) -> Result<winit::keyboard::KeyCode, String> {
+    match (action_id, key) {
+        (Some(id), None) => action(id)?
+            .default_key()
+            .ok_or_else(|| format!("{id} has no default key")),
+        (None, Some(id)) => match input_key(id)? {
+            InputKey::Keyboard(code) => Ok(code),
+            _ => Err(format!("{id} isn't a keyboard key")),
+        },
+        _ => Err("a key takes one of action or key".into()),
+    }
 }
 
 fn bind_keys(core: &mut AppCore, bind: &protocol::Bind) -> Result<Value, String> {

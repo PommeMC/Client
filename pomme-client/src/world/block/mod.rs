@@ -607,6 +607,7 @@ impl<T: Copy> PerState<T> {
 /// own code.
 struct EmbeddedBlocks {
     protocol: i32,
+    version: &'static str,
     /// Deflated by `build.rs` (see [`embedded_data`]); read through
     /// [`parse_embedded`].
     blocks: &'static [u8],
@@ -639,6 +640,7 @@ macro_rules! embedded_blocks {
     ($protocol:expr, $version:literal) => {
         EmbeddedBlocks {
             protocol: $protocol,
+            version: $version,
             blocks: embedded_data!("blocks-", $version, ".json"),
             state: embedded_data!("state-", $version, ".json"),
             piston: embedded_data!("piston-", $version, ".json"),
@@ -2101,7 +2103,7 @@ mod tests {
                     file.version
                 );
                 assert!(
-                    sound::BLOCK_SOUNDS.contains_key(&block.name),
+                    sound::BLOCK_SOUNDS.blocks.contains_key(&block.name),
                     "no sound entry for '{}' ({})",
                     block.name,
                     file.version
@@ -2112,7 +2114,7 @@ mod tests {
         for key in behaviors.keys() {
             assert!(known.contains(key), "orphaned behavior entry '{key}'");
         }
-        for key in sound::BLOCK_SOUNDS.keys() {
+        for key in sound::BLOCK_SOUNDS.blocks.keys() {
             assert!(known.contains(key), "orphaned sound entry '{key}'");
         }
     }

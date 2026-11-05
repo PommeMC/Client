@@ -1,0 +1,69 @@
+# Walking plays the step sound of what's underfoot, which the client plays
+# for itself (the server sends a player's steps only to others): stone, then
+# a snow layer over grass, whose own step plays over the grass's.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/tp @s 110.5 -60 110.5 0 0"
+
+[[step]]
+expect = { player = { position = [110.5, -60.0, 110.5] } }
+
+[[step]]
+chat = "/forceload add 110 110 112 121"
+
+[[step]]
+chat = "/fill 110 -61 110 110 -61 121 minecraft:stone"
+
+[[step]]
+chat = "/fill 112 -60 110 112 -60 121 minecraft:snow[layers=1]"
+
+[[step]]
+expect = { block = "snow", at = [112, -60, 121] }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+expect = { sound = "block.stone.step" }
+
+[[step]]
+chat = "/tp @s 112.5 -60 110.5 0 0"
+
+[[step]]
+expect = { player = { position = [112.5, -60.0, 110.5] } }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+expect = { sound = "block.snow.step" }
+
+[[step]]
+expect = { sound = "block.grass.step" }
+
+[[step]]
+chat = "/fill 110 -61 110 110 -61 121 minecraft:grass_block"
+
+[[step]]
+chat = "/fill 112 -60 110 112 -60 121 minecraft:air"
+
+[[step]]
+chat = "/forceload remove 110 110 112 121"

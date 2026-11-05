@@ -142,6 +142,9 @@ press = { action = "key.drop", ctrl = true }  # a key binding's default key, or
                                               # key = "key.keyboard.j" for a
                                               # physical key; ctrl is optional
 [[step]]
+key_down = { action = "key.forward" }        # held until key_up, which
+                                              # takes the same key
+[[step]]
 bind = { action = "key.drop", keys = ["key.keyboard.j"] }  # this session only;
                                               # no keys resets the defaults
 [[step]]
@@ -234,4 +237,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).

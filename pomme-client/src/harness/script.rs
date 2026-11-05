@@ -46,6 +46,8 @@ struct StepFile {
     mouse_down: Option<Mouse>,
     mouse_up: Option<Mouse>,
     press: Option<protocol::Press>,
+    key_down: Option<protocol::Key>,
+    key_up: Option<protocol::Key>,
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
@@ -329,6 +331,12 @@ impl StepFile {
         }
         if let Some(press) = self.press {
             steps.push(Step::Run(Command::Press(press)));
+        }
+        if let Some(key) = self.key_down {
+            steps.push(Step::Run(Command::KeyDown(key)));
+        }
+        if let Some(key) = self.key_up {
+            steps.push(Step::Run(Command::KeyUp(key)));
         }
         if let Some(bind) = self.bind {
             steps.push(Step::Run(Command::Bind(bind)));

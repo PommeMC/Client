@@ -10,6 +10,7 @@ use super::block_shape::CollisionContext;
 use super::collision::{
     CollisionWorld, find_supporting_block, no_collision, resolve_collision, state_boxes,
 };
+use super::movement_sound;
 use crate::app::input::{self, InputState};
 use crate::entity::components::Velocity;
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT, is_spectator};
@@ -94,6 +95,7 @@ pub fn tick(
 ) {
     let is_passenger = vehicle.is_some();
     let raw_jump_held = input.performing_action(input::Action::Jump);
+    movement_sound::advance_tick(&mut player.movement_sounds);
 
     // `Player.tick` snapshots `wasUnderwater` before `Entity.baseTick`
     // refreshes fluid contact (and applies its current).
@@ -129,7 +131,7 @@ pub fn tick(
 
     let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
 
-    update_fly_state(player, input, world, vehicle, sin_y_rot, cos_y_rot);
+    update_fly_state(player, input, world, tags, vehicle, sin_y_rot, cos_y_rot);
 
     // `LocalPlayer.aiStep`'s `goDownInWater`, before the living jump.
     if player.in_water
@@ -171,7 +173,7 @@ pub fn tick(
         } else if (player.on_ground || (in_water && player.fluid_height <= FLUID_JUMP_THRESHOLD))
             && player.no_jump_delay == 0
         {
-            jump_from_ground(player, world, sin_y_rot, cos_y_rot);
+            jump_from_ground(player, world, tags, sin_y_rot, cos_y_rot);
             player.no_jump_delay = JUMP_DELAY_TICKS;
         }
     } else {
@@ -181,7 +183,15 @@ pub fn tick(
     player.move_forward = forward;
     player.move_strafe = strafe;
     travel(
-        player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
     );
 
     player.tick_air_supply();
@@ -218,6 +228,7 @@ fn travel(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -225,11 +236,27 @@ fn travel(
 ) {
     if player.in_water && player.is_affected_by_fluids() {
         tick_water(
-            player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+            player,
+            input,
+            world,
+            tags,
+            is_passenger,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
         );
     } else {
         tick_land(
-            player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+            player,
+            input,
+            world,
+            tags,
+            is_passenger,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
         );
     }
 }
@@ -251,6 +278,7 @@ pub fn tick_dead(
     tags: &BlockTags,
     is_passenger: bool,
 ) {
+    movement_sound::advance_tick(&mut player.movement_sounds);
     player.no_jump_delay = 0;
 
     // Local players enter death through SetHealth; entity event 3 intentionally
@@ -267,7 +295,15 @@ pub fn tick_dead(
     player.move_forward = 0.0;
     player.move_strafe = 0.0;
     travel(
-        player, &neutral, world, tags, 0.0, 0.0, sin_y_rot, cos_y_rot,
+        player,
+        &neutral,
+        world,
+        tags,
+        is_passenger,
+        0.0,
+        0.0,
+        sin_y_rot,
+        cos_y_rot,
     );
 
     // Player.updatePlayerPose runs after LivingEntity.tick in vanilla. With
@@ -287,6 +323,7 @@ fn update_fly_state(
     player: &mut LocalPlayer,
     input: &InputState,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
     vehicle: Option<Vehicle>,
     sin_y_rot: f32,
     cos_y_rot: f32,
@@ -304,7 +341,7 @@ fn update_fly_state(
             } else if !player.swimming && vehicle.is_none_or(|v| v.jumpable) {
                 player.flying = !player.flying;
                 if player.flying && player.on_ground {
-                    jump_from_ground(player, world, sin_y_rot, cos_y_rot);
+                    jump_from_ground(player, world, tags, sin_y_rot, cos_y_rot);
                 }
                 player.abilities_dirty = true;
                 player.jump_trigger_time = 0;
@@ -320,10 +357,11 @@ fn update_fly_state(
 fn jump_from_ground(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
     sin_y_rot: f32,
     cos_y_rot: f32,
 ) {
-    let jump_factor = block_jump_factor(player, world);
+    let jump_factor = block_jump_factor(player, world, tags);
     let jump_velocity = JUMP_VELOCITY * jump_factor;
     player.velocity.y = f64::from(jump_velocity).max(player.velocity.y);
 
@@ -333,7 +371,7 @@ fn jump_from_ground(
     }
 }
 
-fn is_climbable_state(block_state_data: &BlockStateData, tags: &BlockTags) -> bool {
+pub(super) fn is_climbable_state(block_state_data: &BlockStateData, tags: &BlockTags) -> bool {
     tags.contains("minecraft:climbable", block_state_data.id())
 }
 
@@ -424,6 +462,7 @@ fn tick_land(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -437,7 +476,7 @@ fn tick_land(
     let block_friction = if on_ground_at_start {
         world
             .block_state_table
-            .block_state_data(block_below_affecting_movement(player, world))
+            .block_state_data(block_below_affecting_movement(player, world, tags))
             .movement_friction()
     } else {
         1.0
@@ -453,7 +492,17 @@ fn tick_land(
         input.performing_action(input::Action::Sneak),
     );
 
-    apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
+    apply_collision(
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
 
     // TODO: `wasInPowderSnow && canEntityWalkOnPowderSnow` also takes the impulse.
     if (player.horizontal_collision || input.performing_action(input::Action::Jump))
@@ -463,7 +512,7 @@ fn tick_land(
     }
 
     // `Entity.move`, before gravity and drag.
-    let speed_factor = block_speed_factor(player, world);
+    let speed_factor = block_speed_factor(player, world, tags);
     player.velocity.x *= f64::from(speed_factor);
     player.velocity.z *= f64::from(speed_factor);
 
@@ -507,6 +556,7 @@ fn tick_water(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -518,8 +568,7 @@ fn tick_water(
         let target_vy = vanilla_look_y(player.look_dir.x_rot_deg());
         let surface_y = (player.position.y + 1.0 - 0.1).floor() as i32;
         let surface_fluid = world
-            .block_state_table
-            .block_state_data(world.chunks.get_block_state(
+            .block_data(BlockPos::new(
                 player.position.x.floor() as i32,
                 surface_y,
                 player.position.z.floor() as i32,
@@ -547,7 +596,17 @@ fn tick_water(
         cos_y_rot,
     );
 
-    apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
+    apply_collision(
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
     // TODO: `Entity.move`'s block speed factor also applies in water.
 
     if player.horizontal_collision
@@ -606,13 +665,7 @@ fn contains_any_liquid(world: CollisionWorld<'_>, aabb: &Aabb) -> bool {
     for x in x0..x1 {
         for y in y0..y1 {
             for z in z0..z1 {
-                if world
-                    .block_state_table
-                    .block_state_data(world.chunks.get_block_state(x, y, z))
-                    .fluid()
-                    .kind
-                    != FluidKind::Empty
-                {
+                if world.block_data(BlockPos::new(x, y, z)).fluid().kind != FluidKind::Empty {
                     return true;
                 }
             }
@@ -621,10 +674,13 @@ fn contains_any_liquid(world: CollisionWorld<'_>, aabb: &Aabb) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_collision(
     player: &mut LocalPlayer,
     input: &InputState,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -652,7 +708,10 @@ fn apply_collision(
     player.horizontal_collision = horizontal_collision;
     player.minor_horizontal_collision = horizontal_collision
         && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
-    settle_after_move(player, world, resolved, on_ground, collided, &ctx);
+    let mv = settle_after_move(player, world, resolved, on_ground, collided, &ctx);
+    if !is_passenger {
+        movement_sound::emit(player, world, tags, shift_down, mv);
+    }
 }
 
 /// Which axes `Entity.move`'s collision shortened `delta` on.
@@ -669,7 +728,7 @@ fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
 
 /// The rest of vanilla `Entity.move` once the move is applied: ground and
 /// supporting block, fluid contact, fall distance, and stopping on the
-/// collided axes.
+/// collided axes. Returns the move for its movement emission.
 fn settle_after_move(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
@@ -677,7 +736,7 @@ fn settle_after_move(
     on_ground: bool,
     collided: [bool; 3],
     ctx: &CollisionContext,
-) {
+) -> movement_sound::Move {
     player.on_ground = on_ground;
     update_supporting_block(player, world, on_ground, resolved, ctx);
 
@@ -704,6 +763,10 @@ fn settle_after_move(
     }
     if y {
         player.velocity.y = 0.0;
+    }
+    movement_sound::Move {
+        movement: resolved,
+        velocity: *player.velocity,
     }
 }
 
@@ -1004,29 +1067,44 @@ fn block_state_at_player_position(
     )
 }
 
+/// `Entity.getBlockPosBelowThatAffectsMyMovement`'s block.
 fn block_below_affecting_movement(
     player: &LocalPlayer,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
 ) -> azalea_block::BlockState {
-    let chunk_store = world.chunks;
-    let offset = f64::from(0.500_001_f32);
-    let y = (player.position.y - offset).floor() as i32;
+    let pos = on_pos(player, world, tags, 0.500_001);
+    world.chunks.get_block_state(pos.x, pos.y, pos.z)
+}
 
-    if let Some(support) = player.main_supporting_block_pos {
-        let support_state = chunk_store.get_block_state(support.x, support.y, support.z);
-        let support_id = world.block_state_table.block_state_data(support_state).id();
-        // `Entity.getOnPos`: walls and fence gates keep the support's own Y.
-        if support_id.ends_with("_wall") || support_id.ends_with("_fence_gate") {
-            return support_state;
-        }
-        return chunk_store.get_block_state(support.x, y, support.z);
+/// Vanilla `Entity.getOnPos(offset)`: the supporting block's column `offset`
+/// below the feet, or the support itself for a near-zero offset, a fence
+/// (offsets up to 0.5), a wall or a fence gate.
+pub(super) fn on_pos(
+    player: &LocalPlayer,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    offset: f32,
+) -> BlockPos {
+    let y = (player.position.y - f64::from(offset)).floor() as i32;
+    let Some(support) = player.main_supporting_block_pos else {
+        return BlockPos::new(
+            player.position.x.floor() as i32,
+            y,
+            player.position.z.floor() as i32,
+        );
+    };
+    if offset <= 1.0e-5 {
+        return support;
     }
-
-    chunk_store.get_block_state(
-        player.position.x.floor() as i32,
-        y,
-        player.position.z.floor() as i32,
-    )
+    let support_id = world.block_data(support).id();
+    if (f64::from(offset) <= 0.5 && tags.contains("minecraft:fences", support_id))
+        || tags.contains("minecraft:walls", support_id)
+        || support_id.ends_with("_fence_gate")
+    {
+        return support;
+    }
+    BlockPos::new(support.x, y, support.z)
 }
 
 fn update_supporting_block(
@@ -1064,7 +1142,7 @@ fn update_supporting_block(
     player.on_ground_no_blocks = support.is_none();
 }
 
-fn block_jump_factor(player: &LocalPlayer, world: CollisionWorld<'_>) -> f32 {
+fn block_jump_factor(player: &LocalPlayer, world: CollisionWorld<'_>, tags: &BlockTags) -> f32 {
     let here_factor = world
         .block_state_table
         .block_state_data(block_state_at_player_position(player, world.chunks))
@@ -1072,7 +1150,7 @@ fn block_jump_factor(player: &LocalPlayer, world: CollisionWorld<'_>) -> f32 {
     if f64::from(here_factor) == 1.0 {
         world
             .block_state_table
-            .block_state_data(block_below_affecting_movement(player, world))
+            .block_state_data(block_below_affecting_movement(player, world, tags))
             .movement_jump_factor()
     } else {
         here_factor
@@ -1080,7 +1158,7 @@ fn block_jump_factor(player: &LocalPlayer, world: CollisionWorld<'_>) -> f32 {
 }
 
 /// `Player.getBlockSpeedFactor`; pomme has no fall flying.
-fn block_speed_factor(player: &LocalPlayer, world: CollisionWorld<'_>) -> f32 {
+fn block_speed_factor(player: &LocalPlayer, world: CollisionWorld<'_>, tags: &BlockTags) -> f32 {
     if player.flying {
         return 1.0;
     }
@@ -1093,7 +1171,7 @@ fn block_speed_factor(player: &LocalPlayer, world: CollisionWorld<'_>) -> f32 {
     } else {
         world
             .block_state_table
-            .block_state_data(block_below_affecting_movement(player, world))
+            .block_state_data(block_below_affecting_movement(player, world, tags))
             .movement_speed_factor()
     }
 }
@@ -1265,11 +1343,13 @@ fn vanilla_look_y(pitch_degrees: f32) -> f64 {
     -f64::from(mth_sin(angle))
 }
 
-/// What a piston's move of the player reads: the world, whether the player
-/// is descending (holding sneak), and the tick for the 0.51 budget.
+/// What a piston's move of the player reads: the world and its tags, whether
+/// the player is descending (holding sneak), and the tick for the 0.51
+/// budget.
 #[derive(Clone, Copy)]
 struct PistonMove<'a> {
     world: CollisionWorld<'a>,
+    tags: &'a BlockTags,
     descending: bool,
     tick: u64,
 }
@@ -1332,8 +1412,9 @@ fn move_by_piston(player: &mut LocalPlayer, mv: PistonMove<'_>, delta: DVec3) {
             cos_y_rot,
             resolved,
         );
-    settle_after_move(player, mv.world, resolved, on_ground, collided, &ctx);
-    let speed_factor = f64::from(block_speed_factor(player, mv.world));
+    let moved = settle_after_move(player, mv.world, resolved, on_ground, collided, &ctx);
+    movement_sound::emit(player, mv.world, mv.tags, mv.descending, moved);
+    let speed_factor = f64::from(block_speed_factor(player, mv.world, mv.tags));
     player.velocity.x *= speed_factor;
     player.velocity.z *= speed_factor;
 }
@@ -1391,6 +1472,7 @@ fn movement_area(aabb: &Aabb, direction: Direction, amount: f64) -> Aabb {
 pub fn push_by_moving_piston(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
+    tags: &BlockTags,
     pos: BlockPos,
     piston: &MovingPiston,
     new_progress: f32,
@@ -1404,6 +1486,7 @@ pub fn push_by_moving_piston(
     let blocks = world.block_state_table;
     let mv = PistonMove {
         world,
+        tags,
         descending: player.was_shift_pressed,
         tick,
     };
@@ -1765,6 +1848,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&chunks, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -1798,6 +1882,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&chunks, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2173,6 +2258,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&wet, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2183,6 +2269,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&dry, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2633,7 +2720,8 @@ mod tests {
         assert_eq!(
             block_speed_factor(
                 &player,
-                CollisionWorld::new(&chunks, BlockStateTable::native())
+                CollisionWorld::new(&chunks, BlockStateTable::native()),
+                &BlockTags::default()
             ),
             0.4
         );
@@ -2641,7 +2729,8 @@ mod tests {
         assert_eq!(
             block_speed_factor(
                 &player,
-                CollisionWorld::new(&chunks, BlockStateTable::native())
+                CollisionWorld::new(&chunks, BlockStateTable::native()),
+                &BlockTags::default()
             ),
             1.0
         );
@@ -2694,7 +2783,15 @@ mod tests {
         player.position = dvec3(8.5, 64.5, 8.5).into();
         player.on_ground = true;
         let world = test_world(&chunks, &anim);
-        push_by_moving_piston(&mut player, world, pos, &piston, 1.0, 1);
+        push_by_moving_piston(
+            &mut player,
+            world,
+            &BlockTags::default(),
+            pos,
+            &piston,
+            1.0,
+            1,
+        );
         player.position.y
     }
 
@@ -2707,5 +2804,66 @@ mod tests {
     #[test]
     fn pistons_leave_spectators_alone() {
         assert_eq!(y_after_rising_stone(3), 64.5);
+    }
+
+    #[test]
+    fn on_pos_keeps_a_tagged_fence_or_wall_as_the_block_underfoot() {
+        let table = BlockStateTable::native();
+        let tags = crate::world::block::block_tags_for_test(
+            table,
+            &[("fences", &["oak_fence"]), ("walls", &["cobblestone_wall"])],
+        );
+        let support = BlockPos::new(8, 63, 8);
+        for block in ["oak_fence", "cobblestone_wall"] {
+            let chunks = ChunkStore::with_origin_chunk();
+            chunks.set_block_state(8, 63, 8, table.find_state(block, &[]), table);
+            let world = CollisionWorld::new(&chunks, table);
+            // Standing on the 1.5-tall top, 0.2 below the feet is y 64.
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(8.5, 64.5, 8.5).into();
+            player.main_supporting_block_pos = Some(support);
+            assert_eq!(on_pos(&player, world, &tags, 0.2), support, "{block}");
+            assert_eq!(
+                on_pos(&player, world, &BlockTags::default(), 0.2),
+                BlockPos::new(8, 64, 8),
+                "{block} untagged"
+            );
+        }
+    }
+
+    #[test]
+    fn piston_pushes_walk_toward_the_next_step() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let table = BlockStateTable::native();
+        for x in 0..16 {
+            chunks.set_block_state(x, 63, 8, table.find_state("stone", &[]), table);
+        }
+        let anim = BlockEntityAnimStore::default();
+        let tags = BlockTags::default();
+        let world = test_world(&chunks, &anim);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(2.5, 64.0, 8.5).into();
+        // 0.51 a tick walks 0.306 of `moveDist`; a sideways push leaves the
+        // player off the ground, so it steps on nothing itself.
+        for tick in 1..=4 {
+            let mv = PistonMove {
+                world,
+                tags: &tags,
+                descending: false,
+                tick,
+            };
+            move_by_piston(&mut player, mv, dvec3(0.51, 0.0, 0.0));
+        }
+        assert!(player.movement_sounds.pending.is_empty());
+        // The player's own next move, however short, passes the step at 1.
+        player.on_ground = true;
+        player.main_supporting_block_pos = Some(BlockPos::new(4, 63, 8));
+        let mv = movement_sound::Move {
+            movement: dvec3(0.01, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+        };
+        movement_sound::emit(&mut player, world, &tags, false, mv);
+        assert_eq!(player.movement_sounds.pending.len(), 1);
+        assert_eq!(player.movement_sounds.pending[0].event, "block.stone.step");
     }
 }

@@ -6,7 +6,7 @@ use super::block_shape::{self, CollisionContext};
 use crate::entity::components::Velocity;
 use crate::position::BlockPos;
 use crate::world::block::model::Direction;
-use crate::world::block::{BlockStateTable, SpecialCollision};
+use crate::world::block::{BlockStateData, BlockStateTable, SpecialCollision};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 use crate::world::piston;
@@ -48,6 +48,12 @@ impl<'a> CollisionWorld<'a> {
 }
 
 impl CollisionWorld<'_> {
+    /// The data of the block at `pos`.
+    pub fn block_data(&self, pos: BlockPos) -> &'static BlockStateData {
+        self.block_state_table
+            .block_state_data(self.chunks.get_block_state(pos.x, pos.y, pos.z))
+    }
+
     /// `ShulkerBoxBlockEntity.getBoundingBox` moved to `pos`; `None` while
     /// closed, where the static full cube applies.
     fn shulker_lid(&self, state: BlockState, pos: BlockPos) -> Option<Aabb> {

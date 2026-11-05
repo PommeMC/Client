@@ -119,9 +119,10 @@ fn emit_digging_particles(
         );
     }
     if age.is_multiple_of(10) {
-        let hit = block_sounds_for_id(data.id()).hit_event;
+        let hit =
+            &block_sounds_for_id(game.block_registry.block_state_table(), data.id()).hit_event;
         if !hit.is_empty() {
-            play_bound(audio, game, id, &hit, 0.5, 0.5);
+            play_bound(audio, game, id, hit, 0.5, 0.5);
         }
     }
 }
