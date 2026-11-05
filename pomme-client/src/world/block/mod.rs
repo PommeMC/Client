@@ -10,6 +10,7 @@
 //! current world queries and a per-pass RNG, independent of coordinate
 //! sampling.
 
+pub(crate) mod block_colors;
 pub(crate) mod block_registry;
 mod block_state_table;
 mod condition;
