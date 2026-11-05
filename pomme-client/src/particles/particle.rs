@@ -81,6 +81,15 @@ pub(super) fn resized_bounds(bounds: Aabb, width: f32, height: f32) -> Aabb {
     )
 }
 
+pub(super) fn move_without_collision(bounds: &mut Aabb, position: &mut DVec3, displacement: DVec3) {
+    *bounds = bounds.offset(displacement);
+    *position = DVec3::new(
+        (bounds.min.x + bounds.max.x) / 2.0,
+        bounds.min.y,
+        (bounds.min.z + bounds.max.z) / 2.0,
+    );
+}
+
 pub(super) fn randomized_motion(random: &mut fastrand::Rng, auxiliary: DVec3) -> DVec3 {
     let mut velocity = DVec3::new(
         auxiliary.x + f64::from((random.f32() * 2.0 - 1.0) * 0.4),

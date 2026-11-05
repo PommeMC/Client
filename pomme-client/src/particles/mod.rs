@@ -1,13 +1,14 @@
 //! Vanilla 26.3 particle layer, separate from legacy `crate::particle`.
 //! Type/provider storage and CPU description/sprite binding are implemented.
 //! World LevelContext owns queries/policy and narrow engine access. Concrete
-//! Smoke and Flame simulations and sprite providers accompany a CPU engine
-//! for SingleQuads and NoRender. AppCore owns and ticks the canonical engine
-//! with a fully bound context.
+//! Smoke, Flame and EndRod simulations and sprite providers accompany a CPU
+//! engine for SingleQuads and NoRender. AppCore owns and ticks the canonical
+//! engine with a fully bound context.
 //! Canonical providers share the independent particle atlas lifecycle.
-//! Producers and drawing remain deferred; the legacy store still renders
-//! existing effects. Leaf values, typed tokens and sealed options erasure are
-//! real data/bridges, not placeholder behavior. The ordinary contract_exemplar
+//! Server EndRod packets use the canonical engine and dedicated atlas draws;
+//! terrain and item effects still use the legacy store. Leaf values, typed
+//! tokens and sealed options erasure are real data/bridges, not placeholder
+//! behavior. The ordinary contract_exemplar
 //! needs a caller's real provider and resource/atlas initializer.
 //!
 //! Root contracts describe identity, instances and extraction values. Resources

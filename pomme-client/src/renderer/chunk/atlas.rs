@@ -715,7 +715,6 @@ pub(crate) fn atlas_texture_names(
     let texture_names = render_assets
         .texture_names()
         .chain(generated_item_textures.iter().copied())
-        .chain(crate::particle::END_ROD_SPRITES)
         .collect();
     (texture_names, generated_item_textures)
 }

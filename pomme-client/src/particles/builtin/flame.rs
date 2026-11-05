@@ -6,7 +6,9 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, resized_bounds};
+use super::super::particle::{
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+};
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{
     ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
@@ -112,12 +114,7 @@ impl Particle for FlameParticle {
     }
 
     fn move_by(&mut self, _world: &LevelContext<'_>, displacement: DVec3) {
-        self.bounds = self.bounds.offset(displacement);
-        self.position = DVec3::new(
-            (self.bounds.min.x + self.bounds.max.x) / 2.0,
-            self.bounds.min.y,
-            (self.bounds.min.z + self.bounds.max.z) / 2.0,
-        );
+        move_without_collision(&mut self.bounds, &mut self.position, displacement);
     }
 
     fn remove(&mut self) {
