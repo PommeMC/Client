@@ -6,7 +6,7 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::json_bundle::JsonBundle;
-use super::render_assets::{FaceTextures, Tint};
+use super::render_assets::{FaceTextures, LoadProgress, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::chunk::mesher::Colormap;
 
@@ -575,6 +575,7 @@ pub fn bake_all_models(
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
     bundle: Option<&JsonBundle>,
+    progress: Option<&LoadProgress>,
 ) -> (BakedModelMap, MultipartMap) {
     let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
@@ -588,6 +589,7 @@ pub fn bake_all_models(
         bundle,
         |block_name, blockstate| {
             total += 1;
+            LoadProgress::step(progress);
             let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
             // Variants (and multipart cases) naming the same model, rotation
             // and uvlock share one bake. Per block, since tints are.
@@ -842,6 +844,7 @@ pub fn bake_item_models(
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
     bundle: Option<&JsonBundle>,
+    progress: Option<&LoadProgress>,
 ) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
@@ -979,6 +982,7 @@ pub fn bake_item_models(
             .collect(),
     };
     for item_name in &item_names {
+        LoadProgress::step(progress);
         let item_name = item_name.as_str();
         let item_asset_key = format!("minecraft/items/{item_name}.json");
         let Some(contents) = read_json(bundle, &item_asset_key, || {
@@ -3135,14 +3139,14 @@ mod tests {
         .unwrap();
         std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
 
-        let baked = bake_item_models(&jar, &None, None, None);
+        let baked = bake_item_models(&jar, &None, None, None, None);
         assert_eq!(
             baked.flat_texture_keys.get("holey").map(Vec::as_slice),
             Some([Some("item/zero".to_string())].as_slice())
         );
         // Read through the bundle, the same files bake the same.
-        let bundle = JsonBundle::load(&jar, &None, None);
-        let from_bundle = bake_item_models(&jar, &None, None, Some(&bundle));
+        let bundle = JsonBundle::load(&jar, &None, None, None);
+        let from_bundle = bake_item_models(&jar, &None, None, Some(&bundle), None);
         assert_eq!(from_bundle.flat_texture_keys, baked.flat_texture_keys);
         assert_eq!(
             baked.flat_texture_keys.get("unresolved").map(Vec::as_slice),
@@ -3235,7 +3239,7 @@ mod tests {
 
         let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
         packs.enable_local_pack("test_pack");
-        let baked = bake_item_models(&jar, &None, Some(&packs), None);
+        let baked = bake_item_models(&jar, &None, Some(&packs), None, None);
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
             Some([Some("other:item/replacement".to_string())].as_slice())

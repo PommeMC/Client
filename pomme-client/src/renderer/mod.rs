@@ -62,7 +62,9 @@ use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::ui::font::{FontOptions, FontSources};
-use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView};
+use crate::world::block::render_assets::{
+    BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage,
+};
 
 /// The live atlas's layout, so meshes bake in UVs that match it.
 impl MeshSource for Renderer {
@@ -306,26 +308,44 @@ pub struct Renderer {
     width: u32,
     height: u32,
     last_timings: RenderTimings,
+    /// The player's skin still downloading, applied by the frame it arrives
+    /// in.
+    pending_skin: Option<(
+        uuid::Uuid,
+        std::sync::mpsc::Receiver<Result<SkinData, String>>,
+    )>,
 }
 
-const LOADING_MODELS: &str = "Loading block models...";
+/// The bar's share for the loading thread; `finish`'s steps fill the rest.
+const LOADING_SHARE: f32 = 0.5;
 
-/// A renderer whose block models are still loading on another thread, with
-/// the GPU context and splash up meanwhile. The app keeps handling window
-/// events while it waits, so a slow disk can't make the window hang.
+/// A renderer whose block models and atlas images are still loading on
+/// another thread, with the GPU context and splash up meanwhile. The app
+/// keeps handling window events while it waits, so a slow disk can't make the
+/// window hang.
 pub struct RendererBoot {
     screen: boot::BootScreen,
-    render_assets: std::thread::JoinHandle<BlockRenderAssets>,
+    loaded: std::thread::JoinHandle<(BlockRenderAssets, chunk::atlas::AtlasCpu)>,
+    progress: Arc<LoadProgress>,
+    /// The bar as drawn, eased towards `progress` each frame.
+    shown: f32,
 }
 
 impl RendererBoot {
-    /// The block models are loaded, so [`Renderer::finish`] won't wait on them.
+    /// The loading thread is done, so [`Renderer::finish`] won't wait on it.
     pub fn is_ready(&self) -> bool {
-        self.render_assets.is_finished()
+        self.loaded.is_finished()
     }
 
+    /// One splash frame, its bar eased as vanilla `LoadingOverlay` eases it.
     pub fn draw_splash(&mut self) {
-        let _ = self.screen.draw(0.0, LOADING_MODELS);
+        let actual = self.progress.fraction() * LOADING_SHARE;
+        self.shown = (self.shown * 0.95 + actual * 0.050000012).clamp(0.0, 1.0);
+        let status = match self.progress.stage() {
+            LoadStage::Textures => "Building texture atlas...",
+            _ => "Loading block models...",
+        };
+        let _ = self.screen.draw(self.shown, status);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
@@ -335,7 +355,7 @@ impl RendererBoot {
 
 impl Renderer {
     /// Brings up the GPU and the splash, and starts loading the block models
-    /// on another thread; [`Self::finish`] builds the rest.
+    /// and atlas images on another thread; [`Self::finish`] builds the rest.
     pub fn begin(
         window: &Window,
         font_sources: FontSources<'_>,
@@ -343,26 +363,47 @@ impl Renderer {
         vsync: bool,
         bedrock_ui_dir: &Path,
     ) -> Result<RendererBoot, RendererError> {
-        let render_assets = {
+        let progress = Arc::new(LoadProgress::default());
+        let loaded = {
             let jar_assets_dir = font_sources.jar_assets_dir.to_path_buf();
             let asset_index = font_sources.asset_index.clone();
             let cache_dir = cache_dir.to_path_buf();
+            let progress = Arc::clone(&progress);
             std::thread::spawn(move || {
-                BlockRenderAssets::load(&jar_assets_dir, &asset_index, Some(&cache_dir), None)
+                let render_assets = BlockRenderAssets::load(
+                    &jar_assets_dir,
+                    &asset_index,
+                    Some(&cache_dir),
+                    None,
+                    Some(&progress),
+                );
+                let (texture_names, generated_item_textures) =
+                    chunk::atlas::atlas_texture_names(&render_assets);
+                let atlas = TextureAtlas::build_cpu(
+                    &jar_assets_dir,
+                    &asset_index,
+                    &texture_names,
+                    &generated_item_textures,
+                    None,
+                    Some(&progress),
+                );
+                (render_assets, atlas)
             })
         };
 
         let screen = boot::BootScreen::new(window, font_sources, Some(bedrock_ui_dir), vsync)?;
         let mut boot = RendererBoot {
             screen,
-            render_assets,
+            loaded,
+            progress,
+            shown: 0.0,
         };
         boot.draw_splash();
         Ok(boot)
     }
 
-    /// The renderer `boot` started, waiting for its block models if they
-    /// aren't loaded yet.
+    /// The renderer `boot` started, waiting for its loading thread if it isn't
+    /// done yet.
     pub fn finish(
         boot: RendererBoot,
         font_sources: FontSources<'_>,
@@ -375,10 +416,7 @@ impl Renderer {
             packs,
             options: font_options,
         } = font_sources;
-        let RendererBoot {
-            screen,
-            render_assets: render_assets_handle,
-        } = boot;
+        let RendererBoot { screen, loaded, .. } = boot;
         let vsync = screen.vsync();
         let boot::BootParts {
             ctx,
@@ -406,28 +444,10 @@ impl Renderer {
             );
         };
 
-        splash(&mut menu_pipeline, 0.0, LOADING_MODELS);
-
         let camera = Camera::new(swapchain_state.extent.aspect_ratio());
-        let render_assets = Arc::new(
-            render_assets_handle
-                .join()
-                .expect("block render assets thread panicked"),
-        );
-
-        splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
-
-        let (texture_names, generated_item_textures) =
-            chunk::atlas::atlas_texture_names(&render_assets);
-        let atlas = TextureAtlas::build(
-            &ctx.device,
-            jar_assets_dir,
-            asset_index,
-            &texture_names,
-            &generated_item_textures,
-            None,
-        )
-        .map_err(RendererError::Atlas)?;
+        let (render_assets, atlas) = loaded.join().expect("loading thread panicked");
+        let render_assets = Arc::new(render_assets);
+        let atlas = TextureAtlas::upload(&ctx.device, atlas).map_err(RendererError::Atlas)?;
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
@@ -628,6 +648,7 @@ impl Renderer {
             width: swapchain_extent.width,
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
+            pending_skin: None,
         })
     }
 
@@ -1630,6 +1651,7 @@ impl Renderer {
             &self.asset_index,
             None,
             Some(packs),
+            None,
         ));
 
         self.item_entity_pipeline.clear_meshes(&self.ctx.device);
@@ -1734,9 +1756,30 @@ impl Renderer {
         self.skin_preview.trigger_swing();
     }
 
+    /// Starts downloading the player's skin; vanilla `SkinManager` fetches
+    /// skins asynchronously too, drawing the default one until then.
     pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
         let uuid_str = uuid.to_string().replace('-', "");
-        let skin = rt.block_on(async { fetch_skin_texture(&uuid_str).await });
+        let (tx, rx) = std::sync::mpsc::channel();
+        rt.spawn(async move {
+            let _ = tx.send(fetch_skin_texture(&uuid_str).await);
+        });
+        self.pending_skin = Some((*uuid, rx));
+    }
+
+    fn apply_fetched_skin(&mut self) {
+        let Some((uuid, rx)) = &self.pending_skin else {
+            return;
+        };
+        let uuid = *uuid;
+        let skin = match rx.try_recv() {
+            Ok(skin) => skin,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the skin download stopped".to_owned())
+            }
+        };
+        self.pending_skin = None;
         match skin {
             Ok(skin) => {
                 // In-flight frames may still reference the old skin texture,
@@ -1751,7 +1794,7 @@ impl Renderer {
                     self.hand_pipeline.skin_sampler(),
                     skin.slim,
                 );
-                self.update_player_entity_skin(uuid, &skin);
+                self.update_player_entity_skin(&uuid, &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
@@ -1865,6 +1908,7 @@ impl Renderer {
         if self.suspended {
             return Ok(());
         }
+        self.apply_fetched_skin();
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }

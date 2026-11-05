@@ -145,6 +145,7 @@ pub struct Loading {
     /// surface's window does.
     pub boot: crate::renderer::RendererBoot,
     pub window: Arc<Window>,
+    pub next_frame: Instant,
 }
 
 /// Where a save leads, so closing the window can wait for it too.

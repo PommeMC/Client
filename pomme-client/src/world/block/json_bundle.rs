@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::render_assets::{load_cache, save_cache};
+use super::render_assets::{LoadProgress, LoadStage, load_cache, save_cache};
 use crate::assets::AssetIndex;
 
 const BUNDLE_FILE: &str = "asset_json_v1.json";
@@ -36,12 +36,13 @@ impl JsonBundle {
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         cache_dir: Option<&Path>,
+        progress: Option<&LoadProgress>,
     ) -> Self {
         let path = cache_dir.map(|dir| dir.join(BUNDLE_FILE));
         if let Some(bundle) = path.as_deref().and_then(load_cache) {
             return bundle;
         }
-        let bundle = Self::read_assets(jar_assets_dir, asset_index);
+        let bundle = Self::read_assets(jar_assets_dir, asset_index, progress);
         if let Some(path) = &path
             && !bundle.blockstates.is_empty()
         {
@@ -50,7 +51,11 @@ impl JsonBundle {
         bundle
     }
 
-    fn read_assets(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> Self {
+    fn read_assets(
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        progress: Option<&LoadProgress>,
+    ) -> Self {
         let blockstate_paths: Vec<(String, PathBuf)> =
             super::model::resolve_blockstates_dir(jar_assets_dir, asset_index, None)
                 .map(|dir| json_files(&dir))
@@ -81,7 +86,13 @@ impl JsonBundle {
             .map(|(_, path)| path.as_path())
             .chain(keyed.iter().map(|(_, path)| path.as_path()))
             .collect();
-        let mut contents = read_parallel(&paths).into_iter();
+        LoadProgress::begin_stage(progress, LoadStage::Files, paths.len());
+        let mut contents = crate::util::parallel_map(&paths, |path| {
+            let contents = std::fs::read_to_string(path).ok();
+            LoadProgress::step(progress);
+            contents
+        })
+        .into_iter();
 
         let blockstates = blockstate_paths
             .into_iter()
@@ -144,30 +155,6 @@ fn collect_models(dir: &Path, key_prefix: &str, out: &mut Vec<(String, PathBuf)>
     }
 }
 
-/// Each file's contents in order, `None` where it can't be read. Spread over
-/// the cores: cold opens wait on the disk and the virus scanner, not the CPU.
-fn read_parallel(paths: &[&Path]) -> Vec<Option<String>> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
-    let chunk = paths.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = paths
-            .chunks(chunk)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|path| std::fs::read_to_string(path).ok())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .flat_map(|worker| worker.join().expect("asset read thread panicked"))
-            .collect()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +174,7 @@ mod tests {
         std::fs::write(mc.join("items/stone.json"), "{\"model\":{}}").unwrap();
 
         let cache = root.join("cache");
-        let built = JsonBundle::load(&root, &None, Some(&cache));
+        let built = JsonBundle::load(&root, &None, Some(&cache), None);
         let names: Vec<_> = built
             .blockstates()
             .iter()
@@ -206,7 +193,7 @@ mod tests {
 
         // A second load reads the cached file, not the assets.
         std::fs::remove_dir_all(&mc).unwrap();
-        let cached = JsonBundle::load(&root, &None, Some(&cache));
+        let cached = JsonBundle::load(&root, &None, Some(&cache), None);
         assert_eq!(cached.blockstates().len(), 2);
         assert_eq!(
             cached.get("minecraft/models/block/stone.json"),

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::{packing, rhi, util};
 use crate::world::block::model::TextureId;
-use crate::world::block::render_assets::BlockRenderAssets;
+use crate::world::block::render_assets::{BlockRenderAssets, LoadProgress, LoadStage};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasRegion {
@@ -689,6 +689,19 @@ impl TextureAtlas {
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, String> {
+        let cpu = Self::build_cpu(
+            jar_assets_dir,
+            asset_index,
+            texture_names,
+            generated_item_textures,
+            packs,
+            None,
+        );
+        Self::upload(device, cpu)
+    }
+
+    /// The GPU half of [`Self::build`], from [`Self::build_cpu`]'s output.
+    pub fn upload(device: &rhi::backend::Device, cpu: AtlasCpu) -> Result<Self, String> {
         let AtlasCpu {
             uv_map,
             atlas_pixels,
@@ -697,13 +710,7 @@ impl TextureAtlas {
             mut sources,
             placements,
             missing,
-        } = Self::build_cpu(
-            jar_assets_dir,
-            asset_index,
-            texture_names,
-            generated_item_textures,
-            packs,
-        );
+        } = cpu;
 
         let sprite_rects = rhi::backend::Buffer::try_with_data(
             device,
@@ -899,17 +906,21 @@ impl TextureAtlas {
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
+        progress: Option<&LoadProgress>,
     ) -> AtlasCpu {
-        let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
-        for &name in texture_names {
-            sources.push(load_source(
+        let names: Vec<&str> = texture_names.iter().copied().collect();
+        LoadProgress::begin_stage(progress, LoadStage::Textures, names.len());
+        let mut sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
+            let source = load_source(
                 name,
                 jar_assets_dir,
                 asset_index,
                 packs,
                 generated_item_textures.contains(name),
-            ));
-        }
+            );
+            LoadProgress::step(progress);
+            source
+        });
 
         let mip_level = effective_mip_level(&sources);
         let mip_align = 1 << mip_level;

@@ -377,7 +377,7 @@ impl App {
                 mut pending_skin_uuid,
                 loading: Some(loading),
             } => {
-                let Loading { boot, window } = *loading;
+                let Loading { boot, window, .. } = *loading;
                 let mut renderer = match Renderer::finish(
                     boot,
                     self.core.font_sources(),
@@ -624,7 +624,11 @@ impl ApplicationHandler for App {
                 ) {
                     Ok(boot) => {
                         window.request_redraw();
-                        Some(Box::new(Loading { boot, window }))
+                        Some(Box::new(Loading {
+                            boot,
+                            window,
+                            next_frame: Instant::now(),
+                        }))
                     }
                     Err(e) => {
                         tracing::error!("Failed to create renderer: {e}");
@@ -1121,7 +1125,6 @@ impl ApplicationHandler for App {
                     let Some(loading) = loading else {
                         return;
                     };
-                    // `about_to_wait` asks for the redraw that finishes it.
                     if !loading.boot.is_ready() {
                         loading.boot.draw_splash();
                         return;
@@ -1365,18 +1368,20 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // The splash is still: it's drawn when the window asks, and the
-        // models are checked on until they're loaded.
+        // Vanilla `FramerateLimitTracker` holds its loading screen to 60 fps
+        // (`OUT_OF_LEVEL_MENU_LIMIT`).
         if let AppPhase::Setup {
             loading: Some(loading),
             ..
-        } = self.phase.get()
+        } = self.phase.get_mut()
         {
-            if loading.boot.is_ready() {
+            let now = Instant::now();
+            if now >= loading.next_frame {
+                loading.next_frame = now + std::time::Duration::from_secs(1) / 60;
                 loading.window.request_redraw();
             }
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                Instant::now() + std::time::Duration::from_millis(10),
+                loading.next_frame,
             ));
             return;
         }
