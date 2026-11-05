@@ -61,8 +61,10 @@ use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::block_registry::{BlockDefinitions, BlockRegistry};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 use crate::world::level::LevelContext;
@@ -2969,9 +2971,17 @@ fn run_ticks(
         {
             let level_random = game.level_runtime.get_random().clone();
             let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
             let mut level = LevelContext::new(
                 &game.chunk_store,
-                game.block_registry.block_state_table(),
+                &appearance,
                 gfx.renderer.camera_render_position(),
                 // The client currently advertises ParticleStatus::All; no quality setting exists.
                 ParticleStatus::All,
@@ -5407,9 +5417,17 @@ pub fn update_game(
             };
             let level_random = game.level_runtime.get_random().clone();
             let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
             let level = LevelContext::new(
                 &game.chunk_store,
-                game.block_registry.block_state_table(),
+                &appearance,
                 eye,
                 ParticleStatus::All,
                 &level_random,

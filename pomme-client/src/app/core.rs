@@ -54,7 +54,9 @@ use crate::ui::menu::{
 };
 use crate::ui::text::InlineObject;
 use crate::user::UserData;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::block_registry::BlockDefinitions;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::chunk::ChunkStore;
 use crate::world::environment::EnvironmentProbe;
 use crate::world::level::LevelContext;
@@ -3395,9 +3397,17 @@ impl AppCore {
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
+                    let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                    let colors = BlockColors::new(grass, foliage, dry);
+                    let appearance = BlockParticleAppearance::new(
+                        game.block_registry.render_view(),
+                        renderer.uv_map(),
+                        &colors,
+                        &game.biome_climate,
+                    );
                     let mut level = LevelContext::new(
                         &game.chunk_store,
-                        game.block_registry.block_state_table(),
+                        &appearance,
                         renderer.camera_render_position(),
                         ParticleStatus::All,
                         &level_random,
@@ -4021,7 +4031,16 @@ impl AppCore {
             self.tick_remote_entities(game);
         }
         game.position_remote_riders();
-        super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
+        let engine_access = self.particle_engine.engine_access();
+        let block_type = Rc::clone(&self.particle_types.block);
+        super::sniffer::tick(
+            &mut self.audio,
+            game,
+            renderer.camera_render_position(),
+            renderer.uv_map(),
+            engine_access.as_ref(),
+            &block_type,
+        );
         super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
     }

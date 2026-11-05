@@ -1,15 +1,25 @@
 //! The sniffer's client-side sounds and particles: `SnifferSoundInstance`
 //! (entity event 63) and the client half of `Sniffer.tick`.
 
+use std::rc::Rc;
+
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
 use crate::app::phases::in_game::GameState;
 use crate::audio::{AudioEngine, CATEGORY_NEUTRAL, SoundRef};
 use crate::entity::SnifferState;
+use crate::particles::block_particle_option::BlockParticleOption;
+use crate::particles::particle_engine_access::ParticleEngineAccess;
+use crate::particles::types::ParticleType;
 use crate::position::BlockPos;
+use crate::renderer::chunk::atlas::AtlasUVMap;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::model::Direction;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block::sound::block_sounds_for_id;
+use crate::world::level::LevelContext;
 
 /// `ClientLevel.playLocalSound(Entity, ..)` with the sniffer's sound source.
 fn play_bound(
@@ -45,7 +55,14 @@ pub(super) fn start_digging_sound(audio: &mut AudioEngine, game: &mut GameState,
 }
 
 /// Runs after the entity tick, so ages are the post-increment `tickCount`.
-pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DVec3) {
+pub(super) fn tick(
+    audio: &mut AudioEngine,
+    game: &mut GameState,
+    camera_pos: DVec3,
+    atlas: &AtlasUVMap,
+    engine_access: &dyn ParticleEngineAccess,
+    block_type: &Rc<ParticleType<BlockParticleOption>>,
+) {
     let sniffers: Vec<i32> = game
         .entity_store
         .living
@@ -64,7 +81,13 @@ pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DV
             }
         }
         match e.sniffer_state {
-            SnifferState::Digging => emit_digging_particles(audio, game, id, camera_pos),
+            SnifferState::Digging => {
+                if let Some(hit) =
+                    emit_digging_particles(game, id, camera_pos, atlas, engine_access, block_type)
+                {
+                    play_bound(audio, game, id, &hit, 0.5, 0.5);
+                }
+            }
             SnifferState::Searching if e.age_in_ticks.is_multiple_of(20) => {
                 play_bound(audio, game, id, "entity.sniffer.searching", 1.0, 1.0);
             }
@@ -75,18 +98,18 @@ pub(super) fn tick(audio: &mut AudioEngine, game: &mut GameState, camera_pos: DV
 
 /// `Sniffer.emitDiggingParticles`.
 fn emit_digging_particles(
-    audio: &mut AudioEngine,
-    game: &mut GameState,
+    game: &GameState,
     id: i32,
     camera_pos: DVec3,
-) {
+    atlas: &AtlasUVMap,
+    engine_access: &dyn ParticleEngineAccess,
+    block_type: &Rc<ParticleType<BlockParticleOption>>,
+) -> Option<String> {
     let e = &game.entity_store.living[&id];
-    let Some(start) = e.sniffer_anim_start else {
-        return;
-    };
+    let start = e.sniffer_anim_start?;
     let millis = (i64::from(e.age_in_ticks) - i64::from(start)) * 50;
     if millis <= 1700 || millis >= 6000 {
-        return;
+        return None;
     }
     // `getHeadBlock`.
     let forward = e.look_dir.as_vec().as_dvec3() * 2.25;
@@ -101,28 +124,39 @@ fn emit_digging_particles(
     let state = game.chunk_store.get_block_state(below.x, below.y, below.z);
     let data = game.block_registry.block_state_data(state);
     if data.is_invisible() {
-        return;
+        return None;
     }
     let center = DVec3::new(
         head.x as f64 + 0.5,
         head.y as f64 + 0.5 - f64::from(0.65f32),
         head.z as f64 + 0.5,
     );
+    let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+    let colors = BlockColors::new(grass, foliage, dry);
+    let appearance = BlockParticleAppearance::new(
+        game.block_registry.render_view(),
+        atlas,
+        &colors,
+        &game.biome_climate,
+    );
+    let mut level = LevelContext::new(
+        &game.chunk_store,
+        &appearance,
+        camera_pos,
+        ParticleStatus::All,
+        game.level_runtime.get_random(),
+        engine_access,
+    );
+    let options = BlockParticleOption::new(Rc::clone(block_type), state);
     for _ in 0..30 {
-        game.particle_store.add_block_particle(
-            center,
-            state,
-            game.block_registry.render_view(),
-            &game.chunk_store,
-            &game.biome_climate,
-            camera_pos,
-        );
+        level.add_particle(&options, center, DVec3::ZERO);
     }
     if age.is_multiple_of(10) {
         let hit =
             &block_sounds_for_id(game.block_registry.block_state_table(), data.id()).hit_event;
         if !hit.is_empty() {
-            play_bound(audio, game, id, hit, 0.5, 0.5);
+            return Some(hit.to_owned());
         }
     }
+    None
 }
