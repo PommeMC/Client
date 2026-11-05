@@ -42,23 +42,20 @@ impl BootScreen {
     /// A minimised window (0×0) keeps the old swapchain, as
     /// `Renderer::resize` does, until it's restored.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
-        let Some(parts) = &mut self.parts else {
-            return Ok(());
-        };
         if width == 0 || height == 0 {
             return Ok(());
         }
+        let vsync = self.vsync;
+        let parts = self.parts();
         parts.ctx.device.wait_idle();
         parts
             .swapchain
-            .rebuild(&parts.ctx, &mut parts.frames, width, height, self.vsync)?;
+            .rebuild(&parts.ctx, &mut parts.frames, width, height, vsync)?;
         Ok(())
     }
 
     pub fn draw(&mut self, progress: f32, status: &str) -> Result<(), RendererError> {
-        let Some(parts) = &mut self.parts else {
-            return Ok(());
-        };
+        let parts = self.parts();
         let extent = parts.swapchain.extent;
         super::Renderer::render_splash(
             &parts.ctx,
@@ -74,6 +71,12 @@ impl BootScreen {
 
     pub(super) fn vsync(&self) -> bool {
         self.vsync
+    }
+
+    fn parts(&mut self) -> &mut BootParts {
+        self.parts
+            .as_mut()
+            .expect("boot screen parts are taken once")
     }
 
     /// The GPU context and splash, for the renderer to build on.
