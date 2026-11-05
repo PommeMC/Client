@@ -95,6 +95,7 @@ pub fn tick(
 ) {
     let is_passenger = vehicle.is_some();
     let raw_jump_held = input.performing_action(input::Action::Jump);
+    movement_sound::advance_tick(&mut player.movement_sounds);
 
     // `Player.tick` snapshots `wasUnderwater` before `Entity.baseTick`
     // refreshes fluid contact (and applies its current).
@@ -183,14 +184,15 @@ pub fn tick(
     player.move_forward = forward;
     player.move_strafe = strafe;
     travel(
-        player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
-    );
-    movement_sound::tick(
         player,
+        input,
         world,
         tags,
-        input.performing_action(input::Action::Sneak),
         is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
     );
 
     player.tick_air_supply();
@@ -227,6 +229,7 @@ fn travel(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -234,11 +237,27 @@ fn travel(
 ) {
     if player.in_water && player.is_affected_by_fluids() {
         tick_water(
-            player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+            player,
+            input,
+            world,
+            tags,
+            is_passenger,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
         );
     } else {
         tick_land(
-            player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+            player,
+            input,
+            world,
+            tags,
+            is_passenger,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
         );
     }
 }
@@ -260,6 +279,7 @@ pub fn tick_dead(
     tags: &BlockTags,
     is_passenger: bool,
 ) {
+    movement_sound::advance_tick(&mut player.movement_sounds);
     player.no_jump_delay = 0;
 
     // Local players enter death through SetHealth; entity event 3 intentionally
@@ -276,7 +296,15 @@ pub fn tick_dead(
     player.move_forward = 0.0;
     player.move_strafe = 0.0;
     travel(
-        player, &neutral, world, tags, 0.0, 0.0, sin_y_rot, cos_y_rot,
+        player,
+        &neutral,
+        world,
+        tags,
+        is_passenger,
+        0.0,
+        0.0,
+        sin_y_rot,
+        cos_y_rot,
     );
 
     // Player.updatePlayerPose runs after LivingEntity.tick in vanilla. With
@@ -435,6 +463,7 @@ fn tick_land(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -465,7 +494,15 @@ fn tick_land(
     );
 
     apply_collision(
-        player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
     );
 
     // TODO: `wasInPowderSnow && canEntityWalkOnPowderSnow` also takes the impulse.
@@ -520,6 +557,7 @@ fn tick_water(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -560,7 +598,15 @@ fn tick_water(
     );
 
     apply_collision(
-        player, input, world, tags, forward, strafe, sin_y_rot, cos_y_rot,
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
     );
     // TODO: `Entity.move`'s block speed factor also applies in water.
 
@@ -635,6 +681,7 @@ fn apply_collision(
     input: &InputState,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
+    is_passenger: bool,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -663,7 +710,9 @@ fn apply_collision(
     player.minor_horizontal_collision = horizontal_collision
         && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
     let mv = settle_after_move(player, world, tags, resolved, on_ground, collided, &ctx);
-    player.movement_sounds.last_move = Some(mv);
+    if !is_passenger {
+        movement_sound::emit(player, world, tags, shift_down, mv);
+    }
 }
 
 /// Which axes `Entity.move`'s collision shortened `delta` on.
@@ -1812,6 +1861,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&chunks, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -1845,6 +1895,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&chunks, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2220,6 +2271,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&wet, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2230,6 +2282,7 @@ mod tests {
             &neutral,
             CollisionWorld::new(&dry, BlockStateTable::native()),
             &BlockTags::default(),
+            false,
             0.0,
             0.0,
             0.0,
@@ -2793,11 +2846,11 @@ mod tests {
         // The player's own next move, however short, passes the step at 1.
         player.on_ground = true;
         player.main_supporting_block_pos = Some(BlockPos::new(4, 63, 8));
-        player.movement_sounds.last_move = Some(movement_sound::Move {
+        let mv = movement_sound::Move {
             movement: dvec3(0.01, 0.0, 0.0),
             velocity: DVec3::ZERO,
-        });
-        movement_sound::tick(&mut player, world, &tags, false, false);
+        };
+        movement_sound::emit(&mut player, world, &tags, false, mv);
         assert_eq!(player.movement_sounds.pending.len(), 1);
         assert_eq!(player.movement_sounds.pending[0].event, "block.stone.step");
     }

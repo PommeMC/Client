@@ -37,7 +37,7 @@ pub struct PlayerSound {
     pub unless_silent: bool,
 }
 
-/// The movement `Entity.move` applied this tick, with the velocity left once
+/// The movement one `Entity.move` applied, with the velocity left once
 /// the collided axes stopped.
 #[derive(Clone, Copy)]
 pub(super) struct Move {
@@ -56,9 +56,6 @@ pub struct MovementSounds {
     ticks_since_chime: u32,
     /// Vanilla `Entity.firstTick`: no splash for spawning in water.
     pub(crate) first_tick: bool,
-    /// The player's own move this tick, emitted by [`tick`] once `travel`
-    /// is done.
-    pub(super) last_move: Option<Move>,
     /// This tick's sounds, for the caller to play.
     pub pending: Vec<PlayerSound>,
 }
@@ -71,33 +68,19 @@ impl Default for MovementSounds {
             crystal_sound_intensity: 0.0,
             ticks_since_chime: 0,
             first_tick: true,
-            last_move: None,
             pending: Vec::new(),
         }
     }
 }
 
-/// [`emit`]s the player's own move this tick; `Entity.move` skips a
-/// passenger's.
-pub(super) fn tick(
-    player: &mut LocalPlayer,
-    world: CollisionWorld<'_>,
-    tags: &BlockTags,
-    shift_down: bool,
-    is_passenger: bool,
-) {
-    let sounds = &mut player.movement_sounds;
+/// `Entity.commonTick`'s `tickCount` advance, which the chime counts by.
+pub(super) fn advance_tick(sounds: &mut MovementSounds) {
     sounds.ticks_since_chime = sounds.ticks_since_chime.saturating_add(1);
-    if let Some(mv) = sounds.last_move.take()
-        && !is_passenger
-    {
-        emit(player, world, tags, shift_down, mv);
-    }
 }
 
-/// `Entity.move`'s `applyMovementEmissionAndPlaySound` for one move.
-/// `Player.getMovementEmission` emits nothing while flying or sneaking on
-/// the ground.
+/// `Entity.move`'s `applyMovementEmissionAndPlaySound` for one move, not a
+/// passenger's. `Player.getMovementEmission` emits nothing while flying or
+/// sneaking on the ground.
 pub(super) fn emit(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
@@ -447,26 +430,32 @@ mod tests {
         chunks
     }
 
-    /// A player standing on (8, 63, 8) that just moved `movement`.
-    fn walker(movement: DVec3) -> LocalPlayer {
+    /// A move long enough for a step from rest.
+    const WALK: DVec3 = DVec3::new(3.0, 0.0, 0.0);
+
+    /// A player standing on (8, 63, 8).
+    fn walker() -> LocalPlayer {
         let mut player = LocalPlayer::new();
         player.position = dvec3(8.5, 64.0, 8.5).into();
         player.on_ground = true;
         player.main_supporting_block_pos = Some(BlockPos::new(8, 63, 8));
-        player.movement_sounds.last_move = Some(Move {
-            movement,
-            velocity: movement,
-        });
         player
     }
 
+    /// A tick in which the player moves `movement`.
     fn step_once(
         player: &mut LocalPlayer,
         chunks: &ChunkStore,
+        movement: DVec3,
         shift_down: bool,
     ) -> Vec<(&'static str, f32, f32)> {
         let world = CollisionWorld::new(chunks, BlockStateTable::native());
-        tick(player, world, &tags(), shift_down, false);
+        advance_tick(&mut player.movement_sounds);
+        let mv = Move {
+            movement,
+            velocity: movement,
+        };
+        emit(player, world, &tags(), shift_down, mv);
         std::mem::take(&mut player.movement_sounds.pending)
             .into_iter()
             .map(|s| (s.event, s.volume, s.pitch))
@@ -477,14 +466,10 @@ mod tests {
     fn a_step_sounds_once_the_walked_distance_passes_the_next_step() {
         let chunks = store("stone", None);
         // 1.5 blocks walk 0.9 of `moveDist`: short of the first step at 1.
-        let mut player = walker(dvec3(1.5, 0.0, 0.0));
-        assert!(step_once(&mut player, &chunks, false).is_empty());
-        player.movement_sounds.last_move = Some(Move {
-            movement: dvec3(0.5, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-        });
+        let mut player = walker();
+        assert!(step_once(&mut player, &chunks, dvec3(1.5, 0.0, 0.0), false).is_empty());
         assert_eq!(
-            step_once(&mut player, &chunks, false),
+            step_once(&mut player, &chunks, dvec3(0.5, 0.0, 0.0), false),
             vec![("block.stone.step", 0.15, 1.0)]
         );
         assert_eq!(player.movement_sounds.next_step, 2.0);
@@ -493,19 +478,18 @@ mod tests {
     #[test]
     fn sneaking_on_the_ground_or_flying_is_silent() {
         let chunks = store("stone", None);
-        let mut player = walker(dvec3(3.0, 0.0, 0.0));
-        assert!(step_once(&mut player, &chunks, true).is_empty());
-        let mut player = walker(dvec3(3.0, 0.0, 0.0));
+        let mut player = walker();
+        assert!(step_once(&mut player, &chunks, WALK, true).is_empty());
         player.flying = true;
-        assert!(step_once(&mut player, &chunks, false).is_empty());
+        assert!(step_once(&mut player, &chunks, WALK, false).is_empty());
     }
 
     #[test]
     fn a_snow_layer_plays_over_a_muffled_step_on_the_block_below() {
         let chunks = store("stone", Some(("snow", &[("layers", "1")])));
-        let mut player = walker(dvec3(3.0, 0.0, 0.0));
+        let mut player = walker();
         assert_eq!(
-            step_once(&mut player, &chunks, false),
+            step_once(&mut player, &chunks, WALK, false),
             vec![
                 ("block.snow.step", 0.15, 1.0),
                 ("block.stone.step", 0.05, 0.8)
@@ -516,9 +500,9 @@ mod tests {
     #[test]
     fn in_water_a_step_is_a_swim_stroke_and_a_muffled_step() {
         let chunks = store("stone", None);
-        let mut player = walker(dvec3(3.0, 0.0, 0.0));
+        let mut player = walker();
         player.in_water = true;
-        let sounds = step_once(&mut player, &chunks, false);
+        let sounds = step_once(&mut player, &chunks, WALK, false);
         assert_eq!(sounds.len(), 2);
         assert_eq!(sounds[0].0, "entity.player.swim");
         assert_eq!(sounds[1], ("block.stone.step", 0.05, 0.8));
@@ -527,21 +511,17 @@ mod tests {
     #[test]
     fn amethyst_chimes_at_most_once_a_second() {
         let chunks = store("amethyst_block", None);
-        let mut player = walker(dvec3(3.0, 0.0, 0.0));
+        let mut player = walker();
         player.movement_sounds.ticks_since_chime = 19;
         let events = |sounds: Vec<(&'static str, f32, f32)>| {
             sounds.into_iter().map(|s| s.0).collect::<Vec<_>>()
         };
         assert_eq!(
-            events(step_once(&mut player, &chunks, false)),
+            events(step_once(&mut player, &chunks, WALK, false)),
             ["block.amethyst_block.step", "block.amethyst_block.chime"]
         );
-        player.movement_sounds.last_move = Some(Move {
-            movement: dvec3(3.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-        });
         assert_eq!(
-            events(step_once(&mut player, &chunks, false)),
+            events(step_once(&mut player, &chunks, WALK, false)),
             ["block.amethyst_block.step"]
         );
     }
@@ -556,7 +536,7 @@ mod tests {
         let table = BlockStateTable::native();
         let chunks = ChunkStore::with_origin_chunk();
         chunks.set_block_state(8, 63, 8, table.find_state(ground, props), table);
-        let mut player = walker(DVec3::ZERO);
+        let mut player = walker();
         player.fall_distance = fall;
         player.may_fly = may_fly;
         let world = CollisionWorld::new(&chunks, table);
