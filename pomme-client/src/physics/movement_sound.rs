@@ -419,11 +419,15 @@ mod tests {
         )
     }
 
+    /// A block name and its properties.
+    type Block<'a> = (&'a str, &'a [(&'a str, &'a str)]);
+
     /// `ground` at (8, 63, 8), and `on` above it when given.
-    fn store(ground: &str, on: Option<(&str, &[(&str, &str)])>) -> ChunkStore {
+    fn store(ground: Block<'_>, on: Option<Block<'_>>) -> ChunkStore {
         let table = BlockStateTable::native();
         let chunks = ChunkStore::with_origin_chunk();
-        chunks.set_block_state(8, 63, 8, table.find_state(ground, &[]), table);
+        let (name, props) = ground;
+        chunks.set_block_state(8, 63, 8, table.find_state(name, props), table);
         if let Some((name, props)) = on {
             chunks.set_block_state(8, 64, 8, table.find_state(name, props), table);
         }
@@ -464,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_step_sounds_once_the_walked_distance_passes_the_next_step() {
-        let chunks = store("stone", None);
+        let chunks = store(("stone", &[]), None);
         // 1.5 blocks walk 0.9 of `moveDist`: short of the first step at 1.
         let mut player = walker();
         assert!(step_once(&mut player, &chunks, dvec3(1.5, 0.0, 0.0), false).is_empty());
@@ -477,7 +481,7 @@ mod tests {
 
     #[test]
     fn sneaking_on_the_ground_or_flying_is_silent() {
-        let chunks = store("stone", None);
+        let chunks = store(("stone", &[]), None);
         let mut player = walker();
         assert!(step_once(&mut player, &chunks, WALK, true).is_empty());
         player.flying = true;
@@ -486,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_snow_layer_plays_over_a_muffled_step_on_the_block_below() {
-        let chunks = store("stone", Some(("snow", &[("layers", "1")])));
+        let chunks = store(("stone", &[]), Some(("snow", &[("layers", "1")])));
         let mut player = walker();
         assert_eq!(
             step_once(&mut player, &chunks, WALK, false),
@@ -499,7 +503,7 @@ mod tests {
 
     #[test]
     fn in_water_a_step_is_a_swim_stroke_and_a_muffled_step() {
-        let chunks = store("stone", None);
+        let chunks = store(("stone", &[]), None);
         let mut player = walker();
         player.in_water = true;
         let sounds = step_once(&mut player, &chunks, WALK, false);
@@ -510,7 +514,7 @@ mod tests {
 
     #[test]
     fn amethyst_chimes_at_most_once_a_second() {
-        let chunks = store("amethyst_block", None);
+        let chunks = store(("amethyst_block", &[]), None);
         let mut player = walker();
         player.movement_sounds.ticks_since_chime = 19;
         let events = |sounds: Vec<(&'static str, f32, f32)>| {
@@ -533,13 +537,11 @@ mod tests {
         fall: f64,
         may_fly: bool,
     ) -> Vec<(&'static str, bool)> {
-        let table = BlockStateTable::native();
-        let chunks = ChunkStore::with_origin_chunk();
-        chunks.set_block_state(8, 63, 8, table.find_state(ground, props), table);
+        let chunks = store((ground, props), None);
         let mut player = walker();
         player.fall_distance = fall;
         player.may_fly = may_fly;
-        let world = CollisionWorld::new(&chunks, table);
+        let world = CollisionWorld::new(&chunks, BlockStateTable::native());
         land(
             &mut player,
             world,
