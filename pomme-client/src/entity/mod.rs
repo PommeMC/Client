@@ -871,6 +871,8 @@ pub struct LivingEntity {
     pub death_time: u32,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
+    pub custom_name_spans: Option<Vec<crate::ui::text::TextSpan>>,
+    pub custom_name_visible: bool,
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
     /// zombie/skeleton arms.
     pub aggressive: bool,
@@ -1108,6 +1110,8 @@ impl LivingEntity {
             death_time: 0,
             age_in_ticks: 0,
             custom_name: None,
+            custom_name_spans: None,
+            custom_name_visible: false,
             aggressive: false,
             no_ai: false,
             powered: false,
@@ -1242,6 +1246,36 @@ impl LivingEntity {
             self.prev_interested_angle,
             self.interested_angle,
         )
+    }
+
+    /// The height of its `NAME_TAG` attachment above its feet: the top of
+    /// its current dimensions, or the sniffer's `nameTagOffset`, scaled with
+    /// a baby and by the `scale` attribute unless the size is fixed.
+    // TODO: poses Pomme doesn't track for other entities (swimming, gliding,
+    // a goat's long jump), which change the dimensions too.
+    pub fn name_tag_height(&self) -> f32 {
+        let bounds = |baby| {
+            crate::renderer::pipelines::entity_renderer::entity_bounds(self.entity_type, baby).1
+        };
+        let is_player = self.entity_type == EntityKind::Player;
+        // `LivingEntity.SLEEPING_DIMENSIONS` and a player's `Pose.DYING`, fixed
+        // sizes the scale leaves alone.
+        if self.sleeping_pos.is_some() || is_player && self.health <= 0.0 {
+            return 0.2;
+        }
+        let height = if is_player && self.is_crouching {
+            // `Avatar.POSES`' crouching height.
+            1.5
+        } else if self.entity_type == EntityKind::Sniffer {
+            2.05 * bounds(self.is_baby) / bounds(false)
+        } else {
+            bounds(self.is_baby) * self.stand_height_scale()
+        };
+        let scale = self
+            .attributes
+            .value(crate::attribute::AttributeKind::Scale)
+            .unwrap_or(1.0);
+        height * scale as f32
     }
 
     /// `PolarBear.getDefaultDimensions`' height stretch while standing. Its
@@ -2030,6 +2064,7 @@ impl EntityStore {
                 entity.is_invisible = shared_flags_invisible(f);
                 entity.is_glowing = shared_flags_glowing(f);
             }
+            (_, 3, Bool(b)) => entity.custom_name_visible = b,
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -2234,9 +2269,15 @@ impl EntityStore {
         }
     }
 
-    pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
+    pub fn set_custom_name(
+        &mut self,
+        id: i32,
+        name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
+    ) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
+            entity.custom_name_spans = spans;
         }
     }
 
@@ -2664,6 +2705,29 @@ mod tests {
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);
         store.spawn_living(id, kind, position, LookDirection::default(), uuid);
+    }
+
+    #[test]
+    fn a_name_tag_sits_on_the_entitys_current_height() {
+        let entity = |kind| {
+            LivingEntity::new(
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            )
+        };
+        let mut player = entity(EntityKind::Player);
+        assert_eq!(player.name_tag_height(), 1.8);
+        player.is_crouching = true;
+        assert_eq!(player.name_tag_height(), 1.5);
+        player.sleeping_pos = Some(BlockPos::new(0, 0, 0));
+        assert_eq!(player.name_tag_height(), 0.2);
+
+        let mut sniffer = entity(EntityKind::Sniffer);
+        assert_eq!(sniffer.name_tag_height(), 2.05);
+        sniffer.is_baby = true;
+        assert!((sniffer.name_tag_height() - 1.025).abs() < 1e-5);
     }
 
     #[test]

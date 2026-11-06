@@ -4760,6 +4760,73 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    // `EntityRenderer.extractNameTags` with the living renderers'
+    // `shouldShowName`.
+    // TODO: an entity carrying passengers hides its name (Pomme doesn't link
+    // passengers yet), the below-name score (`belowNameDisplay`), and custom
+    // names on entities that aren't living.
+    let nameplate_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        let target = match game.interaction.target {
+            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+            _ => None,
+        };
+        let camera = gfx.renderer.camera_render_position();
+        let mut list = Vec::new();
+        for (&entity_id, entity) in &game.entity_store.living {
+            // The camera entity never shows its own name.
+            if entity.player_uuid == Some(core.user.uuid) {
+                continue;
+            }
+            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            // `getDisplayName`: a player's account name, or a mob's custom
+            // name when it shows it or is under the crosshair.
+            let spans = match entity.player_uuid {
+                Some(_) => game.scoreboard.line(&name, None),
+                None => match &entity.custom_name_spans {
+                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                        game.scoreboard.line(&name, Some(custom))
+                    }
+                    _ => continue,
+                },
+            };
+            let dist_sq = (*entity.position - camera).length_squared();
+            if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
+                continue;
+            }
+            let visible = !entity.is_invisible
+                || spectating
+                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+            let shown = game
+                .scoreboard
+                .name_tag_shown(&viewer, &name, visible)
+                .unwrap_or(!game.hide_gui && visible);
+            if !shown {
+                continue;
+            }
+            let position = entity
+                .prev_position
+                .lerp(entity.position, partial_tick as f64)
+                + entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64)
+                    .render_offset
+                // `submitNameTag` lifts the tag half a block over its anchor.
+                + glam::DVec3::Y * (f64::from(entity.name_tag_height()) + 0.5);
+            list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                position: *position,
+                spans,
+                discrete: entity.is_crouching,
+                light: entity_light(
+                    &world_light,
+                    entity.entity_type,
+                    entity.eye_position(partial_tick),
+                    entity.is_on_fire,
+                    entity.dark_ticks,
+                ),
+            });
+        }
+        list
+    };
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
     let distant_terrain = if game.light_engine.has_sky() {
@@ -4879,6 +4946,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &nameplate_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off

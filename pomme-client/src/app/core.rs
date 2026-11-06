@@ -2497,6 +2497,7 @@ impl AppCore {
                     color,
                     fill_color,
                     collision_rule,
+                    name_tag_visibility,
                     see_friendly_invisibles,
                     members,
                 } => {
@@ -2508,6 +2509,7 @@ impl AppCore {
                         color,
                         fill_color,
                         collision_rule,
+                        name_tag_visibility,
                         see_friendly_invisibles,
                         members,
                     );
@@ -3051,8 +3053,8 @@ impl AppCore {
                     game.entity_store
                         .set_villager_data(id, kind, profession, level);
                 }
-                NetworkEvent::EntityCustomName { id, name } => {
-                    game.entity_store.set_custom_name(id, name);
+                NetworkEvent::EntityCustomName { id, name, spans } => {
+                    game.entity_store.set_custom_name(id, name, spans);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
