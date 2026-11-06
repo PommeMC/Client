@@ -1107,7 +1107,7 @@ impl GameState {
                 true
             }
             _ if bindings.matches(Action::DebugDebugOptions, &input) => {
-                if menu.is_debug_options() {
+                if self.options_from_game && menu.is_debug_options() {
                     menu.close_debug_options(bindings);
                 } else if self.options_from_game || self.input_live() {
                     // TODO: vanilla also closes the pause menu, chat or a

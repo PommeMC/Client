@@ -1,6 +1,6 @@
 # F3 + F6 opens Debug Options. Setting the fps entry to Always, or picking the
 # Performance profile, shows its line with the overlay closed, and F1 hides it.
-# It ends on the Default profile, since the statuses save.
+# The statuses save, so it goes back to the Default profile before the deaths.
 
 [[step]]
 wait_ms = 2000
@@ -217,6 +217,136 @@ mouse_down = "left"
 
 [[step]]
 mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+# Dying replaces the screen: after respawning, Options from the pause menu
+# closes back to the pause menu.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0.0 } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor = [213, 142]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+cursor = [160, 150]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# Dying again with it open, F3 + F6 opens it at once after respawning, so the
+# next closes it to the game.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0.0 } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor = [213, 142]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
 
 [[step]]
 wait_ms = 300

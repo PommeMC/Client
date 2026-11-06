@@ -1398,6 +1398,7 @@ impl AppCore {
         // runs the options screen's removed() and saves.
         game.paused = false;
         game.options_from_game = false;
+        game.options_close_to_game = false;
         self.menu.flush_settings(&self.input.key_bindings);
         game.close_menu();
         game.close_creative_inventory();
