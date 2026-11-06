@@ -108,6 +108,13 @@ gilrs = "0.11.2"
 pyronyx = { workspace = true, features = ["rwh_06"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
 
+# Windows and Linux load the Vulkan loader at runtime, so a machine without
+# one gets an error instead of the exe failing to start. Apple platforms keep
+# linking the loader releases bundle; Android's is always there. build.rs
+# mirrors this target as `cfg(vulkan_loaded)`.
+[target.'cfg(not(any(target_vendor = "apple", target_os = "android")))'.dependencies]
+pyronyx = { workspace = true, features = ["loaded"] }
+
 # Android has no OS credential store for pomme-auth (see `account::store`).
 [target.'cfg(not(target_os = "android"))'.dependencies]
 pomme-auth = { path = "../pomme-auth", features = ["keyring"] }
