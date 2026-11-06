@@ -210,13 +210,7 @@ impl Translation {
     ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
-        match translate_level_particles_777(id, payload, ids.wire_registries, self.to_native) {
-            Some(out) => Some(out),
-            None => {
-                tracing::debug!("Dropping level_particles with an unsizable payload");
-                None
-            }
-        }
+        translate_level_particles_777(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the advancements 777 payload into the native layout.
@@ -514,6 +508,10 @@ impl Translation {
         let rewritten = rewrite.apply(self, id, payload, state);
         match rewritten {
             Some(out) => Some(out.into_boxed_slice()),
+            None if v777.is_some_and(|v| id == v.level_particles_id) => {
+                tracing::debug!("Dropping level_particles with an unsizable payload");
+                None
+            }
             None => {
                 tracing::warn!("Dropping unparsable game packet {id}");
                 None

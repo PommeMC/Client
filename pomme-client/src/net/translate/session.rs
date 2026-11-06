@@ -4,6 +4,10 @@ use super::*;
 #[derive(Default)]
 pub(super) struct SessionState {
     /// Legacy dimension keys in wire registry-id order.
+    ///
+    /// TODO: a reconfiguration whose registry data omits dimension_type keeps
+    /// the previous list (as `config_sequence` keeps the previous
+    /// `RegistryHolder`).
     pub(super) dimension_types: Vec<String>,
     /// A 26.3 accept held until the following position-and-rotation packet.
     pub(super) pending_accept: Option<u32>,
