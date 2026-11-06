@@ -160,10 +160,16 @@ impl GuiItemPipeline {
                     .insert(key.to_owned(), HeadSkin { texture, group });
             }
         }
-        for (_, skin) in self
+        let dropped: Vec<HeadSkin> = self
             .head_skins
             .extract_if(|key, _| !wanted.contains(key.as_str()))
-        {
+            .map(|(_, skin)| skin)
+            .collect();
+        if !dropped.is_empty() {
+            // A frame still in flight may have baked a head with one.
+            device.wait_idle();
+        }
+        for skin in dropped {
             skin.texture.destroy(device);
             skin.group.destroy(device);
         }

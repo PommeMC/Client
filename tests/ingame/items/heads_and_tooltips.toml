@@ -53,3 +53,58 @@ chat = "/setblock 70 -60 3 minecraft:air"
 
 [[step]]
 expect = { menu = "none" }
+
+# Heads in the hotbar load their skins too: Notch's own, a static profile's
+# default skin by its id, and a skin patch's texture.
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/item replace entity @s hotbar.0 with minecraft:player_head[profile={name:\"Notch\"}]"
+
+[[step]]
+chat = "/item replace entity @s hotbar.1 with minecraft:player_head[profile={id:[I;1,2,3,4],name:\"Nobody\"}]"
+
+[[step]]
+chat = "/item replace entity @s hotbar.2 with minecraft:player_head[profile={texture:\"entity/player/wide/kai\"}]"
+
+[[step]]
+expect = { slot = 38, item = "player_head" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "hotbar"
+
+# A Building Blocks catalog cell's tooltip leaves out the tab names, which a
+# hotbar slot's lists.
+[[step]]
+open_inventory = true
+
+[[step]]
+hover = { catalog = 0 }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "catalog_tooltip"
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "hotbar_tooltip"
+
+[[step]]
+press = { action = "key.inventory" }
+
+[[step]]
+chat = "/clear @s"

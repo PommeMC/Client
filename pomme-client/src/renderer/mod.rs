@@ -1937,15 +1937,15 @@ impl Renderer {
             .update_favicon_atlas(&self.ctx.device, favicons);
     }
 
-    /// Player faces reuse the string-keyed favicon atlas, which holds only
-    /// the last upload; the menu sends faces and favicons together
-    /// (`MainMenu::menu_atlas_images`).
     /// Holds the skins player head items are drawn with, by head key.
     pub fn sync_head_skins<'a>(&mut self, heads: impl IntoIterator<Item = (&'a str, &'a [u8])>) {
         self.gui_item_pipeline
             .sync_head_skins(&self.ctx.device, heads);
     }
 
+    /// Player faces reuse the string-keyed favicon atlas, which holds only
+    /// the last upload; the menu sends faces and favicons together
+    /// (`MainMenu::menu_atlas_images`).
     pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
         self.update_favicon_atlas(faces);
     }
@@ -2161,12 +2161,14 @@ impl Renderer {
                         item_stack.as_ref(),
                         owner_team_color,
                     );
-                    // A player head whose skin has arrived bakes with it.
-                    if let Some(key) = item_stack
+                    // A profiled player head bakes with the first of its skins
+                    // that has arrived.
+                    if let Some(profile) = item_stack
                         .as_ref()
                         .and_then(crate::ui::common::HeadProfile::of_stack)
-                        .map(|profile| profile.skin_key())
-                        && self.gui_item_pipeline.has_head_skin(&key)
+                        && let Some(key) = profile
+                            .skin_keys()
+                            .find(|key| self.gui_item_pipeline.has_head_skin(key))
                     {
                         *item_name = format!("{HEAD_SKIN_ITEM_PREFIX}{key}");
                     }

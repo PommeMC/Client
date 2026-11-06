@@ -592,7 +592,8 @@ pub fn build_creative_inventory(
                 );
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
-                    push_item_tooltip(elements, &item, &tt);
+                    let tab_names = matches!(state.tab, CreativeTab::Search);
+                    push_item_tooltip(elements, &item, &tt, tab_names);
                     if let Some(target) = swap_target
                         && matches!(action, CreativeAction::None)
                         && let ItemStack::Present(data) = &item
@@ -1132,14 +1133,18 @@ fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
 }
 
 /// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the stack's
-/// tooltip with the tabs holding it after its name.
+/// tooltip, with the tabs holding it after its name unless `tab_names` is
+/// off (a catalog slot in a category tab). The tabs hold default stacks, so
+/// one with components set is in none of them.
+// TODO: the search tab's matching item tags, which follow the name there.
 fn build_item_tooltip_lines(
     data: &ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
     advanced: bool,
+    tab_names: bool,
 ) -> Vec<TooltipLine> {
     let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
-    if !lines.is_empty() {
+    if tab_names && data.component_patch.iter().next().is_none() && !lines.is_empty() {
         let tabs = tabs_containing(data.kind)
             .iter()
             .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
@@ -1148,7 +1153,12 @@ fn build_item_tooltip_lines(
     lines
 }
 
-fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &TooltipCtx) {
+fn push_item_tooltip(
+    elements: &mut Vec<MenuElement>,
+    item: &ItemStack,
+    tt: &TooltipCtx,
+    tab_names: bool,
+) {
     if tt.carrying {
         return;
     }
@@ -1156,7 +1166,7 @@ fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &Too
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
             y: tt.cursor.1,
-            lines: build_item_tooltip_lines(data, tt.registries, tt.advanced),
+            lines: build_item_tooltip_lines(data, tt.registries, tt.advanced, tab_names),
             scale: FONT_SIZE * tt.gs,
             screen_w: tt.screen_w,
             screen_h: tt.screen_h,
@@ -1215,7 +1225,7 @@ fn slot_with_tooltip(
 ) -> Option<SlotHit> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
-        push_item_tooltip(elements, item, tt);
+        push_item_tooltip(elements, item, tt, true);
         if let Some(slot) = slot_num {
             let click = if tt.clicked {
                 Some(ClickKind::Left)

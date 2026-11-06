@@ -588,6 +588,9 @@ pub(crate) struct HeadProfile {
     pub(crate) id: Option<uuid::Uuid>,
     pub(crate) name: Option<String>,
     pub(crate) textures: Option<String>,
+    /// The `skinPatch`'s body texture, `namespace/path` under `textures/`,
+    /// which replaces whatever skin the profile has.
+    pub(crate) patch_texture: Option<String>,
 }
 
 impl HeadProfile {
@@ -600,16 +603,23 @@ impl HeadProfile {
         let textures = |properties: &azalea_auth::game_profile::GameProfileProperties| {
             properties.map.get("textures").map(|p| p.value.clone())
         };
+        let patch_texture = profile
+            .skin_patch
+            .body
+            .as_ref()
+            .map(|texture| format!("{}/{}", texture.id.namespace(), texture.id.path()));
         Some(match &*profile.unpack {
             PartialOrFullProfile::Partial(partial) => Self {
                 id: partial.id,
                 name: partial.name.clone(),
                 textures: textures(&partial.properties),
+                patch_texture,
             },
             PartialOrFullProfile::Full(full) => Self {
                 id: Some(full.uuid),
                 name: Some(full.name.clone()),
                 textures: textures(&full.properties),
+                patch_texture,
             },
         })
     }
@@ -619,6 +629,59 @@ impl HeadProfile {
     /// with exactly one of them is `Dynamic` and resolves first.
     pub(crate) fn is_static(&self) -> bool {
         self.textures.is_some() || self.id.is_some() == self.name.is_some()
+    }
+
+    /// The skin from the game's assets it draws while its own loads, or
+    /// when it has none: the `skinPatch` texture, which it always draws, else
+    /// `DefaultPlayerSkin.get(partialProfile())`, picked by the partial
+    /// profile's id (an offline id from the name when it has no id, else
+    /// nil). A `namespace/path` under `textures/`.
+    pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
+        const DEFAULT_SKINS: [&str; 18] = [
+            "minecraft/entity/player/slim/alex",
+            "minecraft/entity/player/slim/ari",
+            "minecraft/entity/player/slim/efe",
+            "minecraft/entity/player/slim/kai",
+            "minecraft/entity/player/slim/makena",
+            "minecraft/entity/player/slim/noor",
+            "minecraft/entity/player/slim/steve",
+            "minecraft/entity/player/slim/sunny",
+            "minecraft/entity/player/slim/zuri",
+            "minecraft/entity/player/wide/alex",
+            "minecraft/entity/player/wide/ari",
+            "minecraft/entity/player/wide/efe",
+            "minecraft/entity/player/wide/kai",
+            "minecraft/entity/player/wide/makena",
+            "minecraft/entity/player/wide/noor",
+            "minecraft/entity/player/wide/steve",
+            "minecraft/entity/player/wide/sunny",
+            "minecraft/entity/player/wide/zuri",
+        ];
+        if let Some(texture) = &self.patch_texture {
+            return texture.into();
+        }
+        let id = self
+            .id
+            .or_else(|| {
+                self.name
+                    .as_deref()
+                    .map(crate::user::UserData::offline_uuid)
+            })
+            .unwrap_or_default();
+        let hash = crate::world::waypoints::java_uuid_hash(&id);
+        DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
+    }
+
+    /// The key [`Self::asset_skin`] is held under.
+    pub(crate) fn asset_skin_key(&self) -> String {
+        format!("asset:{}", self.asset_skin())
+    }
+
+    /// The keys of the skins it can draw, in preference order: its own,
+    /// unless a `skinPatch` replaces it, then [`Self::asset_skin`].
+    pub(crate) fn skin_keys(&self) -> impl Iterator<Item = String> {
+        let own = self.patch_texture.is_none().then(|| self.skin_key());
+        own.into_iter().chain([self.asset_skin_key()])
     }
 
     /// The key its skin is held under: its id, else its skin textures, else
@@ -1098,9 +1161,41 @@ mod tests {
     use azalea_registry::builtin::ItemKind;
 
     use super::{
-        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
-        push_item_icon, push_slot_with_owner,
+        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
+        push_item_count, push_item_icon, push_slot_with_owner,
     };
+
+    #[test]
+    fn a_head_draws_its_patch_or_its_ids_default_skin() {
+        let head = |id, name: Option<&str>, patch: Option<&str>| HeadProfile {
+            id,
+            name: name.map(str::to_owned),
+            textures: None,
+            patch_texture: patch.map(str::to_owned),
+        };
+        // `UUID.hashCode` of the nil id is 0: the first default skin.
+        assert_eq!(
+            head(None, None, None).asset_skin(),
+            "minecraft/entity/player/slim/alex"
+        );
+        // A name alone picks by its offline id.
+        assert_eq!(
+            head(None, Some("Steve"), None).asset_skin(),
+            head(
+                Some(crate::user::UserData::offline_uuid("Steve")),
+                None,
+                None
+            )
+            .asset_skin()
+        );
+        let patched = head(None, Some("Steve"), Some("pack/skins/knight"));
+        assert_eq!(patched.asset_skin(), "pack/skins/knight");
+        assert_eq!(
+            patched.skin_keys().collect::<Vec<_>>(),
+            ["asset:pack/skins/knight"]
+        );
+        assert_eq!(head(None, Some("Steve"), None).skin_keys().count(), 2);
+    }
 
     fn present(stack: ItemStack) -> ItemStackData {
         stack.as_present().expect("stack should be present").clone()

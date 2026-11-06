@@ -2939,6 +2939,25 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
+    // A player head resolves its profile when its item draws: on the HUD's
+    // hotbar and offhand, and in the open screen's slots and cursor.
+    let inventory = &game.player.inventory;
+    let screen_slots =
+        game.inventory_open || game.open_container.is_some() || game.creative_inventory_open;
+    let shown = if screen_slots {
+        game.menu_slots()
+    } else {
+        inventory.hotbar_slots()
+    };
+    for profile in shown
+        .iter()
+        .chain([inventory.offhand(), &game.cursor_item])
+        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(crate::ui::common::HeadProfile::of_stack)
+    {
+        core.request_head(profile);
+    }
+
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
             fps: gfx.fps_counter.display_fps(),
@@ -3664,14 +3683,6 @@ pub fn update_game(
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
-        for profile in game
-            .menu_slots()
-            .iter()
-            .filter_map(azalea_inventory::ItemStack::as_present)
-            .filter_map(crate::ui::common::HeadProfile::of_stack)
-        {
-            core.request_head(profile);
-        }
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
         let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
