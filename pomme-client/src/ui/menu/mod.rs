@@ -1015,12 +1015,7 @@ impl MainMenu {
     }
 
     fn set_screen(&mut self, screen: Screen, key_bindings: &KeyBindings) {
-        // Vanilla's options screens save as they're removed.
-        if self.is_options_screen() {
-            self.save_options(key_bindings);
-        } else {
-            self.flush_settings(key_bindings);
-        }
+        self.screen_removed(self.is_options_screen(), key_bindings);
         // Vanilla opens Key Binds with a fresh list and returns to Controls's
         // own; neither should inherit the other's offset.
         if matches!(screen, Screen::OptionsKeybinds)
@@ -1147,6 +1142,16 @@ impl MainMenu {
     pub(crate) fn save_options(&mut self, key_bindings: &KeyBindings) {
         self.flush_settings(key_bindings);
         self.options_saved = true;
+    }
+
+    /// The closing screen's `removed()`: an options screen saves
+    /// ([`Self::save_options`]), any other writes what's pending.
+    pub fn screen_removed(&mut self, options_screen: bool, key_bindings: &KeyBindings) {
+        if options_screen {
+            self.save_options(key_bindings);
+        } else {
+            self.flush_settings(key_bindings);
+        }
     }
 
     pub fn take_options_saved(&mut self) -> bool {
@@ -1673,6 +1678,10 @@ mod tests {
         assert!(!menu.take_options_saved(), "a change alone doesn't");
         menu.set_screen(Screen::Options, &key_bindings);
         assert!(menu.take_options_saved());
+        assert!(!menu.take_options_saved());
+        menu.screen_removed(true, &key_bindings);
+        assert!(menu.take_options_saved(), "a replaced options screen saves");
+        menu.screen_removed(false, &key_bindings);
         assert!(!menu.take_options_saved());
         std::fs::remove_dir_all(&dir).ok();
     }

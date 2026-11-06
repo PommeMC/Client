@@ -138,11 +138,12 @@ impl CollisionWorld<'_> {
         ctx: &CollisionContext,
         visit: impl FnMut(BlockPos, &[Aabb]),
     ) {
+        let reader = crate::world::chunk_reader::BlockReader::new(self.chunks);
         for_each_block_collision(
             self.block_state_table,
             region,
             ctx,
-            |x, y, z| self.chunks.get_block_state(x, y, z),
+            |x, y, z| reader.get_block_state(x, y, z),
             |state, pos, boxes| self.special_boxes(state, pos, boxes),
             visit,
         );

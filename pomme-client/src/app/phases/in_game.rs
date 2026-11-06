@@ -351,6 +351,9 @@ pub struct GameState {
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
     pub deterministic: bool,
+    /// Set by the test harness's `hold_packets` step: incoming packets wait,
+    /// as behind a slow connection.
+    pub hold_packets: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -660,6 +663,7 @@ impl GameState {
             biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
+            hold_packets: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -4479,6 +4483,11 @@ pub fn update_game(
             game.player.look_dir.y_rot_deg(),
             partial_tick,
         );
+        let interp_body_y_rot_deg = lerp_angle(
+            game.player.prev_body_y_rot,
+            game.player.body_y_rot,
+            partial_tick,
+        );
 
         let (radius, strength) =
             crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
@@ -4489,7 +4498,7 @@ pub fn update_game(
                 game.player.is_sleeping(),
                 gfx.renderer.camera_look_dir().x_rot_deg(),
             ),
-            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            body_y_rot_deg: interp_body_y_rot_deg,
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,

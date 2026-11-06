@@ -1385,6 +1385,21 @@ impl AppCore {
         self.input.on_cursor_moved(x, y);
     }
 
+    /// `Gui.setScreen` with a new screen: whatever is up goes, running its
+    /// `removed()`, so an options screen saves and chat keeps its draft.
+    fn replace_screen(&mut self, game: &mut GameState) {
+        game.paused = false;
+        self.menu
+            .screen_removed(game.options_from_game, &self.input.key_bindings);
+        game.options_from_game = false;
+        game.options_close_to_game = false;
+        game.close_creative_inventory();
+        game.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
+        game.game_mode_switcher = None;
+        game.server_dialog = None;
+    }
+
     pub(crate) fn open_death_screen(
         &mut self,
         connection: &ConnectionHandle,
@@ -1394,18 +1409,8 @@ impl AppCore {
     ) {
         game.interaction
             .stop_destroying_for_screen(&connection.packet_tx);
-        // Minecraft.setScreen(DeathScreen) replaces the current screen, which
-        // runs the options screen's removed() and saves.
-        game.paused = false;
-        game.options_from_game = false;
-        game.options_close_to_game = false;
-        self.menu.flush_settings(&self.input.key_bindings);
+        self.replace_screen(game);
         game.close_menu();
-        game.close_creative_inventory();
-        game.chat
-            .close(crate::ui::chat::ChatExitReason::Interrupted);
-        game.game_mode_switcher = None;
-        game.server_dialog = None;
 
         if let Some(message) = message {
             game.death_message = message;
@@ -1878,7 +1883,8 @@ impl AppCore {
         // `ChunkBatchReceived` is answered on the network thread as vanilla
         // does, so this doesn't pace the server.
         let mut chunk_work = std::time::Duration::ZERO;
-        while !defer_packets(chunk_work, self.tick_accumulator)
+        while !game.hold_packets
+            && !defer_packets(chunk_work, self.tick_accumulator)
             && let Ok(event) = rx.try_recv()
         {
             let chunk_packet = matches!(
@@ -2209,15 +2215,12 @@ impl AppCore {
                         _ => None,
                     };
                     if let Some(screen) = screen {
-                        // Vanilla setScreen replaces whatever screen is up,
-                        // including the pause menu.
-                        game.paused = false;
                         if game.inventory_open || game.recipe_book_ui.captures_typing() {
                             game.recipe_book_ui
                                 .reset_for_closed_screen(&mut game.recipe_book);
                         }
+                        self.replace_screen(game);
                         game.inventory_open = false;
-                        game.close_creative_inventory();
                         game.inv_drag = None;
                         game.inv_last_click = None;
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
@@ -3523,6 +3526,8 @@ impl AppCore {
                 let dx = game.player.position.x - game.player.prev_position.x;
                 let dz = game.player.position.z - game.player.prev_position.z;
                 game.player.tick_bob(dx, dz, true);
+                game.player
+                    .tick_body_rotation(dx, dz, game.interaction.arm_swinging());
             }
             game.interaction
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
@@ -3768,6 +3773,8 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz, false);
+        game.player
+            .tick_body_rotation(dx, dz, game.interaction.arm_swinging());
         game.player.drop_spam.tick();
 
         game.interaction
