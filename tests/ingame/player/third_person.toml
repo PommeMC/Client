@@ -31,6 +31,32 @@ wait_ms = 1000
 [[step]]
 screenshot = "front"
 
+# Strafing turns the body toward the walk; walking backwards keeps it facing
+# forwards. Each shot is taken mid-walk, once the turn has settled.
+[[step]]
+key_down = { action = "key.right" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "strafe"
+
+[[step]]
+key_up = { action = "key.right" }
+
+[[step]]
+key_down = { action = "key.back" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "backwards"
+
+[[step]]
+key_up = { action = "key.back" }
+
 [[step]]
 press = { action = "key.togglePerspective" }
 
