@@ -115,6 +115,29 @@ pub fn encode_set_creative_mode_slot(slot: i16, stack: Option<&crate::item::Item
     buf
 }
 
+/// `ServerboundMoveVehiclePacket`: the vehicle's position and rotation
+/// (`PositionAndRotation`), then whether it's on the ground.
+pub fn encode_move_vehicle(pos: DVec3, y_rot: f32, x_rot: f32, on_ground: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(34);
+    write_varint(&mut buf, game_serverbound_id("move_vehicle"));
+    buf.extend_from_slice(&pos.x.to_be_bytes());
+    buf.extend_from_slice(&pos.y.to_be_bytes());
+    buf.extend_from_slice(&pos.z.to_be_bytes());
+    buf.extend_from_slice(&y_rot.to_be_bytes());
+    buf.extend_from_slice(&x_rot.to_be_bytes());
+    buf.push(on_ground as u8);
+    buf
+}
+
+/// `ServerboundPaddleBoatPacket`: which paddles are stroking.
+pub fn encode_paddle_boat(left: bool, right: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3);
+    write_varint(&mut buf, game_serverbound_id("paddle_boat"));
+    buf.push(left as u8);
+    buf.push(right as u8);
+    buf
+}
+
 /// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;
@@ -247,6 +270,44 @@ mod tests {
         assert_eq!(
             encode_interact(42, 1, DVec3::ZERO, false),
             [0x1A, 42, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn move_vehicle_packet_layout() {
+        // `PositionAndRotation`: three big-endian doubles and two floats,
+        // then the on-ground byte.
+        let mut expected = vec![game_serverbound_id("move_vehicle") as u8];
+        for v in [1.5f64, 64.0, -2.25] {
+            expected.extend_from_slice(&v.to_be_bytes());
+        }
+        expected.extend_from_slice(&90.0f32.to_be_bytes());
+        expected.extend_from_slice(&10.0f32.to_be_bytes());
+        expected.push(1);
+        assert_eq!(
+            encode_move_vehicle(DVec3::new(1.5, 64.0, -2.25), 90.0, 10.0, true),
+            expected
+        );
+        assert_eq!(expected[0], 34);
+    }
+
+    #[test]
+    fn vehicle_packets_match_vanilla_encoder() {
+        use crate::vanilla_fixtures::case;
+        let move_vehicle = encode_move_vehicle(DVec3::new(1.5, 64.0, -2.25), 90.0, 10.0, true);
+        assert_eq!(move_vehicle[1..], case("move_vehicle"));
+        assert_eq!(encode_paddle_boat(true, false)[1..], case("paddle_boat"));
+    }
+
+    #[test]
+    fn paddle_boat_packet_layout() {
+        assert_eq!(
+            encode_paddle_boat(true, false),
+            [game_serverbound_id("paddle_boat") as u8, 1, 0]
+        );
+        assert_eq!(
+            encode_paddle_boat(false, true),
+            [game_serverbound_id("paddle_boat") as u8, 0, 1]
         );
     }
 

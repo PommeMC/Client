@@ -871,6 +871,16 @@ struct ResolvedPlayerCorrection {
     prev_look_dir: LookDirection,
 }
 
+/// `ServerboundMoveVehiclePacket.fromEntity`.
+fn move_vehicle_packet(vehicle: &crate::entity::LivingEntity) -> Vec<u8> {
+    pomme_protocol::wire::encode_move_vehicle(
+        *vehicle.position,
+        vehicle.body_y_rot_deg,
+        vehicle.look_dir.x_rot_deg(),
+        vehicle.on_ground,
+    )
+}
+
 fn resolve_player_position_correction(
     player: &LocalPlayer,
     change: &pomme_protocol::entity::PositionMoveRotation,
@@ -2052,6 +2062,33 @@ impl AppCore {
                 } => {
                     let me = game.player.entity_id;
                     if passengers.contains(&me) {
+                        // Vanilla `handleSetEntityPassengersPacket` on boarding:
+                        // a boat turns the player its way, and the dismount
+                        // hint shows.
+                        if game.riding_vehicle_id != Some(vehicle) {
+                            if let Some(boat) = game
+                                .entity_store
+                                .living
+                                .get(&vehicle)
+                                .filter(|v| crate::entity::is_boat(v.entity_type))
+                            {
+                                let look = LookDirection::new(
+                                    boat.body_y_rot_deg,
+                                    game.player.look_dir.x_rot_deg(),
+                                );
+                                game.player.look_dir = look;
+                                game.player.prev_look_dir = look;
+                                renderer.set_camera_look_dir(look);
+                            }
+                            let key = self.input.key_bindings.key_name(Action::Sneak);
+                            let hint = crate::lang::translate("mount.onboard")
+                                .unwrap_or("Press %s to Dismount")
+                                .replace("%s", &key);
+                            game.action_bar = Some((
+                                vec![crate::ui::text::TextSpan::new(hint, [1.0; 4])],
+                                game.tick_count,
+                            ));
+                        }
                         game.riding_vehicle_id = Some(vehicle);
                         // Only the first passenger controls (vanilla
                         // getControlledVehicle -> null otherwise).
@@ -2066,6 +2103,7 @@ impl AppCore {
                             game.controlled_vehicle_id = None;
                         }
                     }
+                    game.vehicle_passengers.insert(vehicle, passengers);
                 }
                 NetworkEvent::EntityEquipment { entity_id, slots } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
@@ -2295,6 +2333,30 @@ impl AppCore {
                             .send(ServerboundGamePacket::ContainerClose(
                                 ServerboundContainerClose { container_id },
                             ));
+                    }
+                }
+                // Vanilla `handleMoveVehicle`: the vehicle this client moves
+                // snaps to the server's correction, which it confirms.
+                NetworkEvent::MoveVehicle {
+                    position,
+                    y_rot_deg,
+                    x_rot_deg,
+                } => {
+                    if let Some(id) = game.steered_boat()
+                        && let Some(boat) = game.entity_store.living.get(&id)
+                    {
+                        let moved =
+                            boat.client_position().distance(position) > f64::from(1.0e-5_f32);
+                        if moved {
+                            game.entity_store.snap_living(
+                                id,
+                                position.into(),
+                                LookDirection::new(y_rot_deg, x_rot_deg),
+                                game.entity_store.living[&id].velocity,
+                            );
+                        }
+                        let boat = &game.entity_store.living[&id];
+                        connection.packet_tx.send_raw(move_vehicle_packet(boat));
                     }
                 }
                 NetworkEvent::ContainerClosed => {
@@ -2759,16 +2821,24 @@ impl AppCore {
                     position,
                     velocity,
                     x_rot_deg,
+                    y_rot_deg,
                     head_y_rot_deg,
                 } => {
                     game.entity_positions.insert(id, position);
+                    game.entity_kinds.insert(id, entity_type);
                     game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
+                        // A boat isn't living: it has no head yaw, only its own.
+                        let y_rot = if crate::entity::is_boat(entity_type) {
+                            y_rot_deg
+                        } else {
+                            head_y_rot_deg
+                        };
                         game.entity_store.spawn_living(
                             id,
                             entity_type,
                             position,
-                            LookDirection::new(head_y_rot_deg, x_rot_deg),
+                            LookDirection::new(y_rot, x_rot_deg),
                             uuid,
                         );
                         if entity_type == azalea_registry::builtin::EntityKind::Player {
@@ -2792,12 +2862,19 @@ impl AppCore {
                     dz,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .move_living_delta(id, dx, dy, dz, on_ground);
-                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                    if let Some(pos) = game.entity_positions.get_mut(&id) {
-                        *pos += dvec3(dx, dy, dz);
-                        self.audio.update_entity_sound_position(id, *pos);
+                    // Vanilla `handleMoveEntity`: an entity this client moves
+                    // only takes the position as the base later moves decode
+                    // against.
+                    if game.steered_boat() == Some(id) {
+                        game.entity_store.shift_living_base(id, dvec3(dx, dy, dz));
+                    } else {
+                        game.entity_store
+                            .move_living_delta(id, dx, dy, dz, on_ground);
+                        game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        if let Some(pos) = game.entity_positions.get_mut(&id) {
+                            *pos += dvec3(dx, dy, dz);
+                            self.audio.update_entity_sound_position(id, *pos);
+                        }
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -2809,14 +2886,18 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .move_living_delta(id, dx, dy, dz, on_ground);
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
-                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                    if let Some(pos) = game.entity_positions.get_mut(&id) {
-                        *pos += dvec3(dx, dy, dz);
-                        self.audio.update_entity_sound_position(id, *pos);
+                    if game.steered_boat() == Some(id) {
+                        game.entity_store.shift_living_base(id, dvec3(dx, dy, dz));
+                    } else {
+                        game.entity_store
+                            .move_living_delta(id, dx, dy, dz, on_ground);
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        if let Some(pos) = game.entity_positions.get_mut(&id) {
+                            *pos += dvec3(dx, dy, dz);
+                            self.audio.update_entity_sound_position(id, *pos);
+                        }
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -2825,8 +2906,10 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    if game.steered_boat() != Some(id) {
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    }
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
                     // Vanilla `Entity.lerpMotion` sets velocity; the local
@@ -2850,16 +2933,23 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store.teleport_living(id, position, on_ground);
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
-                    if let Some(velocity) = velocity {
-                        game.entity_store.set_living_motion(id, velocity);
+                    // `handleEntityPositionSync` (no velocity) only moves the
+                    // base of an entity this client moves; a teleport still
+                    // moves it.
+                    if velocity.is_none() && game.steered_boat() == Some(id) {
+                        game.entity_store.set_living_base(id, position);
+                    } else {
+                        game.entity_store.teleport_living(id, position, on_ground);
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        if let Some(velocity) = velocity {
+                            game.entity_store.set_living_motion(id, velocity);
+                        }
+                        game.item_entity_store
+                            .teleport(id, position, velocity, on_ground);
+                        game.entity_positions.insert(id, position);
+                        self.audio.update_entity_sound_position(id, position);
                     }
-                    game.item_entity_store
-                        .teleport(id, position, velocity, on_ground);
-                    game.entity_positions.insert(id, position);
-                    self.audio.update_entity_sound_position(id, position);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,
@@ -2912,6 +3002,7 @@ impl AppCore {
                             self.remove_player_skin(renderer, &uuid);
                         }
                         game.entity_positions.remove(id);
+                        game.entity_kinds.remove(id);
                         game.silent_entities.remove(id);
                         self.audio.stop_entity_sounds(*id);
                     }
@@ -2921,6 +3012,12 @@ impl AppCore {
                     }
                     if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.riding_vehicle_id = None;
+                    }
+                    for id in &ids {
+                        game.vehicle_passengers.remove(id);
+                    }
+                    for passengers in game.vehicle_passengers.values_mut() {
+                        passengers.retain(|p| !ids.contains(p));
                     }
                 }
                 NetworkEvent::EntityHeadRotation {
@@ -3248,6 +3345,8 @@ impl AppCore {
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
                     game.entity_positions.clear();
+                    game.entity_kinds.clear();
+                    game.vehicle_passengers.clear();
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
@@ -3445,8 +3544,17 @@ impl AppCore {
         // `ClientLevel.tickEntities` ticks it first and pushes land in next
         // tick's travel.
         // TODO: a same-dimension `handleRespawn` re-adds it after them.
-        self.tick_local_player(renderer, connection, game);
-        self.tick_remote_entities(game);
+        // A passenger ticks after its vehicle, so the player waits for the
+        // remote entities when riding one it doesn't move itself.
+        game.rider_yaw_turn = 0.0;
+        if game.riding_vehicle_id.is_some() && game.steered_boat().is_none() {
+            self.tick_remote_entities(game);
+            self.tick_local_player(renderer, connection, game);
+        } else {
+            self.tick_local_player(renderer, connection, game);
+            self.tick_remote_entities(game);
+        }
+        game.position_remote_riders();
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
         super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
@@ -3488,6 +3596,7 @@ impl AppCore {
             push_box,
             pusher_allowed,
             game.server_simulation_distance,
+            game.controlled_vehicle_id,
         );
     }
 
@@ -3562,13 +3671,15 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
+                let extra_boxes = game.collidable_entity_boxes();
                 movement::tick_dead(
                     &mut game.player,
                     crate::physics::collision::CollisionWorld::with_block_entities(
                         &game.chunk_store,
                         game.block_registry.block_state_table(),
                         &game.block_entity_anim,
-                    ),
+                    )
+                    .with_extra_boxes(&extra_boxes),
                     game.block_registry.tags(),
                     game.riding_vehicle_id.is_some(),
                 );
@@ -3800,9 +3911,12 @@ impl AppCore {
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
+        // The vehicle ticks before its passenger.
+        Self::tick_steered_boat(game, connection);
         let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
             jumpable: game.riding_jumpable_vehicle(),
         });
+        let extra_boxes = game.collidable_entity_boxes();
         movement::tick(
             &mut game.player,
             input,
@@ -3810,7 +3924,8 @@ impl AppCore {
                 &game.chunk_store,
                 game.block_registry.block_state_table(),
                 &game.block_entity_anim,
-            ),
+            )
+            .with_extra_boxes(&extra_boxes),
             game.block_registry.tags(),
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
@@ -3831,13 +3946,36 @@ impl AppCore {
             .tick_body_rotation(dx, dz, game.interaction.arm_swinging());
         game.player.drop_spam.tick();
 
+        // The rest of `LocalPlayer.rideTick`: seated, turned with a boat, and
+        // its keys left for the boat's next tick (`AbstractBoat.setInput`).
+        // TODO: `handsBusy`, which the steering keys set.
+        game.position_local_rider();
+        if game.rider_yaw_turn != 0.0 {
+            renderer.set_camera_look_dir(game.player.look_dir);
+        }
+        if let Some(boat) = game
+            .steered_boat()
+            .and_then(|id| game.entity_store.living.get_mut(&id))
+        {
+            boat.boat_sim.input = crate::entity::boat::BoatInput {
+                left: input.action_held(Action::StrafeLeft),
+                right: input.action_held(Action::StrafeRight),
+                up: input.action_held(Action::Forward),
+                down: input.action_held(Action::Backward),
+            };
+        }
+
         game.interaction
             .tick_player_state(input.is_cursor_captured(), held_stack);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
-        self.send_sprint_command(connection, game);
-        self.send_position_packet(connection, game);
+        if game.riding_vehicle_id.is_some() {
+            self.send_passenger_packets(connection, game);
+        } else {
+            self.send_sprint_command(connection, game);
+            self.send_position_packet(connection, game);
+        }
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
@@ -3943,6 +4081,53 @@ impl AppCore {
             game,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
+    }
+
+    /// Vanilla `AbstractBoat.tick` for the boat the player steers, which
+    /// sends `PaddleBoat` from its tick.
+    fn tick_steered_boat(game: &mut GameState, connection: &ConnectionHandle) {
+        let Some(id) = game.steered_boat() else {
+            return;
+        };
+        let colliders = game.boat_colliders(id);
+        let Some(boat) = game.entity_store.living.get_mut(&id) else {
+            return;
+        };
+        let [left, right] = crate::entity::boat::tick_controlled(
+            boat,
+            &colliders,
+            &game.chunk_store,
+            game.block_registry.block_state_table(),
+            game.block_registry.tags(),
+        );
+        connection
+            .packet_tx
+            .send_raw(pomme_protocol::wire::encode_paddle_boat(left, right));
+    }
+
+    /// `LocalPlayer.sendChanges` for a passenger: its look, then the vehicle
+    /// it moves and its sprint.
+    fn send_passenger_packets(&self, connection: &ConnectionHandle, game: &mut GameState) {
+        use azalea_protocol::common::movements::MoveFlags;
+        use azalea_protocol::packets::game::*;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::MovePlayerRot(
+                ServerboundMovePlayerRot {
+                    look_direction: game.player.look_dir.into(),
+                    flags: MoveFlags {
+                        on_ground: game.player.on_ground,
+                        horizontal_collision: game.player.horizontal_collision,
+                    },
+                },
+            ));
+        if let Some(boat) = game
+            .steered_boat()
+            .and_then(|id| game.entity_store.living.get(&id))
+        {
+            connection.packet_tx.send_raw(move_vehicle_packet(boat));
+            self.send_sprint_command(connection, game);
+        }
     }
 
     pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {

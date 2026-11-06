@@ -441,6 +441,15 @@ impl BlockStateData {
         }
     }
 
+    /// `Block.getBounceRestitution`.
+    pub(crate) fn movement_bounce_restitution(&self) -> f32 {
+        match self.id() {
+            "slime_block" => 1.0,
+            id if id.ends_with("_bed") || id == "shelf_mushroom" => 0.75,
+            _ => 0.0,
+        }
+    }
+
     pub(crate) fn movement_jump_factor(&self) -> f32 {
         if self.id() == "honey_block" { 0.5 } else { 1.0 }
     }

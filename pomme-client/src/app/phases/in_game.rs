@@ -21,6 +21,7 @@ use crate::benchmark::{
     UploadHandle, UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
@@ -189,6 +190,9 @@ pub struct GameState {
     /// Pomme does not otherwise render. Used by packet-driven entity-bound
     /// sounds.
     pub entity_positions: HashMap<i32, Position>,
+    /// The kind of every spawned entity, for vehicles outside the living
+    /// store.
+    pub entity_kinds: HashMap<i32, EntityKind>,
     /// Entity ids whose shared `DATA_SILENT` flag is currently true.
     pub silent_entities: HashSet<i32>,
     pub position_set: bool,
@@ -303,6 +307,11 @@ pub struct GameState {
     pub controlled_vehicle_id: Option<i32>,
     /// Vehicle we are any passenger of (vanilla `getVehicle`).
     pub riding_vehicle_id: Option<i32>,
+    /// Every vehicle's passengers, in `SetPassengers` order.
+    pub vehicle_passengers: HashMap<i32, Vec<i32>>,
+    /// The yaw the local player's vehicle turned it by this tick, eased in by
+    /// the camera (vanilla's `yRotO` to `yRot`).
+    pub rider_yaw_turn: f32,
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
@@ -549,6 +558,7 @@ impl GameState {
             chunk_store,
             entity_store: EntityStore::new(),
             entity_positions: HashMap::new(),
+            entity_kinds: HashMap::new(),
             silent_entities: HashSet::new(),
             position_set: false,
             level_load: None,
@@ -641,6 +651,8 @@ impl GameState {
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
             riding_vehicle_id: None,
+            vehicle_passengers: HashMap::new(),
+            rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
@@ -720,10 +732,180 @@ impl GameState {
             .and_then(|id| self.entity_store.living.get(&id))
     }
 
+    /// The boat this client moves (`isLocalInstanceAuthoritative`): the one
+    /// the player is the first passenger of.
+    // TODO: other vehicles a player steers are its client's to move too;
+    // Pomme leaves them to the server.
+    pub fn steered_boat(&self) -> Option<i32> {
+        self.controlled_vehicle_id.filter(|id| {
+            self.entity_store
+                .living
+                .get(id)
+                .is_some_and(|v| crate::entity::is_boat(v.entity_type))
+        })
+    }
+
     /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
-    /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); boats
+    /// share Pomme's living store but aren't living.
     pub fn vehicle_health(&self) -> Option<(f32, f32)> {
-        self.riding_vehicle().map(|e| (e.health, e.max_health))
+        self.riding_vehicle()
+            .filter(|e| !crate::entity::is_boat(e.entity_type))
+            .map(|e| (e.health, e.max_health))
+    }
+
+    /// Where passenger `id` (a `kind`) of `vehicle_id` rides: its feet, for
+    /// a rider facing `rider_yaw`, and how a boat turns it.
+    // TODO: the vehicles whose `positionRider` adds more (horses rearing,
+    // camels, striders, minecarts on rails); non-living vehicles' yaw.
+    fn seat(&self, vehicle_id: i32, id: i32, kind: EntityKind, rider_yaw: f32) -> Option<Seat> {
+        let passengers = self.vehicle_passengers.get(&vehicle_id)?;
+        let index = passengers.iter().position(|&p| p == id)?;
+        let vehicle = self.entity_store.living.get(&vehicle_id);
+        let (position, vehicle_kind, yaw) = match vehicle {
+            Some(v) => (*v.position, v.entity_type, v.look_dir.y_rot_deg()),
+            None => (
+                glam::DVec3::from(*self.entity_positions.get(&vehicle_id)?),
+                *self.entity_kinds.get(&vehicle_id)?,
+                0.0,
+            ),
+        };
+        let animal = crate::entity::is_animal(kind);
+        let boat = vehicle.filter(|v| crate::entity::is_boat(v.entity_type));
+        let point = match boat {
+            Some(v) => {
+                crate::entity::boat::passenger_attachment(v, index, passengers.len(), animal)
+            }
+            None => EntityDimensions::passenger_attachment(vehicle_kind, index, yaw),
+        };
+        let full = passengers.len() == crate::entity::boat::max_passengers(vehicle_kind);
+        Some(Seat {
+            feet: position + point - EntityDimensions::vehicle_attachment(kind, rider_yaw),
+            // `EntityTypeTags.CAN_TURN_IN_BOATS` holds only the breeze.
+            boat: boat
+                .filter(|_| kind != EntityKind::Breeze)
+                .map(|v| BoatSeat {
+                    // `AbstractBoat.calculatePassengerBodyYRot`.
+                    body: if animal && full {
+                        yaw + if id % 2 == 0 { 90.0 } else { 270.0 }
+                    } else {
+                        yaw
+                    },
+                    delta_rotation: v.boat_sim.delta_rotation,
+                }),
+        })
+    }
+
+    /// Vanilla `rideTick` for the local player: `positionRider` seats it,
+    /// and a boat turns it with itself (it's the authoritative instance)
+    /// and holds its yaw within reach (`AbstractBoat.positionRider`).
+    pub fn position_local_rider(&mut self) {
+        let Some(vehicle_id) = self.riding_vehicle_id else {
+            return;
+        };
+        let yaw = self.player.look_dir.y_rot_deg();
+        let Some(seat) = self.seat(vehicle_id, self.player.entity_id, EntityKind::Player, yaw)
+        else {
+            return;
+        };
+        self.player.position = seat.feet.into();
+        if let Some(boat) = seat.boat {
+            let turned = clamp_rider_yaw(yaw + boat.delta_rotation, boat.body);
+            self.rider_yaw_turn = turned - yaw;
+            self.player.body_y_rot = boat.body;
+            self.player.look_dir = LookDirection::new(turned, self.player.look_dir.x_rot_deg());
+        }
+    }
+
+    /// Vanilla `rideTick` for every other passenger, after the vehicles
+    /// tick: seated, and in a boat held to it (`AbstractBoat.clampRotation`).
+    pub fn position_remote_riders(&mut self) {
+        let riders: Vec<(i32, i32)> = self
+            .vehicle_passengers
+            .iter()
+            .flat_map(|(&vehicle, passengers)| passengers.iter().map(move |&id| (vehicle, id)))
+            .filter(|&(_, id)| id != self.player.entity_id)
+            .collect();
+        for (vehicle_id, id) in riders {
+            let Some(e) = self.entity_store.living.get(&id) else {
+                continue;
+            };
+            let Some(seat) = self.seat(vehicle_id, id, e.entity_type, e.look_dir.y_rot_deg())
+            else {
+                continue;
+            };
+            let Some(e) = self.entity_store.living.get_mut(&id) else {
+                continue;
+            };
+            e.position = seat.feet.into();
+            let Some(boat) = seat.boat else {
+                continue;
+            };
+            e.body_y_rot_deg = boat.body;
+            if e.player_uuid.is_some() {
+                let yaw = clamp_rider_yaw(e.look_dir.y_rot_deg(), boat.body);
+                e.look_dir = LookDirection::new(yaw, e.look_dir.x_rot_deg());
+            } else {
+                // A mob faces the boat's way and `clampHeadRotationToBody`
+                // holds its head within the default 75 degrees.
+                e.look_dir = LookDirection::new(boat.body, e.look_dir.x_rot_deg());
+                let delta = crate::entity::wrap_degrees(boat.body - e.head_y_rot_deg);
+                e.head_y_rot_deg += delta - delta.clamp(-75.0, 75.0);
+            }
+        }
+    }
+
+    /// Boxes the player collides with (`Level.getEntityCollisions`): boats
+    /// other than its own (`AbstractBoat.canBeCollidedWith`).
+    // TODO: shulkers, minecarts and happy ghasts collide too.
+    pub fn collidable_entity_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        self.entity_store
+            .living
+            .iter()
+            .filter(|&(&id, e)| {
+                Some(id) != self.riding_vehicle_id && crate::entity::is_boat(e.entity_type)
+            })
+            .map(|(_, e)| crate::entity::boat::boat_aabb(e))
+            .collect()
+    }
+
+    /// What the boat the player steers collides with
+    /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
+    /// not its own passengers.
+    pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
+        let passengers = self.vehicle_passengers.get(&boat_id);
+        self.entity_store
+            .living
+            .iter()
+            .filter(|&(&id, e)| {
+                id != boat_id
+                    && !passengers.is_some_and(|p| p.contains(&id))
+                    && (crate::entity::is_boat(e.entity_type) || self.is_pushable(e))
+            })
+            .map(|(_, e)| {
+                if crate::entity::is_boat(e.entity_type) {
+                    crate::entity::boat::boat_aabb(e)
+                } else {
+                    EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
+                }
+            })
+            .collect()
+    }
+
+    /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor
+    /// stands and bats never are.
+    // TODO: nor while on a ladder, and a ridden horse isn't either.
+    fn is_pushable(&self, e: &crate::entity::LivingEntity) -> bool {
+        e.health > 0.0
+            && !matches!(e.entity_type, EntityKind::ArmorStand | EntityKind::Bat)
+            && !self.is_spectator(e)
+    }
+
+    /// Whether `e` is a player in spectator mode.
+    fn is_spectator(&self, e: &crate::entity::LivingEntity) -> bool {
+        e.player_uuid
+            .and_then(|uuid| self.tab_list.players.get(&uuid))
+            .is_some_and(|p| crate::player::is_spectator(p.game_mode))
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`
@@ -2490,6 +2672,26 @@ fn block_outline(
     ))
 }
 
+/// A rider's place, from [`GameState::seat`].
+struct Seat {
+    feet: glam::DVec3,
+    boat: Option<BoatSeat>,
+}
+
+/// How a boat holds its rider: the body yaw it gives it and the turn it
+/// passes on this tick.
+struct BoatSeat {
+    body: f32,
+    delta_rotation: f32,
+}
+
+/// Vanilla `AbstractBoat.clampRotation` for a passenger that isn't a mob:
+/// `yaw` held within 105 degrees of the boat's `body` yaw.
+pub(crate) fn clamp_rider_yaw(yaw: f32, body: f32) -> f32 {
+    let delta = crate::entity::wrap_degrees(yaw - body);
+    yaw + delta.clamp(-105.0, 105.0) - delta
+}
+
 /// Vanilla `Minecraft.hitResult`.
 // TODO: pick from a spectated entity; the target is cast from the player's
 // own body, so nothing counts as targeted while spectating one.
@@ -2849,6 +3051,17 @@ pub fn update_game(
             core.menu.invert_mouse_x,
             core.menu.invert_mouse_y,
         );
+        // `Entity.turn` tells the vehicle (`onPassengerTurned`): a boat holds
+        // its rider's yaw within reach of its own.
+        if let Some(boat) = game
+            .riding_vehicle()
+            .filter(|v| crate::entity::is_boat(v.entity_type))
+        {
+            let look = gfx.renderer.camera_look_dir();
+            let yaw = clamp_rider_yaw(look.y_rot_deg(), boat.body_y_rot_deg);
+            gfx.renderer
+                .set_camera_look_dir(LookDirection::new(yaw, look.x_rot_deg()));
+        }
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
@@ -3011,6 +3224,8 @@ pub fn update_game(
         }
     };
     gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer
+        .set_camera_yaw_ease(game.rider_yaw_turn * (1.0 - partial_tick));
     gfx.renderer
         .set_entity_camera_look(spectated.map(|e| e.view_look(partial_tick)));
     gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
@@ -4490,6 +4705,12 @@ pub fn update_game(
         // Vanilla `LevelExtractor` skips the camera entity unless the camera
         // is detached.
         let first_person = gfx.renderer.is_first_person();
+        let passengers: HashSet<i32> = game
+            .vehicle_passengers
+            .values()
+            .flatten()
+            .copied()
+            .collect();
         game.entity_store
             .living
             .iter()
@@ -4512,11 +4733,7 @@ pub fn update_game(
                     visibility: visibility(e.is_invisible, &name),
                     pack_shadow: if game.riding_vehicle_id == Some(entity_id) {
                         PackShadow::Player
-                    } else if e
-                        .player_uuid
-                        .and_then(|id| game.tab_list.players.get(&id))
-                        .is_some_and(|p| crate::player::is_spectator(p.game_mode))
-                    {
+                    } else if game.is_spectator(e) {
                         PackShadow::Spectator
                     } else {
                         PackShadow::Entity
@@ -4561,6 +4778,8 @@ pub fn update_game(
                     head_y_offset: extras.head_y_offset,
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
                     has_red_overlay: has_red_overlay(e.hurt_time, e.death_time),
+                    rowing_time_left: e.boat_sim.rowing_time(0, partial_tick),
+                    rowing_time_right: e.boat_sim.rowing_time(1, partial_tick),
                     death_time: render_death_time(e.death_time, partial_tick),
                     aggressive: e.aggressive,
                     flap: extras.flap,
@@ -4570,6 +4789,7 @@ pub fn update_game(
                     is_holding_item: e.equipment(EquipmentSlot::Mainhand).is_some(),
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
+                    is_passenger: passengers.contains(&entity_id),
                     is_sprinting: e.is_sprinting,
                     is_angry: extras.is_angry,
                     tail_angle: extras.tail_angle,
@@ -4657,6 +4877,7 @@ pub fn update_game(
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
+            is_passenger: game.riding_vehicle_id.is_some(),
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -5880,6 +6101,26 @@ fn entity_extras(
             overlay_tints: SLOT0_TINTS,
             ..Default::default()
         },
+        _ if crate::entity::is_boat(e.entity_type) => {
+            let boat = &e.boat_sim;
+            EntityExtras {
+                // `BoatRenderer.submitTypeAdditions`: the water patch, unless
+                // the boat is under water.
+                overlay_tints: if boat.is_under_water() {
+                    Default::default()
+                } else {
+                    SLOT0_TINTS
+                },
+                body_transform: Some(crate::renderer::entity_model::boat_body_transform(
+                    boat.hurt_time as f32 - alpha,
+                    boat.hurt_dir,
+                    (boat.damage - alpha).max(0.0),
+                    boat.bubble_angle(alpha),
+                    boat.is_under_water(),
+                )),
+                ..Default::default()
+            }
+        }
         _ => EntityExtras::default(),
     }
 }

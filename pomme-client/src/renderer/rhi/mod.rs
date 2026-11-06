@@ -825,6 +825,8 @@ pub struct RenderPipelineDesc<'a> {
     /// Clamps depth instead of clipping at the near and far planes, where the
     /// device can.
     pub depth_clamp: bool,
+    /// Whether the colour target is written; off for depth-only draws.
+    pub write_color: bool,
 }
 
 impl<'a> RenderPipelineDesc<'a> {
@@ -847,6 +849,7 @@ impl<'a> RenderPipelineDesc<'a> {
             depth: None,
             blend: None,
             depth_clamp: false,
+            write_color: true,
         }
     }
 }

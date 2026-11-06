@@ -219,6 +219,52 @@ fn packet_ids_match_azalea() {
         )
     );
 
+    // azalea's `move_vehicle` predates 26.x's trailing on-ground flag, which
+    // is why `wire.rs` encodes it; everything before the flag reads back.
+    {
+        use azalea_buf::AzBuf;
+        use azalea_protocol::packets::game::{s_move_vehicle, s_paddle_boat};
+        let bytes = pomme_protocol::wire::encode_move_vehicle(
+            glam::DVec3::new(1.5, 64.0, -2.25),
+            90.0,
+            10.0,
+            true,
+        );
+        let mut cursor = std::io::Cursor::new(&bytes[1..]);
+        let read = s_move_vehicle::ServerboundMoveVehicle::azalea_read(&mut cursor).unwrap();
+        assert_eq!(read.pos, azalea_core::position::Vec3::new(1.5, 64.0, -2.25));
+        assert_eq!(
+            (read.look_direction.y_rot(), read.look_direction.x_rot()),
+            (90.0, 10.0)
+        );
+        assert_eq!(&bytes[1 + cursor.position() as usize..], [1]);
+        assert_eq!(
+            u32::from(bytes[0]),
+            ServerboundGamePacket::MoveVehicle(read).id()
+        );
+
+        let bytes = pomme_protocol::wire::encode_paddle_boat(true, false);
+        let read = s_paddle_boat::ServerboundPaddleBoat::azalea_read(&mut std::io::Cursor::new(
+            &bytes[1..],
+        ))
+        .unwrap();
+        assert!(read.left && !read.right);
+        assert_eq!(
+            u32::from(bytes[0]),
+            ServerboundGamePacket::PaddleBoat(read).id()
+        );
+    }
+    let move_vehicle = ClientboundGamePacket::MoveVehicle(
+        azalea_protocol::packets::game::c_move_vehicle::ClientboundMoveVehicle {
+            pos: Default::default(),
+            look_direction: Default::default(),
+        },
+    );
+    assert_eq!(
+        move_vehicle.id(),
+        table_id(Phase::Game, Direction::Clientbound, "move_vehicle")
+    );
+
     let teleport = ServerboundGamePacket::TeleportToEntity(
         azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity {
             uuid: uuid::Uuid::nil(),

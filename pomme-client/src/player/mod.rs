@@ -53,7 +53,10 @@ pub fn is_spectator(game_mode: u8) -> bool {
     game_mode == 3
 }
 
-fn is_water_block(state: azalea_block::BlockState, block_state_table: BlockStateTable) -> bool {
+pub(crate) fn is_water_block(
+    state: azalea_block::BlockState,
+    block_state_table: BlockStateTable,
+) -> bool {
     block_state_table.block_state_data(state).fluid().kind == FluidKind::Water
 }
 
@@ -64,6 +67,92 @@ fn vanilla_vec3_normalize(v: glam::DVec3) -> glam::DVec3 {
         glam::DVec3::ZERO
     } else {
         v / length
+    }
+}
+
+/// Vanilla `EntityFluidInteraction.update` for water over `bounds`, a
+/// bounding box (scanned deflated by 0.001): how high the water reaches above
+/// its bottom, and the current it gathered.
+pub(crate) fn water_contact(
+    chunks: &crate::world::chunk::ChunkStore,
+    block_state_table: BlockStateTable,
+    bounds: &crate::physics::aabb::Aabb,
+) -> WaterContact {
+    // A block's fluid column is `amount / 9` of a block, or a full block when
+    // more water sits directly above.
+    const MARGIN: f64 = 0.001;
+    let feet_y = bounds.min.y;
+    let x0 = (bounds.min.x + MARGIN).floor() as i32;
+    let x1 = (bounds.max.x - MARGIN).ceil() as i32 - 1;
+    let y0 = (bounds.min.y + MARGIN).floor() as i32;
+    let y1 = (bounds.max.y - MARGIN).ceil() as i32 - 1;
+    let z0 = (bounds.min.z + MARGIN).floor() as i32;
+    let z1 = (bounds.max.z - MARGIN).ceil() as i32 - 1;
+
+    let mut contact = WaterContact::default();
+    for bx in x0..=x1 {
+        for by in y0..=y1 {
+            for bz in z0..=z1 {
+                let f = block_state_table
+                    .block_state_data(chunks.get_block_state(bx, by, bz))
+                    .fluid();
+                if f.kind != FluidKind::Water {
+                    continue;
+                }
+                let block_height =
+                    if is_water_block(chunks.get_block_state(bx, by + 1, bz), block_state_table) {
+                        1.0
+                    } else {
+                        // f32 to match vanilla's float math.
+                        f64::from(f.amount as f32 / 9.0)
+                    };
+                let fluid_top = f64::from(by) + block_height;
+                if fluid_top < feet_y + MARGIN {
+                    continue;
+                }
+
+                contact.height = contact.height.max(fluid_top - feet_y);
+                let mut flow = water_flow_at(chunks, block_state_table, bx, by, bz, f);
+                // Shallow contact scales the flow by the height so far.
+                if contact.height < 0.4 {
+                    flow *= contact.height;
+                }
+                contact.current += flow;
+                contact.count += 1;
+            }
+        }
+    }
+    contact
+}
+
+/// [`water_contact`]'s result.
+#[derive(Default)]
+pub(crate) struct WaterContact {
+    pub height: f64,
+    current: glam::DVec3,
+    count: u32,
+}
+
+impl WaterContact {
+    /// `CurrentAccumulator.applyTo` at water's 0.014: players average the
+    /// currents (`average`), other entities normalize them.
+    pub(crate) fn current_impulse(&self, velocity: glam::DVec3, average: bool) -> glam::DVec3 {
+        if self.count == 0 || self.current.length_squared() < f64::from(1.0e-5_f32) {
+            return glam::DVec3::ZERO;
+        }
+        let mut impulse = if average {
+            self.current * (1.0 / f64::from(self.count))
+        } else {
+            vanilla_vec3_normalize(self.current)
+        };
+        impulse *= 0.014;
+        if velocity.x.abs() < 0.003
+            && velocity.z.abs() < 0.003
+            && impulse.length() < 0.004_500_000_000_000_000_5
+        {
+            impulse = vanilla_vec3_normalize(impulse) * 0.004_500_000_000_000_000_5;
+        }
+        impulse
     }
 }
 
@@ -612,72 +701,22 @@ impl LocalPlayer {
         let half_w = PLAYER_HALF_WIDTH;
         let height = self.height();
         let eye_height = f64::from(self.target_eye_height());
-        // Vanilla `EntityFluidInteraction.update`: scan the bounding box
-        // deflated by 0.001; a block's fluid column is `amount / 9` of a
-        // block, or a full block when more water sits directly above.
-        const MARGIN: f64 = 0.001;
         let velocity_before_current = *self.velocity;
         let feet_y = self.position.y;
-        let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
-        let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
-        let y0 = (feet_y + MARGIN).floor() as i32;
-        let y1 = (feet_y + height - MARGIN).ceil() as i32 - 1;
-        let z0 = (self.position.z - half_w + MARGIN).floor() as i32;
-        let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
-
-        let mut fluid_height = 0.0f64;
-        let mut accumulated_current = glam::DVec3::ZERO;
-        let mut current_count = 0_u32;
-        for bx in x0..=x1 {
-            for by in y0..=y1 {
-                for bz in z0..=z1 {
-                    let f = block_state_table
-                        .block_state_data(chunks.get_block_state(bx, by, bz))
-                        .fluid();
-                    if f.kind != FluidKind::Water {
-                        continue;
-                    }
-                    let block_height = if is_water_block(
-                        chunks.get_block_state(bx, by + 1, bz),
-                        block_state_table,
-                    ) {
-                        1.0
-                    } else {
-                        // f32 to match vanilla's float math.
-                        f64::from(f.amount as f32 / 9.0)
-                    };
-                    let fluid_top = f64::from(by) + block_height;
-                    if fluid_top < feet_y + MARGIN {
-                        continue;
-                    }
-
-                    fluid_height = fluid_height.max(fluid_top - feet_y);
-                    let mut flow = water_flow_at(chunks, block_state_table, bx, by, bz, f);
-                    // Shallow contact scales the flow by the height so far.
-                    if fluid_height < 0.4 {
-                        flow *= fluid_height;
-                    }
-                    accumulated_current += flow;
-                    current_count += 1;
-                }
-            }
-        }
-
-        if !self.flying
-            && current_count != 0
-            && accumulated_current.length_squared() >= f64::from(1.0e-5_f32)
-        {
-            // Players average the currents; other entities normalize.
-            let mut impulse = accumulated_current * (1.0 / f64::from(current_count));
-            impulse *= 0.014;
-            if self.velocity.x.abs() < 0.003
-                && self.velocity.z.abs() < 0.003
-                && impulse.length() < 0.004_500_000_000_000_000_5
-            {
-                impulse = vanilla_vec3_normalize(impulse) * 0.004_500_000_000_000_000_5;
-            }
+        let bounds = crate::physics::aabb::Aabb::new(
+            glam::dvec3(self.position.x - half_w, feet_y, self.position.z - half_w),
+            glam::dvec3(
+                self.position.x + half_w,
+                feet_y + height,
+                self.position.z + half_w,
+            ),
+        );
+        let water = water_contact(chunks, block_state_table, &bounds);
+        if !self.flying {
+            let impulse = water.current_impulse(*self.velocity, true);
             *self.velocity += impulse;
         }
+        let fluid_height = water.height;
 
         let eye_y = self.position.y + eye_height;
         let eye_block_x = self.position.x.floor() as i32;

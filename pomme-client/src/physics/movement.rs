@@ -66,7 +66,7 @@ const MTH_EQUAL_EPSILON: f64 = 1.0e-5_f32 as f64;
 const MINOR_COLLISION_ANGLE: f64 = 0.139_626_339_077_949_52;
 const CLIMB_UP_VELOCITY: f64 = 0.2;
 const CLIMB_MAX_FALL_SPEED: f32 = 0.15;
-const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0_f32;
+pub(crate) const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0_f32;
 const SIN_SCALE: f64 = 10_430.378_350_470_453;
 
 /// Vanilla `Mth.SIN`: 65536 samples of one turn, in its own division form.
@@ -94,6 +94,11 @@ pub fn tick(
     vehicle: Option<Vehicle>,
 ) {
     let is_passenger = vehicle.is_some();
+    // `Entity.rideTick` clears a passenger's motion before its tick; its
+    // vehicle then seats it.
+    if is_passenger {
+        player.velocity = Velocity::new(0.0, 0.0, 0.0);
+    }
     let raw_jump_held = input.performing_action(input::Action::Jump);
     movement_sound::advance_tick(&mut player.movement_sounds);
 
@@ -716,7 +721,7 @@ fn apply_collision(
 }
 
 /// Which axes `Entity.move`'s collision shortened `delta` on.
-fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
+pub(crate) fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
     // epsilon is the widened float constant 1.0E-5f. Vertical collision is an
     // exact double comparison.
@@ -1088,22 +1093,34 @@ fn block_below_affecting_movement(
     world.chunks.get_block_state(pos.x, pos.y, pos.z)
 }
 
-/// Vanilla `Entity.getOnPos(offset)`: the supporting block's column `offset`
-/// below the feet, or the support itself for a near-zero offset, a fence
-/// (offsets up to 0.5), a wall or a fence gate.
 pub(super) fn on_pos(
     player: &LocalPlayer,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
     offset: f32,
 ) -> BlockPos {
-    let y = (player.position.y - f64::from(offset)).floor() as i32;
-    let Some(support) = player.main_supporting_block_pos else {
-        return BlockPos::new(
-            player.position.x.floor() as i32,
-            y,
-            player.position.z.floor() as i32,
-        );
+    on_pos_of(
+        player.position.into(),
+        player.main_supporting_block_pos,
+        world,
+        tags,
+        offset,
+    )
+}
+
+/// Vanilla `Entity.getOnPos(offset)`: the supporting block's column `offset`
+/// below the feet, or the support itself for a near-zero offset, a fence
+/// (offsets up to 0.5), a wall or a fence gate.
+pub(crate) fn on_pos_of(
+    position: DVec3,
+    support: Option<BlockPos>,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    offset: f32,
+) -> BlockPos {
+    let y = (position.y - f64::from(offset)).floor() as i32;
+    let Some(support) = support else {
+        return BlockPos::new(position.x.floor() as i32, y, position.z.floor() as i32);
     };
     if offset <= 1.0e-5 {
         return support;
@@ -1125,13 +1142,39 @@ fn update_supporting_block(
     movement: DVec3,
     ctx: &CollisionContext,
 ) {
+    let bounding_box = player.bounding_box();
+    check_supporting_block(
+        &mut player.main_supporting_block_pos,
+        &mut player.on_ground_no_blocks,
+        world,
+        player.position.into(),
+        &bounding_box,
+        on_ground,
+        movement,
+        ctx,
+    );
+}
+
+/// Vanilla `Entity.checkSupportingBlock`: the block under `bounding_box`
+/// that holds it up, kept in `support`, with `no_blocks` set when it stands
+/// on no block (an entity, say).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_supporting_block(
+    support: &mut Option<BlockPos>,
+    no_blocks: &mut bool,
+    world: CollisionWorld<'_>,
+    position: DVec3,
+    bounding_box: &Aabb,
+    on_ground: bool,
+    movement: DVec3,
+    ctx: &CollisionContext,
+) {
     if !on_ground {
-        player.on_ground_no_blocks = false;
-        player.main_supporting_block_pos = None;
+        *no_blocks = false;
+        *support = None;
         return;
     }
 
-    let bounding_box = player.bounding_box();
     let test_area = Aabb::new(
         dvec3(
             bounding_box.min.x,
@@ -1140,17 +1183,13 @@ fn update_supporting_block(
         ),
         dvec3(bounding_box.max.x, bounding_box.min.y, bounding_box.max.z),
     );
-    let entity_position: DVec3 = player.position.into();
-    let mut support = find_supporting_block(world, &test_area, entity_position, ctx);
-
-    if support.is_some() || player.on_ground_no_blocks {
-        player.main_supporting_block_pos = support;
-    } else {
+    let mut found = find_supporting_block(world, &test_area, position, ctx);
+    if found.is_none() && !*no_blocks {
         let previous_test_area = test_area.offset(dvec3(-movement.x, 0.0, -movement.z));
-        support = find_supporting_block(world, &previous_test_area, entity_position, ctx);
-        player.main_supporting_block_pos = support;
+        found = find_supporting_block(world, &previous_test_area, position, ctx);
     }
-    player.on_ground_no_blocks = support.is_none();
+    *support = found;
+    *no_blocks = found.is_none();
 }
 
 fn block_jump_factor(player: &LocalPlayer, world: CollisionWorld<'_>, tags: &BlockTags) -> f32 {
@@ -1173,17 +1212,29 @@ fn block_speed_factor(player: &LocalPlayer, world: CollisionWorld<'_>, tags: &Bl
     if player.flying {
         return 1.0;
     }
-    let block_state_data = world
-        .block_state_table
-        .block_state_data(block_state_at_player_position(player, world.chunks));
+    entity_block_speed_factor(
+        player.position.into(),
+        player.main_supporting_block_pos,
+        world,
+        tags,
+    )
+}
+
+/// `Entity.getBlockSpeedFactor`.
+pub(crate) fn entity_block_speed_factor(
+    position: DVec3,
+    support: Option<BlockPos>,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+) -> f32 {
+    let here = BlockPos::containing(position);
+    let block_state_data = world.block_data(here);
     let here_factor = block_state_data.movement_speed_factor();
     if matches!(block_state_data.id(), "water" | "bubble_column") || f64::from(here_factor) != 1.0 {
         here_factor
     } else {
-        world
-            .block_state_table
-            .block_state_data(block_below_affecting_movement(player, world, tags))
-            .movement_speed_factor()
+        let below = on_pos_of(position, support, world, tags, 0.500_001);
+        world.block_data(below).movement_speed_factor()
     }
 }
 
@@ -1334,12 +1385,12 @@ fn mth_sqrt(value: f32) -> f32 {
     f64::from(value).sqrt() as f32
 }
 
-fn mth_sin(angle: f32) -> f32 {
+pub(crate) fn mth_sin(angle: f32) -> f32 {
     let index = ((f64::from(angle) * SIN_SCALE) as i64 & 0xFFFF) as usize;
     SIN[index]
 }
 
-fn mth_cos(angle: f32) -> f32 {
+pub(crate) fn mth_cos(angle: f32) -> f32 {
     let index = ((f64::from(angle) * SIN_SCALE + 16_384.0) as i64 & 0xFFFF) as usize;
     SIN[index]
 }

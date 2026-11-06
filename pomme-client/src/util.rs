@@ -4,6 +4,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Vanilla `Mth.clampedLerp`.
+pub fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
+    if factor < 0.0 {
+        min
+    } else if factor > 1.0 {
+        max
+    } else {
+        min + factor * (max - min)
+    }
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///

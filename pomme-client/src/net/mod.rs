@@ -249,6 +249,12 @@ pub enum NetworkEvent {
         is_front_text: bool,
     },
     ContainerClosed,
+    /// The server's correction of the vehicle the player steers.
+    MoveVehicle {
+        position: DVec3,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+    },
     CursorItem {
         item: ItemStack,
     },
@@ -439,6 +445,7 @@ pub enum NetworkEvent {
         position: Position,
         velocity: DVec3,
         x_rot_deg: f32,
+        y_rot_deg: f32,
         head_y_rot_deg: f32,
     },
     EntityMoved {

@@ -1,3 +1,4 @@
+pub mod boat;
 pub mod components;
 pub mod dimensions;
 pub mod glowing;
@@ -821,6 +822,9 @@ pub struct LivingEntity {
     pub velocity: DVec3,
     /// Vanilla `wasTouchingWater`, probed per tick for aquatic kinds.
     pub is_in_water: bool,
+    /// Boat control state (vanilla `AbstractBoat`); only meaningful while
+    /// the kind is a `*_boat`/`*_raft`.
+    pub boat_sim: boat::BoatSim,
     /// Squid client sim (vanilla `Squid.aiStep`), degrees.
     pub x_body_rot: f32,
     pub prev_x_body_rot: f32,
@@ -896,6 +900,9 @@ pub struct LivingEntity {
     tentacle_speed: f32,
     rotate_speed: f32,
     interp_target: Position,
+    /// The position the server's relative moves decode against
+    /// (`Entity.getPositionCodec`).
+    position_base: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
     interp_head_y_rot_deg: f32,
@@ -1072,6 +1079,7 @@ impl LivingEntity {
             armor: Default::default(),
             velocity: DVec3::ZERO,
             is_in_water: false,
+            boat_sim: boat::BoatSim::default(),
             x_body_rot: 0.0,
             prev_x_body_rot: 0.0,
             z_body_rot: 0.0,
@@ -1130,6 +1138,7 @@ impl LivingEntity {
             tentacle_speed: 1.0 / (fastrand::f32() + 1.0) * 0.2,
             rotate_speed: 0.0,
             interp_target: position,
+            position_base: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
             interp_head_y_rot_deg: y_rot_deg,
@@ -1163,27 +1172,46 @@ impl LivingEntity {
 
     fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
+        self.position_base = pos;
         self.interp_steps = INTERPOLATION_STEPS;
+    }
+
+    /// Vanilla `getClientPosition`: where it's interpolating to, or where it
+    /// is.
+    pub fn client_position(&self) -> Position {
+        if self.interp_steps > 0 {
+            self.interp_target
+        } else {
+            self.position
+        }
+    }
+
+    /// `InterpolationHandler.interpolate`: one step toward the server's pose;
+    /// false when none is left.
+    pub fn interpolate(&mut self) -> bool {
+        if self.interp_steps == 0 {
+            return false;
+        }
+        let alpha = 1.0 / self.interp_steps as f64;
+        self.position = self.position.lerp(self.interp_target, alpha);
+        let y_rot = lerp_angle(
+            self.look_dir.y_rot_deg(),
+            self.interp_look_dir.y_rot_deg(),
+            1.0 / self.interp_steps as f32,
+        );
+        let x_rot = self.look_dir.x_rot_deg()
+            + (self.interp_look_dir.x_rot_deg() - self.look_dir.x_rot_deg())
+                / self.interp_steps as f32;
+        self.look_dir = LookDirection::new(y_rot, x_rot);
+        self.interp_steps -= 1;
+        true
     }
 
     pub fn tick_interpolation(&mut self) {
         self.prev_position = self.position;
         self.prev_look_dir = self.look_dir;
 
-        if self.interp_steps > 0 {
-            let alpha = 1.0 / self.interp_steps as f64;
-            self.position = self.position.lerp(self.interp_target, alpha);
-            let y_rot = lerp_angle(
-                self.look_dir.y_rot_deg(),
-                self.interp_look_dir.y_rot_deg(),
-                1.0 / self.interp_steps as f32,
-            );
-            let x_rot = self.look_dir.x_rot_deg()
-                + (self.interp_look_dir.x_rot_deg() - self.look_dir.x_rot_deg())
-                    / self.interp_steps as f32;
-            self.look_dir = LookDirection::new(y_rot, x_rot);
-            self.interp_steps -= 1;
-        } else {
+        if !self.interpolate() {
             // `LivingEntity.aiStep` for an entity that can't simulate movement.
             self.velocity *= 0.98;
         }
@@ -2018,7 +2046,7 @@ impl EntityStore {
 
     pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
-            let target = entity.interp_target + DVec3::new(dx, dy, dz);
+            let target = entity.position_base + DVec3::new(dx, dy, dz);
             entity.interpolate_to_pos(target);
             entity.on_ground = on_ground;
         }
@@ -2065,6 +2093,14 @@ impl EntityStore {
                 entity.is_glowing = shared_flags_glowing(f);
             }
             (_, 3, Bool(b)) => entity.custom_name_visible = b,
+            (k, 5, Bool(b)) if is_boat(k) => entity.boat_sim.no_gravity = b,
+            // Boats aren't living: `VehicleEntity` 8-10, `AbstractBoat` 11-13.
+            (k, 8, Int(t)) if is_boat(k) => entity.boat_sim.hurt_time = t,
+            (k, 9, Int(d)) if is_boat(k) => entity.boat_sim.hurt_dir = d,
+            (k, 10, Float(d)) if is_boat(k) => entity.boat_sim.damage = d,
+            (k, 11, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[0] = b,
+            (k, 12, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[1] = b,
+            (k, 13, Int(t)) if is_boat(k) => entity.boat_sim.bubble_time = t,
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -2269,6 +2305,42 @@ impl EntityStore {
         }
     }
 
+    /// For an entity this client moves: the server's position, kept only
+    /// as the base its later moves decode against (`VecDeltaCodec.setBase`).
+    pub fn set_living_base(&mut self, id: i32, position: Position) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.position_base = position;
+        }
+    }
+
+    /// [`set_living_base`](Self::set_living_base) for a relative move.
+    pub fn shift_living_base(&mut self, id: i32, delta: DVec3) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.position_base += delta;
+        }
+    }
+
+    /// The server's correction of an entity this client moves, dropping any
+    /// interpolation (`handleMoveVehicle`'s `absSnapTo`).
+    pub fn snap_living(
+        &mut self,
+        id: i32,
+        position: Position,
+        look: LookDirection,
+        velocity: DVec3,
+    ) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.position_base = position;
+            entity.interp_steps = 0;
+            entity.position = position;
+            entity.prev_position = position;
+            entity.body_y_rot_deg = look.y_rot_deg();
+            entity.prev_body_y_rot_deg = look.y_rot_deg();
+            entity.look_dir = look;
+            entity.velocity = velocity;
+        }
+    }
+
     pub fn set_custom_name(
         &mut self,
         id: i32,
@@ -2418,6 +2490,7 @@ impl EntityStore {
             .find(|entity| entity.player_uuid == Some(*uuid))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn tick_living(
         &mut self,
         chunks: &ChunkStore,
@@ -2426,10 +2499,32 @@ impl EntityStore {
         local_push_box: Option<Aabb>,
         pusher_allowed: impl Fn(i32, &LivingEntity) -> bool,
         simulation_distance: u32,
+        controlled_vehicle_id: Option<i32>,
     ) -> DVec3 {
         let mut local_push = DVec3::ZERO;
         let thundering = self.thundering;
         for (&id, entity) in &mut self.living {
+            if is_boat(entity.entity_type) {
+                // The boat the player steers ticks before its rider.
+                if Some(id) == controlled_vehicle_id {
+                    continue;
+                }
+                boat::tick_client(entity, chunks, block_state_table);
+                // `AbstractBoat.tick`'s push, through `AbstractBoat.push`.
+                let hull = boat::boat_aabb(entity);
+                if let Some(local_box) = local_push_box
+                    && pusher_allowed(id, entity)
+                    && hull
+                        .inflate(DVec3::new(0.2, -0.01, 0.2))
+                        .intersects(&local_box)
+                    && local_box.min.y <= hull.min.y
+                    && let Some((local_impulse, _)) =
+                        living_push_impulses(player_position, entity.position)
+                {
+                    local_push += local_impulse;
+                }
+                continue;
+            }
             entity.tick_interpolation();
             // A scared armadillo's body control skips its client tick.
             if !(entity.entity_type == EntityKind::Armadillo && entity.armadillo.is_scared()) {
@@ -2566,6 +2661,58 @@ pub fn is_equine(kind: &EntityKind) -> bool {
     )
 }
 
+/// Vanilla `AbstractBoat`: boats, rafts and their chest forms. Pomme keeps
+/// them in the living store.
+pub fn is_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.ends_with("_boat") || s.ends_with("_raft")
+}
+
+pub fn is_raft(kind: EntityKind) -> bool {
+    kind.to_str().ends_with("_raft")
+}
+
+pub fn is_chest_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.ends_with("_chest_boat") || s.ends_with("_chest_raft")
+}
+
+/// Vanilla's `Animal` subclasses.
+pub fn is_animal(kind: EntityKind) -> bool {
+    is_equine(&kind)
+        || is_llama(kind)
+        || matches!(
+            kind,
+            EntityKind::Armadillo
+                | EntityKind::Axolotl
+                | EntityKind::Bee
+                | EntityKind::Camel
+                | EntityKind::CamelHusk
+                | EntityKind::Cat
+                | EntityKind::Chicken
+                | EntityKind::Cow
+                | EntityKind::Fox
+                | EntityKind::Frog
+                | EntityKind::Goat
+                | EntityKind::HappyGhast
+                | EntityKind::Hoglin
+                | EntityKind::Mooshroom
+                | EntityKind::Nautilus
+                | EntityKind::Ocelot
+                | EntityKind::Panda
+                | EntityKind::Parrot
+                | EntityKind::Pig
+                | EntityKind::PolarBear
+                | EntityKind::Rabbit
+                | EntityKind::Sheep
+                | EntityKind::Sniffer
+                | EntityKind::Strider
+                | EntityKind::Turtle
+                | EntityKind::Wolf
+                | EntityKind::ZombieNautilus
+        )
+}
+
 /// Vanilla `Llama` and its `TraderLlama` subclass: `AbstractHorse`s that
 /// pomme renders apart from the horse family.
 pub fn is_llama(kind: EntityKind) -> bool {
@@ -2573,7 +2720,8 @@ pub fn is_llama(kind: EntityKind) -> bool {
 }
 
 pub fn is_living_mob(kind: &EntityKind) -> bool {
-    is_equine(kind)
+    is_boat(*kind)
+        || is_equine(kind)
         || is_llama(*kind)
         || matches!(
             kind,
@@ -3109,6 +3257,7 @@ mod tests {
             None,
             |_, _| true,
             10,
+            None,
         );
     }
 
@@ -3186,6 +3335,7 @@ mod tests {
             Some(local_box),
             |id, _| id != 5,
             10,
+            None,
         );
         let expected = f64::from(0.05_f32) * 0.5;
 

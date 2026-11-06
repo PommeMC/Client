@@ -1302,6 +1302,15 @@ impl Renderer {
         self.camera.reset(position, look_dir);
     }
 
+    pub fn set_camera_look_dir(&mut self, look_dir: LookDirection) {
+        self.camera.set_look_dir(look_dir);
+    }
+
+    /// The part of this tick's vehicle turn the view eases into this frame.
+    pub fn set_camera_yaw_ease(&mut self, yaw_ease: f32) {
+        self.camera.set_yaw_ease(yaw_ease);
+    }
+
     pub fn set_top_down_radius(&mut self, radius_blocks: f32) {
         self.camera.frame_top_down(radius_blocks);
     }
@@ -2559,6 +2568,8 @@ impl Renderer {
                     }
 
                     self.gpu_stamp(&encoder, frame, "entities");
+
+                    self.entity_renderer.draw_water_masks(&mut pass, frame);
 
                     // Translucent water draws after opaque terrain and entities so it
                     // blends over them; depth-tested (occluded by geometry in front)
