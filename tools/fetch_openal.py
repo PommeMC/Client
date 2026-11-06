@@ -2,9 +2,10 @@
 """Stage Minecraft's OpenAL Soft native library into one or more directories.
 
 The client loads OpenAL at runtime with `libloading`, trying the directory
-holding the executable before any system path, so dropping the library into
-`target/debug` is all a development build needs. Release bundles use the same
-script so CI and dev builds stay on one pinned version.
+holding the executable first, so dropping the library into `target/debug` is
+all a development build needs. The release job stages it with the same script
+for the build to embed (`POMME_EMBED_OPENAL`), so CI and dev builds stay on
+one pinned version.
 
 Usage:
   fetch_openal.py <out-dir> [<out-dir> ...] [--classifier <lwjgl-classifier>]

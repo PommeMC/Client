@@ -1,4 +1,5 @@
 mod decoder;
+pub mod embedded_openal;
 mod openal;
 mod sounds;
 
