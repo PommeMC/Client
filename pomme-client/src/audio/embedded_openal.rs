@@ -37,6 +37,9 @@ pub(super) fn unpack() -> Option<Result<PathBuf, String>> {
 /// Removes the copy and notices that releases from before embedding shipped
 /// beside the binary in `dir`. A different build of the library there is a
 /// player's own, which loads first, and stays.
+// TODO: once the pinned OpenAL Soft changes, recognise the builds releases
+// shipped beside the binary too (their checksums in `openal-natives.txt`), or a
+// player who skips releases keeps loading the old one.
 pub fn remove_bundled_copy(dir: &Path) {
     if !LIBRARY.is_empty() {
         remove_copy(dir, LIBRARY_NAME, LIBRARY);
