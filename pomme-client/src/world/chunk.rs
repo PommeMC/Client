@@ -619,8 +619,14 @@ impl ChunkStore {
         self.grid.view_center = pos;
     }
 
+    /// Shares a column with work that must outlive this borrow of the store.
     pub fn get_chunk(&self, pos: &ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
         self.grid.get(*pos).cloned()
+    }
+
+    /// Borrows a column lock without changing its Arc reference count.
+    pub(crate) fn borrow_chunk(&self, pos: &ChunkPos) -> Option<&RwLock<Chunk>> {
+        self.grid.get(*pos).map(Arc::as_ref)
     }
 
     pub fn set_block_state(
@@ -668,9 +674,10 @@ impl ChunkStore {
         (old, (was_empty != is_empty).then_some(is_empty))
     }
 
+    /// Reads a cell through a borrowed column; missing columns read as air.
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
-        let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
+        let Some(chunk_lock) = self.borrow_chunk(&chunk_pos) else {
             return BlockState::AIR;
         };
         let chunk = chunk_lock.read();

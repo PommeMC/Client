@@ -78,7 +78,8 @@ impl Scene {
     }
 }
 
-const SURFACE_Y: i32 = 63;
+/// The y every scene's ground is solid below.
+pub const SURFACE_Y: i32 = 63;
 /// The camera the fade and walk benches view from: just above the surface of
 /// column (0, 0).
 pub const EYE: DVec3 = DVec3::new(8.0, 72.0, 8.0);
