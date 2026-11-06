@@ -5,6 +5,7 @@ use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
 use crate::physics::aabb::Aabb;
+use crate::physics::movement::{DEG_TO_RAD, mth_cos, mth_sin};
 
 /// Vanilla `EntityDimensions`' width and height.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,6 +35,29 @@ impl EntityDimensions {
             )
     }
 
+    /// Vanilla `EntityAttachments.getClamped(PASSENGER, seat, yRot)`: where
+    /// the `seat`th passenger rides (the last point serves any further
+    /// seats), turned by the vehicle's `y_rot`.
+    // TODO: the attachments of babies and scaled entities scale with them.
+    pub fn passenger_attachment(kind: EntityKind, seat: usize, y_rot: f32) -> DVec3 {
+        let point = PASSENGER_ATTACHMENTS
+            .binary_search_by(|(id, _)| id.cmp(&kind.to_str()))
+            .map_or([0.0, Self::of(kind).height, 0.0], |i| {
+                let points = PASSENGER_ATTACHMENTS[i].1;
+                points[seat.min(points.len() - 1)]
+            });
+        attachment_point(point, y_rot)
+    }
+
+    /// Vanilla `getVehicleAttachmentPoint`: the point of a rider of `kind`
+    /// that its seat holds, turned by the rider's `y_rot`.
+    pub fn vehicle_attachment(kind: EntityKind, y_rot: f32) -> DVec3 {
+        let point = VEHICLE_ATTACHMENTS
+            .binary_search_by(|(id, _)| id.cmp(&kind.to_str()))
+            .map_or([0.0; 3], |i| VEHICLE_ATTACHMENTS[i].1);
+        attachment_point(point, y_rot)
+    }
+
     /// Vanilla `EntityDimensions.makeBoundingBox`: centred on `pos` in x and
     /// z, rising `height` from it.
     pub fn make_bounding_box(&self, pos: DVec3) -> Aabb {
@@ -47,6 +71,14 @@ impl EntityDimensions {
             ),
         )
     }
+}
+
+/// Vanilla `EntityAttachments.transformPoint`: `point.yRot(-y_rot)`.
+pub fn attachment_point([x, y, z]: [f32; 3], y_rot: f32) -> DVec3 {
+    let angle = -y_rot * DEG_TO_RAD;
+    let (sin, cos) = (f64::from(mth_sin(angle)), f64::from(mth_cos(angle)));
+    let (x, z) = (f64::from(x), f64::from(z));
+    DVec3::new(x * cos + z * sin, f64::from(y), z * cos - x * sin)
 }
 
 /// `(registry id, width, height)`, sorted by id.
@@ -324,6 +356,99 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
     ("minecraft:zombie_nautilus", 0.2751),
     ("minecraft:zombie_villager", 1.74),
     ("minecraft:zombified_piglin", 1.79),
+];
+
+/// `(registry id, points)` from `EntityTypes`' `passengerAttachments`, sorted
+/// by id; other types seat a passenger at their height.
+#[rustfmt::skip]
+const PASSENGER_ATTACHMENTS: &[(&str, &[[f32; 3]])] = &[
+    ("minecraft:cat", &[[0.0, 0.5125, 0.0]]),
+    ("minecraft:chest_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:chicken", &[[0.0, 0.7, -0.1]]),
+    ("minecraft:command_block_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:cow", &[[0.0, 1.36875, 0.0]]),
+    ("minecraft:donkey", &[[0.0, 1.1125, 0.0]]),
+    ("minecraft:drowned", &[[0.0, 2.0125, 0.0]]),
+    ("minecraft:elder_guardian", &[[0.0, 2.350625, 0.0]]),
+    ("minecraft:ender_dragon", &[[0.0, 3.0, 0.0]]),
+    ("minecraft:enderman", &[[0.0, 2.80625, 0.0]]),
+    ("minecraft:endermite", &[[0.0, 0.2375, 0.0]]),
+    ("minecraft:evoker", &[[0.0, 2.0, 0.0]]),
+    ("minecraft:fox", &[[0.0, 0.6375, -0.25]]),
+    ("minecraft:frog", &[[0.0, 0.375, -0.25]]),
+    ("minecraft:furnace_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:ghast", &[[0.0, 4.0625, 0.0]]),
+    ("minecraft:goat", &[[0.0, 1.1125, 0.0]]),
+    ("minecraft:guardian", &[[0.0, 0.975, 0.0]]),
+    ("minecraft:happy_ghast", &[[0.0, 4.0, 1.7], [-1.7, 4.0, 0.0], [0.0, 4.0, -1.7], [1.7, 4.0, 0.0]]),
+    ("minecraft:hoglin", &[[0.0, 1.49375, 0.0]]),
+    ("minecraft:hopper_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:horse", &[[0.0, 1.44375, 0.0]]),
+    ("minecraft:husk", &[[0.0, 2.075, 0.0]]),
+    ("minecraft:illusioner", &[[0.0, 2.0, 0.0]]),
+    ("minecraft:llama", &[[0.0, 1.37, -0.3]]),
+    ("minecraft:minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:mooshroom", &[[0.0, 1.36875, 0.0]]),
+    ("minecraft:mule", &[[0.0, 1.2125, 0.0]]),
+    ("minecraft:nautilus", &[[0.0, 1.1375, 0.0]]),
+    ("minecraft:ocelot", &[[0.0, 0.6375, 0.0]]),
+    ("minecraft:parrot", &[[0.0, 0.4625, 0.0]]),
+    ("minecraft:phantom", &[[0.0, 0.3375, 0.0]]),
+    ("minecraft:pig", &[[0.0, 0.86875, 0.0]]),
+    ("minecraft:piglin", &[[0.0, 2.0125, 0.0]]),
+    ("minecraft:piglin_brute", &[[0.0, 2.0125, 0.0]]),
+    ("minecraft:pillager", &[[0.0, 2.0, 0.0]]),
+    ("minecraft:ravager", &[[0.0, 2.2625, -0.0625]]),
+    ("minecraft:sheep", &[[0.0, 1.2375, 0.0]]),
+    ("minecraft:silverfish", &[[0.0, 0.2375, 0.0]]),
+    ("minecraft:skeleton_horse", &[[0.0, 1.31875, 0.0]]),
+    ("minecraft:sniffer", &[[0.0, 2.09375, 0.0]]),
+    ("minecraft:spawner_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:spider", &[[0.0, 0.765, 0.0]]),
+    ("minecraft:tnt_minecart", &[[0.0, 0.1875, 0.0]]),
+    ("minecraft:trader_llama", &[[0.0, 1.37, -0.3]]),
+    ("minecraft:turtle", &[[0.0, 0.55625, -0.25]]),
+    ("minecraft:vex", &[[0.0, 0.7375, 0.0]]),
+    ("minecraft:vindicator", &[[0.0, 2.0, 0.0]]),
+    ("minecraft:warden", &[[0.0, 3.15, 0.0]]),
+    ("minecraft:witch", &[[0.0, 2.2625, 0.0]]),
+    ("minecraft:wolf", &[[0.0, 0.81875, -0.0625]]),
+    ("minecraft:zoglin", &[[0.0, 1.49375, 0.0]]),
+    ("minecraft:zombie", &[[0.0, 2.0125, 0.0]]),
+    ("minecraft:zombie_horse", &[[0.0, 1.31875, 0.0]]),
+    ("minecraft:zombie_nautilus", &[[0.0, 1.1375, 0.0]]),
+    ("minecraft:zombie_villager", &[[0.0, 2.125, 0.0]]),
+    ("minecraft:zombified_piglin", &[[0.0, 2.0, 0.0]]),
+];
+
+/// `(registry id, point)` from `EntityTypes`' `ridingOffset` (negated) and
+/// `vehicleAttachment`, sorted by id; other types are held at their feet.
+#[rustfmt::skip]
+const VEHICLE_ATTACHMENTS: &[(&str, [f32; 3])] = &[
+    ("minecraft:allay", [0.0, -0.04, 0.0]),
+    ("minecraft:bogged", [0.0, 0.7, 0.0]),
+    ("minecraft:drowned", [0.0, 0.7, 0.0]),
+    ("minecraft:evoker", [0.0, 0.6, 0.0]),
+    ("minecraft:ghast", [0.0, -0.5, 0.0]),
+    ("minecraft:giant", [0.0, 3.75, 0.0]),
+    ("minecraft:happy_ghast", [0.0, -0.5, 0.0]),
+    ("minecraft:husk", [0.0, 0.7, 0.0]),
+    ("minecraft:illusioner", [0.0, 0.6, 0.0]),
+    ("minecraft:mannequin", [0.0, 0.6, 0.0]),
+    ("minecraft:parched", [0.0, 0.7, 0.0]),
+    ("minecraft:phantom", [0.0, 0.125, 0.0]),
+    ("minecraft:piglin", [0.0, 0.7, 0.0]),
+    ("minecraft:piglin_brute", [0.0, 0.7, 0.0]),
+    ("minecraft:pillager", [0.0, 0.6, 0.0]),
+    ("minecraft:player", [0.0, 0.6, 0.0]),
+    ("minecraft:skeleton", [0.0, 0.7, 0.0]),
+    ("minecraft:stray", [0.0, 0.7, 0.0]),
+    ("minecraft:vex", [0.0, -0.04, 0.0]),
+    ("minecraft:vindicator", [0.0, 0.6, 0.0]),
+    ("minecraft:wither_skeleton", [0.0, 0.875, 0.0]),
+    ("minecraft:zombie", [0.0, 0.7, 0.0]),
+    ("minecraft:zombie_villager", [0.0, 0.7, 0.0]),
+    ("minecraft:zombified_piglin", [0.0, 0.7, 0.0]),
 ];
 
 #[cfg(test)]

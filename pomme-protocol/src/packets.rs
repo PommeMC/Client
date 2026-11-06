@@ -310,6 +310,9 @@ mod tests {
             (Direction::Clientbound, "set_chunk_cache_radius", 95),
             (Direction::Serverbound, "set_creative_mode_slot", 56),
             (Direction::Serverbound, "container_slot_state_changed", 20),
+            (Direction::Serverbound, "move_vehicle", 34),
+            (Direction::Serverbound, "paddle_boat", 35),
+            (Direction::Clientbound, "move_vehicle", 57),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
         }
@@ -510,6 +513,9 @@ mod tests {
         let sb = |name| t.id(Phase::Game, Direction::Serverbound, name);
         assert_eq!(sb("punch"), Some(46));
         assert_eq!(sb("swing"), None);
+        assert_eq!(sb("move_vehicle"), Some(34));
+        assert_eq!(sb("paddle_boat"), Some(35));
+        assert_eq!(cb("move_vehicle"), Some(58));
         assert_eq!(
             t.id(Phase::Configuration, Direction::Clientbound, "post_effects"),
             Some(10)

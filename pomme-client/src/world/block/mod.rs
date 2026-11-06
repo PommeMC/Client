@@ -12,6 +12,7 @@
 
 pub(crate) mod block_registry;
 mod block_state_table;
+mod condition;
 pub mod json_bundle;
 pub mod model;
 pub mod render_assets;
@@ -34,7 +35,7 @@ use crate::position::BlockPos;
 pub struct PropMap(Box<[(&'static str, &'static str)]>);
 
 impl PropMap {
-    fn from_pairs(mut pairs: Vec<(&'static str, &'static str)>) -> Self {
+    pub(crate) fn from_pairs(mut pairs: Vec<(&'static str, &'static str)>) -> Self {
         pairs.sort_unstable_by_key(|&(k, _)| k);
         Self(pairs.into_boxed_slice())
     }
@@ -438,6 +439,15 @@ impl BlockStateData {
         match self.id() {
             "soul_sand" | "honey_block" => 0.4,
             _ => 1.0,
+        }
+    }
+
+    /// `Block.getBounceRestitution`.
+    pub(crate) fn movement_bounce_restitution(&self) -> f32 {
+        match self.id() {
+            "slime_block" => 1.0,
+            id if id.ends_with("_bed") || id == "shelf_mushroom" => 0.75,
+            _ => 0.0,
         }
     }
 

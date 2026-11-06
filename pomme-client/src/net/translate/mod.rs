@@ -280,6 +280,8 @@
 //!   and game `login` lacks enforcesSecureChat
 //! - `update_attributes` keys attributes by resource location and
 //!   `update_mob_effect` has a byte amplifier plus trailing factor NBT
+//! - TODO: sign messages in block entity NBT are JSON strings, where 1.20.5
+//!   stores components; they aren't rewritten, so 765 signs show the JSON
 //! - `level_particles` leads with the particle type id; `chat_command` is
 //!   always the signed form (empty signatures appended), so
 //!   `chat_command_signed` goes out as it, checksum stripped

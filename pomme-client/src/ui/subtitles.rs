@@ -160,7 +160,7 @@ impl SubtitleOverlayState {
 
             // Brightness fades 255 -> 75 over the display time; alpha stays 1.
             let t = ms_since(now, closest.time) / DISPLAY_TIME_MS;
-            let b = clamped_lerp(t, 255.0, 75.0).floor() / 255.0;
+            let b = crate::util::clamped_lerp(t, 255.0, 75.0).floor() / 255.0;
             let color = [b, b, b, 1.0];
             let text_y = cy - half_height as f32 * gs;
             let mut push_text = |text: String, x: f32| {
@@ -196,17 +196,6 @@ fn ms_since(now: Instant, then: Instant) -> f32 {
 fn normalize_or_zero(v: DVec3) -> DVec3 {
     let len = v.length();
     if len < 1.0e-5 { DVec3::ZERO } else { v / len }
-}
-
-/// Vanilla `Mth.clampedLerp`.
-fn clamped_lerp(t: f32, min: f32, max: f32) -> f32 {
-    if t < 0.0 {
-        min
-    } else if t > 1.0 {
-        max
-    } else {
-        min + t * (max - min)
-    }
 }
 
 #[cfg(test)]

@@ -400,7 +400,7 @@ impl App {
                 ) {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::error!("Failed to create renderer: {e}");
+                        report_renderer_failure(&e);
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_play,
@@ -564,6 +564,47 @@ fn create_window(
     event_loop.create_window(window_attrs).map(Arc::new)
 }
 
+/// Logs a renderer that couldn't start and tells the player why: without a
+/// renderer there's no window to say it in.
+pub(crate) fn report_renderer_failure(error: &dyn std::fmt::Display) {
+    tracing::error!("Failed to create renderer: {error}");
+    show_error_dialog(&format!(
+        "Pomme couldn't start its renderer:\n{error}\n\n\
+         Pomme needs a graphics card and driver with Vulkan 1.2 support. On \
+         Intel integrated graphics that means 6th generation (Skylake) or \
+         newer. Updating the graphics driver may help."
+    ));
+}
+
+#[cfg(windows)]
+fn show_error_dialog(text: &str) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(
+            window: *mut std::ffi::c_void,
+            text: *const u16,
+            caption: *const u16,
+            kind: u32,
+        ) -> i32;
+    }
+    const MB_ICONERROR: u32 = 0x10;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
+    // no owner window is allowed.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide(text).as_ptr(),
+            wide("Pomme").as_ptr(),
+            MB_ICONERROR,
+        );
+    }
+}
+
+/// Elsewhere the log, also on stderr, carries it.
+#[cfg(not(windows))]
+fn show_error_dialog(_text: &str) {}
+
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.core.menu.restore_bench_render_distance();
@@ -651,7 +692,7 @@ impl ApplicationHandler for App {
                         }))
                     }
                     Err(e) => {
-                        tracing::error!("Failed to create renderer: {e}");
+                        report_renderer_failure(&e);
                         event_loop.exit();
                         None
                     }
@@ -858,6 +899,7 @@ impl ApplicationHandler for App {
                                         code,
                                         f3_held,
                                         &self.core.input.key_bindings,
+                                        &mut self.core.menu,
                                         &connection,
                                     ) {
                                         self.core.input.on_menu_key_event(&event);
@@ -900,6 +942,7 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.on_menu_key_event(&event);
@@ -928,6 +971,7 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.on_menu_key_event(&event);
@@ -944,6 +988,7 @@ impl ApplicationHandler for App {
                                         code,
                                         f3_held,
                                         &self.core.input.key_bindings,
+                                        &mut self.core.menu,
                                         &connection,
                                     ) {
                                         self.core.input.on_menu_key_event(&event);
@@ -993,9 +1038,15 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.unclick(code);
+                                                // A chord can open a screen.
+                                                self.core.apply_cursor_grab(
+                                                    &gfx.window,
+                                                    Some(&mut game),
+                                                );
                                             }
                                         }
                                     }

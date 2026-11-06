@@ -215,32 +215,7 @@ impl TextFieldState {
     }
 
     pub fn get_word_position(&self, dir: i32, from: usize, strip_spaces: bool) -> usize {
-        let mut result = from;
-        let reverse = dir < 0;
-        let abs = dir.unsigned_abs();
-        let bytes = self.value.as_bytes();
-        for _ in 0..abs {
-            if reverse {
-                while strip_spaces && result > 0 && bytes[result - 1] == b' ' {
-                    result = prev_char_boundary(&self.value, result);
-                }
-                while result > 0 && bytes[result - 1] != b' ' {
-                    result = prev_char_boundary(&self.value, result);
-                }
-            } else {
-                let length = self.value.len();
-                match self.value[result..].find(' ') {
-                    None => result = length,
-                    Some(off) => {
-                        result += off;
-                        while strip_spaces && result < length && bytes[result] == b' ' {
-                            result += 1;
-                        }
-                    }
-                }
-            }
-        }
-        result
+        word_position(&self.value, dir, from, strip_spaces)
     }
 
     pub fn move_cursor(
@@ -501,8 +476,146 @@ impl TextFieldState {
 }
 
 /// `TextCursorUtils.isCursorVisible`: the caret blinks on and off.
-fn caret_visible(since: Instant) -> bool {
+pub(crate) fn caret_visible(since: Instant) -> bool {
     (since.elapsed().as_millis() as u64 / CURSOR_BLINK_INTERVAL_MS).is_multiple_of(2)
+}
+
+/// Port of vanilla `TextFieldHelper`: edits a string the caller holds,
+/// keeping only changes that pass `valid` (a sign's line-width check).
+/// Positions are byte offsets on `char` boundaries, as in [`TextFieldState`].
+#[derive(Default)]
+pub struct TextFieldHelper {
+    cursor: usize,
+    selection: usize,
+}
+
+impl TextFieldHelper {
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn selection(&self) -> usize {
+        self.selection
+    }
+
+    pub fn char_typed(&mut self, message: &mut String, c: char, valid: &dyn Fn(&str) -> bool) {
+        if is_allowed_chat_character(c) {
+            let mut buf = [0u8; 4];
+            self.insert_text(message, c.encode_utf8(&mut buf), valid);
+        }
+    }
+
+    /// True when the key was handled (vanilla returns false for Delete even
+    /// though it deletes).
+    pub fn key_pressed(
+        &mut self,
+        message: &mut String,
+        code: KeyCode,
+        mods: &KeyMods,
+        clipboard: &mut dyn ClipboardAccess,
+        valid: &dyn Fn(&str) -> bool,
+    ) -> bool {
+        let clean = mods.edit_shortcut() && !mods.shift && !mods.alt;
+        match code {
+            KeyCode::KeyA if clean => {
+                self.selection = 0;
+                self.cursor = message.len();
+            }
+            KeyCode::KeyC if clean => clipboard.set(self.selected(message)),
+            KeyCode::KeyV if clean => {
+                let text = crate::ui::text::strip_formatting(&clipboard.get().replace('\r', ""));
+                self.insert_text(message, &text, valid);
+                self.selection = self.cursor;
+            }
+            KeyCode::KeyX if clean => {
+                clipboard.set(self.selected(message));
+                self.delete_selection(message);
+            }
+            KeyCode::Backspace => self.remove_from_cursor(message, BACKWARDS, mods.edit_shortcut()),
+            KeyCode::Delete => {
+                self.remove_from_cursor(message, FORWARDS, mods.edit_shortcut());
+                return false;
+            }
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                let dir = if code == KeyCode::ArrowLeft {
+                    BACKWARDS
+                } else {
+                    FORWARDS
+                };
+                self.cursor = if mods.edit_shortcut() {
+                    word_position(message, dir, self.cursor, true)
+                } else {
+                    offset_by_chars(message, self.cursor, dir)
+                };
+                self.reset_selection(mods.shift);
+            }
+            KeyCode::Home => self.set_cursor(0, mods.shift),
+            KeyCode::End => self.set_cursor(message.len(), mods.shift),
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn set_cursor_to_end(&mut self, message: &str) {
+        self.set_cursor(message.len(), false);
+    }
+
+    fn set_cursor(&mut self, pos: usize, selecting: bool) {
+        self.cursor = pos;
+        self.reset_selection(selecting);
+    }
+
+    fn reset_selection(&mut self, selecting: bool) {
+        if !selecting {
+            self.selection = self.cursor;
+        }
+    }
+
+    fn insert_text(&mut self, message: &mut String, text: &str, valid: &dyn Fn(&str) -> bool) {
+        let mut edited = message.clone();
+        self.delete_selection(&mut edited);
+        self.cursor = floor_char_boundary(&edited, self.cursor);
+        edited.insert_str(self.cursor, text);
+        if valid(&edited) {
+            *message = edited;
+            self.cursor = (self.cursor + text.len()).min(message.len());
+            self.selection = self.cursor;
+        }
+    }
+
+    /// `removeCharsFromCursor` and `removeWordsFromCursor`.
+    fn remove_from_cursor(&mut self, message: &mut String, dir: i32, words: bool) {
+        if message.is_empty() {
+            return;
+        }
+        if self.selection != self.cursor {
+            self.delete_selection(message);
+            return;
+        }
+        let other = if words {
+            word_position(message, dir, self.cursor, true)
+        } else {
+            offset_by_chars(message, self.cursor, dir)
+        };
+        let start = other.min(self.cursor);
+        message.replace_range(start..other.max(self.cursor), "");
+        if dir < 0 {
+            self.set_cursor(start, false);
+        }
+    }
+
+    fn selected<'a>(&self, message: &'a str) -> &'a str {
+        &message[self.cursor.min(self.selection)..self.cursor.max(self.selection)]
+    }
+
+    fn delete_selection(&mut self, message: &mut String) {
+        if self.selection == self.cursor {
+            return;
+        }
+        let start = self.cursor.min(self.selection);
+        message.replace_range(start..self.cursor.max(self.selection), "");
+        self.set_cursor(start, false);
+    }
 }
 
 /// Vanilla `MultilineTextField`: the text model behind `MultiLineEditBox`.
@@ -968,6 +1081,36 @@ pub fn split_lines(value: &str, width: f32, width_fn: &dyn Fn(&str) -> f32) -> V
     lines
 }
 
+/// `StringSplitter.getWordPosition`.
+fn word_position(value: &str, dir: i32, from: usize, strip_spaces: bool) -> usize {
+    let mut result = from;
+    let reverse = dir < 0;
+    let abs = dir.unsigned_abs();
+    let bytes = value.as_bytes();
+    for _ in 0..abs {
+        if reverse {
+            while strip_spaces && result > 0 && bytes[result - 1] == b' ' {
+                result = prev_char_boundary(value, result);
+            }
+            while result > 0 && bytes[result - 1] != b' ' {
+                result = prev_char_boundary(value, result);
+            }
+        } else {
+            let length = value.len();
+            match value[result..].find(' ') {
+                None => result = length,
+                Some(off) => {
+                    result += off;
+                    while strip_spaces && result < length && bytes[result] == b' ' {
+                        result += 1;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 /// `StringUtil.isAllowedChatCharacter`: not `§`, `>= ' '`, not DEL.
 fn is_allowed_chat_character(c: char) -> bool {
     c != '\u{a7}' && c >= ' ' && c != '\u{7f}'
@@ -1366,5 +1509,61 @@ mod tests {
         f.key_pressed(KeyCode::End, &shift, &mut clip, inner, W);
         f.key_pressed(KeyCode::KeyV, &edit(), &mut clip, inner, W);
         assert_eq!(f.value(), pasted);
+    }
+
+    /// `TextFieldHelper` keys over `message`, with a six-character check
+    /// standing in for a sign's width check.
+    fn helper_keys(
+        helper: &mut TextFieldHelper,
+        message: &mut String,
+        keys: &[(KeyCode, KeyMods)],
+    ) -> Vec<bool> {
+        let valid = |s: &str| s.chars().count() <= 6;
+        let mut clip = MockClipboard("pa\r\u{a7}cste".into());
+        keys.iter()
+            .map(|(code, mods)| helper.key_pressed(message, *code, mods, &mut clip, &valid))
+            .collect()
+    }
+
+    #[test]
+    fn text_field_helper_types_only_what_passes_its_check() {
+        let mut helper = TextFieldHelper::default();
+        let mut message = String::new();
+        let valid = |s: &str| s.chars().count() <= 6;
+        for c in "signs!!".chars() {
+            helper.char_typed(&mut message, c, &valid);
+        }
+        assert_eq!(message, "signs!");
+        assert_eq!(helper.cursor(), 6);
+        // `§` isn't an allowed chat character.
+        helper.char_typed(&mut message, '\u{a7}', &|_| true);
+        assert_eq!(message, "signs!");
+    }
+
+    #[test]
+    fn text_field_helper_edits_and_selects() {
+        let mut helper = TextFieldHelper::default();
+        let mut message = "ab cd".to_string();
+        helper.set_cursor_to_end(&message);
+        // Ctrl+Backspace drops the word; Delete at the end returns false as
+        // vanilla's does.
+        let handled = helper_keys(
+            &mut helper,
+            &mut message,
+            &[(KeyCode::Backspace, edit()), (KeyCode::Delete, plain())],
+        );
+        assert_eq!(message, "ab ");
+        assert_eq!(handled, [true, false]);
+        // Shift+Home selects all; typing replaces it.
+        helper_keys(&mut helper, &mut message, &[(KeyCode::Home, shift())]);
+        assert_eq!((helper.cursor(), helper.selection()), (0, 3));
+        helper.char_typed(&mut message, 'x', &|_| true);
+        assert_eq!(message, "x");
+        // Paste drops `\r` and formatting codes.
+        helper_keys(&mut helper, &mut message, &[(KeyCode::KeyV, edit())]);
+        assert_eq!(message, "xpaste");
+        // A paste that fails the check leaves the text.
+        helper_keys(&mut helper, &mut message, &[(KeyCode::KeyV, edit())]);
+        assert_eq!(message, "xpaste");
     }
 }

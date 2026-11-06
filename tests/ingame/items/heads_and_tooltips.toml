@@ -1,0 +1,110 @@
+# Heads and skulls as 3D items in a chest, a profiled player head with its
+# owner's skin, and a container slot's tooltip.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/setblock 70 -60 3 minecraft:chest{Items:[{Slot:0b,id:\"minecraft:diamond_sword\",count:1,components:{\"minecraft:enchantments\":{\"minecraft:sharpness\":5}}},{Slot:1b,id:\"minecraft:player_head\",count:1,components:{\"minecraft:profile\":{name:\"Notch\"}}},{Slot:2b,id:\"minecraft:player_head\",count:1},{Slot:3b,id:\"minecraft:zombie_head\",count:1},{Slot:4b,id:\"minecraft:skeleton_skull\",count:1},{Slot:5b,id:\"minecraft:wither_skeleton_skull\",count:1},{Slot:6b,id:\"minecraft:creeper_head\",count:1},{Slot:7b,id:\"minecraft:piglin_head\",count:1},{Slot:8b,id:\"minecraft:dragon_head\",count:1}]}"
+
+[[step]]
+chat = "/tp @s 70.5 -60 0.5 0 0"
+
+[[step]]
+expect = { block = "chest", at = [70, -60, 3], block_entity = "chest" }
+
+[[step]]
+look_at = [70.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "generic_9x3", title = "Chest" }
+
+[[step]]
+expect = { slot = 8, item = "dragon_head" }
+
+# Long enough for Notch's skin to download from Mojang.
+[[step]]
+wait_ms = 8000
+
+[[step]]
+screenshot = "heads"
+
+# Chest slot 0's centre at the harness's 427x240 GUI.
+[[step]]
+cursor = [141, 62]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "tooltip"
+
+[[step]]
+chat = "/setblock 70 -60 3 minecraft:air"
+
+[[step]]
+expect = { menu = "none" }
+
+# Heads in the hotbar load their skins too: Notch's own, a static profile's
+# default skin by its id, and a skin patch's texture.
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/item replace entity @s hotbar.0 with minecraft:player_head[profile={name:\"Notch\"}]"
+
+[[step]]
+chat = "/item replace entity @s hotbar.1 with minecraft:player_head[profile={id:[I;1,2,3,4],name:\"Nobody\"}]"
+
+[[step]]
+chat = "/item replace entity @s hotbar.2 with minecraft:player_head[profile={texture:\"entity/player/wide/kai\"}]"
+
+[[step]]
+expect = { slot = 38, item = "player_head" }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "hotbar"
+
+# A Building Blocks catalog cell's tooltip leaves out the tab names, which a
+# hotbar slot's lists.
+[[step]]
+open_inventory = true
+
+[[step]]
+hover = { catalog = 0 }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "catalog_tooltip"
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "hotbar_tooltip"
+
+[[step]]
+press = { action = "key.inventory" }
+
+[[step]]
+chat = "/clear @s"

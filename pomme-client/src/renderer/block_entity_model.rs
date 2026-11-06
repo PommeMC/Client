@@ -174,3 +174,177 @@ pub fn bake_chest_models() -> Vec<BakedEntityModel> {
         bake_chest_layer(1.0, 15.0, 15.0, 1.0, FACE_ALL & !FACE_POS_X),
     ]
 }
+
+/// The skull and head kinds, vanilla `SkullBlock.Types`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkullKind {
+    Skeleton,
+    WitherSkeleton,
+    Player,
+    Zombie,
+    Creeper,
+    Piglin,
+    Dragon,
+}
+
+impl SkullKind {
+    pub const ALL: [Self; 7] = [
+        Self::Skeleton,
+        Self::WitherSkeleton,
+        Self::Player,
+        Self::Zombie,
+        Self::Creeper,
+        Self::Piglin,
+        Self::Dragon,
+    ];
+
+    /// The item and its default texture (`SkullBlockRenderer.SKIN_BY_TYPE`;
+    /// the player's is `DefaultPlayerSkin`'s wide Steve).
+    pub fn item_and_texture(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Skeleton => ("skeleton_skull", "entity/skeleton/skeleton"),
+            Self::WitherSkeleton => ("wither_skeleton_skull", "entity/skeleton/wither_skeleton"),
+            Self::Player => ("player_head", "entity/player/wide/steve"),
+            Self::Zombie => ("zombie_head", "entity/zombie/zombie"),
+            Self::Creeper => ("creeper_head", "entity/creeper/creeper"),
+            Self::Piglin => ("piglin_head", "entity/piglin/piglin"),
+            Self::Dragon => ("dragon_head", "entity/enderdragon/dragon"),
+        }
+    }
+
+    /// The model layer's texture size.
+    pub fn texture_size(self) -> (u32, u32) {
+        match self {
+            // `createMobHeadLayer`.
+            Self::Skeleton | Self::WitherSkeleton | Self::Creeper => (64, 32),
+            Self::Player | Self::Zombie | Self::Piglin => (64, 64),
+            Self::Dragon => (256, 256),
+        }
+    }
+}
+
+/// Vanilla `SkullBlockRenderer.createModel`'s model for `kind`, posed as
+/// `setupAnim` leaves it at `animationPos` 0 (the item's), in literal y-up
+/// model space.
+pub fn bake_skull_model(kind: SkullKind) -> BakedEntityModel {
+    let cube = |origin: [f32; 3], size: [f32; 3], tex_offset: (i32, i32)| ModelCube {
+        origin: Vec3::from(origin),
+        size: Vec3::from(size),
+        tex_offset,
+        deformation: 0.0,
+        mirror: false,
+    };
+    let part = |name: &str, offset: [f32; 3], rotation: [f32; 3], cubes, parent| EntityPart {
+        name: name.into(),
+        offset: Vec3::from(offset),
+        default_rotation: Vec3::from(rotation),
+        cubes,
+        parent,
+    };
+    // `SkullModel.createHeadModel`.
+    let skull_head = || cube([-4.0, -8.0, -4.0], [8.0; 3], (0, 0));
+    let (parts, head_scale) = match kind {
+        SkullKind::Skeleton | SkullKind::WitherSkeleton | SkullKind::Creeper => (
+            vec![part("head", [0.0; 3], [0.0; 3], vec![skull_head()], None)],
+            1.0,
+        ),
+        // `createHumanoidHeadLayer`: the head and its 0.25-inflated hat.
+        SkullKind::Player | SkullKind::Zombie => {
+            let hat = ModelCube {
+                tex_offset: (32, 0),
+                deformation: 0.25,
+                ..skull_head()
+            };
+            (
+                vec![part(
+                    "head",
+                    [0.0; 3],
+                    [0.0; 3],
+                    vec![skull_head(), hat],
+                    None,
+                )],
+                1.0,
+            )
+        }
+        // `PiglinHeadModel.createHeadModel` (`AbstractPiglinModel.addHead`);
+        // `setupAnim` sets the ears' z rotation to ∓(cos 0 + 2.5) * 0.2.
+        SkullKind::Piglin => (
+            vec![
+                part(
+                    "head",
+                    [0.0; 3],
+                    [0.0; 3],
+                    vec![
+                        cube([-5.0, -8.0, -4.0], [10.0, 8.0, 8.0], (0, 0)),
+                        cube([-2.0, -4.0, -5.0], [4.0, 4.0, 1.0], (31, 1)),
+                        cube([2.0, -2.0, -5.0], [1.0, 2.0, 1.0], (2, 4)),
+                        cube([-3.0, -2.0, -5.0], [1.0, 2.0, 1.0], (2, 0)),
+                    ],
+                    None,
+                ),
+                part(
+                    "left_ear",
+                    [4.5, -6.0, 0.0],
+                    [0.0, 0.0, -0.7],
+                    vec![cube([0.0, 0.0, -2.0], [1.0, 5.0, 4.0], (51, 6))],
+                    Some(0),
+                ),
+                part(
+                    "right_ear",
+                    [-4.5, -6.0, 0.0],
+                    [0.0, 0.0, 0.7],
+                    vec![cube([-1.0, 0.0, -2.0], [1.0, 5.0, 4.0], (39, 6))],
+                    Some(0),
+                ),
+            ],
+            1.0,
+        ),
+        // `DragonHeadModel.createHeadLayer`; `setupAnim` opens the jaw to
+        // (sin 0 + 1) * 0.2.
+        SkullKind::Dragon => {
+            let mirrored = |c: ModelCube| ModelCube { mirror: true, ..c };
+            (
+                vec![
+                    part(
+                        "head",
+                        [0.0, -7.986666, 0.0],
+                        [0.0; 3],
+                        vec![
+                            cube([-6.0, -1.0, -24.0], [12.0, 5.0, 16.0], (176, 44)),
+                            cube([-8.0, -8.0, -10.0], [16.0; 3], (112, 30)),
+                            mirrored(cube([-5.0, -12.0, -4.0], [2.0, 4.0, 6.0], (0, 0))),
+                            mirrored(cube([-5.0, -3.0, -22.0], [2.0, 2.0, 4.0], (112, 0))),
+                            cube([3.0, -12.0, -4.0], [2.0, 4.0, 6.0], (0, 0)),
+                            cube([3.0, -3.0, -22.0], [2.0, 2.0, 4.0], (112, 0)),
+                        ],
+                        None,
+                    ),
+                    part(
+                        "jaw",
+                        [0.0, 4.0, -8.0],
+                        [0.2, 0.0, 0.0],
+                        vec![cube([-6.0, 0.0, -16.0], [12.0, 4.0, 16.0], (176, 65))],
+                        Some(0),
+                    ),
+                ],
+                0.75,
+            )
+        }
+    };
+
+    let (tex_w, tex_h) = kind.texture_size();
+    let mut vertices = Vec::new();
+    let mut part_ranges = Vec::new();
+    for part in &parts {
+        let start = vertices.len() as u32;
+        for cube in &part.cubes {
+            generate_cube_vertices(cube, tex_w, tex_h, FACE_ALL, false, &mut vertices);
+        }
+        part_ranges.push((start, vertices.len() as u32 - start));
+    }
+    let mut model = BakedEntityModel::new(parts, vertices, part_ranges)
+        .with_convention(ModelConvention::BlockYUp);
+    // `PartPose.scaled(0.75)` on the dragon's head.
+    model.part_scales[0] = head_scale;
+    model
+}

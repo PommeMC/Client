@@ -1101,7 +1101,7 @@ pub fn try_create_render_pipeline(
                 format,
                 vk::Format::R32Sfloat | vk::Format::R32G32Sfloat | vk::Format::R32G32B32A32Sfloat
             );
-            color_blend_attachment(desc.blend.filter(|_| blendable))
+            color_blend_attachment(desc.blend.filter(|_| blendable), desc.write_color)
         })
         .collect();
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
@@ -1878,11 +1878,19 @@ fn stage_flags(stages: ShaderStages) -> vk::ShaderStageFlags {
     )
 }
 
-fn color_blend_attachment(blend: Option<BlendState>) -> vk::PipelineColorBlendAttachmentState {
+fn color_blend_attachment(
+    blend: Option<BlendState>,
+    write_color: bool,
+) -> vk::PipelineColorBlendAttachmentState {
+    let color_write_mask = if write_color {
+        vk::ColorComponentFlags::RGBA
+    } else {
+        vk::ColorComponentFlags::empty()
+    };
     let Some(blend) = blend else {
         return vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
+            color_write_mask,
             ..Default::default()
         };
     };
@@ -1904,7 +1912,7 @@ fn color_blend_attachment(blend: Option<BlendState>) -> vk::PipelineColorBlendAt
         src_alpha_blend_factor: factor(blend.alpha.src),
         dst_alpha_blend_factor: factor(blend.alpha.dst),
         alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
+        color_write_mask,
     }
 }
 

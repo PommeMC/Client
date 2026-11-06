@@ -38,6 +38,8 @@ import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ServerboundMoveVehiclePacket;
+import net.minecraft.network.protocol.game.ServerboundPaddleBoatPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
@@ -114,6 +116,10 @@ public final class CodecOracle {
                 new ClientboundSetEntityDataPacket(7, List.of(SynchedEntityData.DataValue.create(
                         new EntityDataAccessor<>(18, EntityDataSerializers.ARMADILLO_STATE),
                         Armadillo.ArmadilloState.UNROLLING))));
+        encode("move_vehicle", ServerboundMoveVehiclePacket.STREAM_CODEC::encode,
+                new ServerboundMoveVehiclePacket(new Vec3(1.5, 64.0, -2.25), 90.0f, 10.0f, true));
+        encode("paddle_boat", ServerboundPaddleBoatPacket.STREAM_CODEC::encode,
+                new ServerboundPaddleBoatPacket(true, false));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());

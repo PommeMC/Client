@@ -1,0 +1,367 @@
+# F3 + F6 opens Debug Options. Setting the fps entry to Always, or picking the
+# Performance profile, shows its line with the overlay closed, and F1 hides it.
+# The statuses save, so it goes back to the Default profile before the deaths.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "options"
+
+# The search box has focus; the list keeps the fps row only.
+[[step]]
+text = "fps"
+
+[[step]]
+wait_ms = 300
+
+# The fps row's Always button.
+[[step]]
+cursor = [356, 93]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "always"
+
+# F3 + F6 again closes it, to the game.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "hud"
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+text = "fps"
+
+[[step]]
+wait_ms = 300
+
+# Back to In Overlay, the Default profile's status for it.
+[[step]]
+cursor = [296, 93]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "restored"
+
+# F3 shows the fps line at the top of the overlay.
+[[step]]
+press = { key = "key.keyboard.f3" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "overlay"
+
+[[step]]
+press = { key = "key.keyboard.f3" }
+
+# The Performance profile shows fps without the overlay. The footer has one
+# more button here than on 26.2, so each click lands where both layouts put
+# the same button.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+cursor = [214, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "performance_profile"
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "performance"
+
+# F1 hides it with the rest of the HUD.
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "hidden"
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+# Back to the Default profile.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+cursor = [88, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+# Dying replaces the screen: after respawning, Options from the pause menu
+# closes back to the pause menu.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0.0 } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor = [213, 142]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+cursor = [160, 150]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# Dying again with it open, F3 + F6 opens it at once after respawning, so the
+# next closes it to the game.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0.0 } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor = [213, 142]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/gamerule advance_time true"

@@ -466,8 +466,7 @@ impl<'a> BlockRenderView<'a> {
         let entries = self.assets.multipart.get(block_state_data.id)?;
         let mut quads = Vec::new();
         for entry in entries {
-            let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-            if constraints_match(&block_state_data.properties, when) {
+            if entry.when.matches(&block_state_data.properties) {
                 quads.extend(entry.model.quads.iter());
             }
         }

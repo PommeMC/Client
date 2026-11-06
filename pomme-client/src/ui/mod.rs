@@ -10,6 +10,7 @@ pub mod crafting_table;
 pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;
+pub mod debug_entries;
 pub mod enchantment;
 pub mod font;
 pub mod friends;
@@ -34,3 +35,4 @@ pub mod touch_controls;
 pub mod world_list;
 
 pub mod bundle;
+pub mod sign_edit;
