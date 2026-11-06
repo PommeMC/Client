@@ -524,6 +524,7 @@ impl Renderer {
             menu_pipeline.mc_font_texture(),
             menu_pipeline.mc_font_color_texture(),
             menu_pipeline.mc_font_sampler(),
+            &lightmap,
         );
 
         let panorama_pipeline = PanoramaPipeline::new(

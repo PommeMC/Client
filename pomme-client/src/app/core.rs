@@ -2453,6 +2453,7 @@ impl AppCore {
                     color,
                     fill_color,
                     collision_rule,
+                    name_tag_visibility,
                     see_friendly_invisibles,
                     members,
                 } => {
@@ -2464,6 +2465,7 @@ impl AppCore {
                         color,
                         fill_color,
                         collision_rule,
+                        name_tag_visibility,
                         see_friendly_invisibles,
                         members,
                     );

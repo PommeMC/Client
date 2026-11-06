@@ -60,6 +60,16 @@ pub enum CollisionRule {
     PushOwnTeam,
 }
 
+/// Vanilla `Team.Visibility`, a team's `nameTagVisibility`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NameTagVisibility {
+    #[default]
+    Always,
+    Never,
+    HideForOtherTeams,
+    HideForOwnTeam,
+}
+
 struct ScoreEntry {
     score: i32,
     display: Option<Vec<TextSpan>>,
@@ -91,6 +101,7 @@ pub(crate) struct ScoreboardTeam {
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
+    name_tag_visibility: NameTagVisibility,
     see_friendly_invisibles: bool,
     pub(crate) members: HashSet<String>,
 }
@@ -170,6 +181,7 @@ impl Scoreboard {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: CollisionRule,
+        name_tag_visibility: NameTagVisibility,
         see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     ) {
@@ -188,6 +200,7 @@ impl Scoreboard {
             color,
             fill_color: None,
             collision_rule,
+            name_tag_visibility,
             see_friendly_invisibles,
             members: HashSet::new(),
         });
@@ -197,6 +210,7 @@ impl Scoreboard {
         team.color = color;
         team.fill_color = fill_color;
         team.collision_rule = collision_rule;
+        team.name_tag_visibility = name_tag_visibility;
         team.see_friendly_invisibles = see_friendly_invisibles;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
@@ -287,6 +301,26 @@ impl Scoreboard {
             .is_some_and(|(_, team)| team.see_friendly_invisibles && team.members.contains(viewer))
     }
 
+    /// `LivingEntityRenderer.shouldShowName`'s team rule for `target`'s name
+    /// tag as `viewer` sees it, `visible` being whether `viewer` can see
+    /// `target` at all; `None` when `target` is on no team.
+    pub fn name_tag_shown(&self, viewer: &str, target: &str, visible: bool) -> Option<bool> {
+        let (team_name, team) = self.team_of(target)?;
+        let allied = self.team_of(viewer).map(|(own, _)| own == team_name);
+        Some(match team.name_tag_visibility {
+            NameTagVisibility::Always => visible,
+            NameTagVisibility::Never => false,
+            NameTagVisibility::HideForOtherTeams => match allied {
+                None => visible,
+                Some(allied) => allied && (team.see_friendly_invisibles || visible),
+            },
+            NameTagVisibility::HideForOwnTeam => match allied {
+                None => visible,
+                Some(allied) => !allied && visible,
+            },
+        })
+    }
+
     pub fn member_team_color(&self, member: &str) -> Option<u32> {
         self.teams
             .values()
@@ -294,7 +328,9 @@ impl Scoreboard {
             .fill_color
     }
 
-    fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+    /// `PlayerTeam.formatNameForTeam`: `owner`'s name, or `display` in its
+    /// place, in its team's prefix, colour and suffix.
+    pub(crate) fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
         let team = self.team_of(owner).map(|(_, team)| team);
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
         line.extend(display.map_or_else(
@@ -1829,6 +1865,7 @@ mod tests {
             WHITE,
             None,
             rule,
+            NameTagVisibility::Always,
             true,
             Some(members.iter().map(|m| (*m).into()).collect()),
         );
@@ -1887,10 +1924,49 @@ mod tests {
             WHITE,
             None,
             CollisionRule::Always,
+            NameTagVisibility::Always,
             false,
             None,
         );
         assert!(!scoreboard.sees_friendly_invisible("viewer", "mate"));
+    }
+
+    #[test]
+    fn a_teams_name_tag_visibility_decides_who_sees_its_names() {
+        let shown = |visibility, viewer_team: Option<&str>, visible| {
+            let mut scoreboard = Scoreboard::default();
+            add_team(&mut scoreboard, "a", CollisionRule::Always, &["target"]);
+            scoreboard.teams.get_mut("a").unwrap().name_tag_visibility = visibility;
+            match viewer_team {
+                Some("a") => scoreboard
+                    .teams
+                    .get_mut("a")
+                    .unwrap()
+                    .members
+                    .insert("viewer".into()),
+                Some(team) => {
+                    add_team(&mut scoreboard, team, CollisionRule::Always, &["viewer"]);
+                    true
+                }
+                None => true,
+            };
+            scoreboard.name_tag_shown("viewer", "target", visible)
+        };
+        use NameTagVisibility::*;
+
+        assert_eq!(
+            Scoreboard::default().name_tag_shown("viewer", "target", true),
+            None
+        );
+        assert_eq!(shown(Always, Some("b"), true), Some(true));
+        assert_eq!(shown(Always, None, false), Some(false));
+        assert_eq!(shown(Never, Some("a"), true), Some(false));
+        assert_eq!(shown(HideForOtherTeams, Some("b"), true), Some(false));
+        assert_eq!(shown(HideForOtherTeams, None, true), Some(true));
+        // The team sees its own invisible members' names.
+        assert_eq!(shown(HideForOtherTeams, Some("a"), false), Some(true));
+        assert_eq!(shown(HideForOwnTeam, Some("a"), true), Some(false));
+        assert_eq!(shown(HideForOwnTeam, Some("b"), true), Some(true));
     }
 
     fn add_colored_team(scoreboard: &mut Scoreboard, name: &str, fill: Option<u32>) {
@@ -1902,6 +1978,7 @@ mod tests {
             WHITE,
             fill,
             CollisionRule::Always,
+            NameTagVisibility::Always,
             true,
             Some(vec!["Player".into()]),
         );

@@ -1,0 +1,103 @@
+# Name tags over named mobs: one shown always, one in a coloured team with a
+# prefix, one shown only under the crosshair, and one hidden by its team's
+# name tag visibility; then the same at night, where the tags are lit like
+# their entities.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/tp @s 100.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [100.5, -60.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:villager 99 -60 6 {CustomName:\"Bob\",CustomNameVisible:1b,NoAI:1b,Silent:1b,Rotation:[180f,0f],UUID:[I;1,1,1,1]}"
+
+[[step]]
+chat = "/summon minecraft:husk 102 -60 6 {CustomName:\"Red\",CustomNameVisible:1b,NoAI:1b,Silent:1b,Rotation:[180f,0f],UUID:[I;1,1,1,2]}"
+
+[[step]]
+chat = "/summon minecraft:pig 100.5 -60 3 {CustomName:\"Hover\",NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/team add reds"
+
+[[step]]
+chat = "/team modify reds color red"
+
+[[step]]
+chat = "/team modify reds prefix \"[R] \""
+
+[[step]]
+chat = "/team join reds 00000001-0000-0001-0000-000100000002"
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "named"
+
+# The pig's name shows under the crosshair.
+[[step]]
+look_at = [100.5, -59.5, 3.0]
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "targeted"
+
+[[step]]
+chat = "/team add hidden"
+
+[[step]]
+chat = "/team modify hidden nametagVisibility never"
+
+[[step]]
+chat = "/team join hidden 00000001-0000-0001-0000-000100000001"
+
+[[step]]
+chat = "/tp @s 100.5 -60 0.5 0 0"
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "team_hidden"
+
+# At night the tags take the entities' light.
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "night"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/team remove reds"
+
+[[step]]
+chat = "/team remove hidden"
+
+[[step]]
+chat = "/gamerule advance_time true"
