@@ -53,6 +53,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
+use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
@@ -368,6 +369,9 @@ pub struct GameState {
     pub was_sprinting: bool,
     pub position_send_counter: u32,
     pub options_from_game: bool,
+    /// The open options screen leaves to the game, not the pause menu:
+    /// Debug Options, which replaces any screen it opens over.
+    pub options_close_to_game: bool,
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
@@ -548,6 +552,7 @@ impl GameState {
             level_load: None,
             client_loaded: false,
             options_from_game: false,
+            options_close_to_game: false,
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
@@ -979,6 +984,7 @@ impl GameState {
         code: winit::keyboard::KeyCode,
         f3_held: bool,
         bindings: &KeyBindings,
+        menu: &mut crate::ui::menu::MainMenu,
         connection: &ConnectionHandle,
     ) -> bool {
         let input = InputKey::Keyboard(code);
@@ -1104,6 +1110,19 @@ impl GameState {
                 ));
                 true
             }
+            _ if bindings.matches(Action::DebugDebugOptions, &input) => {
+                if self.options_from_game && menu.is_debug_options() {
+                    menu.close_debug_options(bindings);
+                } else if self.options_from_game || self.input_live() {
+                    // TODO: vanilla also closes the pause menu, chat or a
+                    // container screen to open it (`canInterruptScreen`).
+                    menu.open_debug_options(bindings);
+                    self.options_from_game = true;
+                    self.options_close_to_game = true;
+                    self.paused = true;
+                }
+                true
+            }
             _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
@@ -1121,7 +1140,7 @@ impl GameState {
                 )]);
                 true
             }
-            // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
+            // TODO: F3+P pause-on-lost-focus,
             // F3+S dump dynamic textures, F3+T resource pack reload,
             // F3+L profiler, F3+1..4 debug charts (no backing features)
             _ => false,
@@ -2679,8 +2698,25 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    // A harness press goes through the debug chords as a key event's press
+    // does, then releases.
     #[cfg(feature = "test-harness")]
     if let Some(code) = core.input.take_harness_release() {
+        let f3_held = core.input.action_held(Action::DebugModifier);
+        if game.handle_debug_key(
+            code,
+            f3_held,
+            &core.input.key_bindings,
+            &mut core.menu,
+            connection,
+        ) {
+            core.input.unclick(code);
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        game.on_key_released(code, &core.input, connection);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_key_up() {
         game.on_key_released(code, &core.input, connection);
     }
 
@@ -2943,9 +2979,35 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
+    // TODO: Pomme doesn't track the server's reduced debug info yet.
+    let enabled = core
+        .menu
+        .debug_entries
+        .currently_enabled(game.show_debug, false);
+    let mut debug = if enabled.is_empty() {
+        DebugColumns::default()
+    } else {
+        debug_entries::entry_columns(
+            &enabled,
+            &DebugEntryInput {
+                fps: gfx.fps_counter.display_fps(),
+                framerate_limit: core.menu.max_framerate,
+                present_mode: gfx.renderer.present_mode(),
+                refresh_rate_hz: gfx
+                    .window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz())
+                    .map(|millihertz| millihertz as f32 / 1000.0),
+                lows: gfx.fps_counter.lows(),
+            },
+        )
+    };
+    if game.show_debug {
+        let info = hud::DebugInfo {
+            debug_options_key: hud::format_debug_keybind(
+                &core.input.key_bindings,
+                Action::DebugDebugOptions,
+            ),
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
@@ -2991,10 +3053,9 @@ pub fn update_game(
                 draw_ms: gfx.renderer.last_timings().draw_ms,
                 present_ms: gfx.renderer.last_timings().present_ms,
             }),
-        })
-    } else {
-        None
-    };
+        };
+        hud::build_debug_overlay(&mut debug, &info);
+    }
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -3018,9 +3079,9 @@ pub fn update_game(
         );
     }
     if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
+        // F1 hides the debug lines too, unless a screen is open.
+        if !game.input_live() {
+            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
                 gfx.renderer.menu_text_width(t, s)
             });
         }
@@ -3203,7 +3264,7 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
+            &debug,
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -4907,7 +4968,8 @@ pub fn update_game(
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
             // Chat Settings opened from chat return to it, unpaused.
-            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
+            let to_chat = game.chat.return_from_settings(game.command_tree.as_deref());
+            game.paused = !to_chat && !std::mem::take(&mut game.options_close_to_game);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }

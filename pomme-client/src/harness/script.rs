@@ -431,8 +431,7 @@ fn summarize(samples: &[FrameSample]) -> String {
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
     let mut intervals: Vec<f32> = samples.iter().map(|s| s.interval_ms).collect();
     intervals.sort_by(f32::total_cmp);
-    let slowest = &intervals[intervals.len() - intervals.len().div_ceil(100)..];
-    let low = slowest.iter().sum::<f32>() / slowest.len() as f32;
+    let low = crate::util::slowest_mean(&intervals, 100);
     // Per pass, in the order the frame stamps them.
     let mut passes: Vec<(&str, f32, u32)> = Vec::new();
     for &(name, ms) in samples.iter().flat_map(|s| &s.gpu) {

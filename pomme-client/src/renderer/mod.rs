@@ -1445,6 +1445,10 @@ impl Renderer {
         &self.ctx.api_version
     }
 
+    pub fn present_mode(&self) -> Option<rhi::PresentMode> {
+        self.swapchain.present_mode()
+    }
+
     pub fn loaded_chunk_count(&self) -> u32 {
         self.chunk_buffers.chunk_count()
     }

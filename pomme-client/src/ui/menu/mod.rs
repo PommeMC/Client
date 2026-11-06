@@ -1,6 +1,7 @@
 mod account;
 mod bedrock_screen;
 mod credits;
+mod debug_options;
 mod friends_screen;
 pub(crate) mod helpers;
 mod main_screen;
@@ -576,6 +577,7 @@ enum Screen {
     OptionsTelemetry,
     OptionsCredits,
     CreditsRoll,
+    DebugOptions,
 }
 
 impl Screen {
@@ -600,6 +602,7 @@ impl Screen {
             Self::OptionsTelemetry => Self::OptionsTelemetry,
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
+            Self::DebugOptions => Self::DebugOptions,
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
             Self::CreateWorld => Self::CreateWorld,
@@ -770,6 +773,7 @@ pub struct MainMenu {
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
     pub master_volume: f32,
@@ -825,6 +829,7 @@ pub struct MainMenu {
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
+    debug_search: TextFieldState,
 }
 
 /// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
@@ -933,6 +938,7 @@ impl MainMenu {
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
             master_volume: settings.master_volume,
@@ -982,6 +988,7 @@ impl MainMenu {
             reload_assets: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
+            debug_search: TextFieldState::new(MAX_SEARCH),
         };
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
@@ -1295,6 +1302,7 @@ impl MainMenu {
                 | Screen::OptionsTelemetry
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
+                | Screen::DebugOptions
         )
     }
 
@@ -1616,6 +1624,9 @@ impl MainMenu {
             }
             Screen::CreditsRoll => {
                 self.build_credits_roll(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::DebugOptions => {
+                self.build_debug_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
         }
     }

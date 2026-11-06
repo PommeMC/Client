@@ -1392,6 +1392,7 @@ impl AppCore {
         self.menu
             .screen_removed(game.options_from_game, &self.input.key_bindings);
         game.options_from_game = false;
+        game.options_close_to_game = false;
         game.close_creative_inventory();
         game.chat
             .close(crate::ui::chat::ChatExitReason::Interrupted);
