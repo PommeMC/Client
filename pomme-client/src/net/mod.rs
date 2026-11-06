@@ -244,6 +244,10 @@ pub enum NetworkEvent {
         menu_type: azalea_registry::builtin::MenuKind,
         title: String,
     },
+    OpenSignEditor {
+        pos: azalea_core::position::BlockPos,
+        is_front_text: bool,
+    },
     ContainerClosed,
     /// The server's correction of the vehicle the player steers.
     MoveVehicle {

@@ -23,6 +23,8 @@ pub mod particle;
 pub mod post;
 pub mod post_effect;
 pub mod shaderpack;
+pub mod sign_text;
 pub mod skin_preview;
 pub mod sky;
 pub mod weather;
+pub mod world_text;

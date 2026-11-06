@@ -75,7 +75,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Hud => to_value(protocol::hud(game)),
         Command::Sounds => to_value(core.audio.recent_sounds()),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
-        Command::Press(press) => press_key(core, press),
+        Command::Press(press) => press_key(core, game, press),
         Command::KeyDown(key) | Command::KeyUp(key) => {
             keyboard_key(&key.action, &key.key).map(|code| {
                 core.input
@@ -198,9 +198,14 @@ fn input_key(id: &str) -> Result<InputKey, String> {
 }
 
 /// A binding's default key, or a physical key, through the real key path.
-fn press_key(core: &mut AppCore, press: &protocol::Press) -> Result<Value, String> {
+fn press_key(
+    core: &mut AppCore,
+    game: &crate::app::phases::in_game::GameState,
+    press: &protocol::Press,
+) -> Result<Value, String> {
     let code = keyboard_key(&press.action, &press.key)?;
-    core.input.press_key(code, press.ctrl);
+    core.input
+        .press_key(code, press.ctrl, game.wants_text_input());
     Ok(Value::Null)
 }
 

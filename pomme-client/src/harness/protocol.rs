@@ -307,6 +307,7 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
             None if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) => {
                 "pause".into()
             }
+            None if game.sign_editor.is_some() => "sign".into(),
             None => "none".into(),
         }
     };

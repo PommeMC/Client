@@ -1388,7 +1388,8 @@ impl AppCore {
 
     /// `Gui.setScreen` with a new screen: whatever is up goes, running its
     /// `removed()`, so an options screen saves and chat keeps its draft.
-    fn replace_screen(&mut self, game: &mut GameState) {
+    fn replace_screen(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+        game.close_sign_editor(&connection.packet_tx);
         game.paused = false;
         self.menu
             .screen_removed(game.options_from_game, &self.input.key_bindings);
@@ -1410,7 +1411,7 @@ impl AppCore {
     ) {
         game.interaction
             .stop_destroying_for_screen(&connection.packet_tx);
-        self.replace_screen(game);
+        self.replace_screen(connection, game);
         game.close_menu();
 
         if let Some(message) = message {
@@ -2297,7 +2298,7 @@ impl AppCore {
                             game.recipe_book_ui
                                 .reset_for_closed_screen(&mut game.recipe_book);
                         }
-                        self.replace_screen(game);
+                        self.replace_screen(connection, game);
                         game.inventory_open = false;
                         game.inv_drag = None;
                         game.inv_last_click = None;
@@ -2359,7 +2360,8 @@ impl AppCore {
                 }
                 NetworkEvent::ContainerClosed => {
                     // Vanilla closes whatever menu is open regardless of the
-                    // packet's container id.
+                    // packet's container id, and with it any screen.
+                    game.close_sign_editor(&connection.packet_tx);
                     game.close_menu();
                     // The server initiated the close; don't echo one back.
                     game.container_was_open = None;
@@ -2452,10 +2454,20 @@ impl AppCore {
                 NetworkEvent::ServerLinks { links } => {
                     game.server_links = links;
                 }
+                NetworkEvent::OpenSignEditor { pos, is_front_text } => {
+                    if let Some(editor) = game.sign_editor_for(pos.into(), is_front_text) {
+                        self.replace_screen(connection, game);
+                        game.close_menu();
+                        game.sign_editor = Some(editor);
+                        self.apply_cursor_grab(window, Some(game));
+                    }
+                }
                 NetworkEvent::ShowDialog { dialog } => {
                     // The screen under the dialog is vanilla's `previousScreen`:
                     // it keeps its state (an open container included) and comes
                     // back when the dialog closes.
+                    // TODO: a sign editor under it sends its lines here, as
+                    // `setScreen` runs its `removed()`, and again on closing.
                     if game.open_server_dialog(dialog) {
                         self.apply_cursor_grab(window, Some(game));
                     }
@@ -2619,7 +2631,7 @@ impl AppCore {
                         }
                         game.chunk_store.block_entities.insert(
                             pos,
-                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                            crate::world::block_entity::StoredBlockEntity::new(kind, nbt),
                         );
                     }
                 }
@@ -2628,7 +2640,7 @@ impl AppCore {
                     if game.chunk_store.get_chunk(&chunk_pos).is_some() {
                         game.chunk_store.block_entities.insert(
                             pos,
-                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                            crate::world::block_entity::StoredBlockEntity::new(kind, nbt),
                         );
                     }
                 }

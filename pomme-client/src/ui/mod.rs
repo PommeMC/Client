@@ -35,3 +35,4 @@ pub mod touch_controls;
 pub mod world_list;
 
 pub mod bundle;
+pub mod sign_edit;

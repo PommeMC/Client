@@ -29,6 +29,15 @@ fn main() {
         println!("cargo:rustc-cfg=mobile");
     }
 
+    // Where pyronyx's `loaded` feature is on (see Cargo.toml): Vulkan is
+    // loaded at runtime rather than linked.
+    println!("cargo::rustc-check-cfg=cfg(vulkan_loaded)");
+    if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android")
+    {
+        println!("cargo:rustc-cfg=vulkan_loaded");
+    }
+
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -184,8 +193,8 @@ fn main() {
         ("clouds.frag", shaderc::ShaderKind::Fragment),
         ("entity_shadow.vert", shaderc::ShaderKind::Vertex),
         ("entity_shadow.frag", shaderc::ShaderKind::Fragment),
-        ("nameplate.vert", shaderc::ShaderKind::Vertex),
-        ("nameplate.frag", shaderc::ShaderKind::Fragment),
+        ("world_text.vert", shaderc::ShaderKind::Vertex),
+        ("world_text.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

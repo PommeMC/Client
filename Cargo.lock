@@ -4811,6 +4811,7 @@ version = "0.5.1+1.4.363"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "989a05a332095d6a9ec3d64e429a9ceaf2337812c6216dbd5128e8441d1fdf37"
 dependencies = [
+ "libloading 0.9.0",
  "raw-window-handle",
  "raw-window-metal",
 ]
