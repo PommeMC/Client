@@ -1389,8 +1389,9 @@ impl AppCore {
     /// `removed()`, so an options screen saves and chat keeps its draft.
     fn replace_screen(&mut self, game: &mut GameState) {
         game.paused = false;
+        self.menu
+            .screen_removed(game.options_from_game, &self.input.key_bindings);
         game.options_from_game = false;
-        self.menu.flush_settings(&self.input.key_bindings);
         game.close_creative_inventory();
         game.chat
             .close(crate::ui::chat::ChatExitReason::Interrupted);
