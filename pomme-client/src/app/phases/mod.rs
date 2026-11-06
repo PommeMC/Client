@@ -64,82 +64,58 @@ impl Panorama {
     }
 }
 
-const FPS_WINDOW_SECS: f32 = 2.0;
+/// How far back the lows look.
+const LOWS_WINDOW_SECS: f32 = 2.0;
 
 pub struct FpsCounter {
     frame_count: u32,
     elapsed: f32,
     display_fps: u32,
+    window: VecDeque<f32>,
     window_time: f32,
-    frame_times: VecDeque<f32>,
-    scratch: Vec<f32>,
-    low_1pct_fps: u32,
-    low_01pct_fps: u32,
+    lows: (u32, u32),
 }
 
 impl FpsCounter {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             frame_count: 0,
             elapsed: 0.0,
             display_fps: 0,
+            window: VecDeque::new(),
             window_time: 0.0,
-            frame_times: VecDeque::with_capacity(512),
-            scratch: Vec::with_capacity(512),
-            low_1pct_fps: 0,
-            low_01pct_fps: 0,
+            lows: (0, 0),
         }
     }
 
     pub fn update(&mut self, dt: f32) {
         self.frame_count += 1;
         self.elapsed += dt;
-
+        self.window.push_back(dt);
         self.window_time += dt;
-        self.frame_times.push_back(dt);
-        while self.window_time > FPS_WINDOW_SECS && self.frame_times.len() > 1 {
-            if let Some(old) = self.frame_times.pop_front() {
-                self.window_time -= old;
-            }
+        while self.window_time > LOWS_WINDOW_SECS && self.window.len() > 1 {
+            self.window_time -= self.window.pop_front().unwrap_or_default();
         }
-
         if self.elapsed >= 1.0 {
             self.display_fps = self.frame_count;
             self.frame_count = 0;
             self.elapsed -= 1.0;
-            self.recompute_lows();
+            self.lows = self.compute_lows();
         }
     }
 
-    fn recompute_lows(&mut self) {
-        let count = self.frame_times.len();
-        if count == 0 {
-            self.low_1pct_fps = self.display_fps;
-            self.low_01pct_fps = self.display_fps;
-            return;
-        }
-
-        self.scratch.clear();
-        self.scratch.extend(&self.frame_times);
-        self.scratch.sort_unstable_by(|a, b| b.total_cmp(a));
-
-        let count_1pct = ((count as f64 * 0.01).ceil() as usize).max(1).min(count);
-        let sum_1pct: f32 = self.scratch[..count_1pct].iter().sum();
-        let avg_1pct = sum_1pct / count_1pct as f32;
-        self.low_1pct_fps = if avg_1pct > 0.0 {
-            ((1.0 / avg_1pct).round() as u32).min(self.display_fps)
-        } else {
-            0
+    fn compute_lows(&self) -> (u32, u32) {
+        let mut sorted: Vec<f32> = self.window.iter().copied().collect();
+        sorted.sort_by(f32::total_cmp);
+        let fps = |per| {
+            let secs = crate::util::slowest_mean(&sorted, per);
+            if secs > 0.0 {
+                (1.0 / secs).round() as u32
+            } else {
+                0
+            }
         };
-
-        let count_01pct = ((count as f64 * 0.001).ceil() as usize).max(1).min(count);
-        let sum_01pct: f32 = self.scratch[..count_01pct].iter().sum();
-        let avg_01pct = sum_01pct / count_01pct as f32;
-        self.low_01pct_fps = if avg_01pct > 0.0 {
-            ((1.0 / avg_01pct).round() as u32).min(self.low_1pct_fps)
-        } else {
-            0
-        };
+        (fps(100), fps(1000))
     }
 
     #[inline]
@@ -148,16 +124,12 @@ impl FpsCounter {
         self.display_fps
     }
 
+    /// The frame rate of the slowest 1% and 0.1% of the last two seconds'
+    /// frames, updated with `display_fps`.
     #[inline]
     #[must_use]
-    pub const fn stats(&self) -> (u32, u32, u32) {
-        (self.display_fps, self.low_1pct_fps, self.low_01pct_fps)
-    }
-}
-
-impl Default for FpsCounter {
-    fn default() -> Self {
-        Self::new()
+    pub const fn lows(&self) -> (u32, u32) {
+        self.lows
     }
 }
 
@@ -310,26 +282,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fps_counter_calculates_average_and_lows() {
+    fn one_slow_frame_sets_both_lows() {
         let mut counter = FpsCounter::new();
         for _ in 0..99 {
             counter.update(0.01);
         }
-        counter.update(0.011);
+        counter.update(0.02);
         assert_eq!(counter.display_fps(), 100);
-        assert_eq!(counter.stats(), (100, 91, 91));
-    }
-
-    #[test]
-    fn fps_counter_detects_frametime_stutters() {
-        let mut counter = FpsCounter::new();
-        for _ in 0..99 {
-            counter.update(0.009);
-        }
-        counter.update(0.109);
-        let (fps, low_1, low_01) = counter.stats();
-        assert_eq!(fps, 100);
-        assert!(low_1 < 100);
-        assert!(low_01 <= low_1);
+        assert_eq!(counter.lows(), (50, 50));
     }
 }

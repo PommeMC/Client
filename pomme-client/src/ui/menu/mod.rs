@@ -1,6 +1,7 @@
 mod account;
 mod bedrock_screen;
 mod credits;
+mod debug_options;
 mod friends_screen;
 pub(crate) mod helpers;
 mod main_screen;
@@ -122,8 +123,6 @@ struct Settings {
     shader_pack: Option<String>,
     #[serde(default = "default_attack_indicator")]
     attack_indicator: u8,
-    #[serde(default)]
-    fps_display: u8,
     #[serde(default)]
     display_mode: u8,
     #[serde(default)]
@@ -289,7 +288,6 @@ impl Default for Settings {
             cloud_mode: 2,
             shader_pack: None,
             attack_indicator: 1,
-            fps_display: 0,
             display_mode: 0,
             theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
@@ -579,6 +577,7 @@ enum Screen {
     OptionsTelemetry,
     OptionsCredits,
     CreditsRoll,
+    DebugOptions,
 }
 
 impl Screen {
@@ -603,6 +602,7 @@ impl Screen {
             Self::OptionsTelemetry => Self::OptionsTelemetry,
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
+            Self::DebugOptions => Self::DebugOptions,
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
             Self::CreateWorld => Self::CreateWorld,
@@ -773,6 +773,7 @@ pub struct MainMenu {
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
     pub master_volume: f32,
@@ -800,7 +801,6 @@ pub struct MainMenu {
     pub shader_pack: Option<String>,
     pub shader_packs_dir: PathBuf,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
-    pub fps_display: crate::ui::hud::FpsDisplayMode,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
@@ -829,6 +829,7 @@ pub struct MainMenu {
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
+    debug_search: TextFieldState,
 }
 
 /// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
@@ -937,6 +938,7 @@ impl MainMenu {
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
             master_volume: settings.master_volume,
@@ -965,7 +967,6 @@ impl MainMenu {
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
                 settings.attack_indicator,
             ),
-            fps_display: crate::ui::hud::FpsDisplayMode::from_u8(settings.fps_display),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
             force_unicode_font: settings.force_unicode_font,
@@ -987,6 +988,7 @@ impl MainMenu {
             reload_assets: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
+            debug_search: TextFieldState::new(MAX_SEARCH),
         };
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
@@ -1210,7 +1212,6 @@ impl MainMenu {
                 cloud_mode: self.cloud_mode.to_u8(),
                 shader_pack: self.shader_pack.clone(),
                 attack_indicator: self.attack_indicator.to_u8(),
-                fps_display: self.fps_display.to_u8(),
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
@@ -1296,6 +1297,7 @@ impl MainMenu {
                 | Screen::OptionsTelemetry
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
+                | Screen::DebugOptions
         )
     }
 
@@ -1618,6 +1620,9 @@ impl MainMenu {
             Screen::CreditsRoll => {
                 self.build_credits_roll(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::DebugOptions => {
+                self.build_debug_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
         }
     }
 
@@ -1911,31 +1916,6 @@ mod tests {
             let json = serde_json::to_string(&settings).unwrap();
             let loaded: Settings = serde_json::from_str(&json).unwrap();
             assert_eq!(PanoramaTheme::from_u8(loaded.theme), theme);
-        }
-    }
-
-    #[test]
-    fn fps_display_settings_are_backward_compatible_and_round_trip() {
-        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
-        legacy.as_object_mut().unwrap().remove("fps_display");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy.fps_display, 0);
-
-        for mode in [
-            crate::ui::hud::FpsDisplayMode::Off,
-            crate::ui::hud::FpsDisplayMode::Simple,
-            crate::ui::hud::FpsDisplayMode::Extended,
-        ] {
-            let settings = Settings {
-                fps_display: mode.to_u8(),
-                ..Settings::default()
-            };
-            let json = serde_json::to_string(&settings).unwrap();
-            let loaded: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(
-                crate::ui::hud::FpsDisplayMode::from_u8(loaded.fps_display),
-                mode
-            );
         }
     }
 }

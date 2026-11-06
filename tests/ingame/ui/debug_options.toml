@@ -1,0 +1,132 @@
+# F3 + F6 opens Debug Options. Setting the fps entry to Always shows its line
+# with the overlay closed; it goes back to In Overlay at the end, since the
+# statuses save.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+deterministic = true
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "options"
+
+# The search box has focus; the list keeps the fps row only.
+[[step]]
+text = "fps"
+
+[[step]]
+wait_ms = 300
+
+# The fps row's Always button.
+[[step]]
+cursor = [356, 93]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "always"
+
+# F3 + F6 again closes it, to the game.
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "hud"
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+text = "fps"
+
+[[step]]
+wait_ms = 300
+
+# Back to In Overlay, the Default profile's status for it.
+[[step]]
+cursor = [296, 93]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.f3" }
+
+[[step]]
+press = { key = "key.keyboard.f6" }
+
+[[step]]
+key_up = { key = "key.keyboard.f3" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "restored"
+
+[[step]]
+chat = "/gamerule advance_time true"

@@ -899,8 +899,28 @@ pub(super) fn push_screen_chrome(
     title: &str,
 ) -> ChromeLayout {
     let fs = common::FONT_SIZE * gs;
-    let cx = sw / 2.0;
-    let header_h = HEADER_FOOTER_H * gs;
+    let chrome = push_chrome_frame(elements, sw, sh, gs, HEADER_FOOTER_H);
+    elements.push(MenuElement::Text {
+        x: sw / 2.0,
+        y: (chrome.header_h - fs) / 2.0,
+        text: title.into(),
+        scale: fs,
+        color: WHITE,
+        centered: true,
+    });
+    chrome
+}
+
+/// [`push_screen_chrome`]'s frame without the title, under a header
+/// `header_units` high (`HeaderAndFooterLayout`'s header height).
+pub(super) fn push_chrome_frame(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    header_units: f32,
+) -> ChromeLayout {
+    let header_h = header_units * gs;
     let footer_h = HEADER_FOOTER_H * gs;
     let sep_h = 2.0 * gs;
     let content_top = header_h;
@@ -914,14 +934,6 @@ pub(super) fn push_screen_chrome(
         content_bottom - content_top,
         gs,
     );
-    elements.push(MenuElement::Text {
-        x: cx,
-        y: (header_h - fs) / 2.0,
-        text: title.into(),
-        scale: fs,
-        color: WHITE,
-        centered: true,
-    });
     elements.push(MenuElement::Image {
         x: 0.0,
         y: content_top - sep_h,
@@ -1111,6 +1123,27 @@ pub(super) enum BedrockDownload {
 /// The Pomme link and theme dropdowns and the theme wipe, shared by both
 /// title screens.
 impl MainMenu {
+    /// A full-width list's wheel scroll, half a row per line, clamped to its
+    /// rows; returns the cursor and click its entries see, which only reach
+    /// them inside the list (`getEntryAtPosition`).
+    pub(super) fn scroll_list(
+        &mut self,
+        input: &MenuInput,
+        sw: f32,
+        list_y: f32,
+        list_h: f32,
+        total_h: f32,
+        row_h: f32,
+    ) -> ((f32, f32), bool) {
+        let in_list = common::hit_test(input.cursor, [0.0, list_y, sw, list_h]);
+        if in_list {
+            self.scroll_offset -= input.scroll_delta * row_h / 2.0;
+        }
+        self.scroll_offset = self.scroll_offset.clamp(0.0, (total_h - list_h).max(0.0));
+        let row_cursor = if in_list { input.cursor } else { (-1.0, -1.0) };
+        (row_cursor, in_list && input.clicked)
+    }
+
     /// Opening either dropdown closes the other.
     pub(super) fn toggle_links(&mut self) {
         self.links_open = !self.links_open;
