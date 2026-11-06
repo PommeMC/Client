@@ -1541,6 +1541,20 @@ fn interaction_ranges(attributes: &AttributeMap, creative: bool, protocol: i32) 
     }
 }
 
+/// Vanilla `Player.isWithinBlockInteractionRange`.
+pub fn within_block_interaction_range(
+    eye: DVec3,
+    pos: crate::position::BlockPos,
+    attributes: &AttributeMap,
+    creative: bool,
+    protocol: i32,
+    buffer: f64,
+) -> bool {
+    let range = interaction_ranges(attributes, creative, protocol).0 + buffer;
+    let corner = pos.corner();
+    eye.clamp(corner, corner + 1.0).distance_squared(eye) < range * range
+}
+
 /// Vanilla `Player.getCurrentItemAttackStrengthDelay`, in ticks. Equipment
 /// and enchantment modifiers are applied server-side and arrive in the synced
 /// `ATTACK_SPEED` attribute snapshot.

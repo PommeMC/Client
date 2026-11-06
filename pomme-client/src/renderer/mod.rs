@@ -48,13 +48,15 @@ use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
 use pipelines::lightmap::{Lightmap, LightmapInfo};
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
-use pipelines::nameplate::{NameplatePipeline, NameplateRenderInfo};
+use pipelines::nameplate::NameplateRenderInfo;
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::post_effect::{PostEffect, PostEffects};
+use pipelines::sign_text::SignRenderInfo;
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
+use pipelines::world_text::{WorldTextPipeline, WorldTextVertices};
 use thiserror::Error;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -220,6 +222,7 @@ enum RenderMode<'a> {
         block_entities: BlockEntityList<'a>,
         particles: &'a [ParticleQuad],
         nameplates: &'a [NameplateRenderInfo],
+        signs: &'a [SignRenderInfo],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -292,7 +295,7 @@ pub struct Renderer {
     weather_pipeline: WeatherPipeline,
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
-    nameplate_pipeline: NameplatePipeline,
+    world_text_pipeline: WorldTextPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
     /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
@@ -518,7 +521,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
         );
-        let nameplate_pipeline = NameplatePipeline::new(
+        let world_text_pipeline = WorldTextPipeline::new(
             &ctx.device,
             swapchain_state.targets(),
             menu_pipeline.mc_font_texture(),
@@ -673,7 +676,7 @@ impl Renderer {
             weather_pipeline,
             particle_pipeline,
             cloud_pipeline,
-            nameplate_pipeline,
+            world_text_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
             font_options,
@@ -1115,7 +1118,7 @@ impl Renderer {
         // TODO: weather, clouds, dropped items, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
         // block outline and chunk borders over the pack's depth; name tags
-        // through `gbuffers_entities_translucent` (Iris's `TEXT` and
+        // and sign text through `gbuffers_entities_translucent` (Iris's `TEXT` and
         // `TEXT_BG`), which needs the glyph atlas as an RGBA 2D texture.
         if let Some((_, slot)) = &mut self.shader_pack {
             *slot = Some(pack);
@@ -1187,7 +1190,7 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
             self.particle_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
-            self.nameplate_pipeline
+            self.world_text_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.cloud_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1686,7 +1689,8 @@ impl Renderer {
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: BlockEntityList<'_>,
         particles: &[ParticleQuad],
-        nameplates: &[pipelines::nameplate::NameplateRenderInfo],
+        nameplates: &[NameplateRenderInfo],
+        signs: &[SignRenderInfo],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -1747,6 +1751,7 @@ impl Renderer {
                 block_entities,
                 particles,
                 nameplates,
+                signs,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1866,7 +1871,7 @@ impl Renderer {
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         }
-        self.nameplate_pipeline.rebind_font(
+        self.world_text_pipeline.rebind_font(
             &self.ctx.device,
             self.menu_pipeline.mc_font_texture(),
             self.menu_pipeline.mc_font_color_texture(),
@@ -2116,7 +2121,7 @@ impl Renderer {
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
-            self.nameplate_pipeline.update_camera(frame, &uniform);
+            self.world_text_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
         }
 
@@ -2337,19 +2342,26 @@ impl Renderer {
         if let RenderMode::World {
             particles,
             nameplates,
+            signs,
             ..
         } = &mode
         {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
-            self.nameplate_pipeline.prepare(
-                frame,
-                &self.camera,
-                self.camera_render_position(),
-                self.camera.anchor(),
-                self.menu_pipeline.mc_glyph_map(),
-                nameplates,
-            );
+            let mut text = WorldTextVertices::default();
+            if let Some(glyph_map) = self.menu_pipeline.mc_glyph_map() {
+                let anchor = self.camera.anchor();
+                pipelines::nameplate::push_nameplates(
+                    &mut text,
+                    &self.camera,
+                    self.camera_render_position(),
+                    anchor,
+                    glyph_map,
+                    nameplates,
+                );
+                pipelines::sign_text::push_signs(&mut text, anchor, glyph_map, signs);
+            }
+            self.world_text_pipeline.prepare(frame, text);
         }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
 
@@ -2390,6 +2402,7 @@ impl Renderer {
                 block_entities,
                 particles: _,
                 nameplates: _,
+                signs: _,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2582,7 +2595,7 @@ impl Renderer {
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
                     }
-                    self.nameplate_pipeline.draw(&mut pass, frame);
+                    self.world_text_pipeline.draw(&mut pass, frame);
                     self.gpu_stamp(&encoder, frame, "clouds");
                     cull_ms
                 };
@@ -3184,7 +3197,7 @@ impl Drop for Renderer {
         self.held_item_pipeline.destroy(&self.ctx.device);
         self.weather_pipeline.destroy(&self.ctx.device);
         self.particle_pipeline.destroy(&self.ctx.device);
-        self.nameplate_pipeline.destroy(&self.ctx.device);
+        self.world_text_pipeline.destroy(&self.ctx.device);
         self.cloud_pipeline.destroy(&self.ctx.device);
         self.gui_item_pipeline.destroy(&self.ctx.device);
         self.gui_item_atlas.destroy(&self.ctx.device);

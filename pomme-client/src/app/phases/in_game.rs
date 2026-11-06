@@ -49,6 +49,7 @@ use crate::renderer::pipelines::lightmap::LightmapInfo;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
+use crate::renderer::pipelines::sign_text::{SignFace, SignRenderInfo};
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
@@ -263,6 +264,7 @@ pub struct GameState {
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub sign_editor: Option<crate::ui::sign_edit::SignEditState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     /// The connection is in the configuration phase (the join, or a
@@ -616,6 +618,7 @@ impl GameState {
                 chat
             },
             server_dialog: None,
+            sign_editor: None,
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
             configuring: true,
@@ -755,6 +758,90 @@ impl GameState {
             || self.open_container.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
+            || self.sign_editor.is_some()
+    }
+
+    /// The sign block at `pos`, if that's what is there.
+    fn sign_block_at(&self, pos: BlockPos) -> Option<crate::world::block_entity::SignBlock> {
+        let data = block_state_data_at(self, pos);
+        crate::world::block_entity::SignBlock::of(data.id(), data.properties())
+    }
+
+    /// `ClientPacketListener.handleOpenSignEditor`: the editor for the sign
+    /// at `pos`, or `None` (and a warning) when there's no sign there.
+    pub fn sign_editor_for(
+        &self,
+        pos: BlockPos,
+        is_front_text: bool,
+    ) -> Option<crate::ui::sign_edit::SignEditState> {
+        let texts = self
+            .chunk_store
+            .block_entities
+            .get(&pos)
+            .and_then(|be| be.sign.as_deref());
+        let (Some(texts), Some(block)) = (texts, self.sign_block_at(pos)) else {
+            tracing::warn!("Ignoring openTextEdit on an invalid entity at {pos:?}");
+            return None;
+        };
+        Some(crate::ui::sign_edit::SignEditState::new(
+            pos,
+            is_front_text,
+            block,
+            texts.face(is_front_text),
+        ))
+    }
+
+    /// `AbstractSignEditScreen.removed`: the lines go to the server however
+    /// the screen closes.
+    pub fn close_sign_editor(&mut self, packet_tx: &crate::net::sender::PacketSender) {
+        if let Some(editor) = self.sign_editor.take() {
+            packet_tx.send(ServerboundGamePacket::SignUpdate(
+                azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
+                    pos: editor.pos.into(),
+                    is_front_text: editor.is_front_text,
+                    lines: editor.messages,
+                },
+            ));
+        }
+    }
+
+    /// `AbstractSignEditScreen.setMessage`: the sign shows the lines as
+    /// they're typed.
+    fn apply_sign_edit(&mut self) {
+        let Some(editor) = &self.sign_editor else {
+            return;
+        };
+        let Some(texts) = self
+            .chunk_store
+            .block_entities
+            .get_mut(&editor.pos)
+            .and_then(|be| be.sign.as_deref_mut())
+        else {
+            return;
+        };
+        let face = texts.face_mut(editor.is_front_text);
+        for (message, line) in face.messages.iter_mut().zip(&editor.messages) {
+            *message = crate::chat_component::Component::text(line.as_str());
+        }
+    }
+
+    /// `AbstractSignEditScreen.isValid`: the sign is still there and within
+    /// reach.
+    fn sign_edit_valid(&self) -> bool {
+        self.sign_editor.as_ref().is_none_or(|editor| {
+            self.chunk_store
+                .block_entities
+                .get(&editor.pos)
+                .is_some_and(|be| be.sign.is_some())
+                && crate::player::interaction::within_block_interaction_range(
+                    self.player.eye_pos().into(),
+                    editor.pos,
+                    &self.player.attributes,
+                    crate::player::is_creative(self.player.game_mode),
+                    self.block_registry.protocol(),
+                    4.0,
+                )
+        })
     }
 
     /// The container menu the player currently has open (0 = survival
@@ -911,6 +998,9 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self.sign_editor.is_some() {
+            return true;
+        }
         if self
             .server_dialog
             .as_ref()
@@ -4307,6 +4397,29 @@ pub fn update_game(
         &text_events,
     );
 
+    if let Some(editor) = game.sign_editor.as_mut() {
+        // `Font.width`, in GUI units.
+        let width = |s: &str| gfx.renderer.menu_text_width(s, common::FONT_SIZE).ceil();
+        let changed = editor.handle_text_input(&text_events, &width);
+        let done = editor.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+            &width,
+        );
+        if changed {
+            game.apply_sign_edit();
+        }
+        if done || !game.sign_edit_valid() {
+            game.close_sign_editor(&connection.packet_tx);
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        core.input.clear_just_pressed_actions();
+    }
+
     if screen_pointer != game.screen_pointer {
         game.screen_pointer = screen_pointer;
         gfx.window
@@ -4641,6 +4754,38 @@ pub fn update_game(
         Vec::new()
     };
 
+    // `BlockEntityRenderer.shouldRender` at the default view distance, 64.
+    let sign_renders: Vec<SignRenderInfo> = if benchmark_running {
+        Vec::new()
+    } else {
+        let camera = gfx.renderer.camera_render_position();
+        let viewer = game
+            .spectated()
+            .map_or(*game.player.position, |entity| *entity.position);
+        game.chunk_store
+            .block_entities
+            .iter()
+            .filter_map(|(&pos, be)| {
+                let texts = be.sign.as_deref()?;
+                let center = pos.center();
+                if center.distance_squared(camera) >= 64.0 * 64.0 {
+                    return None;
+                }
+                let block = game.sign_block_at(pos)?;
+                // `AbstractSignRenderer.isOutlineVisible`.
+                // TODO: also while scoping through a spyglass in first person.
+                let outline_visible = center.distance_squared(viewer) < 16.0 * 16.0;
+                Some(SignRenderInfo {
+                    pos,
+                    block,
+                    light: block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]),
+                    faces: [&texts.front, &texts.back]
+                        .map(|text| SignFace::new(text, outline_visible)),
+                })
+            })
+            .collect()
+    };
+
     let (block_entity_renders, camera_block_entities) = if benchmark_running {
         (Vec::new(), 0)
     } else {
@@ -4947,6 +5092,7 @@ pub fn update_game(
         },
         &particle_quads,
         &nameplate_renders,
+        &sign_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off

@@ -13,6 +13,7 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{block_entity_model, rhi, util};
+use crate::world::block_entity::DYE_COLOR_NAMES;
 
 pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
@@ -64,34 +65,7 @@ struct KindDef {
     tex_size: u32,
 }
 
-/// 16 dye colors in vanilla `DyeColor` ordinal order. Used both to build
-/// texture-variant arrays and to map block names back to variant indices.
-const DYE_COLOR_NAMES: [&str; 16] = [
-    "white",
-    "orange",
-    "magenta",
-    "light_blue",
-    "yellow",
-    "lime",
-    "pink",
-    "gray",
-    "light_gray",
-    "cyan",
-    "purple",
-    "blue",
-    "brown",
-    "green",
-    "red",
-    "black",
-];
-
-/// Wood/material variants for sign textures, in the order they appear in
-/// `SIGN_TEXTURES`.
-const SIGN_WOOD_NAMES: [&str; 12] = [
-    "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
-    "bamboo", "crimson", "warped",
-];
-
+/// In `SIGN_WOOD_NAMES` order.
 const SIGN_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/block/oak_sign.png"],
     &["minecraft/textures/block/spruce_sign.png"],
@@ -213,11 +187,8 @@ pub fn variant_for_block(
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
-        BlockEntityKind::Sign => name
-            .strip_suffix("_sign")
-            .or_else(|| name.strip_suffix("_wall_sign"))
-            .and_then(|s| name_index(&SIGN_WOOD_NAMES, s))
-            .unwrap_or(0),
+        BlockEntityKind::Sign => crate::world::block_entity::SignBlock::of(name, props)
+            .map_or(0, |sign| sign.wood as u32),
         _ => 0,
     }
 }

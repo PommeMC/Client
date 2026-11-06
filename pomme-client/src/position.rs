@@ -24,6 +24,16 @@ impl BlockPos {
         )
     }
 
+    /// Vanilla `Vec3.atLowerCornerOf`.
+    pub fn corner(self) -> glam::DVec3 {
+        glam::DVec3::new(self.x as f64, self.y as f64, self.z as f64)
+    }
+
+    /// Vanilla `Vec3.atCenterOf`.
+    pub fn center(self) -> glam::DVec3 {
+        self.corner() + 0.5
+    }
+
     /// Vanilla `BlockPos.relative`: the neighbour one step towards
     /// `direction`.
     pub fn relative(self, direction: Direction) -> Self {
@@ -54,6 +64,12 @@ impl ChunkPos {
 // pomme-encoded.
 impl From<BlockPos> for azalea_core::position::BlockPos {
     fn from(pos: BlockPos) -> Self {
+        Self::new(pos.x, pos.y, pos.z)
+    }
+}
+
+impl From<azalea_core::position::BlockPos> for BlockPos {
+    fn from(pos: azalea_core::position::BlockPos) -> Self {
         Self::new(pos.x, pos.y, pos.z)
     }
 }

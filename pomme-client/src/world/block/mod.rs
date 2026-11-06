@@ -34,7 +34,7 @@ use crate::position::BlockPos;
 pub struct PropMap(Box<[(&'static str, &'static str)]>);
 
 impl PropMap {
-    fn from_pairs(mut pairs: Vec<(&'static str, &'static str)>) -> Self {
+    pub(crate) fn from_pairs(mut pairs: Vec<(&'static str, &'static str)>) -> Self {
         pairs.sort_unstable_by_key(|&(k, _)| k);
         Self(pairs.into_boxed_slice())
     }
