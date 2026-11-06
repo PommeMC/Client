@@ -529,7 +529,7 @@ pub struct BakedModel {
 
 #[derive(Clone)]
 pub struct MultipartEntry {
-    pub when: HashMap<String, String>,
+    pub when: super::condition::Condition,
     pub model: Arc<BakedModel>,
 }
 
@@ -631,10 +631,12 @@ pub fn bake_all_models(
                 let mut entries = Vec::new();
                 for case in multipart {
                     if let Some(baked) = bake(case.apply.first()?) {
-                        entries.push(MultipartEntry {
-                            when: parse_when_condition(&case.when),
-                            model: baked,
-                        });
+                        match super::condition::Condition::parse(case.when.as_ref()) {
+                            Ok(when) => entries.push(MultipartEntry { when, model: baked }),
+                            Err(error) => {
+                                tracing::warn!(block_name, %error, "Invalid multipart selector")
+                            }
+                        }
                     }
                 }
                 if !entries.is_empty() {
@@ -1677,20 +1679,6 @@ pub fn find_first_string_for_key(json: &serde_json::Value, key: &str) -> Option<
         serde_json::Value::Array(arr) => arr.iter().find_map(|v| find_first_string_for_key(v, key)),
         _ => None,
     }
-}
-
-fn parse_when_condition(when: &Option<serde_json::Value>) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    if let Some(serde_json::Value::Object(map)) = when {
-        for (key, value) in map {
-            if let serde_json::Value::String(s) = value {
-                result.insert(key.clone(), s.clone());
-            } else if let serde_json::Value::Bool(b) = value {
-                result.insert(key.clone(), b.to_string());
-            }
-        }
-    }
-    result
 }
 
 fn for_each_blockstate(
