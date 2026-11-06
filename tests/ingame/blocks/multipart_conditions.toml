@@ -37,6 +37,9 @@ expect = { block = "oak_shelf", at = [5, -60, 5] }
 chat = "/tp @s 4.0 -57.6 8.6"
 
 [[step]]
+expect = { player = { position = [4.0, -57.6, 8.6] } }
+
+[[step]]
 look_at = [4.0, -60.0, 3.8]
 
 [[step]]
