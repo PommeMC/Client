@@ -35,13 +35,12 @@ impl<'a> BlockReader<'a> {
             .iter()
             .position(|column| column.as_ref().is_some_and(|(p, _)| *p == pos));
         match hit {
-            Some(1) => columns.swap(0, 1),
             Some(0) => {}
+            Some(_) => columns.swap(0, 1),
             None => {
                 columns[1] = columns[0].take();
                 columns[0] = Some((pos, self.store.borrow_chunk(&pos).map(|chunk| chunk.read())));
             }
-            Some(_) => unreachable!("two-column cache"),
         }
         columns[0]
             .as_ref()
