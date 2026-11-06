@@ -151,7 +151,13 @@ struct SerializedOptions {
     profile: Option<DebugProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     custom: Option<HashMap<String, DebugEntryStatus>>,
+    /// `DataFixTypes.wrapCodec`'s stamp.
+    #[serde(rename = "DataVersion", skip_deserializing)]
+    data_version: i32,
 }
+
+/// 26.3's data version (`world_version` in its `version.json`).
+const DATA_VERSION: i32 = 5023;
 
 /// Vanilla `DebugScreenEntryList`, without the overlay's visibility, which
 /// Pomme keeps as `GameState::show_debug` and passes in.
@@ -248,6 +254,7 @@ impl DebugEntries {
         let serialized = SerializedOptions {
             profile: self.profile,
             custom: self.profile.is_none().then(|| self.statuses.clone()),
+            data_version: DATA_VERSION,
         };
         let written = serde_json::to_vec(&serialized)
             .map_err(std::io::Error::other)
@@ -461,7 +468,7 @@ mod tests {
         assert!(DebugEntries::load(&dir).is_using_profile(DebugProfile::Default));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            r#"{"profile":"default"}"#
+            r#"{"profile":"default","DataVersion":5023}"#
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -471,10 +478,11 @@ mod tests {
         let profile = SerializedOptions {
             profile: Some(DebugProfile::Performance),
             custom: None,
+            data_version: DATA_VERSION,
         };
         assert_eq!(
             serde_json::to_string(&profile).unwrap(),
-            r#"{"profile":"performance"}"#
+            r#"{"profile":"performance","DataVersion":5023}"#
         );
         let custom: SerializedOptions =
             serde_json::from_str(r#"{"custom":{"minecraft:fps":"alwaysOn"}}"#).unwrap();

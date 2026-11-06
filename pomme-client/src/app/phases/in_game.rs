@@ -2711,6 +2711,10 @@ pub fn update_game(
         }
         game.on_key_released(code, &core.input, connection);
     }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_key_up() {
+        game.on_key_released(code, &core.input, connection);
+    }
 
     // The ticks the loading screen handed over finish before any packet is
     // handled, as vanilla's join tick does.
@@ -3071,10 +3075,12 @@ pub fn update_game(
         );
     }
     if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
-        });
+        // F1 hides the debug lines too, unless a screen is open.
+        if !game.input_live() {
+            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
+                gfx.renderer.menu_text_width(t, s)
+            });
+        }
     } else if !benchmark_running {
         // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
         // draw under everything else in the HUD.
