@@ -2946,12 +2946,23 @@ fn attribute_tooltip_lines(
             {
                 continue;
             }
-            // `display` is `{type, value}`, or a bare type name.
-            let display = entry.get("display");
-            let display_type = display
-                .and_then(|display| display.get("type").or(Some(display)))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("default");
+            // `display` is the codec's `{type, value}`, azalea's
+            // `{"override": {text}}`, or a bare type name.
+            let (display_type, override_text) = match entry.get("display") {
+                Some(serde_json::Value::String(kind)) => (kind.as_str(), None),
+                Some(serde_json::Value::Object(display)) => {
+                    match display.get("type").and_then(serde_json::Value::as_str) {
+                        Some(kind) => (kind, display.get("value")),
+                        None => display
+                            .iter()
+                            .next()
+                            .map_or(("default", None), |(kind, value)| {
+                                (kind.as_str(), value.get("text"))
+                            }),
+                    }
+                }
+                _ => ("default", None),
+            };
             if display_type == "hidden" {
                 continue;
             }
@@ -2964,10 +2975,9 @@ fn attribute_tooltip_lines(
                 first = false;
             }
             if display_type == "override" {
-                let text = display
-                    .and_then(|display| display.get("value").or_else(|| display.get("text")))
-                    .and_then(|value| Component::from_value(value).ok());
-                if let Some(text) = text {
+                if let Some(text) =
+                    override_text.and_then(|value| Component::from_value(value).ok())
+                {
                     lines.extend(component_tooltip_lines_with_bindings(&text, bindings));
                 }
                 continue;
@@ -5113,6 +5123,47 @@ mod tests {
             lines(serde_json::json!({"name": "Nobody", "id": [0, 0, 0, 1]})),
             ["Nobody's Head"]
         );
+    }
+
+    #[test]
+    fn a_modifiers_override_text_replaces_its_line_in_either_shape() {
+        use azalea_inventory::components::{
+            AttributeModifier, AttributeModifierDisplay, AttributeModifiersEntry,
+            EquipmentSlotGroup,
+        };
+        let entry = AttributeModifiersEntry {
+            kind: azalea_registry::builtin::Attribute::Armor,
+            modifier: AttributeModifier {
+                id: "minecraft:a".into(),
+                amount: 1.0,
+                operation:
+                    azalea_core::attribute_modifier_operation::AttributeModifierOperation::AddValue,
+            },
+            slot: EquipmentSlotGroup::Chest,
+            display: AttributeModifierDisplay::Override {
+                text: "Sturdy".into(),
+            },
+        };
+        let azalea = serde_json::to_value(AttributeModifiers {
+            modifiers: vec![entry],
+        })
+        .unwrap();
+        let codec = serde_json::json!([{
+            "type": "minecraft:armor", "id": "minecraft:a", "amount": 1.0,
+            "operation": "add_value", "slot": "chest",
+            "display": {"type": "override", "value": "Sturdy"}
+        }]);
+        for modifiers in [azalea, codec] {
+            let lines = item_tooltip_lines(
+                &serde_json::json!({
+                    "id": "minecraft:stick",
+                    "components": {"minecraft:attribute_modifiers": modifiers}
+                }),
+                None,
+                false,
+            );
+            assert_eq!(line_text(&lines.last().unwrap().spans), "Sturdy");
+        }
     }
 
     #[test]

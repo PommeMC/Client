@@ -1533,19 +1533,21 @@ impl AppCore {
                     self.asset_head_skins.insert(texture.into_owned(), skin);
                 }
             }
-            let skins: Vec<(String, &[u8])> = self
+            // The asset skins stay until disconnect, so a head's own skin
+            // arriving frees nothing the GPU may still read.
+            let own = self
                 .player_heads
                 .iter()
                 .filter_map(|(profile, entry)| match &entry.state {
                     HeadState::Ready { skin, .. } if profile.patch_texture.is_none() => {
                         Some((profile.skin_key(), skin.as_slice()))
                     }
-                    _ => {
-                        let skin = self.asset_head_skins.get(profile.asset_skin().as_ref())?;
-                        Some((profile.asset_skin_key(), skin.as_deref()?))
-                    }
-                })
-                .collect();
+                    _ => None,
+                });
+            let assets = self.asset_head_skins.iter().filter_map(|(texture, skin)| {
+                Some((HeadProfile::asset_skin_key(texture), skin.as_deref()?))
+            });
+            let skins: Vec<(String, &[u8])> = own.chain(assets).collect();
             renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)));
         }
         for entry in self.inline_objects.values() {
@@ -1828,6 +1830,7 @@ impl AppCore {
         self.player_faces_dirty = false;
         self.inline_objects.clear();
         self.player_heads.clear();
+        self.asset_head_skins.clear();
         self.head_skins_dirty = true;
         self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();

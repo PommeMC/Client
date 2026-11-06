@@ -672,16 +672,17 @@ impl HeadProfile {
         DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
     }
 
-    /// The key [`Self::asset_skin`] is held under.
-    pub(crate) fn asset_skin_key(&self) -> String {
-        format!("asset:{}", self.asset_skin())
+    /// The key an [`Self::asset_skin`] texture is held under.
+    pub(crate) fn asset_skin_key(texture: &str) -> String {
+        format!("asset:{texture}")
     }
 
     /// The keys of the skins it can draw, in preference order: its own,
     /// unless a `skinPatch` replaces it, then [`Self::asset_skin`].
     pub(crate) fn skin_keys(&self) -> impl Iterator<Item = String> {
         let own = self.patch_texture.is_none().then(|| self.skin_key());
-        own.into_iter().chain([self.asset_skin_key()])
+        own.into_iter()
+            .chain([Self::asset_skin_key(&self.asset_skin())])
     }
 
     /// The key its skin is held under: its id, else its skin textures, else
