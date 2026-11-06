@@ -85,6 +85,10 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         }
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
+        Command::HoldPackets { hold } => {
+            game.hold_packets = *hold;
+            Ok(Value::Null)
+        }
         Command::Deterministic => {
             game.deterministic = true;
             game.block_light_flicker = 0.0;
