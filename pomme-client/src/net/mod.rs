@@ -445,6 +445,7 @@ pub enum NetworkEvent {
         position: Position,
         velocity: DVec3,
         x_rot_deg: f32,
+        y_rot_deg: f32,
         head_y_rot_deg: f32,
     },
     EntityMoved {

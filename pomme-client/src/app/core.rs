@@ -2345,7 +2345,8 @@ impl AppCore {
                     if let Some(id) = game.steered_boat()
                         && let Some(boat) = game.entity_store.living.get(&id)
                     {
-                        let moved = boat.position.distance(position) > f64::from(1.0e-5_f32);
+                        let moved =
+                            boat.client_position().distance(position) > f64::from(1.0e-5_f32);
                         if moved {
                             game.entity_store.snap_living(
                                 id,
@@ -2820,17 +2821,24 @@ impl AppCore {
                     position,
                     velocity,
                     x_rot_deg,
+                    y_rot_deg,
                     head_y_rot_deg,
                 } => {
                     game.entity_positions.insert(id, position);
                     game.entity_kinds.insert(id, entity_type);
                     game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
+                        // A boat isn't living: it has no head yaw, only its own.
+                        let y_rot = if crate::entity::is_boat(entity_type) {
+                            y_rot_deg
+                        } else {
+                            head_y_rot_deg
+                        };
                         game.entity_store.spawn_living(
                             id,
                             entity_type,
                             position,
-                            LookDirection::new(head_y_rot_deg, x_rot_deg),
+                            LookDirection::new(y_rot, x_rot_deg),
                             uuid,
                         );
                         if entity_type == azalea_registry::builtin::EntityKind::Player {
@@ -3536,8 +3544,16 @@ impl AppCore {
         // `ClientLevel.tickEntities` ticks it first and pushes land in next
         // tick's travel.
         // TODO: a same-dimension `handleRespawn` re-adds it after them.
-        self.tick_local_player(renderer, connection, game);
-        self.tick_remote_entities(game);
+        // A passenger ticks after its vehicle, so the player waits for the
+        // remote entities when riding one it doesn't move itself.
+        game.rider_yaw_turn = 0.0;
+        if game.riding_vehicle_id.is_some() && game.steered_boat().is_none() {
+            self.tick_remote_entities(game);
+            self.tick_local_player(renderer, connection, game);
+        } else {
+            self.tick_local_player(renderer, connection, game);
+            self.tick_remote_entities(game);
+        }
         game.position_remote_riders();
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
         super::copper_golem::tick(&self.audio, game);

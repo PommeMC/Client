@@ -763,7 +763,7 @@ impl GameState {
         let index = passengers.iter().position(|&p| p == id)?;
         let vehicle = self.entity_store.living.get(&vehicle_id);
         let (position, vehicle_kind, yaw) = match vehicle {
-            Some(v) => (*v.position, v.entity_type, v.body_y_rot_deg),
+            Some(v) => (*v.position, v.entity_type, v.look_dir.y_rot_deg()),
             None => (
                 glam::DVec3::from(*self.entity_positions.get(&vehicle_id)?),
                 *self.entity_kinds.get(&vehicle_id)?,
@@ -800,7 +800,6 @@ impl GameState {
     /// and a boat turns it with itself (it's the authoritative instance)
     /// and holds its yaw within reach (`AbstractBoat.positionRider`).
     pub fn position_local_rider(&mut self) {
-        self.rider_yaw_turn = 0.0;
         let Some(vehicle_id) = self.riding_vehicle_id else {
             return;
         };
@@ -879,7 +878,9 @@ impl GameState {
             .living
             .iter()
             .filter(|&(&id, e)| {
-                id != boat_id && !passengers.is_some_and(|p| p.contains(&id)) && e.health > 0.0
+                id != boat_id
+                    && !passengers.is_some_and(|p| p.contains(&id))
+                    && (crate::entity::is_boat(e.entity_type) || self.is_pushable(e))
             })
             .map(|(_, e)| {
                 if crate::entity::is_boat(e.entity_type) {
@@ -889,6 +890,22 @@ impl GameState {
                 }
             })
             .collect()
+    }
+
+    /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor
+    /// stands and bats never are.
+    // TODO: nor while on a ladder, and a ridden horse isn't either.
+    fn is_pushable(&self, e: &crate::entity::LivingEntity) -> bool {
+        e.health > 0.0
+            && !matches!(e.entity_type, EntityKind::ArmorStand | EntityKind::Bat)
+            && !self.is_spectator(e)
+    }
+
+    /// Whether `e` is a player in spectator mode.
+    fn is_spectator(&self, e: &crate::entity::LivingEntity) -> bool {
+        e.player_uuid
+            .and_then(|uuid| self.tab_list.players.get(&uuid))
+            .is_some_and(|p| crate::player::is_spectator(p.game_mode))
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`
@@ -4716,11 +4733,7 @@ pub fn update_game(
                     visibility: visibility(e.is_invisible, &name),
                     pack_shadow: if game.riding_vehicle_id == Some(entity_id) {
                         PackShadow::Player
-                    } else if e
-                        .player_uuid
-                        .and_then(|id| game.tab_list.players.get(&id))
-                        .is_some_and(|p| crate::player::is_spectator(p.game_mode))
-                    {
+                    } else if game.is_spectator(e) {
                         PackShadow::Spectator
                     } else {
                         PackShadow::Entity

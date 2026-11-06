@@ -46,6 +46,13 @@ chat = "/summon minecraft:spruce_chest_boat 304.5 -60 5.5 {Rotation:[-30f,0f]}"
 [[step]]
 chat = "/summon minecraft:bamboo_raft 301.5 -60 9.5 {Rotation:[0f,0f]}"
 
+# Each faces the way it was summoned from the start.
+[[step]]
+expect = { entity = "oak_boat", y_rot = 30.0 }
+
+[[step]]
+expect = { entity = "spruce_chest_boat", y_rot = -30.0 }
+
 [[step]]
 expect = { entity = "bamboo_raft", y_rot = 0.0 }
 

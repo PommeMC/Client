@@ -76,12 +76,9 @@ impl EntityDimensions {
 /// Vanilla `EntityAttachments.transformPoint`: `point.yRot(-y_rot)`.
 pub fn attachment_point([x, y, z]: [f32; 3], y_rot: f32) -> DVec3 {
     let angle = -y_rot * DEG_TO_RAD;
-    let (sin, cos) = (mth_sin(angle), mth_cos(angle));
-    DVec3::new(
-        f64::from(x * cos + z * sin),
-        f64::from(y),
-        f64::from(z * cos - x * sin),
-    )
+    let (sin, cos) = (f64::from(mth_sin(angle)), f64::from(mth_cos(angle)));
+    let (x, z) = (f64::from(x), f64::from(z));
+    DVec3::new(x * cos + z * sin, f64::from(y), z * cos - x * sin)
 }
 
 /// `(registry id, width, height)`, sorted by id.

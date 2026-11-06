@@ -900,6 +900,9 @@ pub struct LivingEntity {
     tentacle_speed: f32,
     rotate_speed: f32,
     interp_target: Position,
+    /// The position the server's relative moves decode against
+    /// (`Entity.getPositionCodec`).
+    position_base: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
     interp_head_y_rot_deg: f32,
@@ -1135,6 +1138,7 @@ impl LivingEntity {
             tentacle_speed: 1.0 / (fastrand::f32() + 1.0) * 0.2,
             rotate_speed: 0.0,
             interp_target: position,
+            position_base: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
             interp_head_y_rot_deg: y_rot_deg,
@@ -1168,7 +1172,18 @@ impl LivingEntity {
 
     fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
+        self.position_base = pos;
         self.interp_steps = INTERPOLATION_STEPS;
+    }
+
+    /// Vanilla `getClientPosition`: where it's interpolating to, or where it
+    /// is.
+    pub fn client_position(&self) -> Position {
+        if self.interp_steps > 0 {
+            self.interp_target
+        } else {
+            self.position
+        }
     }
 
     /// `InterpolationHandler.interpolate`: one step toward the server's pose;
@@ -2031,7 +2046,7 @@ impl EntityStore {
 
     pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
-            let target = entity.interp_target + DVec3::new(dx, dy, dz);
+            let target = entity.position_base + DVec3::new(dx, dy, dz);
             entity.interpolate_to_pos(target);
             entity.on_ground = on_ground;
         }
@@ -2294,14 +2309,14 @@ impl EntityStore {
     /// as the base its later moves decode against (`VecDeltaCodec.setBase`).
     pub fn set_living_base(&mut self, id: i32, position: Position) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_target = position;
+            entity.position_base = position;
         }
     }
 
     /// [`set_living_base`](Self::set_living_base) for a relative move.
     pub fn shift_living_base(&mut self, id: i32, delta: DVec3) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_target += delta;
+            entity.position_base += delta;
         }
     }
 
@@ -2315,7 +2330,7 @@ impl EntityStore {
         velocity: DVec3,
     ) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_target = position;
+            entity.position_base = position;
             entity.interp_steps = 0;
             entity.position = position;
             entity.prev_position = position;

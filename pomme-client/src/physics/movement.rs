@@ -1147,6 +1147,7 @@ fn update_supporting_block(
         &mut player.main_supporting_block_pos,
         &mut player.on_ground_no_blocks,
         world,
+        player.position.into(),
         &bounding_box,
         on_ground,
         movement,
@@ -1157,10 +1158,12 @@ fn update_supporting_block(
 /// Vanilla `Entity.checkSupportingBlock`: the block under `bounding_box`
 /// that holds it up, kept in `support`, with `no_blocks` set when it stands
 /// on no block (an entity, say).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_supporting_block(
     support: &mut Option<BlockPos>,
     no_blocks: &mut bool,
     world: CollisionWorld<'_>,
+    position: DVec3,
     bounding_box: &Aabb,
     on_ground: bool,
     movement: DVec3,
@@ -1180,15 +1183,10 @@ pub(crate) fn check_supporting_block(
         ),
         dvec3(bounding_box.max.x, bounding_box.min.y, bounding_box.max.z),
     );
-    let entity_position = dvec3(
-        (bounding_box.min.x + bounding_box.max.x) / 2.0,
-        bounding_box.min.y,
-        (bounding_box.min.z + bounding_box.max.z) / 2.0,
-    );
-    let mut found = find_supporting_block(world, &test_area, entity_position, ctx);
+    let mut found = find_supporting_block(world, &test_area, position, ctx);
     if found.is_none() && !*no_blocks {
         let previous_test_area = test_area.offset(dvec3(-movement.x, 0.0, -movement.z));
-        found = find_supporting_block(world, &previous_test_area, entity_position, ctx);
+        found = find_supporting_block(world, &previous_test_area, position, ctx);
     }
     *support = found;
     *no_blocks = found.is_none();

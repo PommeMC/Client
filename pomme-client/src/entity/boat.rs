@@ -529,6 +529,7 @@ fn move_boat(boat: &mut LivingEntity, world: CollisionWorld<'_>, tags: &BlockTag
         &mut sim.supporting_block,
         &mut sim.on_ground_no_blocks,
         world,
+        *boat.position,
         &hull,
         below,
         movement,
