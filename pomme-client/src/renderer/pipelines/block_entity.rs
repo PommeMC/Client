@@ -486,7 +486,6 @@ impl BlockEntityPipeline {
                         * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
                         * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
                 }
-                ModelConvention::Boat => glam::Mat4::IDENTITY,
             };
 
             let anim = lid_anim(info.kind, info.lid_open);

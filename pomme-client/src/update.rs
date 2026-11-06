@@ -101,6 +101,7 @@ pub fn clean_up() {
         && let Some(dir) = exe.parent()
     {
         remove_leftovers(dir);
+        crate::audio::embedded_openal::remove_bundled_copy(dir);
     }
 }
 

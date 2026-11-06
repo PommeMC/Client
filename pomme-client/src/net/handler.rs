@@ -171,6 +171,16 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ClearDialog(_) => {
             send_ordered(event_tx, NetworkEvent::ClearDialog);
         }
+        ClientboundGamePacket::MoveVehicle(p) => {
+            send_ordered(
+                event_tx,
+                NetworkEvent::MoveVehicle {
+                    position: glam::DVec3::new(p.pos.x, p.pos.y, p.pos.z),
+                    y_rot_deg: p.look_direction.y_rot(),
+                    x_rot_deg: p.look_direction.x_rot(),
+                },
+            );
+        }
         ClientboundGamePacket::SetCamera(p) => {
             send_ordered(event_tx, NetworkEvent::SetCamera { id: p.camera_id.0 });
         }

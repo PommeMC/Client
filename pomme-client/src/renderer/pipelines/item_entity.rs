@@ -9,7 +9,7 @@ use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::entity_model::pack_normal;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
-use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
+use crate::world::block::model::{BakedModel, Direction, TextureId, direction_from_positions};
 
 /// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
 /// and carries a baked face normal; both matter here because generated sprite
@@ -348,6 +348,25 @@ impl ItemPipelineShared {
         );
     }
 
+    /// A group binding `texture` where the atlas goes, for a draw that
+    /// samples its own texture (`bind_texture`).
+    pub(super) fn texture_group(
+        &self,
+        device: &rhi::backend::Device,
+        texture: rhi::backend::TextureHandle,
+    ) -> rhi::backend::BindGroup {
+        util::create_texture_group(device, self.atlas_layout, texture, self.atlas_sampler)
+    }
+
+    /// Binds `group` (or the atlas, for `None`) for the draws that follow.
+    pub(super) fn bind_texture(
+        &self,
+        pass: &rhi::backend::RenderPassEncoder,
+        group: Option<rhi::backend::BindGroup>,
+    ) {
+        pass.set_bind_groups(1, &[group.unwrap_or(self.atlas_set)]);
+    }
+
     pub(super) fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let bytes = bytemuck::bytes_of(uniform);
         self.camera_buffers[frame].write(bytes);
@@ -517,13 +536,30 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let vertices = build_item_mesh(model, uv_map);
+        let vertices = build_item_mesh(model, |texture| uv_map.region(texture));
         if !vertices.is_empty() {
             let translucent = model
                 .quads
                 .iter()
                 .any(|quad| uv_map.region(quad.texture).translucent);
             self.insert_mesh(device, name, &vertices, true, translucent);
+        }
+    }
+
+    /// `model` as a mesh that samples the whole of whatever texture is bound
+    /// in place of the atlas: a player head drawn with a player's skin.
+    pub fn ensure_skin_mesh(
+        &mut self,
+        device: &rhi::backend::Device,
+        name: &str,
+        model: &BakedModel,
+    ) {
+        if self.meshes.contains_key(name) {
+            return;
+        }
+        let vertices = build_item_mesh(model, |_| AtlasRegion::UNIT);
+        if !vertices.is_empty() {
+            self.insert_mesh(device, name, &vertices, true, false);
         }
     }
 
@@ -691,10 +727,14 @@ fn tint_index_or_none(index: Option<u32>) -> u32 {
     index.unwrap_or(NO_ITEM_TINT)
 }
 
-fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
+/// `model`'s quads, each texture's UVs placed in the region `region_of` gives.
+fn build_item_mesh(
+    model: &BakedModel,
+    region_of: impl Fn(TextureId) -> AtlasRegion,
+) -> Vec<ItemVertex> {
     let mut vertices = Vec::new();
     for quad in &model.quads {
-        let region = uv_map.region(quad.texture);
+        let region = region_of(quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
         let tint_index = tint_index_or_none(quad.tint_index);

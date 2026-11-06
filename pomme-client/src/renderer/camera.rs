@@ -120,6 +120,9 @@ pub struct Camera {
     pub look_dir: LookDirection,
     /// The first-person view along the bed while asleep; render-only.
     sleeping_look_dir: Option<LookDirection>,
+    /// How much of this tick's turn by the player's vehicle the view hasn't
+    /// reached yet (vanilla lerps `yRotO` to `yRot`); render-only.
+    yaw_ease: f32,
     /// A spectated entity's view rotation, which the view takes in every mode
     /// (vanilla `Camera.setup` reads the camera entity's); render-only.
     entity_look_dir: Option<LookDirection>,
@@ -154,6 +157,7 @@ impl Camera {
             position: Position::default(),
             look_dir: LookDirection::default(),
             sleeping_look_dir: None,
+            yaw_ease: 0.0,
             entity_look_dir: None,
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
@@ -316,14 +320,22 @@ impl Camera {
         self.entity_look_dir = look_dir;
     }
 
+    pub fn set_yaw_ease(&mut self, yaw_ease: f32) {
+        self.yaw_ease = yaw_ease;
+    }
+
     pub fn render_look_dir(&self) -> LookDirection {
         if let Some(look_dir) = self.entity_look_dir {
             return look_dir;
         }
+        let look_dir = LookDirection::new(
+            self.look_dir.y_rot_deg() - self.yaw_ease,
+            self.look_dir.x_rot_deg(),
+        );
         if self.mode == CameraMode::FirstPerson {
-            self.sleeping_look_dir.unwrap_or(self.look_dir)
+            self.sleeping_look_dir.unwrap_or(look_dir)
         } else {
-            self.look_dir
+            look_dir
         }
     }
 
@@ -395,10 +407,9 @@ impl Camera {
     }
 
     fn culling_view_projection(&self, fov: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
         // Vanilla prepares the cull frustum before bobHurt/bobView are applied.
-        let view = view::look_to_mat4(offset, forward, up);
+        let view = view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
         proj.y_axis.y *= -1.0;
         proj * view
@@ -605,9 +616,8 @@ impl Camera {
     }
 
     fn view_projection_with_planes(&self, fov: f32, near: f32, far: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        let view = self.view_effect_matrix() * view::look_to_mat4(offset, forward, up);
+        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(fov, self.aspect_ratio, near, far);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view

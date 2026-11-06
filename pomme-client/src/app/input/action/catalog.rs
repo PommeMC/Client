@@ -346,6 +346,14 @@ actions! {
         listed: true,
         defaults: [Keyboard(KeyCode::F4)],
     },
+    DebugDebugOptions => {
+        id: "key.debug.debugOptions",
+        translation_id: Some(StringId::new("key.debug.debugOptions")),
+        fallback: "Debug Options",
+        category: Debug,
+        listed: true,
+        defaults: [Keyboard(KeyCode::F6)],
+    },
     DebugSpectate => {
         id: "key.debug.spectate",
         translation_id: Some(StringId::new("key.debug.spectate")),

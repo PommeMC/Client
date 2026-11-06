@@ -1,20 +1,71 @@
+# Boats: an oak boat, a spruce chest boat and a bamboo raft on water; then
+# the player rides the boat, looks from behind, paddles it into a wall, turns
+# it, and steps off with the sneak key.
+
 [[step]]
 wait_ms = 2000
 
 [[step]]
-chat = "/fill -8 -61 -8 40 -58 40 minecraft:water"
+chat = "/gamemode creative"
 
 [[step]]
-chat = "/fill 0 -61 14 9 -50 14 minecraft:stone"
+chat = "/gamerule advance_time false"
 
 [[step]]
-wait_ms = 300
+chat = "/time set 6000"
 
 [[step]]
-chat = '/summon minecraft:oak_boat 4.5 -57 4.5 {Rotation:[0f,0f]}'
+deterministic = true
 
 [[step]]
-expect = { entity = "oak_boat", y_rot = 0.0 }
+chat = "/tp @s 300.5 -60 0.5 0 20"
+
+[[step]]
+expect = { player = { position = [300.5, -60.0, 0.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [300, -61, 5] }
+
+[[step]]
+chat = "/fill 290 -63 2 320 -61 40 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [300, -61, 5] }
+
+# A wall the paddled boat stops at.
+[[step]]
+chat = "/fill 290 -63 20 320 -58 20 minecraft:stone"
+
+[[step]]
+chat = "/summon minecraft:oak_boat 298.5 -60 5.5 {Rotation:[30f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:spruce_chest_boat 304.5 -60 5.5 {Rotation:[-30f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:bamboo_raft 301.5 -60 9.5 {Rotation:[0f,0f]}"
+
+[[step]]
+expect = { entity = "bamboo_raft", y_rot = 0.0 }
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "boats"
+
+[[step]]
+chat = "/kill @e[type=!player,type=!oak_boat]"
+
+[[step]]
+chat = "/tp @e[type=oak_boat] 300.5 -60 5.5 0 0"
+
+# In place before riding: once ridden, the client moves the boat and the
+# server's position only rebases it.
+[[step]]
+expect = { entity = "oak_boat", at = [300.5, -60.48, 5.5], y_rot = 0.0 }
 
 [[step]]
 chat = "/ride @s mount @e[type=oak_boat,limit=1]"
@@ -26,6 +77,22 @@ expect = { riding = true }
 wait_ms = 1500
 
 [[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "riding_behind"
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+[[step]]
+press = { action = "key.togglePerspective" }
+
+# Paddled straight ahead, it stops against the wall.
+[[step]]
 key_down = { action = "key.forward" }
 
 [[step]]
@@ -35,5 +102,44 @@ wait_ms = 3000
 key_up = { action = "key.forward" }
 
 [[step]]
-expect = { entity = "oak_boat", at = [4.5, -57.48, 13.31], y_rot = 0.0 }
+expect = { entity = "oak_boat", at = [300.5, -60.48, 19.3125], y_rot = 0.0 }
 timeout_ms = 5000
+
+[[step]]
+key_down = { action = "key.left" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+key_up = { action = "key.left" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "riding"
+
+[[step]]
+key_down = { action = "key.sneak" }
+
+[[step]]
+expect = { riding = false }
+
+[[step]]
+key_up = { action = "key.sneak" }
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 290 -60 20 320 -58 20 minecraft:air"
+
+[[step]]
+chat = "/fill 290 -63 2 320 -61 40 minecraft:grass_block"
+
+[[step]]
+chat = "/fill 290 -63 2 320 -62 40 minecraft:dirt"
+
+[[step]]
+chat = "/gamerule advance_time true"

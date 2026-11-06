@@ -166,6 +166,8 @@ pub struct EntityRenderInfo {
     pub nose_wobble_speed: f32,
     /// Tamable sitting pose (wolf/cat).
     pub is_sitting: bool,
+    /// Riding something: humanoids sit (`HumanoidRenderState.isPassenger`).
+    pub is_passenger: bool,
     pub is_sprinting: bool,
     /// Wolf anger — angry face texture is picked upstream; this pins the tail.
     pub is_angry: bool,
@@ -273,6 +275,7 @@ impl Default for EntityRenderInfo {
             is_holding_item: false,
             nose_wobble_speed: 0.0,
             is_sitting: false,
+            is_passenger: false,
             is_sprinting: false,
             is_angry: false,
             tail_angle: 0.0,
@@ -366,6 +369,8 @@ enum OverlayKind {
     /// Additive, full-bright, depth-writing, scrolling UV — charged creeper
     /// swirl.
     SwirlAdditive,
+    /// Depth only, no colour: a boat's water patch (`RenderTypes.waterMask`),
+    /// which keeps water out of its hull.
     WaterMask,
 }
 
@@ -912,7 +917,10 @@ pub struct EntityRenderer {
     eyes_pipeline: rhi::backend::RenderPipeline,
     /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: rhi::backend::RenderPipeline,
-    pub water_mask_pipeline: rhi::backend::RenderPipeline,
+    /// Depth only — boat water patches.
+    water_mask_pipeline: rhi::backend::RenderPipeline,
+    /// This frame's water patches, drawn just before translucent terrain.
+    water_mask_records: Vec<DrawRecord>,
     /// Glowing outlines into the outline target, unculled then culled.
     outline_pipelines: [rhi::backend::RenderPipeline; 2],
     /// This frame's outline draws, paired with `outline_pipelines`.
@@ -960,6 +968,7 @@ pub(super) enum BlendMode {
     /// `entityTranslucentCull`): an invisible mob the viewer sees through.
     TranslucentCulled,
     Additive,
+    /// Depth writes only (`RenderTypes.waterMask`).
     WaterMask,
 }
 
@@ -999,6 +1008,7 @@ enum AnimationType {
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
+    /// Paddles (`AbstractBoatModel.setupAnim`).
     Boat,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
@@ -1171,39 +1181,31 @@ fn mob_definitions() -> Vec<MobDef> {
     const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse" => "donkey_baby");
     const MULE_TEX: &[&[&str]] = tex_table!("horse" => "mule");
     const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "mule_baby");
-    const OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "oak");
-    const SPRUCE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "spruce");
-    const BIRCH_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "birch");
-    const JUNGLE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "jungle");
-    const ACACIA_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "acacia");
-    const CHERRY_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "cherry");
-    const DARK_OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "dark_oak");
-    const MANGROVE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "mangrove");
-    const PALE_OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "pale_oak");
-    const BAMBOO_RAFT_TEX: &[&[&str]] = tex_table!("boat" => "bamboo");
-
-    const OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "oak");
-    const SPRUCE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "spruce");
-    const BIRCH_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "birch");
-    const JUNGLE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "jungle");
-    const ACACIA_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "acacia");
-    const CHERRY_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "cherry");
-    const DARK_OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "dark_oak");
-    const MANGROVE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "mangrove");
-    const PALE_OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "pale_oak");
-    const BAMBOO_CHEST_RAFT_TEX: &[&[&str]] = tex_table!("chest_boat" => "bamboo");
-
-    fn water_mask(
-        model: BakedEntityModel,
-        tex_variants: &'static [&'static [&'static str]],
-        tex_size: u32,
-    ) -> VariantDef {
-        VariantDef {
-            overlay_kind: OverlayKind::WaterMask,
-            ..opaque(model, tex_variants, tex_size)
-        }
-    }
-
+    // `BoatRenderer` and `RaftRenderer` for each wood, with their chest
+    // forms.
+    #[rustfmt::skip]
+    let boats: [(EntityKind, &'static [&'static [&'static str]]); 20] = [
+        (EntityKind::OakBoat, tex_table!("boat" => "oak")),
+        (EntityKind::SpruceBoat, tex_table!("boat" => "spruce")),
+        (EntityKind::BirchBoat, tex_table!("boat" => "birch")),
+        (EntityKind::JungleBoat, tex_table!("boat" => "jungle")),
+        (EntityKind::AcaciaBoat, tex_table!("boat" => "acacia")),
+        (EntityKind::CherryBoat, tex_table!("boat" => "cherry")),
+        (EntityKind::DarkOakBoat, tex_table!("boat" => "dark_oak")),
+        (EntityKind::MangroveBoat, tex_table!("boat" => "mangrove")),
+        (EntityKind::PaleOakBoat, tex_table!("boat" => "pale_oak")),
+        (EntityKind::BambooRaft, tex_table!("boat" => "bamboo")),
+        (EntityKind::OakChestBoat, tex_table!("chest_boat" => "oak")),
+        (EntityKind::SpruceChestBoat, tex_table!("chest_boat" => "spruce")),
+        (EntityKind::BirchChestBoat, tex_table!("chest_boat" => "birch")),
+        (EntityKind::JungleChestBoat, tex_table!("chest_boat" => "jungle")),
+        (EntityKind::AcaciaChestBoat, tex_table!("chest_boat" => "acacia")),
+        (EntityKind::CherryChestBoat, tex_table!("chest_boat" => "cherry")),
+        (EntityKind::DarkOakChestBoat, tex_table!("chest_boat" => "dark_oak")),
+        (EntityKind::MangroveChestBoat, tex_table!("chest_boat" => "mangrove")),
+        (EntityKind::PaleOakChestBoat, tex_table!("chest_boat" => "pale_oak")),
+        (EntityKind::BambooChestRaft, tex_table!("chest_boat" => "bamboo")),
+    ];
     const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton");
     const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton_baby");
     const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie");
@@ -1398,7 +1400,7 @@ fn mob_definitions() -> Vec<MobDef> {
         baby_overlays: vec![],
     };
 
-    vec![
+    let mut defs = vec![
         llama(EntityKind::Llama),
         llama(EntityKind::TraderLlama),
         // Vanilla `MushroomCowRenderer`: the cow meshes.
@@ -2172,290 +2174,6 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         // Variant = size (small/medium/large), three root-scaled bakes.
         MobDef {
-            kind: EntityKind::OakBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), OAK_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::SpruceBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), SPRUCE_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::BirchBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), BIRCH_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::JungleBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), JUNGLE_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::AcaciaBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), ACACIA_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::CherryBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_boat_model(), CHERRY_BOAT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::DarkOakBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_boat_model(),
-                DARK_OAK_BOAT_TEX,
-                64,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::MangroveBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_boat_model(),
-                MANGROVE_BOAT_TEX,
-                64,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::PaleOakBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_boat_model(),
-                PALE_OAK_BOAT_TEX,
-                64,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::BambooRaft,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(entity_model::bake_raft_model(), BAMBOO_RAFT_TEX, 64)],
-            baby: None,
-            adult_overlays: vec![],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::OakChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                OAK_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::SpruceChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                SPRUCE_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::BirchChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                BIRCH_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::JungleChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                JUNGLE_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::AcaciaChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                ACACIA_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::CherryChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                CHERRY_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::DarkOakChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                DARK_OAK_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::MangroveChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                MANGROVE_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::PaleOakChestBoat,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_boat_model(),
-                PALE_OAK_CHEST_BOAT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![water_mask(
-                entity_model::bake_boat_water_patch_model(),
-                OAK_BOAT_TEX,
-                64,
-            )],
-            baby_overlays: vec![],
-        },
-        MobDef {
-            kind: EntityKind::BambooChestRaft,
-            anim: AnimationType::Boat,
-            adult: vec![opaque(
-                entity_model::bake_chest_raft_model(),
-                BAMBOO_CHEST_RAFT_TEX,
-                128,
-            )],
-            baby: None,
-            adult_overlays: vec![],
-            baby_overlays: vec![],
-        },
-        MobDef {
             kind: EntityKind::Salmon,
             anim: AnimationType::Fish,
             adult: vec![
@@ -2531,7 +2249,32 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
             baby_overlays: vec![],
         },
-    ]
+    ];
+    defs.extend(boats.into_iter().map(|(kind, tex)| {
+        let (model, water_patch) = entity_model::bake_boat(kind);
+        let tex_size = if crate::entity::is_chest_boat(kind) {
+            128
+        } else {
+            64
+        };
+        // Only boats have a water patch (`BoatRenderer.submitTypeAdditions`);
+        // drawn into depth alone, it reuses the boat's texture.
+        MobDef {
+            kind,
+            anim: AnimationType::Boat,
+            adult: vec![opaque(model, tex, tex_size)],
+            baby: None,
+            adult_overlays: water_patch
+                .map(|patch| VariantDef {
+                    overlay_kind: OverlayKind::WaterMask,
+                    ..opaque(patch, tex, tex_size)
+                })
+                .into_iter()
+                .collect(),
+            baby_overlays: vec![],
+        }
+    }));
+    defs
 }
 
 impl EntityRenderer {
@@ -2661,6 +2404,7 @@ impl EntityRenderer {
             eyes_pipeline,
             swirl_pipeline,
             water_mask_pipeline,
+            water_mask_records: Vec::new(),
             outline_pipelines,
             outline_records: Default::default(),
             pack_layers: Default::default(),
@@ -2926,6 +2670,7 @@ impl EntityRenderer {
                 info.walk_anim_pos,
                 info.walk_anim_speed,
                 info.is_crouching,
+                info.is_passenger,
             ),
             AnimationType::Enderman => entity_model::compute_enderman_anim(
                 model,
@@ -3414,6 +3159,13 @@ impl EntityRenderer {
         } else {
             self.instance_count = count;
             self.outline_records = outline;
+            // TODO: under a shader pack, through its translucent entity
+            // program.
+            self.water_mask_records = if self.pack_binding.is_none() {
+                water_mask
+            } else {
+                Vec::new()
+            };
             &mut self.instance_buffers[frame]
         };
         buffer.write(bytes);
@@ -3447,16 +3199,21 @@ impl EntityRenderer {
                 }
             }
         }
-        if shadow.is_none() {
-            self.record_pass(
-                pass,
-                frame,
-                buffer,
-                self.water_mask_pipeline,
-                &water_mask,
-                count,
-            );
-        }
+    }
+
+    /// The last `draw`'s boat water patches, which vanilla's
+    /// `FeatureRenderDispatcher.executeTranslucent` draws last, just before
+    /// translucent terrain.
+    pub fn draw_water_masks(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
+        let buffer = self.instance_buffers[frame].handle();
+        self.record_pass(
+            pass,
+            frame,
+            buffer,
+            self.water_mask_pipeline,
+            &self.water_mask_records,
+            self.instance_count,
+        );
     }
 
     /// Whether the last `draw` kept any of `layer` for a pack pass.
@@ -3838,13 +3595,6 @@ fn body_route(info: &EntityRenderInfo) -> Route {
 /// coloredCutoutModelCopyLayerRender`), eyes and the energy swirl ignore it,
 /// and sheep wool and the slime shell leave their outline.
 fn layer_route(info: &EntityRenderInfo, kind: OverlayKind, invisible_outline: bool) -> Route {
-    if kind == OverlayKind::WaterMask {
-        return if info.is_in_water && info.visibility == Visibility::Visible {
-            Route::Draw
-        } else {
-            Route::Skip
-        };
-    }
     if info.visibility == Visibility::Visible
         || matches!(
             kind,
@@ -3953,7 +3703,7 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
 
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
-fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+pub(crate) fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
     // list kinds whose constant isn't the half-scale the fallback below
     // assumes. Every new baby mob must be checked against its class.
@@ -4093,10 +3843,6 @@ fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
         .map(|p| p.name.as_str())
         .collect();
     for overlay in overlays.iter_mut().flatten() {
-        if overlay.overlay_kind == OverlayKind::WaterMask {
-            overlay.own_pivots = true;
-            continue;
-        }
         let overlay_names: Vec<&str> = overlay
             .model
             .parts

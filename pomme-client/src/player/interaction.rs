@@ -317,6 +317,11 @@ impl InteractionState {
         Some((self.destroy_pos, stage.min(9)))
     }
 
+    /// Vanilla `SwingState.animation > 0`: an arm swing is under way.
+    pub fn arm_swinging(&self) -> bool {
+        self.attack_anim > 0.0
+    }
+
     /// Vanilla `ItemInHandRenderer`'s attack value: `getAttackAnim` for the
     /// swinging arm's hand, 0 for the other.
     pub fn swing_progress(&self, hand: InteractionHand, partial_tick: f32) -> f32 {

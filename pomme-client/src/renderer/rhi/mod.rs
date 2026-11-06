@@ -13,6 +13,15 @@ pub use vulkan as backend;
 /// backend.
 pub type Shader<'a> = &'a [u8];
 
+/// How the swapchain paces presents (vanilla `GpuSurface.PresentMode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    Immediate,
+    Mailbox,
+    Fifo,
+    FifoRelaxed,
+}
+
 /// A set of flags with `contains` and `|`, like WebGPU's flag types.
 macro_rules! flags {
     ($(#[$doc:meta])* $name:ident { $($flag:ident = $bit:literal),* $(,)? }) => {
@@ -816,6 +825,7 @@ pub struct RenderPipelineDesc<'a> {
     /// Clamps depth instead of clipping at the near and far planes, where the
     /// device can.
     pub depth_clamp: bool,
+    /// Whether the colour target is written; off for depth-only draws.
     pub write_color: bool,
 }
 

@@ -57,6 +57,9 @@ pub struct InputState {
     /// handling.
     #[cfg(feature = "test-harness")]
     harness_released: Option<KeyCode>,
+    /// The key a harness `key_up` let go, for the same handling.
+    #[cfg(feature = "test-harness")]
+    harness_key_up: Option<KeyCode>,
     /// Harness `text` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_text: Option<String>,
@@ -190,6 +193,8 @@ impl InputState {
             harness_press: None,
             #[cfg(feature = "test-harness")]
             harness_released: None,
+            #[cfg(feature = "test-harness")]
+            harness_key_up: None,
             #[cfg(feature = "test-harness")]
             harness_text: None,
             mouse_delta: (0.0, 0.0),
@@ -761,6 +766,15 @@ impl InputState {
             ElementState::Released
         };
         self.on_key(code, state, false);
+        if !down {
+            self.harness_key_up = Some(code);
+        }
+    }
+
+    /// The key a harness `key_up` let go, once.
+    #[cfg(feature = "test-harness")]
+    pub fn take_harness_key_up(&mut self) -> Option<KeyCode> {
+        self.harness_key_up.take()
     }
 
     /// The key a harness `press` released, once.

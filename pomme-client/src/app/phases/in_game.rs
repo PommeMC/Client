@@ -1,63 +1,3 @@
-pub use crate::entity::is_boat;
-
-pub fn is_minecart(kind: EntityKind) -> bool {
-    let s = kind.to_str();
-    s.ends_with("minecart")
-}
-
-pub fn passenger_attachment_offset(
-    kind: EntityKind,
-    height: f32,
-    seat_index: usize,
-    passenger_count: usize,
-    passenger_is_animal: bool,
-    yaw_deg: f32,
-) -> glam::DVec3 {
-    let yaw_rad = (yaw_deg as f64).to_radians();
-    let fx = -yaw_rad.sin();
-    let fz = yaw_rad.cos();
-
-    if is_boat(kind) {
-        let x_offset = if passenger_count > 1 {
-            let mut base = if seat_index == 0 { 0.2 } else { -0.6 };
-            if passenger_is_animal {
-                base += 0.2;
-            }
-            base
-        } else if crate::entity::is_chest_boat(kind) {
-            0.15
-        } else {
-            0.0
-        };
-        let ride_height = if crate::entity::is_raft(kind) {
-            (height as f64) * 0.8888889 - 0.6
-        } else {
-            (height as f64) / 3.0 - 0.6
-        };
-        glam::DVec3::new(fx * x_offset, ride_height, fz * x_offset)
-    } else if is_minecart(kind) {
-        glam::DVec3::new(0.0, -0.35, 0.0)
-    } else {
-        match kind {
-            EntityKind::ArmorStand => glam::DVec3::new(0.0, -0.75, 0.0),
-            EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse => {
-                glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0)
-            }
-            EntityKind::Donkey | EntityKind::Mule => {
-                glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0)
-            }
-            EntityKind::Camel | EntityKind::CamelHusk => {
-                let seat_dist = if seat_index == 0 { 0.5 } else { -0.7 };
-                glam::DVec3::new(fx * seat_dist, 1.8 - 0.35, fz * seat_dist)
-            }
-            EntityKind::Llama | EntityKind::TraderLlama => glam::DVec3::new(0.0, 1.4 - 0.35, 0.0),
-            EntityKind::Pig => glam::DVec3::new(0.0, (height as f64) * 0.6 - 0.35, 0.0),
-            EntityKind::Strider => glam::DVec3::new(0.0, 1.275 - 0.35, 0.0),
-            _ => glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0),
-        }
-    }
-}
-
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -81,6 +21,7 @@ use crate::benchmark::{
     UploadHandle, UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
@@ -113,6 +54,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
+use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
@@ -247,6 +189,8 @@ pub struct GameState {
     /// Pomme does not otherwise render. Used by packet-driven entity-bound
     /// sounds.
     pub entity_positions: HashMap<i32, Position>,
+    /// The kind of every spawned entity, for vehicles outside the living
+    /// store.
     pub entity_kinds: HashMap<i32, EntityKind>,
     /// Entity ids whose shared `DATA_SILENT` flag is currently true.
     pub silent_entities: HashSet<i32>,
@@ -361,8 +305,11 @@ pub struct GameState {
     pub controlled_vehicle_id: Option<i32>,
     /// Vehicle we are any passenger of (vanilla `getVehicle`).
     pub riding_vehicle_id: Option<i32>,
-    pub last_boat_visual_yaw: Option<f32>,
+    /// Every vehicle's passengers, in `SetPassengers` order.
     pub vehicle_passengers: HashMap<i32, Vec<i32>>,
+    /// The yaw the local player's vehicle turned it by this tick, eased in by
+    /// the camera (vanilla's `yRotO` to `yRot`).
+    pub rider_yaw_turn: f32,
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
@@ -413,6 +360,9 @@ pub struct GameState {
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
     pub deterministic: bool,
+    /// Set by the test harness's `hold_packets` step: incoming packets wait,
+    /// as behind a slow connection.
+    pub hold_packets: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -428,6 +378,9 @@ pub struct GameState {
     pub was_sprinting: bool,
     pub position_send_counter: u32,
     pub options_from_game: bool,
+    /// The open options screen leaves to the game, not the pause menu:
+    /// Debug Options, which replaces any screen it opens over.
+    pub options_close_to_game: bool,
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
@@ -609,6 +562,7 @@ impl GameState {
             level_load: None,
             client_loaded: false,
             options_from_game: false,
+            options_close_to_game: false,
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
@@ -694,8 +648,8 @@ impl GameState {
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
             riding_vehicle_id: None,
-            last_boat_visual_yaw: None,
             vehicle_passengers: HashMap::new(),
+            rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
@@ -721,6 +675,7 @@ impl GameState {
             biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
+            hold_packets: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -774,98 +729,163 @@ impl GameState {
             .and_then(|id| self.entity_store.living.get(&id))
     }
 
+    /// The boat this client moves (`isLocalInstanceAuthoritative`): the one
+    /// the player is the first passenger of.
+    // TODO: other vehicles a player steers are its client's to move too;
+    // Pomme leaves them to the server.
+    pub fn steered_boat(&self) -> Option<i32> {
+        self.controlled_vehicle_id.filter(|id| {
+            self.entity_store
+                .living
+                .get(id)
+                .is_some_and(|v| crate::entity::is_boat(v.entity_type))
+        })
+    }
+
     /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
-    /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); boats
+    /// share Pomme's living store but aren't living.
     pub fn vehicle_health(&self) -> Option<(f32, f32)> {
         self.riding_vehicle()
-            .filter(|e| !is_boat(e.entity_type) && !is_minecart(e.entity_type))
+            .filter(|e| !crate::entity::is_boat(e.entity_type))
             .map(|e| (e.health, e.max_health))
     }
 
-    pub fn sync_passengers(&mut self, vehicle_id: i32) {
-        let Some(passengers) = self.vehicle_passengers.get(&vehicle_id).cloned() else {
+    /// Where passenger `id` (a `kind`) of `vehicle_id` rides: its feet, for
+    /// a rider facing `rider_yaw`, and how a boat turns it.
+    // TODO: the vehicles whose `positionRider` adds more (horses rearing,
+    // camels, striders, minecarts on rails); non-living vehicles' yaw.
+    fn seat(&self, vehicle_id: i32, id: i32, kind: EntityKind, rider_yaw: f32) -> Option<Seat> {
+        let passengers = self.vehicle_passengers.get(&vehicle_id)?;
+        let index = passengers.iter().position(|&p| p == id)?;
+        let vehicle = self.entity_store.living.get(&vehicle_id);
+        let (position, vehicle_kind, yaw) = match vehicle {
+            Some(v) => (*v.position, v.entity_type, v.body_y_rot_deg),
+            None => (
+                glam::DVec3::from(*self.entity_positions.get(&vehicle_id)?),
+                *self.entity_kinds.get(&vehicle_id)?,
+                0.0,
+            ),
+        };
+        let animal = crate::entity::is_animal(kind);
+        let boat = vehicle.filter(|v| crate::entity::is_boat(v.entity_type));
+        let point = match boat {
+            Some(v) => {
+                crate::entity::boat::passenger_attachment(v, index, passengers.len(), animal)
+            }
+            None => EntityDimensions::passenger_attachment(vehicle_kind, index, yaw),
+        };
+        let full = passengers.len() == crate::entity::boat::max_passengers(vehicle_kind);
+        Some(Seat {
+            feet: position + point - EntityDimensions::vehicle_attachment(kind, rider_yaw),
+            // `EntityTypeTags.CAN_TURN_IN_BOATS` holds only the breeze.
+            boat: boat
+                .filter(|_| kind != EntityKind::Breeze)
+                .map(|v| BoatSeat {
+                    // `AbstractBoat.calculatePassengerBodyYRot`.
+                    body: if animal && full {
+                        yaw + if id % 2 == 0 { 90.0 } else { 270.0 }
+                    } else {
+                        yaw
+                    },
+                    delta_rotation: v.boat_sim.delta_rotation,
+                }),
+        })
+    }
+
+    /// Vanilla `rideTick` for the local player: `positionRider` seats it,
+    /// and a boat turns it with itself (it's the authoritative instance)
+    /// and holds its yaw within reach (`AbstractBoat.positionRider`).
+    pub fn position_local_rider(&mut self) {
+        self.rider_yaw_turn = 0.0;
+        let Some(vehicle_id) = self.riding_vehicle_id else {
             return;
         };
-        let (vehicle_pos, vehicle_yaw, vehicle_kind, height, vehicle_on_ground) =
-            if let Some(e) = self.entity_store.living.get(&vehicle_id) {
-                let h = crate::entity::dimensions::EntityDimensions::of(e.entity_type).height;
-                (*e.position, e.body_y_rot_deg, e.entity_type, h, e.on_ground)
-            } else if let Some(pos) = self.entity_positions.get(&vehicle_id) {
-                let kind = self
-                    .entity_kinds
-                    .get(&vehicle_id)
-                    .copied()
-                    .unwrap_or(EntityKind::ArmorStand);
-                let h = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                (**pos, 0.0, kind, h, false)
-            } else {
-                return;
-            };
+        let yaw = self.player.look_dir.y_rot_deg();
+        let Some(seat) = self.seat(vehicle_id, self.player.entity_id, EntityKind::Player, yaw)
+        else {
+            return;
+        };
+        self.player.position = seat.feet.into();
+        if let Some(boat) = seat.boat {
+            let turned = clamp_rider_yaw(yaw + boat.delta_rotation, boat.body);
+            self.rider_yaw_turn = turned - yaw;
+            self.player.body_y_rot = boat.body;
+            self.player.look_dir = LookDirection::new(turned, self.player.look_dir.x_rot_deg());
+        }
+    }
 
-        let passenger_count = passengers.len();
-        for (seat_idx, passenger_id) in passengers.into_iter().enumerate() {
-            let is_animal = self
-                .entity_store
-                .living
-                .get(&passenger_id)
-                .is_some_and(|e| crate::entity::is_animal(e.entity_type));
-            let offset = passenger_attachment_offset(
-                vehicle_kind,
-                height,
-                seat_idx,
-                passenger_count,
-                is_animal,
-                vehicle_yaw,
-            );
-            let pos = vehicle_pos + offset;
-            if passenger_id == self.player.entity_id {
-                self.player.position =
-                    crate::entity::components::Position::new(pos.x, pos.y, pos.z);
-                self.player.prev_position = self.player.position;
-                self.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
-                self.player.on_ground = vehicle_on_ground;
-                if is_boat(vehicle_kind) {
-                    let diff =
-                        crate::entity::wrap_degrees(self.player.look_dir.y_rot_deg() - vehicle_yaw);
-                    let clamped = diff.clamp(-105.0, 105.0);
-                    let delta = clamped - diff;
-                    if delta != 0.0 {
-                        let new_yaw = self.player.look_dir.y_rot_deg() + delta;
-                        self.player.look_dir = crate::entity::components::LookDirection::new(
-                            new_yaw,
-                            self.player.look_dir.x_rot_deg(),
-                        );
-                    }
-                }
-            }
-            if let Some(e) = self.entity_store.living.get_mut(&passenger_id) {
-                e.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
-                e.prev_position = e.position;
-                if is_boat(vehicle_kind) && e.entity_type != EntityKind::Breeze {
-                    e.body_y_rot_deg = vehicle_yaw;
-                    e.prev_body_y_rot_deg = vehicle_yaw;
-                    let diff = crate::entity::wrap_degrees(e.look_dir.y_rot_deg() - vehicle_yaw);
-                    let clamped = diff.clamp(-105.0, 105.0);
-                    let delta = clamped - diff;
-                    if delta != 0.0 {
-                        let new_yaw = e.look_dir.y_rot_deg() + delta;
-                        e.look_dir = crate::entity::components::LookDirection::new(
-                            new_yaw,
-                            e.look_dir.x_rot_deg(),
-                        );
-                    }
-                    e.head_y_rot_deg = e.look_dir.y_rot_deg();
-                    e.prev_head_y_rot_deg = e.head_y_rot_deg;
-                    if is_animal && passenger_count == 2 {
-                        let offset = if passenger_id % 2 == 0 { 90.0 } else { 270.0 };
-                        e.body_y_rot_deg += offset;
-                        e.prev_body_y_rot_deg += offset;
-                        e.head_y_rot_deg += offset;
-                        e.prev_head_y_rot_deg += offset;
-                    }
-                }
+    /// Vanilla `rideTick` for every other passenger, after the vehicles
+    /// tick: seated, and in a boat held to it (`AbstractBoat.clampRotation`).
+    pub fn position_remote_riders(&mut self) {
+        let riders: Vec<(i32, i32)> = self
+            .vehicle_passengers
+            .iter()
+            .flat_map(|(&vehicle, passengers)| passengers.iter().map(move |&id| (vehicle, id)))
+            .filter(|&(_, id)| id != self.player.entity_id)
+            .collect();
+        for (vehicle_id, id) in riders {
+            let Some(e) = self.entity_store.living.get(&id) else {
+                continue;
+            };
+            let Some(seat) = self.seat(vehicle_id, id, e.entity_type, e.look_dir.y_rot_deg())
+            else {
+                continue;
+            };
+            let Some(e) = self.entity_store.living.get_mut(&id) else {
+                continue;
+            };
+            e.position = seat.feet.into();
+            let Some(boat) = seat.boat else {
+                continue;
+            };
+            e.body_y_rot_deg = boat.body;
+            if e.player_uuid.is_some() {
+                let yaw = clamp_rider_yaw(e.look_dir.y_rot_deg(), boat.body);
+                e.look_dir = LookDirection::new(yaw, e.look_dir.x_rot_deg());
+            } else {
+                // A mob faces the boat's way and `clampHeadRotationToBody`
+                // holds its head within the default 75 degrees.
+                e.look_dir = LookDirection::new(boat.body, e.look_dir.x_rot_deg());
+                let delta = crate::entity::wrap_degrees(boat.body - e.head_y_rot_deg);
+                e.head_y_rot_deg += delta - delta.clamp(-75.0, 75.0);
             }
         }
+    }
+
+    /// Boxes the player collides with (`Level.getEntityCollisions`): boats
+    /// other than its own (`AbstractBoat.canBeCollidedWith`).
+    // TODO: shulkers, minecarts and happy ghasts collide too.
+    pub fn collidable_entity_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        self.entity_store
+            .living
+            .iter()
+            .filter(|&(&id, e)| {
+                Some(id) != self.riding_vehicle_id && crate::entity::is_boat(e.entity_type)
+            })
+            .map(|(_, e)| crate::entity::boat::boat_aabb(e))
+            .collect()
+    }
+
+    /// What the boat the player steers collides with
+    /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
+    /// not its own passengers.
+    pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
+        let passengers = self.vehicle_passengers.get(&boat_id);
+        self.entity_store
+            .living
+            .iter()
+            .filter(|&(&id, e)| {
+                id != boat_id && !passengers.is_some_and(|p| p.contains(&id)) && e.health > 0.0
+            })
+            .map(|(_, e)| {
+                if crate::entity::is_boat(e.entity_type) {
+                    crate::entity::boat::boat_aabb(e)
+                } else {
+                    EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
+                }
+            })
+            .collect()
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`
@@ -1129,6 +1149,7 @@ impl GameState {
         code: winit::keyboard::KeyCode,
         f3_held: bool,
         bindings: &KeyBindings,
+        menu: &mut crate::ui::menu::MainMenu,
         connection: &ConnectionHandle,
     ) -> bool {
         let input = InputKey::Keyboard(code);
@@ -1254,6 +1275,19 @@ impl GameState {
                 ));
                 true
             }
+            _ if bindings.matches(Action::DebugDebugOptions, &input) => {
+                if self.options_from_game && menu.is_debug_options() {
+                    menu.close_debug_options(bindings);
+                } else if self.options_from_game || self.input_live() {
+                    // TODO: vanilla also closes the pause menu, chat or a
+                    // container screen to open it (`canInterruptScreen`).
+                    menu.open_debug_options(bindings);
+                    self.options_from_game = true;
+                    self.options_close_to_game = true;
+                    self.paused = true;
+                }
+                true
+            }
             _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
@@ -1271,7 +1305,7 @@ impl GameState {
                 )]);
                 true
             }
-            // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
+            // TODO: F3+P pause-on-lost-focus,
             // F3+S dump dynamic textures, F3+T resource pack reload,
             // F3+L profiler, F3+1..4 debug charts (no backing features)
             _ => false,
@@ -2531,6 +2565,26 @@ fn block_outline(
     ))
 }
 
+/// A rider's place, from [`GameState::seat`].
+struct Seat {
+    feet: glam::DVec3,
+    boat: Option<BoatSeat>,
+}
+
+/// How a boat holds its rider: the body yaw it gives it and the turn it
+/// passes on this tick.
+struct BoatSeat {
+    body: f32,
+    delta_rotation: f32,
+}
+
+/// Vanilla `AbstractBoat.clampRotation` for a passenger that isn't a mob:
+/// `yaw` held within 105 degrees of the boat's `body` yaw.
+pub(crate) fn clamp_rider_yaw(yaw: f32, body: f32) -> f32 {
+    let delta = crate::entity::wrap_degrees(yaw - body);
+    yaw + delta.clamp(-105.0, 105.0) - delta
+}
+
 /// Vanilla `Minecraft.hitResult`.
 // TODO: pick from a spectated entity; the target is cast from the player's
 // own body, so nothing counts as targeted while spectating one.
@@ -2829,8 +2883,25 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    // A harness press goes through the debug chords as a key event's press
+    // does, then releases.
     #[cfg(feature = "test-harness")]
     if let Some(code) = core.input.take_harness_release() {
+        let f3_held = core.input.action_held(Action::DebugModifier);
+        if game.handle_debug_key(
+            code,
+            f3_held,
+            &core.input.key_bindings,
+            &mut core.menu,
+            connection,
+        ) {
+            core.input.unclick(code);
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        game.on_key_released(code, &core.input, connection);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_key_up() {
         game.on_key_released(code, &core.input, connection);
     }
 
@@ -2873,38 +2944,16 @@ pub fn update_game(
             core.menu.invert_mouse_x,
             core.menu.invert_mouse_y,
         );
-        if let Some(vehicle_id) = game.riding_vehicle_id {
-            if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
-                if is_boat(vehicle.entity_type) {
-                    let partial_tick = core.tick_accumulator / TICK_RATE;
-                    let current_boat_yaw = crate::entity::lerp_angle(
-                        vehicle.prev_body_y_rot_deg,
-                        vehicle.body_y_rot_deg,
-                        partial_tick,
-                    );
-                    let mut cam_yaw = gfx.renderer.camera_look_dir().y_rot_deg();
-                    if let Some(last_yaw) = game.last_boat_visual_yaw {
-                        let boat_turn = crate::entity::wrap_degrees(current_boat_yaw - last_yaw);
-                        cam_yaw += boat_turn;
-                    }
-                    game.last_boat_visual_yaw = Some(current_boat_yaw);
-                    let diff = crate::entity::wrap_degrees(cam_yaw - current_boat_yaw);
-                    let clamped = diff.clamp(-105.0, 105.0);
-                    let delta = clamped - diff;
-                    cam_yaw += delta;
-                    let new_look = crate::entity::components::LookDirection::new(
-                        cam_yaw,
-                        gfx.renderer.camera_look_dir().x_rot_deg(),
-                    );
-                    gfx.renderer.set_camera_look_dir(new_look);
-                } else {
-                    game.last_boat_visual_yaw = None;
-                }
-            } else {
-                game.last_boat_visual_yaw = None;
-            }
-        } else {
-            game.last_boat_visual_yaw = None;
+        // `Entity.turn` tells the vehicle (`onPassengerTurned`): a boat holds
+        // its rider's yaw within reach of its own.
+        if let Some(boat) = game
+            .riding_vehicle()
+            .filter(|v| crate::entity::is_boat(v.entity_type))
+        {
+            let look = gfx.renderer.camera_look_dir();
+            let yaw = clamp_rider_yaw(look.y_rot_deg(), boat.body_y_rot_deg);
+            gfx.renderer
+                .set_camera_look_dir(LookDirection::new(yaw, look.x_rot_deg()));
         }
     }
 
@@ -3061,67 +3110,15 @@ pub fn update_game(
     let camera_pivot = match spectated {
         Some(e) => e.eye_position(partial_tick),
         None => {
-            let rider_feet = if let Some(vehicle_id) = game.riding_vehicle_id {
-                let count = game
-                    .vehicle_passengers
-                    .get(&vehicle_id)
-                    .map_or(1, |p| p.len());
-                let seat_idx = game
-                    .vehicle_passengers
-                    .get(&vehicle_id)
-                    .and_then(|p| p.iter().position(|&id| id == game.player.entity_id))
-                    .unwrap_or(0);
-                if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
-                    let v_pos = vehicle
-                        .prev_position
-                        .lerp(vehicle.position, partial_tick as f64);
-                    let v_yaw = lerp_angle(
-                        vehicle.prev_body_y_rot_deg,
-                        vehicle.body_y_rot_deg,
-                        partial_tick,
-                    );
-                    let height =
-                        crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                    Some(
-                        v_pos
-                            + passenger_attachment_offset(
-                                vehicle.entity_type,
-                                height,
-                                seat_idx,
-                                count,
-                                false,
-                                v_yaw,
-                            ),
-                    )
-                } else if let Some(pos) = game.entity_positions.get(&vehicle_id) {
-                    let kind = game
-                        .entity_kinds
-                        .get(&vehicle_id)
-                        .copied()
-                        .unwrap_or(EntityKind::ArmorStand);
-                    let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                    Some(
-                        *pos + passenger_attachment_offset(
-                            kind, height, seat_idx, count, false, 0.0,
-                        ),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let eye = match rider_feet {
-                Some(feet) => feet + glam::dvec3(0.0, f64::from(game.player.eye_height), 0.0),
-                None => game
-                    .player
-                    .prev_eye_pos()
-                    .lerp(game.player.eye_pos(), partial_tick as f64),
-            };
-            eye + glam::dvec3(0.0, first_person_lift, 0.0)
+            game.player
+                .prev_eye_pos()
+                .lerp(game.player.eye_pos(), partial_tick as f64)
+                + glam::dvec3(0.0, first_person_lift, 0.0)
         }
     };
     gfx.renderer.sync_camera_pos(camera_pivot);
+    gfx.renderer
+        .set_camera_yaw_ease(game.rider_yaw_turn * (1.0 - partial_tick));
     gfx.renderer
         .set_entity_camera_look(spectated.map(|e| e.view_look(partial_tick)));
     gfx.renderer.set_sleeping_camera_look(is_sleeping.then(|| {
@@ -3180,9 +3177,54 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
+    // A player head resolves its profile when its item draws: on the HUD's
+    // hotbar and offhand, and in the open screen's slots and cursor.
+    let inventory = &game.player.inventory;
+    let screen_slots =
+        game.inventory_open || game.open_container.is_some() || game.creative_inventory_open;
+    let shown = if screen_slots {
+        game.menu_slots()
+    } else {
+        inventory.hotbar_slots()
+    };
+    for profile in shown
+        .iter()
+        .chain([inventory.offhand(), &game.cursor_item])
+        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(crate::ui::common::HeadProfile::of_stack)
+    {
+        core.request_head(profile);
+    }
+
+    // TODO: Pomme doesn't track the server's reduced debug info yet.
+    let enabled = core
+        .menu
+        .debug_entries
+        .currently_enabled(game.show_debug, false);
+    let mut debug = if enabled.is_empty() {
+        DebugColumns::default()
+    } else {
+        debug_entries::entry_columns(
+            &enabled,
+            &DebugEntryInput {
+                fps: gfx.fps_counter.display_fps(),
+                framerate_limit: core.menu.max_framerate,
+                present_mode: gfx.renderer.present_mode(),
+                refresh_rate_hz: gfx
+                    .window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz())
+                    .map(|millihertz| millihertz as f32 / 1000.0),
+                lows: gfx.fps_counter.lows(),
+            },
+        )
+    };
+    if game.show_debug {
+        let info = hud::DebugInfo {
+            debug_options_key: hud::format_debug_keybind(
+                &core.input.key_bindings,
+                Action::DebugDebugOptions,
+            ),
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
@@ -3228,10 +3270,9 @@ pub fn update_game(
                 draw_ms: gfx.renderer.last_timings().draw_ms,
                 present_ms: gfx.renderer.last_timings().present_ms,
             }),
-        })
-    } else {
-        None
-    };
+        };
+        hud::build_debug_overlay(&mut debug, &info);
+    }
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -3255,9 +3296,9 @@ pub fn update_game(
         );
     }
     if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
+        // F1 hides the debug lines too, unless a screen is open.
+        if !game.input_live() {
+            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
                 gfx.renderer.menu_text_width(t, s)
             });
         }
@@ -3440,7 +3481,7 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
+            &debug,
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -4254,6 +4295,28 @@ pub fn update_game(
                 sh,
                 gs,
             );
+        } else if let Some(slot) = hovered
+            && game.cursor_item.is_empty()
+            && let Some(stack) = game
+                .menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+        {
+            let lines = crate::ui::chat::stack_tooltip_lines(
+                stack,
+                &game.registries,
+                game.advanced_item_tooltips,
+            );
+            if !lines.is_empty() {
+                crate::ui::common::push_tooltip_lines(
+                    &mut elements,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                    lines,
+                );
+            }
         }
         core.input.clear_just_pressed_actions();
     }
@@ -4295,6 +4358,7 @@ pub fn update_game(
             drop,
             game.player.drop_spam.can_drop(),
             &game.player.inventory,
+            &game.registries,
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),
@@ -4511,64 +4575,18 @@ pub fn update_game(
         // Vanilla `LevelExtractor` skips the camera entity unless the camera
         // is detached.
         let first_person = gfx.renderer.is_first_person();
-        let passenger_map: HashMap<i32, (i32, usize, usize)> = game
+        let passengers: HashSet<i32> = game
             .vehicle_passengers
-            .iter()
-            .flat_map(|(&vid, passengers)| {
-                let count = passengers.len();
-                passengers
-                    .iter()
-                    .enumerate()
-                    .map(move |(idx, &pid)| (pid, (vid, idx, count)))
-            })
+            .values()
+            .flatten()
+            .copied()
             .collect();
         game.entity_store
             .living
             .iter()
             .filter(|&(&id, _)| !(first_person && game.camera_entity == Some(id)))
             .map(|(&entity_id, e)| {
-                let is_passenger = passenger_map.contains_key(&entity_id);
-                let interp_pos = if let Some(&(vid, seat_idx, count)) =
-                    passenger_map.get(&entity_id)
-                {
-                    let is_animal = crate::entity::is_animal(e.entity_type);
-                    if let Some(vehicle) = game.entity_store.living.get(&vid) {
-                        let v_pos = vehicle
-                            .prev_position
-                            .lerp(vehicle.position, partial_tick as f64);
-                        let v_yaw = lerp_angle(
-                            vehicle.prev_body_y_rot_deg,
-                            vehicle.body_y_rot_deg,
-                            partial_tick,
-                        );
-                        let height =
-                            crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type)
-                                .height;
-                        v_pos
-                            + passenger_attachment_offset(
-                                vehicle.entity_type,
-                                height,
-                                seat_idx,
-                                count,
-                                is_animal,
-                                v_yaw,
-                            )
-                    } else if let Some(pos) = game.entity_positions.get(&vid) {
-                        let kind = game
-                            .entity_kinds
-                            .get(&vid)
-                            .copied()
-                            .unwrap_or(EntityKind::ArmorStand);
-                        let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                        *pos + passenger_attachment_offset(
-                            kind, height, seat_idx, count, is_animal, 0.0,
-                        )
-                    } else {
-                        e.prev_position.lerp(e.position, partial_tick as f64)
-                    }
-                } else {
-                    e.prev_position.lerp(e.position, partial_tick as f64)
-                };
+                let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
                 let is_sleeping = e.sleeping_pos.is_some();
@@ -4612,23 +4630,11 @@ pub fn update_game(
                             .x_rot_deg()
                             .lerp(e.look_dir.x_rot_deg(), partial_tick),
                     ),
-                    body_y_rot_deg: if let Some(&(vid, _, _)) = passenger_map.get(&entity_id) {
-                        if let Some(vehicle) = game.entity_store.living.get(&vid) {
-                            let v_yaw = lerp_angle(
-                                vehicle.prev_body_y_rot_deg,
-                                vehicle.body_y_rot_deg,
-                                partial_tick,
-                            );
-                            let body_yaw =
-                                lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick);
-                            let diff = (body_yaw - v_yaw + 180.0).rem_euclid(360.0) - 180.0;
-                            v_yaw + diff.clamp(-85.0, 85.0)
-                        } else {
-                            lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick)
-                        }
-                    } else {
-                        lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick)
-                    },
+                    body_y_rot_deg: lerp_angle(
+                        e.prev_body_y_rot_deg,
+                        e.body_y_rot_deg,
+                        partial_tick,
+                    ),
                     is_sleeping,
                     sleeping_direction: bed_orientation(game, e.sleeping_pos),
                     sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
@@ -4656,7 +4662,8 @@ pub fn update_game(
                     is_converting: e.is_converting,
                     is_holding_item: e.equipment(EquipmentSlot::Mainhand).is_some(),
                     nose_wobble_speed: extras.nose_wobble_speed,
-                    is_sitting: e.is_sitting || is_passenger,
+                    is_sitting: e.is_sitting,
+                    is_passenger: passengers.contains(&entity_id),
                     is_sprinting: e.is_sprinting,
                     is_angry: extras.is_angry,
                     tail_angle: extras.tail_angle,
@@ -4671,9 +4678,7 @@ pub fn update_game(
                     stand_anim: extras.stand_anim,
                     feeding_anim: extras.feeding_anim,
                     animate_tail: extras.animate_tail,
-                    is_in_water: (is_boat(e.entity_type)
-                        && e.boat_sim.status != crate::entity::boat::BoatStatus::OnLand)
-                        || e.is_in_water,
+                    is_in_water: e.is_in_water,
                     tentacle_angle: extras.tentacle_angle,
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
@@ -4717,74 +4722,21 @@ pub fn update_game(
         finished,
     );
     if game.camera_entity.is_none() && (shown || !benchmark_running && !finished && !spectating) {
-        let interp_pos = if let Some(vehicle_id) = game.riding_vehicle_id {
-            let count = game
-                .vehicle_passengers
-                .get(&vehicle_id)
-                .map_or(1, |p| p.len());
-            let seat_idx = game
-                .vehicle_passengers
-                .get(&vehicle_id)
-                .and_then(|p| p.iter().position(|&id| id == game.player.entity_id))
-                .unwrap_or(0);
-            if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
-                let v_pos = vehicle
-                    .prev_position
-                    .lerp(vehicle.position, partial_tick as f64);
-                let v_yaw = lerp_angle(
-                    vehicle.prev_body_y_rot_deg,
-                    vehicle.body_y_rot_deg,
-                    partial_tick,
-                );
-                let height =
-                    crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                v_pos
-                    + passenger_attachment_offset(
-                        vehicle.entity_type,
-                        height,
-                        seat_idx,
-                        count,
-                        false,
-                        v_yaw,
-                    )
-            } else if let Some(pos) = game.entity_positions.get(&vehicle_id) {
-                let kind = game
-                    .entity_kinds
-                    .get(&vehicle_id)
-                    .copied()
-                    .unwrap_or(EntityKind::ArmorStand);
-                let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                *pos + passenger_attachment_offset(kind, height, seat_idx, count, false, 0.0)
-            } else {
-                game.player
-                    .prev_position
-                    .lerp(game.player.position, partial_tick as f64)
-            }
-        } else {
-            game.player
-                .prev_position
-                .lerp(game.player.position, partial_tick as f64)
-        };
+        let interp_pos = game
+            .player
+            .prev_position
+            .lerp(game.player.position, partial_tick as f64);
 
         let interp_y_rot_deg = lerp_angle(
             game.player.prev_look_dir.y_rot_deg(),
             game.player.look_dir.y_rot_deg(),
             partial_tick,
         );
-        let interp_body_y_rot_deg = if let Some(vehicle_id) = game.riding_vehicle_id
-            && let Some(vehicle) = game.entity_store.living.get(&vehicle_id)
-            && is_boat(vehicle.entity_type)
-        {
-            let v_yaw = lerp_angle(
-                vehicle.prev_body_y_rot_deg,
-                vehicle.body_y_rot_deg,
-                partial_tick,
-            );
-            let diff = (interp_y_rot_deg - v_yaw + 180.0).rem_euclid(360.0) - 180.0;
-            v_yaw + diff.clamp(-85.0, 85.0)
-        } else {
-            interp_y_rot_deg
-        };
+        let interp_body_y_rot_deg = lerp_angle(
+            game.player.prev_body_y_rot,
+            game.player.body_y_rot,
+            partial_tick,
+        );
 
         let (radius, strength) =
             crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
@@ -4799,7 +4751,7 @@ pub fn update_game(
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
-            is_sitting: game.riding_vehicle_id.is_some(),
+            is_passenger: game.riding_vehicle_id.is_some(),
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -5016,6 +4968,73 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    // `EntityRenderer.extractNameTags` with the living renderers'
+    // `shouldShowName`.
+    // TODO: an entity carrying passengers hides its name (Pomme doesn't link
+    // passengers yet), the below-name score (`belowNameDisplay`), and custom
+    // names on entities that aren't living.
+    let nameplate_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        let target = match game.interaction.target {
+            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+            _ => None,
+        };
+        let camera = gfx.renderer.camera_render_position();
+        let mut list = Vec::new();
+        for (&entity_id, entity) in &game.entity_store.living {
+            // The camera entity never shows its own name.
+            if entity.player_uuid == Some(core.user.uuid) {
+                continue;
+            }
+            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            // `getDisplayName`: a player's account name, or a mob's custom
+            // name when it shows it or is under the crosshair.
+            let spans = match entity.player_uuid {
+                Some(_) => game.scoreboard.line(&name, None),
+                None => match &entity.custom_name_spans {
+                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                        game.scoreboard.line(&name, Some(custom))
+                    }
+                    _ => continue,
+                },
+            };
+            let dist_sq = (*entity.position - camera).length_squared();
+            if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
+                continue;
+            }
+            let visible = !entity.is_invisible
+                || spectating
+                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+            let shown = game
+                .scoreboard
+                .name_tag_shown(&viewer, &name, visible)
+                .unwrap_or(!game.hide_gui && visible);
+            if !shown {
+                continue;
+            }
+            let position = entity
+                .prev_position
+                .lerp(entity.position, partial_tick as f64)
+                + entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64)
+                    .render_offset
+                // `submitNameTag` lifts the tag half a block over its anchor.
+                + glam::DVec3::Y * (f64::from(entity.name_tag_height()) + 0.5);
+            list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                position: *position,
+                spans,
+                discrete: entity.is_crouching,
+                light: entity_light(
+                    &world_light,
+                    entity.entity_type,
+                    entity.eye_position(partial_tick),
+                    entity.is_on_fire,
+                    entity.dark_ticks,
+                ),
+            });
+        }
+        list
+    };
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
     let distant_terrain = if game.light_engine.has_sky() {
@@ -5135,6 +5154,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &nameplate_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off
@@ -5266,7 +5286,8 @@ pub fn update_game(
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
             // Chat Settings opened from chat return to it, unpaused.
-            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
+            let to_chat = game.chat.return_from_settings(game.command_tree.as_deref());
+            game.paused = !to_chat && !std::mem::take(&mut game.options_close_to_game);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }
@@ -5921,10 +5942,26 @@ fn entity_extras(
             overlay_tints: SLOT0_TINTS,
             ..Default::default()
         },
-        _ if is_boat(e.entity_type) && !crate::entity::is_raft(e.entity_type) => EntityExtras {
-            overlay_tints: SLOT0_TINTS,
-            ..Default::default()
-        },
+        _ if crate::entity::is_boat(e.entity_type) => {
+            let boat = &e.boat_sim;
+            EntityExtras {
+                // `BoatRenderer.submitTypeAdditions`: the water patch, unless
+                // the boat is under water.
+                overlay_tints: if boat.is_under_water() {
+                    Default::default()
+                } else {
+                    SLOT0_TINTS
+                },
+                body_transform: Some(crate::renderer::entity_model::boat_body_transform(
+                    boat.hurt_time as f32 - alpha,
+                    boat.hurt_dir,
+                    (boat.damage - alpha).max(0.0),
+                    boat.bubble_angle(alpha),
+                    boat.is_under_water(),
+                )),
+                ..Default::default()
+            }
+        }
         _ => EntityExtras::default(),
     }
 }

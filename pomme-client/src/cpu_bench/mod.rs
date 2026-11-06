@@ -1,9 +1,10 @@
 //! Headless CPU benchmarks (`just bench [filter]`): the chunk mesher and its
-//! worker queue, the chunk draw lists, cave culling, chunk packet decoding
-//! and distant terrain, with no window or Vulkan device.
+//! worker queue, the chunk draw lists, cave culling, chunk packet decoding,
+//! block collision and distant terrain, with no window or Vulkan device.
 //! Criterion reports each run's change against the last.
 
 mod chunk_decode;
+mod collision;
 mod dispatch;
 mod distant;
 mod fixtures;
@@ -43,6 +44,7 @@ pub fn run(version: &str, dirs: &DataDirs, filter: Option<&str>) -> i32 {
         distant::bench(&mut c, &assets);
     }
     chunk_decode::bench(&mut c, block_state_table);
+    collision::bench(&mut c, block_state_table);
     lists::bench(&mut c);
     occlusion::bench_walk(&mut c);
 

@@ -245,6 +245,12 @@ pub enum NetworkEvent {
         title: String,
     },
     ContainerClosed,
+    /// The server's correction of the vehicle the player steers.
+    MoveVehicle {
+        position: DVec3,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+    },
     CursorItem {
         item: ItemStack,
     },
@@ -334,6 +340,7 @@ pub enum NetworkEvent {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
+        name_tag_visibility: crate::ui::hud::NameTagVisibility,
         see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     },
@@ -596,6 +603,7 @@ pub enum NetworkEvent {
     EntityCustomName {
         id: i32,
         name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
     },
     EntitySwing {
         id: i32,

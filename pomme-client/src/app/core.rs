@@ -16,22 +16,6 @@ use winit::window::{CursorGrabMode, Fullscreen, Window};
 use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
 use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
-
-impl GameState {
-    pub fn collidable_entity_boxes(
-        &self,
-        ignored_vehicle: Option<i32>,
-    ) -> Vec<crate::physics::aabb::Aabb> {
-        self.entity_store
-            .living
-            .iter()
-            .filter(|(id, entity)| {
-                Some(**id) != ignored_vehicle && crate::entity::is_boat(entity.entity_type)
-            })
-            .map(|(_, entity)| crate::entity::boat::boat_aabb(entity))
-            .collect()
-    }
-}
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
@@ -48,6 +32,7 @@ use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
+use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
 };
@@ -97,37 +82,19 @@ struct PlayerSkinResult {
     result: Result<crate::renderer::SkinData, String>,
 }
 
-/// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
-/// `ResolvableProfile`, so two heads with the same id but different textures
-/// are different entries.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct HeadProfile {
-    id: Option<uuid::Uuid>,
-    name: Option<String>,
-    textures: Option<String>,
-}
-
-impl HeadProfile {
-    /// `ResolvableProfile.create`: a profile carrying properties, or both or
-    /// neither of id and name, is `Static` and never looks anything up; one
-    /// with exactly one of them is `Dynamic` and resolves first.
-    fn is_static(&self) -> bool {
-        self.textures.is_some() || self.id.is_some() == self.name.is_some()
-    }
-}
-
 enum HeadState {
     Pending,
     Ready {
         hat: Vec<u8>,
         base: Vec<u8>,
+        /// The 64x64 skin, which a profiled player head item is drawn with.
+        skin: Vec<u8>,
     },
     /// No skin to show: a static profile with no textures, or a lookup that
     /// failed. Cached so it isn't retried (and re-logged) every frame.
-    // TODO: vanilla falls back to `DefaultPlayerSkin.get(uuid)` (one of 18
-    // skins by `floorMod(uuid.hashCode(), 18)`, see `java_uuid_hash` in
-    // world/waypoints.rs); Pomme draws wide Steve everywhere, entities
-    // included.
+    // TODO: vanilla falls back to `DefaultPlayerSkin.get(uuid)`, which head
+    // items draw (`HeadProfile::asset_skin`); chat head glyphs and entities
+    // still draw wide Steve.
     Fallback,
 }
 
@@ -687,14 +654,9 @@ impl GameState {
         change: &pomme_protocol::entity::PositionMoveRotation,
         relative: &pomme_protocol::entity::Relative,
     ) -> bool {
-        if let Some(vehicle_id) = self.riding_vehicle_id.take() {
-            self.controlled_vehicle_id = None;
-            self.last_boat_visual_yaw = None;
-            if let Some(passengers) = self.vehicle_passengers.get_mut(&vehicle_id) {
-                passengers.retain(|&id| id != self.player.entity_id);
-            }
-        }
-        let correction = resolve_player_position_correction(&self.player, change, relative);
+        let is_passenger = self.riding_vehicle_id.is_some();
+        let correction =
+            resolve_player_position_correction(&self.player, change, relative, is_passenger);
         if let Some(correction) = &correction {
             self.player.position = correction.position;
             self.player.prev_position = correction.prev_position;
@@ -909,11 +871,26 @@ struct ResolvedPlayerCorrection {
     prev_look_dir: LookDirection,
 }
 
+/// `ServerboundMoveVehiclePacket.fromEntity`.
+fn move_vehicle_packet(vehicle: &crate::entity::LivingEntity) -> Vec<u8> {
+    pomme_protocol::wire::encode_move_vehicle(
+        *vehicle.position,
+        vehicle.body_y_rot_deg,
+        vehicle.look_dir.x_rot_deg(),
+        vehicle.on_ground,
+    )
+}
+
 fn resolve_player_position_correction(
     player: &LocalPlayer,
     change: &pomme_protocol::entity::PositionMoveRotation,
     relative: &pomme_protocol::entity::Relative,
+    is_passenger: bool,
 ) -> Option<ResolvedPlayerCorrection> {
+    if is_passenger {
+        return None;
+    }
+
     // Vanilla `setValuesFromPositionPacket` resolves the old pose through the
     // same `calculateAbsolute`.
     let resolve_position = |base: Position| {
@@ -1059,6 +1036,11 @@ pub struct AppCore {
     /// Head skins by profile identity, shared by a profile's hat and base
     /// glyphs and kept apart from the entity skin cache.
     player_heads: HashMap<HeadProfile, HeadEntry>,
+    /// A head's skin arrived or left, so the renderer's copies need syncing.
+    head_skins_dirty: bool,
+    /// The skins from the game's assets heads draw (`HeadProfile::asset_skin`),
+    /// by texture; `None` when the asset is missing or isn't a 64x64 skin.
+    asset_head_skins: HashMap<String, Option<Vec<u8>>>,
     head_tx: crossbeam_channel::Sender<HeadResult>,
     head_rx: crossbeam_channel::Receiver<HeadResult>,
     /// A packed glyph's pixels changed (a head arrived), so the atlas needs
@@ -1151,6 +1133,7 @@ fn resolve_head_profile(profile: HeadProfile, tab_list: &TabList) -> HeadProfile
             id: Some(player.uuid),
             name: Some(player.name.clone()),
             textures: player.textures.clone(),
+            patch_texture: profile.patch_texture.clone(),
         },
         None => profile,
     }
@@ -1217,6 +1200,8 @@ impl AppCore {
             player_faces_dirty: false,
             inline_objects: HashMap::new(),
             player_heads: HashMap::new(),
+            head_skins_dirty: false,
+            asset_head_skins: HashMap::new(),
             head_tx,
             head_rx,
             inline_atlas_dirty: false,
@@ -1401,6 +1386,21 @@ impl AppCore {
         self.input.on_cursor_moved(x, y);
     }
 
+    /// `Gui.setScreen` with a new screen: whatever is up goes, running its
+    /// `removed()`, so an options screen saves and chat keeps its draft.
+    fn replace_screen(&mut self, game: &mut GameState) {
+        game.paused = false;
+        self.menu
+            .screen_removed(game.options_from_game, &self.input.key_bindings);
+        game.options_from_game = false;
+        game.options_close_to_game = false;
+        game.close_creative_inventory();
+        game.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
+        game.game_mode_switcher = None;
+        game.server_dialog = None;
+    }
+
     pub(crate) fn open_death_screen(
         &mut self,
         connection: &ConnectionHandle,
@@ -1410,17 +1410,8 @@ impl AppCore {
     ) {
         game.interaction
             .stop_destroying_for_screen(&connection.packet_tx);
-        // Minecraft.setScreen(DeathScreen) replaces the current screen, which
-        // runs the options screen's removed() and saves.
-        game.paused = false;
-        game.options_from_game = false;
-        self.menu.flush_settings(&self.input.key_bindings);
+        self.replace_screen(game);
         game.close_menu();
-        game.close_creative_inventory();
-        game.chat
-            .close(crate::ui::chat::ChatExitReason::Interrupted);
-        game.game_mode_switcher = None;
-        game.server_dialog = None;
 
         if let Some(message) = message {
             game.death_message = message;
@@ -1538,8 +1529,43 @@ impl AppCore {
         // once it has been unused for the cache duration.
         self.inline_objects
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
+        let heads = self.player_heads.len();
         self.player_heads
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
+        self.head_skins_dirty |= self.player_heads.len() != heads;
+        if std::mem::take(&mut self.head_skins_dirty) {
+            for profile in self.player_heads.keys() {
+                let texture = profile.asset_skin();
+                if !self.asset_head_skins.contains_key(texture.as_ref()) {
+                    let (namespace, path) = texture.split_once('/').unwrap_or_default();
+                    let file = crate::assets::resolve_asset_path(
+                        &self.data_dirs.jar_assets_dir,
+                        &self.asset_index,
+                        &format!("{namespace}/textures/{path}.png"),
+                    );
+                    let skin = crate::renderer::util::load_png(&file)
+                        .filter(|&(_, width, height)| (width, height) == (64, 64))
+                        .map(|(pixels, ..)| pixels);
+                    self.asset_head_skins.insert(texture.into_owned(), skin);
+                }
+            }
+            // The asset skins stay until disconnect, so a head's own skin
+            // arriving frees nothing the GPU may still read.
+            let own = self
+                .player_heads
+                .iter()
+                .filter_map(|(profile, entry)| match &entry.state {
+                    HeadState::Ready { skin, .. } if profile.patch_texture.is_none() => {
+                        Some((profile.skin_key(), skin.as_slice()))
+                    }
+                    _ => None,
+                });
+            let assets = self.asset_head_skins.iter().filter_map(|(texture, skin)| {
+                Some((HeadProfile::asset_skin_key(texture), skin.as_deref()?))
+            });
+            let skins: Vec<(String, &[u8])> = own.chain(assets).collect();
+            renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)));
+        }
         for entry in self.inline_objects.values() {
             if let InlineObjectContent::Head { profile, .. } = &entry.content
                 && let Some(head) = self.player_heads.get_mut(profile)
@@ -1607,6 +1633,7 @@ impl AppCore {
                                 HeadState::Ready {
                                     hat: hat_face,
                                     base,
+                                    ..
                                 },
                             ..
                         }) = self.player_heads.get(profile)
@@ -1678,6 +1705,7 @@ impl AppCore {
                         id: *uuid,
                         name: name.clone(),
                         textures: textures.clone(),
+                        patch_texture: None,
                     },
                     &game.tab_list,
                 );
@@ -1688,10 +1716,13 @@ impl AppCore {
     }
 
     /// Starts the one fetch a profile needs; its hat and base glyphs share it.
-    fn request_head(&mut self, profile: HeadProfile) {
-        if self.player_heads.contains_key(&profile) {
+    pub(crate) fn request_head(&mut self, profile: HeadProfile) {
+        if let Some(entry) = self.player_heads.get_mut(&profile) {
+            entry.last_used = Instant::now();
             return;
         }
+        // Its default skin draws until its own arrives.
+        self.head_skins_dirty = true;
         // A `Static` profile with no textures has nothing to fetch: vanilla's
         // `SkinManager.get` reads the profile's own property and falls back to
         // the default skin without a lookup.
@@ -1743,7 +1774,14 @@ impl AppCore {
                         extract_face_8x8(&data.pixels, data.width, data.height),
                         extract_face_8x8_with_hat(&data.pixels, data.width, data.height, false),
                     ) {
-                        (Some(hat), Some(base)) => HeadState::Ready { hat, base },
+                        (Some(hat), Some(base)) => {
+                            self.head_skins_dirty = true;
+                            HeadState::Ready {
+                                hat,
+                                base,
+                                skin: data.pixels,
+                            }
+                        }
                         _ => HeadState::Fallback,
                     }
                 }
@@ -1808,6 +1846,8 @@ impl AppCore {
         self.player_faces_dirty = false;
         self.inline_objects.clear();
         self.player_heads.clear();
+        self.asset_head_skins.clear();
+        self.head_skins_dirty = true;
         self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();
     }
@@ -1893,7 +1933,8 @@ impl AppCore {
         // `ChunkBatchReceived` is answered on the network thread as vanilla
         // does, so this doesn't pace the server.
         let mut chunk_work = std::time::Duration::ZERO;
-        while !defer_packets(chunk_work, self.tick_accumulator)
+        while !game.hold_packets
+            && !defer_packets(chunk_work, self.tick_accumulator)
             && let Ok(event) = rx.try_recv()
         {
             let chunk_packet = matches!(
@@ -2020,6 +2061,33 @@ impl AppCore {
                 } => {
                     let me = game.player.entity_id;
                     if passengers.contains(&me) {
+                        // Vanilla `handleSetEntityPassengersPacket` on boarding:
+                        // a boat turns the player its way, and the dismount
+                        // hint shows.
+                        if game.riding_vehicle_id != Some(vehicle) {
+                            if let Some(boat) = game
+                                .entity_store
+                                .living
+                                .get(&vehicle)
+                                .filter(|v| crate::entity::is_boat(v.entity_type))
+                            {
+                                let look = LookDirection::new(
+                                    boat.body_y_rot_deg,
+                                    game.player.look_dir.x_rot_deg(),
+                                );
+                                game.player.look_dir = look;
+                                game.player.prev_look_dir = look;
+                                renderer.set_camera_look_dir(look);
+                            }
+                            let key = self.input.key_bindings.key_name(Action::Sneak);
+                            let hint = crate::lang::translate("mount.onboard")
+                                .unwrap_or("Press %s to Dismount")
+                                .replace("%s", &key);
+                            game.action_bar = Some((
+                                vec![crate::ui::text::TextSpan::new(hint, [1.0; 4])],
+                                game.tick_count,
+                            ));
+                        }
                         game.riding_vehicle_id = Some(vehicle);
                         // Only the first passenger controls (vanilla
                         // getControlledVehicle -> null otherwise).
@@ -2029,15 +2097,12 @@ impl AppCore {
                         // Removed from this vehicle.
                         if game.riding_vehicle_id == Some(vehicle) {
                             game.riding_vehicle_id = None;
-                            game.last_boat_visual_yaw = None;
                         }
                         if game.controlled_vehicle_id == Some(vehicle) {
                             game.controlled_vehicle_id = None;
-                            game.entity_store.reset_living_interpolation(vehicle);
                         }
                     }
                     game.vehicle_passengers.insert(vehicle, passengers);
-                    game.sync_passengers(vehicle);
                 }
                 NetworkEvent::EntityEquipment { entity_id, slots } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
@@ -2228,15 +2293,12 @@ impl AppCore {
                         _ => None,
                     };
                     if let Some(screen) = screen {
-                        // Vanilla setScreen replaces whatever screen is up,
-                        // including the pause menu.
-                        game.paused = false;
                         if game.inventory_open || game.recipe_book_ui.captures_typing() {
                             game.recipe_book_ui
                                 .reset_for_closed_screen(&mut game.recipe_book);
                         }
+                        self.replace_screen(game);
                         game.inventory_open = false;
-                        game.close_creative_inventory();
                         game.inv_drag = None;
                         game.inv_last_click = None;
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
@@ -2270,6 +2332,29 @@ impl AppCore {
                             .send(ServerboundGamePacket::ContainerClose(
                                 ServerboundContainerClose { container_id },
                             ));
+                    }
+                }
+                // Vanilla `handleMoveVehicle`: the vehicle this client moves
+                // snaps to the server's correction, which it confirms.
+                NetworkEvent::MoveVehicle {
+                    position,
+                    y_rot_deg,
+                    x_rot_deg,
+                } => {
+                    if let Some(id) = game.steered_boat()
+                        && let Some(boat) = game.entity_store.living.get(&id)
+                    {
+                        let moved = boat.position.distance(position) > f64::from(1.0e-5_f32);
+                        if moved {
+                            game.entity_store.snap_living(
+                                id,
+                                position.into(),
+                                LookDirection::new(y_rot_deg, x_rot_deg),
+                                game.entity_store.living[&id].velocity,
+                            );
+                        }
+                        let boat = &game.entity_store.living[&id];
+                        connection.packet_tx.send_raw(move_vehicle_packet(boat));
                     }
                 }
                 NetworkEvent::ContainerClosed => {
@@ -2473,6 +2558,7 @@ impl AppCore {
                     color,
                     fill_color,
                     collision_rule,
+                    name_tag_visibility,
                     see_friendly_invisibles,
                     members,
                 } => {
@@ -2484,6 +2570,7 @@ impl AppCore {
                         color,
                         fill_color,
                         collision_rule,
+                        name_tag_visibility,
                         see_friendly_invisibles,
                         members,
                     );
@@ -2755,7 +2842,12 @@ impl AppCore {
                     dz,
                     on_ground,
                 } => {
-                    if game.controlled_vehicle_id != Some(id) {
+                    // Vanilla `handleMoveEntity`: an entity this client moves
+                    // only takes the position as the base later moves decode
+                    // against.
+                    if game.steered_boat() == Some(id) {
+                        game.entity_store.shift_living_base(id, dvec3(dx, dy, dz));
+                    } else {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
@@ -2763,7 +2855,6 @@ impl AppCore {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
                         }
-                        game.sync_passengers(id);
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -2775,7 +2866,9 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    if game.controlled_vehicle_id != Some(id) {
+                    if game.steered_boat() == Some(id) {
+                        game.entity_store.shift_living_base(id, dvec3(dx, dy, dz));
+                    } else {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.entity_store
@@ -2785,7 +2878,6 @@ impl AppCore {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
                         }
-                        game.sync_passengers(id);
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -2794,15 +2886,17 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    if game.controlled_vehicle_id != Some(id) {
+                    if game.steered_boat() != Some(id) {
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     }
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
+                    // Vanilla `Entity.lerpMotion` sets velocity; the local
+                    // player lives outside the entity stores.
                     if id == game.player.entity_id {
                         game.player.velocity = velocity.into();
-                    } else if game.controlled_vehicle_id != Some(id) {
+                    } else {
                         game.item_entity_store.set_motion(id, velocity);
                         game.entity_store.set_living_motion(id, velocity);
                     }
@@ -2819,7 +2913,12 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    if game.controlled_vehicle_id != Some(id) {
+                    // `handleEntityPositionSync` (no velocity) only moves the
+                    // base of an entity this client moves; a teleport still
+                    // moves it.
+                    if velocity.is_none() && game.steered_boat() == Some(id) {
+                        game.entity_store.set_living_base(id, position);
+                    } else {
                         game.entity_store.teleport_living(id, position, on_ground);
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
@@ -2830,7 +2929,6 @@ impl AppCore {
                             .teleport(id, position, velocity, on_ground);
                         game.entity_positions.insert(id, position);
                         self.audio.update_entity_sound_position(id, position);
-                        game.sync_passengers(id);
                     }
                 }
                 NetworkEvent::LevelEvent {
@@ -3044,8 +3142,8 @@ impl AppCore {
                     game.entity_store
                         .set_villager_data(id, kind, profession, level);
                 }
-                NetworkEvent::EntityCustomName { id, name } => {
-                    game.entity_store.set_custom_name(id, name);
+                NetworkEvent::EntityCustomName { id, name, spans } => {
+                    game.entity_store.set_custom_name(id, name, spans);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
@@ -3229,7 +3327,6 @@ impl AppCore {
                     game.entity_positions.clear();
                     game.entity_kinds.clear();
                     game.vehicle_passengers.clear();
-                    game.last_boat_visual_yaw = None;
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
@@ -3429,6 +3526,7 @@ impl AppCore {
         // TODO: a same-dimension `handleRespawn` re-adds it after them.
         self.tick_local_player(renderer, connection, game);
         self.tick_remote_entities(game);
+        game.position_remote_riders();
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
         super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
@@ -3545,7 +3643,7 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                let extra_boxes = game.collidable_entity_boxes(game.riding_vehicle_id);
+                let extra_boxes = game.collidable_entity_boxes();
                 movement::tick_dead(
                     &mut game.player,
                     crate::physics::collision::CollisionWorld::with_block_entities(
@@ -3565,6 +3663,8 @@ impl AppCore {
                 let dx = game.player.position.x - game.player.prev_position.x;
                 let dz = game.player.position.z - game.player.prev_position.z;
                 game.player.tick_bob(dx, dz, true);
+                game.player
+                    .tick_body_rotation(dx, dz, game.interaction.arm_swinging());
             }
             game.interaction
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
@@ -3783,10 +3883,12 @@ impl AppCore {
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
+        // The vehicle ticks before its passenger.
+        Self::tick_steered_boat(game, connection);
         let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
             jumpable: game.riding_jumpable_vehicle(),
         });
-        let extra_boxes = game.collidable_entity_boxes(game.riding_vehicle_id);
+        let extra_boxes = game.collidable_entity_boxes();
         movement::tick(
             &mut game.player,
             input,
@@ -3801,7 +3903,6 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
-        Self::tick_controlled_vehicle(game, input, connection);
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -3813,15 +3914,40 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz, false);
+        game.player
+            .tick_body_rotation(dx, dz, game.interaction.arm_swinging());
         game.player.drop_spam.tick();
+
+        // The rest of `LocalPlayer.rideTick`: seated, turned with a boat, and
+        // its keys left for the boat's next tick (`AbstractBoat.setInput`).
+        // TODO: `handsBusy`, which the steering keys set.
+        game.position_local_rider();
+        if game.rider_yaw_turn != 0.0 {
+            renderer.set_camera_look_dir(game.player.look_dir);
+        }
+        if let Some(boat) = game
+            .steered_boat()
+            .and_then(|id| game.entity_store.living.get_mut(&id))
+        {
+            boat.boat_sim.input = crate::entity::boat::BoatInput {
+                left: input.action_held(Action::StrafeLeft),
+                right: input.action_held(Action::StrafeRight),
+                up: input.action_held(Action::Forward),
+                down: input.action_held(Action::Backward),
+            };
+        }
 
         game.interaction
             .tick_player_state(input.is_cursor_captured(), held_stack);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
-        self.send_sprint_command(connection, game);
-        self.send_position_packet(connection, game);
+        if game.riding_vehicle_id.is_some() {
+            self.send_passenger_packets(connection, game);
+        } else {
+            self.send_sprint_command(connection, game);
+            self.send_position_packet(connection, game);
+        }
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
@@ -3929,28 +4055,50 @@ impl AppCore {
         );
     }
 
-    fn tick_controlled_vehicle(
-        game: &mut GameState,
-        input: &InputState,
-        _connection: &ConnectionHandle,
-    ) {
-        let Some(vehicle_id) = game.controlled_vehicle_id else {
+    /// Vanilla `AbstractBoat.tick` for the boat the player steers, which
+    /// sends `PaddleBoat` from its tick.
+    fn tick_steered_boat(game: &mut GameState, connection: &ConnectionHandle) {
+        let Some(id) = game.steered_boat() else {
             return;
         };
-        let Some(vehicle) = game.entity_store.living.get_mut(&vehicle_id) else {
+        let colliders = game.boat_colliders(id);
+        let Some(boat) = game.entity_store.living.get_mut(&id) else {
             return;
         };
+        let [left, right] = crate::entity::boat::tick_controlled(
+            boat,
+            &colliders,
+            &game.chunk_store,
+            game.block_registry.block_state_table(),
+            game.block_registry.tags(),
+        );
+        connection
+            .packet_tx
+            .send_raw(pomme_protocol::wire::encode_paddle_boat(left, right));
+    }
 
-        if crate::entity::is_boat(vehicle.entity_type) {
-            let table = game.block_registry.block_state_table();
-            vehicle.boat_sim.input_left = input.action_held(Action::StrafeLeft);
-            vehicle.boat_sim.input_right = input.action_held(Action::StrafeRight);
-            vehicle.boat_sim.input_up = input.action_held(Action::Forward);
-            vehicle.boat_sim.input_down = input.action_held(Action::Backward);
-            crate::entity::boat::tick_controlled_boat(vehicle, &game.chunk_store, table);
-            vehicle.look_dir =
-                crate::entity::components::LookDirection::new(vehicle.body_y_rot_deg, 0.0);
-            game.sync_passengers(vehicle_id);
+    /// `LocalPlayer.sendChanges` for a passenger: its look, then the vehicle
+    /// it moves and its sprint.
+    fn send_passenger_packets(&self, connection: &ConnectionHandle, game: &mut GameState) {
+        use azalea_protocol::common::movements::MoveFlags;
+        use azalea_protocol::packets::game::*;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::MovePlayerRot(
+                ServerboundMovePlayerRot {
+                    look_direction: game.player.look_dir.into(),
+                    flags: MoveFlags {
+                        on_ground: game.player.on_ground,
+                        horizontal_collision: game.player.horizontal_collision,
+                    },
+                },
+            ));
+        if let Some(boat) = game
+            .steered_boat()
+            .and_then(|id| game.entity_store.living.get(&id))
+        {
+            connection.packet_tx.send_raw(move_vehicle_packet(boat));
+            self.send_sprint_command(connection, game);
         }
     }
 
@@ -3958,34 +4106,6 @@ impl AppCore {
         let sender = &connection.packet_tx;
         use azalea_protocol::common::movements::MoveFlags;
         use azalea_protocol::packets::game::*;
-
-        if let Some(vehicle_id) = game.controlled_vehicle_id
-            && let Some(vehicle) = game.entity_store.living.get(&vehicle_id)
-        {
-            let flags = MoveFlags {
-                on_ground: vehicle.on_ground,
-                horizontal_collision: game.player.horizontal_collision,
-            };
-            sender.send(ServerboundGamePacket::MovePlayerRot(
-                ServerboundMovePlayerRot {
-                    look_direction: game.player.look_dir.into(),
-                    flags,
-                },
-            ));
-            sender.send_raw(pomme_protocol::wire::encode_move_vehicle(
-                *vehicle.position,
-                vehicle.body_y_rot_deg,
-                vehicle.look_dir.x_rot_deg(),
-                vehicle.on_ground,
-            ));
-            if crate::entity::is_boat(vehicle.entity_type) {
-                sender.send_raw(pomme_protocol::wire::encode_paddle_boat(
-                    vehicle.boat_sim.paddle_state[0],
-                    vehicle.boat_sim.paddle_state[1],
-                ));
-            }
-            return;
-        }
 
         let pos = game.player.position;
         let look_dir = game.player.look_dir;
@@ -4309,6 +4429,7 @@ mod tests {
             id: None,
             name: Some("alex".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert!(!by_name.is_static());
         let resolved = resolve_head_profile(by_name, &tab_list);
@@ -4319,6 +4440,7 @@ mod tests {
             id: Some(uuid),
             name: None,
             textures: None,
+            patch_texture: None,
         };
         assert_eq!(
             resolve_head_profile(by_id, &tab_list).textures.as_deref(),
@@ -4331,6 +4453,7 @@ mod tests {
             id: None,
             name: Some("Notch".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert_eq!(resolve_head_profile(stranger.clone(), &tab_list), stranger);
 
@@ -4339,6 +4462,7 @@ mod tests {
             id: Some(uuid),
             name: Some("Alex".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert!(both.is_static());
         assert_eq!(resolve_head_profile(both.clone(), &tab_list), both);
@@ -4347,6 +4471,7 @@ mod tests {
                 id: None,
                 name: None,
                 textures: None,
+                patch_texture: None,
             }
             .is_static()
         );
@@ -4355,6 +4480,7 @@ mod tests {
                 id: None,
                 name: Some("Alex".to_owned()),
                 textures: Some("packed".to_owned()),
+                patch_texture: None,
             }
             .is_static()
         );
@@ -4569,11 +4695,16 @@ mod tests {
         };
         let relative = Relative::default();
 
-        let corrected = resolve_player_position_correction(&player, &change, &relative)
-            .expect("correction applies");
-        assert_eq!(corrected.position, Position::new(100.0, 200.0, 300.0));
-        assert_eq!(corrected.velocity, Velocity::new(1.0, 2.0, 3.0));
-        assert_eq!(corrected.look_dir, LookDirection::new(90.0, 45.0));
+        let unmounted = resolve_player_position_correction(&player, &change, &relative, false)
+            .expect("unmounted correction applies");
+        assert_eq!(unmounted.position, Position::new(100.0, 200.0, 300.0));
+        assert_eq!(unmounted.velocity, Velocity::new(1.0, 2.0, 3.0));
+        assert_eq!(unmounted.look_dir, LookDirection::new(90.0, 45.0));
+
+        assert!(
+            resolve_player_position_correction(&player, &change, &relative, true).is_none(),
+            "vanilla mounted clients acknowledge the teleport but keep current local PosRot"
+        );
     }
 
     #[test]
