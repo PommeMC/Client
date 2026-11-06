@@ -2979,6 +2979,25 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
+    // A player head resolves its profile when its item draws: on the HUD's
+    // hotbar and offhand, and in the open screen's slots and cursor.
+    let inventory = &game.player.inventory;
+    let screen_slots =
+        game.inventory_open || game.open_container.is_some() || game.creative_inventory_open;
+    let shown = if screen_slots {
+        game.menu_slots()
+    } else {
+        inventory.hotbar_slots()
+    };
+    for profile in shown
+        .iter()
+        .chain([inventory.offhand(), &game.cursor_item])
+        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(crate::ui::common::HeadProfile::of_stack)
+    {
+        core.request_head(profile);
+    }
+
     // TODO: Pomme doesn't track the server's reduced debug info yet.
     let enabled = core
         .menu
@@ -4078,6 +4097,28 @@ pub fn update_game(
                 sh,
                 gs,
             );
+        } else if let Some(slot) = hovered
+            && game.cursor_item.is_empty()
+            && let Some(stack) = game
+                .menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+        {
+            let lines = crate::ui::chat::stack_tooltip_lines(
+                stack,
+                &game.registries,
+                game.advanced_item_tooltips,
+            );
+            if !lines.is_empty() {
+                crate::ui::common::push_tooltip_lines(
+                    &mut elements,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                    lines,
+                );
+            }
         }
         core.input.clear_just_pressed_actions();
     }
@@ -4119,6 +4160,7 @@ pub fn update_game(
             drop,
             game.player.drop_spam.can_drop(),
             &game.player.inventory,
+            &game.registries,
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),

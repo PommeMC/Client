@@ -32,6 +32,7 @@ use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resource_pack::ResourcePackManager;
+use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
 };
@@ -81,37 +82,19 @@ struct PlayerSkinResult {
     result: Result<crate::renderer::SkinData, String>,
 }
 
-/// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
-/// `ResolvableProfile`, so two heads with the same id but different textures
-/// are different entries.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct HeadProfile {
-    id: Option<uuid::Uuid>,
-    name: Option<String>,
-    textures: Option<String>,
-}
-
-impl HeadProfile {
-    /// `ResolvableProfile.create`: a profile carrying properties, or both or
-    /// neither of id and name, is `Static` and never looks anything up; one
-    /// with exactly one of them is `Dynamic` and resolves first.
-    fn is_static(&self) -> bool {
-        self.textures.is_some() || self.id.is_some() == self.name.is_some()
-    }
-}
-
 enum HeadState {
     Pending,
     Ready {
         hat: Vec<u8>,
         base: Vec<u8>,
+        /// The 64x64 skin, which a profiled player head item is drawn with.
+        skin: Vec<u8>,
     },
     /// No skin to show: a static profile with no textures, or a lookup that
     /// failed. Cached so it isn't retried (and re-logged) every frame.
-    // TODO: vanilla falls back to `DefaultPlayerSkin.get(uuid)` (one of 18
-    // skins by `floorMod(uuid.hashCode(), 18)`, see `java_uuid_hash` in
-    // world/waypoints.rs); Pomme draws wide Steve everywhere, entities
-    // included.
+    // TODO: vanilla falls back to `DefaultPlayerSkin.get(uuid)`, which head
+    // items draw (`HeadProfile::asset_skin`); chat head glyphs and entities
+    // still draw wide Steve.
     Fallback,
 }
 
@@ -1043,6 +1026,11 @@ pub struct AppCore {
     /// Head skins by profile identity, shared by a profile's hat and base
     /// glyphs and kept apart from the entity skin cache.
     player_heads: HashMap<HeadProfile, HeadEntry>,
+    /// A head's skin arrived or left, so the renderer's copies need syncing.
+    head_skins_dirty: bool,
+    /// The skins from the game's assets heads draw (`HeadProfile::asset_skin`),
+    /// by texture; `None` when the asset is missing or isn't a 64x64 skin.
+    asset_head_skins: HashMap<String, Option<Vec<u8>>>,
     head_tx: crossbeam_channel::Sender<HeadResult>,
     head_rx: crossbeam_channel::Receiver<HeadResult>,
     /// A packed glyph's pixels changed (a head arrived), so the atlas needs
@@ -1135,6 +1123,7 @@ fn resolve_head_profile(profile: HeadProfile, tab_list: &TabList) -> HeadProfile
             id: Some(player.uuid),
             name: Some(player.name.clone()),
             textures: player.textures.clone(),
+            patch_texture: profile.patch_texture.clone(),
         },
         None => profile,
     }
@@ -1201,6 +1190,8 @@ impl AppCore {
             player_faces_dirty: false,
             inline_objects: HashMap::new(),
             player_heads: HashMap::new(),
+            head_skins_dirty: false,
+            asset_head_skins: HashMap::new(),
             head_tx,
             head_rx,
             inline_atlas_dirty: false,
@@ -1528,8 +1519,43 @@ impl AppCore {
         // once it has been unused for the cache duration.
         self.inline_objects
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
+        let heads = self.player_heads.len();
         self.player_heads
             .retain(|_, entry| now.duration_since(entry.last_used) < GLYPH_CACHE_DURATION);
+        self.head_skins_dirty |= self.player_heads.len() != heads;
+        if std::mem::take(&mut self.head_skins_dirty) {
+            for profile in self.player_heads.keys() {
+                let texture = profile.asset_skin();
+                if !self.asset_head_skins.contains_key(texture.as_ref()) {
+                    let (namespace, path) = texture.split_once('/').unwrap_or_default();
+                    let file = crate::assets::resolve_asset_path(
+                        &self.data_dirs.jar_assets_dir,
+                        &self.asset_index,
+                        &format!("{namespace}/textures/{path}.png"),
+                    );
+                    let skin = crate::renderer::util::load_png(&file)
+                        .filter(|&(_, width, height)| (width, height) == (64, 64))
+                        .map(|(pixels, ..)| pixels);
+                    self.asset_head_skins.insert(texture.into_owned(), skin);
+                }
+            }
+            // The asset skins stay until disconnect, so a head's own skin
+            // arriving frees nothing the GPU may still read.
+            let own = self
+                .player_heads
+                .iter()
+                .filter_map(|(profile, entry)| match &entry.state {
+                    HeadState::Ready { skin, .. } if profile.patch_texture.is_none() => {
+                        Some((profile.skin_key(), skin.as_slice()))
+                    }
+                    _ => None,
+                });
+            let assets = self.asset_head_skins.iter().filter_map(|(texture, skin)| {
+                Some((HeadProfile::asset_skin_key(texture), skin.as_deref()?))
+            });
+            let skins: Vec<(String, &[u8])> = own.chain(assets).collect();
+            renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)));
+        }
         for entry in self.inline_objects.values() {
             if let InlineObjectContent::Head { profile, .. } = &entry.content
                 && let Some(head) = self.player_heads.get_mut(profile)
@@ -1597,6 +1623,7 @@ impl AppCore {
                                 HeadState::Ready {
                                     hat: hat_face,
                                     base,
+                                    ..
                                 },
                             ..
                         }) = self.player_heads.get(profile)
@@ -1668,6 +1695,7 @@ impl AppCore {
                         id: *uuid,
                         name: name.clone(),
                         textures: textures.clone(),
+                        patch_texture: None,
                     },
                     &game.tab_list,
                 );
@@ -1678,10 +1706,13 @@ impl AppCore {
     }
 
     /// Starts the one fetch a profile needs; its hat and base glyphs share it.
-    fn request_head(&mut self, profile: HeadProfile) {
-        if self.player_heads.contains_key(&profile) {
+    pub(crate) fn request_head(&mut self, profile: HeadProfile) {
+        if let Some(entry) = self.player_heads.get_mut(&profile) {
+            entry.last_used = Instant::now();
             return;
         }
+        // Its default skin draws until its own arrives.
+        self.head_skins_dirty = true;
         // A `Static` profile with no textures has nothing to fetch: vanilla's
         // `SkinManager.get` reads the profile's own property and falls back to
         // the default skin without a lookup.
@@ -1733,7 +1764,14 @@ impl AppCore {
                         extract_face_8x8(&data.pixels, data.width, data.height),
                         extract_face_8x8_with_hat(&data.pixels, data.width, data.height, false),
                     ) {
-                        (Some(hat), Some(base)) => HeadState::Ready { hat, base },
+                        (Some(hat), Some(base)) => {
+                            self.head_skins_dirty = true;
+                            HeadState::Ready {
+                                hat,
+                                base,
+                                skin: data.pixels,
+                            }
+                        }
                         _ => HeadState::Fallback,
                     }
                 }
@@ -1798,6 +1836,8 @@ impl AppCore {
         self.player_faces_dirty = false;
         self.inline_objects.clear();
         self.player_heads.clear();
+        self.asset_head_skins.clear();
+        self.head_skins_dirty = true;
         self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();
     }
@@ -4218,6 +4258,7 @@ mod tests {
             id: None,
             name: Some("alex".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert!(!by_name.is_static());
         let resolved = resolve_head_profile(by_name, &tab_list);
@@ -4228,6 +4269,7 @@ mod tests {
             id: Some(uuid),
             name: None,
             textures: None,
+            patch_texture: None,
         };
         assert_eq!(
             resolve_head_profile(by_id, &tab_list).textures.as_deref(),
@@ -4240,6 +4282,7 @@ mod tests {
             id: None,
             name: Some("Notch".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert_eq!(resolve_head_profile(stranger.clone(), &tab_list), stranger);
 
@@ -4248,6 +4291,7 @@ mod tests {
             id: Some(uuid),
             name: Some("Alex".to_owned()),
             textures: None,
+            patch_texture: None,
         };
         assert!(both.is_static());
         assert_eq!(resolve_head_profile(both.clone(), &tab_list), both);
@@ -4256,6 +4300,7 @@ mod tests {
                 id: None,
                 name: None,
                 textures: None,
+                patch_texture: None,
             }
             .is_static()
         );
@@ -4264,6 +4309,7 @@ mod tests {
                 id: None,
                 name: Some("Alex".to_owned()),
                 textures: Some("packed".to_owned()),
+                patch_texture: None,
             }
             .is_static()
         );
