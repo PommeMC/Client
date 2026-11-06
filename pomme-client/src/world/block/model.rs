@@ -8,7 +8,9 @@ use serde::Deserialize;
 use super::json_bundle::JsonBundle;
 use super::render_assets::{FaceTextures, LoadProgress, Tint};
 use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
+use crate::renderer::block_entity_model::{SkullKind, bake_skull_model};
 use crate::renderer::chunk::mesher::Colormap;
+use crate::renderer::entity_model::{PartAnim, cube_face_positions, cube_face_uvs};
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -1034,6 +1036,24 @@ pub fn bake_item_models(
     ground_transforms.insert("chest".to_string(), chest.ground_transform);
     flat_keys.remove("chest");
 
+    for kind in SkullKind::ALL {
+        let (name, _) = kind.item_and_texture();
+        // The item's `base` in `items/<name>.json`.
+        let base = if kind == SkullKind::Dragon {
+            "item/dragon_head"
+        } else {
+            "item/template_skull"
+        };
+        let base = resolve_model(base, jar_assets_dir, asset_index, &mut model_cache, packs);
+        item_models.insert(
+            name.to_string(),
+            bake_skull_item_model(kind, base.gui_transform, base.gui_light),
+        );
+        gui_transforms.insert(name.to_string(), base.gui_transform);
+        ground_transforms.insert(name.to_string(), base.ground_transform);
+        flat_keys.remove(name);
+    }
+
     tracing::info!(
         "Baked {} item models, {} flat items, and registered {} generated-item textures",
         item_models.len(),
@@ -1047,6 +1067,63 @@ pub fn bake_item_models(
         gui_transforms,
         ground_transforms,
         tint_sources,
+    }
+}
+
+/// `SkullSpecialRenderer` as a mesh: the skull model under the item's
+/// `transformation` (translate (0.5, 0, 0.5), then 180 degrees about x), each
+/// face lit by its own normal as the GUI's item lighting does.
+fn bake_skull_item_model(
+    kind: SkullKind,
+    gui: DisplayTransform,
+    gui_light: GuiLight,
+) -> BakedModel {
+    let model = bake_skull_model(kind);
+    let (_, texture) = kind.item_and_texture();
+    let (tex_w, tex_h) = kind.texture_size();
+    let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_x(std::f32::consts::PI);
+    let (l0, l1) = gui_lights(gui_light);
+    let transforms = model.compute_part_transforms(&PartAnim::default());
+    let mut quads = Vec::new();
+    for (part, transform) in model.parts.iter().zip(&transforms) {
+        let to_item = item * *transform;
+        for cube in &part.cubes {
+            let center = to_item.transform_point3((cube.origin + cube.size * 0.5) / 16.0);
+            for (corners, [u0, v0, u1, v1]) in cube_face_positions(cube, false)
+                .iter()
+                .zip(cube_face_uvs(cube))
+            {
+                let mut positions = corners.map(|p| to_item.transform_point3(Vec3::from(p)));
+                let mut uvs = [[u1, v0], [u0, v0], [u0, v1], [u1, v1]]
+                    .map(|[u, v]| [u / tex_w as f32, v / tex_h as f32]);
+                let mut normal = (positions[1] - positions[0]).cross(positions[2] - positions[0]);
+                // Item meshes cull back faces, so wind each face outward.
+                let face_center = positions.iter().sum::<Vec3>() / 4.0;
+                if normal.dot(face_center - center) < 0.0 {
+                    positions.reverse();
+                    uvs.reverse();
+                    normal = -normal;
+                }
+                let n_gui = transform_gui_normal(normal.normalize().to_array(), gui);
+                quads.push(BakedQuad {
+                    positions: positions.map(|p| p.to_array()),
+                    uvs,
+                    texture: TextureId::intern(texture),
+                    cullface: None,
+                    tint: super::render_assets::Tint::None,
+                    tint_index: None,
+                    shade_light: lambert_shade(n_gui, l0, l1),
+                    shade_face: None,
+                    emission: 0,
+                    ambient_occlusion: true,
+                });
+            }
+        }
+    }
+    BakedModel {
+        quads,
+        is_full_cube: false,
     }
 }
 

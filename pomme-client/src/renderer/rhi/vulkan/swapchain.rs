@@ -244,6 +244,16 @@ impl Swapchain {
         self.present_mode == vk::PresentModeKHR::Fifo
     }
 
+    pub fn present_mode(&self) -> Option<rhi::PresentMode> {
+        match self.present_mode {
+            vk::PresentModeKHR::Immediate => Some(rhi::PresentMode::Immediate),
+            vk::PresentModeKHR::Mailbox => Some(rhi::PresentMode::Mailbox),
+            vk::PresentModeKHR::Fifo => Some(rhi::PresentMode::Fifo),
+            vk::PresentModeKHR::FifoRelaxed => Some(rhi::PresentMode::FifoRelaxed),
+            _ => None,
+        }
+    }
+
     /// Whether a suboptimal swapchain needs rebuilding: only once the surface's
     /// size changed. A phone held sideways is suboptimal on every frame (see
     /// `choose_pre_transform`), and a same-size rebuild each frame stalls it.

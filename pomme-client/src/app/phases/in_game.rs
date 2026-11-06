@@ -49,10 +49,12 @@ use crate::renderer::pipelines::lightmap::LightmapInfo;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
+use crate::renderer::pipelines::sign_text::{SignFace, SignRenderInfo};
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
+use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
@@ -263,9 +265,6 @@ pub struct GameState {
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub sign_editor: Option<crate::ui::sign_edit::SignEditState>,
-    /// The GUI scale the game UI is currently built at; screens opened from
-    /// network events initialize with it.
-    pub gui_scale: f32,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     /// The connection is in the configuration phase (the join, or a
@@ -354,6 +353,9 @@ pub struct GameState {
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
     pub deterministic: bool,
+    /// Set by the test harness's `hold_packets` step: incoming packets wait,
+    /// as behind a slow connection.
+    pub hold_packets: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -369,6 +371,9 @@ pub struct GameState {
     pub was_sprinting: bool,
     pub position_send_counter: u32,
     pub options_from_game: bool,
+    /// The open options screen leaves to the game, not the pause menu:
+    /// Debug Options, which replaces any screen it opens over.
+    pub options_close_to_game: bool,
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
@@ -549,6 +554,7 @@ impl GameState {
             level_load: None,
             client_loaded: false,
             options_from_game: false,
+            options_close_to_game: false,
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
@@ -613,7 +619,6 @@ impl GameState {
             },
             server_dialog: None,
             sign_editor: None,
-            gui_scale: 1.0,
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
             configuring: true,
@@ -661,6 +666,7 @@ impl GameState {
             biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
+            hold_packets: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -755,146 +761,87 @@ impl GameState {
             || self.sign_editor.is_some()
     }
 
-    pub fn open_sign_editor(&mut self, pos: BlockPos, is_front_text: bool) {
-        self.paused = false;
-        self.close_menu();
-        self.chat
-            .close(crate::ui::chat::ChatExitReason::Interrupted);
-        let (lines, is_hanging, is_wall, wood_index, text_color) =
-            self.read_sign_data(pos, is_front_text);
-        self.sign_editor = Some(crate::ui::sign_edit::SignEditState::new(
-            pos,
-            is_front_text,
-            is_hanging,
-            is_wall,
-            wood_index,
-            lines,
-            text_color,
-            self.gui_scale,
-        ));
+    /// The sign block at `pos`, if that's what is there.
+    fn sign_block_at(&self, pos: BlockPos) -> Option<crate::world::block_entity::SignBlock> {
+        let data = block_state_data_at(self, pos);
+        crate::world::block_entity::SignBlock::of(data.id(), data.properties())
     }
 
-    pub fn close_sign_editor(&mut self, connection: Option<&ConnectionHandle>) {
-        if let Some(editor) = self.sign_editor.take() {
-            let lines = editor.lines_as_strings();
-            if let Some(conn) = connection {
-                conn.packet_tx.send(ServerboundGamePacket::SignUpdate(
-                    azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
-                        pos: editor.pos.into(),
-                        is_front_text: editor.is_front_text,
-                        lines: lines.clone(),
-                    },
-                ));
-            }
-            self.apply_local_sign_text(editor.pos, editor.is_front_text, lines);
-        }
-    }
-
-    pub fn read_sign_data(
+    /// `ClientPacketListener.handleOpenSignEditor`: the editor for the sign
+    /// at `pos`, or `None` (and a warning) when there's no sign there.
+    pub fn sign_editor_for(
         &self,
         pos: BlockPos,
         is_front_text: bool,
-    ) -> ([String; 4], bool, bool, u8, [f32; 4]) {
-        let mut lines = [String::new(), String::new(), String::new(), String::new()];
-        let mut text_color = [0.0, 0.0, 0.0, 1.0];
-
-        if let Some(be) = self.chunk_store.block_entities.get(&pos) {
-            let side_key = if is_front_text {
-                "front_text"
-            } else {
-                "back_text"
-            };
-            if let Some(side) = be.nbt.compound(side_key) {
-                if let Some(color_name) = side.string("color")
-                    && let Some(rgb) =
-                        crate::world::block_entity::dye_color_rgb(&color_name.to_str())
-                {
-                    text_color = crate::ui::common::rgb(rgb);
-                }
-                if let Some(list) = side.list("messages")
-                    && let Some(strings) = list.strings()
-                {
-                    for (i, s) in strings.iter().enumerate().take(4) {
-                        let parsed = crate::world::block_entity::parse_line(&s.to_str());
-                        lines[i] = parsed.text;
-                    }
-                }
-            } else {
-                for (i, key) in ["Text1", "Text2", "Text3", "Text4"].iter().enumerate() {
-                    if let Some(s) = be.nbt.string(key) {
-                        let parsed = crate::world::block_entity::parse_line(&s.to_str());
-                        lines[i] = parsed.text;
-                    }
-                }
-            }
-        }
-
-        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-        let block_data = self.block_registry.block_state_data(state);
-        let name = block_data.id();
-        let is_hanging = name.contains("hanging_sign");
-        let is_wall = name.contains("wall");
-        let wood_index = crate::renderer::pipelines::menu_overlay::SIGN_WOOD_TYPES
-            .iter()
-            .position(|&w| name.contains(w))
-            .unwrap_or(11) as u8;
-
-        (lines, is_hanging, is_wall, wood_index, text_color)
-    }
-
-    pub fn apply_local_sign_text(
-        &mut self,
-        pos: BlockPos,
-        is_front_text: bool,
-        lines: [String; 4],
-    ) {
-        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
-
-        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-        let block_data = self.block_registry.block_state_data(state);
-        let kind = if block_data.id().contains("hanging_sign") {
-            azalea_registry::builtin::BlockEntityKind::HangingSign
-        } else {
-            azalea_registry::builtin::BlockEntityKind::Sign
-        };
-
-        let entry = self
+    ) -> Option<crate::ui::sign_edit::SignEditState> {
+        let texts = self
             .chunk_store
             .block_entities
-            .entry(pos)
-            .or_insert_with(|| crate::world::block_entity::StoredBlockEntity {
-                kind,
-                nbt: NbtCompound::new(),
-            });
-        entry.kind = kind;
-
-        let side_key = if is_front_text {
-            "front_text"
-        } else {
-            "back_text"
+            .get(&pos)
+            .and_then(|be| be.sign.as_deref());
+        let (Some(texts), Some(block)) = (texts, self.sign_block_at(pos)) else {
+            tracing::warn!("Ignoring openTextEdit on an invalid entity at {pos:?}");
+            return None;
         };
-        let mut side = entry
-            .nbt
-            .compound(side_key)
-            .cloned()
-            .unwrap_or_else(NbtCompound::new);
-        let string_list: Vec<_> = lines.iter().map(|line| line.as_str().into()).collect();
-        side.insert("messages", NbtTag::List(NbtList::String(string_list)));
-        entry.nbt.insert(side_key, NbtTag::Compound(side));
-        if is_front_text {
-            entry
-                .nbt
-                .insert("Text1", NbtTag::String(lines[0].as_str().into()));
-            entry
-                .nbt
-                .insert("Text2", NbtTag::String(lines[1].as_str().into()));
-            entry
-                .nbt
-                .insert("Text3", NbtTag::String(lines[2].as_str().into()));
-            entry
-                .nbt
-                .insert("Text4", NbtTag::String(lines[3].as_str().into()));
+        Some(crate::ui::sign_edit::SignEditState::new(
+            pos,
+            is_front_text,
+            block,
+            texts.face(is_front_text),
+        ))
+    }
+
+    /// `AbstractSignEditScreen.removed`: the lines go to the server however
+    /// the screen closes.
+    pub fn close_sign_editor(&mut self, packet_tx: &crate::net::sender::PacketSender) {
+        if let Some(editor) = self.sign_editor.take() {
+            packet_tx.send(ServerboundGamePacket::SignUpdate(
+                azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
+                    pos: editor.pos.into(),
+                    is_front_text: editor.is_front_text,
+                    lines: editor.messages,
+                },
+            ));
         }
+    }
+
+    /// `AbstractSignEditScreen.setMessage`: the sign shows the lines as
+    /// they're typed.
+    fn apply_sign_edit(&mut self) {
+        let Some(editor) = &self.sign_editor else {
+            return;
+        };
+        let Some(texts) = self
+            .chunk_store
+            .block_entities
+            .get_mut(&editor.pos)
+            .and_then(|be| be.sign.as_deref_mut())
+        else {
+            return;
+        };
+        let face = texts.face_mut(editor.is_front_text);
+        for (message, line) in face.messages.iter_mut().zip(&editor.messages) {
+            *message = crate::chat_component::Component::text(line.as_str());
+        }
+    }
+
+    /// `AbstractSignEditScreen.isValid`: the sign is still there and within
+    /// reach.
+    fn sign_edit_valid(&self) -> bool {
+        self.sign_editor.as_ref().is_none_or(|editor| {
+            self.chunk_store
+                .block_entities
+                .get(&editor.pos)
+                .is_some_and(|be| be.sign.is_some())
+                && crate::player::interaction::within_block_interaction_range(
+                    self.player.eye_pos().into(),
+                    editor.pos,
+                    &self.player.attributes,
+                    crate::player::is_creative(self.player.game_mode),
+                    self.block_registry.protocol(),
+                    4.0,
+                )
+        })
     }
 
     /// The container menu the player currently has open (0 = survival
@@ -991,7 +938,6 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
-        self.sign_editor = None;
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
@@ -1128,6 +1074,7 @@ impl GameState {
         code: winit::keyboard::KeyCode,
         f3_held: bool,
         bindings: &KeyBindings,
+        menu: &mut crate::ui::menu::MainMenu,
         connection: &ConnectionHandle,
     ) -> bool {
         let input = InputKey::Keyboard(code);
@@ -1253,6 +1200,19 @@ impl GameState {
                 ));
                 true
             }
+            _ if bindings.matches(Action::DebugDebugOptions, &input) => {
+                if self.options_from_game && menu.is_debug_options() {
+                    menu.close_debug_options(bindings);
+                } else if self.options_from_game || self.input_live() {
+                    // TODO: vanilla also closes the pause menu, chat or a
+                    // container screen to open it (`canInterruptScreen`).
+                    menu.open_debug_options(bindings);
+                    self.options_from_game = true;
+                    self.options_close_to_game = true;
+                    self.paused = true;
+                }
+                true
+            }
             _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
@@ -1270,7 +1230,7 @@ impl GameState {
                 )]);
                 true
             }
-            // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
+            // TODO: F3+P pause-on-lost-focus,
             // F3+S dump dynamic textures, F3+T resource pack reload,
             // F3+L profiler, F3+1..4 debug charts (no backing features)
             _ => false,
@@ -2828,8 +2788,25 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    // A harness press goes through the debug chords as a key event's press
+    // does, then releases.
     #[cfg(feature = "test-harness")]
     if let Some(code) = core.input.take_harness_release() {
+        let f3_held = core.input.action_held(Action::DebugModifier);
+        if game.handle_debug_key(
+            code,
+            f3_held,
+            &core.input.key_bindings,
+            &mut core.menu,
+            connection,
+        ) {
+            core.input.unclick(code);
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        game.on_key_released(code, &core.input, connection);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_key_up() {
         game.on_key_released(code, &core.input, connection);
     }
 
@@ -3089,13 +3066,57 @@ pub fn update_game(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = core.menu.gui_scale(sw, sh);
-    game.gui_scale = gs;
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
+    // A player head resolves its profile when its item draws: on the HUD's
+    // hotbar and offhand, and in the open screen's slots and cursor.
+    let inventory = &game.player.inventory;
+    let screen_slots =
+        game.inventory_open || game.open_container.is_some() || game.creative_inventory_open;
+    let shown = if screen_slots {
+        game.menu_slots()
+    } else {
+        inventory.hotbar_slots()
+    };
+    for profile in shown
+        .iter()
+        .chain([inventory.offhand(), &game.cursor_item])
+        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(crate::ui::common::HeadProfile::of_stack)
+    {
+        core.request_head(profile);
+    }
+
+    // TODO: Pomme doesn't track the server's reduced debug info yet.
+    let enabled = core
+        .menu
+        .debug_entries
+        .currently_enabled(game.show_debug, false);
+    let mut debug = if enabled.is_empty() {
+        DebugColumns::default()
+    } else {
+        debug_entries::entry_columns(
+            &enabled,
+            &DebugEntryInput {
+                fps: gfx.fps_counter.display_fps(),
+                framerate_limit: core.menu.max_framerate,
+                present_mode: gfx.renderer.present_mode(),
+                refresh_rate_hz: gfx
+                    .window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz())
+                    .map(|millihertz| millihertz as f32 / 1000.0),
+                lows: gfx.fps_counter.lows(),
+            },
+        )
+    };
+    if game.show_debug {
+        let info = hud::DebugInfo {
+            debug_options_key: hud::format_debug_keybind(
+                &core.input.key_bindings,
+                Action::DebugDebugOptions,
+            ),
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
@@ -3141,10 +3162,9 @@ pub fn update_game(
                 draw_ms: gfx.renderer.last_timings().draw_ms,
                 present_ms: gfx.renderer.last_timings().present_ms,
             }),
-        })
-    } else {
-        None
-    };
+        };
+        hud::build_debug_overlay(&mut debug, &info);
+    }
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -3168,9 +3188,9 @@ pub fn update_game(
         );
     }
     if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
+        // F1 hides the debug lines too, unless a screen is open.
+        if !game.input_live() {
+            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
                 gfx.renderer.menu_text_width(t, s)
             });
         }
@@ -3353,7 +3373,7 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
+            &debug,
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -4167,6 +4187,28 @@ pub fn update_game(
                 sh,
                 gs,
             );
+        } else if let Some(slot) = hovered
+            && game.cursor_item.is_empty()
+            && let Some(stack) = game
+                .menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+        {
+            let lines = crate::ui::chat::stack_tooltip_lines(
+                stack,
+                &game.registries,
+                game.advanced_item_tooltips,
+            );
+            if !lines.is_empty() {
+                crate::ui::common::push_tooltip_lines(
+                    &mut elements,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                    lines,
+                );
+            }
         }
         core.input.clear_just_pressed_actions();
     }
@@ -4208,6 +4250,7 @@ pub fn update_game(
             drop,
             game.player.drop_spam.can_drop(),
             &game.player.inventory,
+            &game.registries,
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),
@@ -4355,20 +4398,23 @@ pub fn update_game(
     );
 
     if let Some(editor) = game.sign_editor.as_mut() {
-        let fs = common::FONT_SIZE * gs;
-        let finish_typing =
-            editor.handle_text_input(&text_events, &|s| gfx.renderer.menu_text_width(s, fs));
-        let submitted = editor.build(
+        // `Font.width`, in GUI units.
+        let width = |s: &str| gfx.renderer.menu_text_width(s, common::FONT_SIZE).ceil();
+        let changed = editor.handle_text_input(&text_events, &width);
+        let done = editor.build(
             &mut elements,
             sw,
             sh,
             gs,
             core.input.cursor_pos(),
             core.input.left_just_pressed(),
-            &|s| gfx.renderer.menu_text_width(s, fs),
+            &width,
         );
-        if submitted || finish_typing {
-            game.close_sign_editor(Some(connection));
+        if changed {
+            game.apply_sign_edit();
+        }
+        if done || !game.sign_edit_valid() {
+            game.close_sign_editor(&connection.packet_tx);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         core.input.clear_just_pressed_actions();
@@ -4592,6 +4638,11 @@ pub fn update_game(
             game.player.look_dir.y_rot_deg(),
             partial_tick,
         );
+        let interp_body_y_rot_deg = lerp_angle(
+            game.player.prev_body_y_rot,
+            game.player.body_y_rot,
+            partial_tick,
+        );
 
         let (radius, strength) =
             crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
@@ -4602,7 +4653,7 @@ pub fn update_game(
                 game.player.is_sleeping(),
                 gfx.renderer.camera_look_dir().x_rot_deg(),
             ),
-            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            body_y_rot_deg: interp_body_y_rot_deg,
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
@@ -4703,21 +4754,34 @@ pub fn update_game(
         Vec::new()
     };
 
-    let sign_renders: Vec<crate::world::block_entity::SignRenderInfo> = if benchmark_running {
+    // `BlockEntityRenderer.shouldRender` at the default view distance, 64.
+    let sign_renders: Vec<SignRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
+        let camera = gfx.renderer.camera_render_position();
+        let viewer = game
+            .spectated()
+            .map_or(*game.player.position, |entity| *entity.position);
         game.chunk_store
             .block_entities
             .iter()
-            .filter_map(|(pos, be)| {
-                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                let block_state_data = game.block_registry.block_state_data(state);
-                let id = block_state_data.id();
-                let props = block_state_data.properties();
-                let light = block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]);
-                crate::world::block_entity::parse_sign_render_info(
-                    *pos, be.kind, &be.nbt, id, props, light,
-                )
+            .filter_map(|(&pos, be)| {
+                let texts = be.sign.as_deref()?;
+                let center = pos.center();
+                if center.distance_squared(camera) >= 64.0 * 64.0 {
+                    return None;
+                }
+                let block = game.sign_block_at(pos)?;
+                // `AbstractSignRenderer.isOutlineVisible`.
+                // TODO: also while scoping through a spyglass in first person.
+                let outline_visible = center.distance_squared(viewer) < 16.0 * 16.0;
+                Some(SignRenderInfo {
+                    pos,
+                    block,
+                    light: block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]),
+                    faces: [&texts.front, &texts.back]
+                        .map(|text| SignFace::new(text, outline_visible)),
+                })
             })
             .collect()
     };
@@ -4762,9 +4826,6 @@ pub fn update_game(
                 // A predicted break leaves a stale entry until the server
                 // confirms; don't render entries whose block is gone.
                 if !crate::world::block_entity::is_block_entity_block(id) {
-                    return None;
-                }
-                if id.contains("sign") {
                     return None;
                 }
                 let props = block_state_data.properties();
@@ -4843,6 +4904,73 @@ pub fn update_game(
         core.menu.render_distance.min(game.server_render_distance)
     } else {
         core.menu.render_distance
+    };
+    // `EntityRenderer.extractNameTags` with the living renderers'
+    // `shouldShowName`.
+    // TODO: an entity carrying passengers hides its name (Pomme doesn't link
+    // passengers yet), the below-name score (`belowNameDisplay`), and custom
+    // names on entities that aren't living.
+    let nameplate_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        let target = match game.interaction.target {
+            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+            _ => None,
+        };
+        let camera = gfx.renderer.camera_render_position();
+        let mut list = Vec::new();
+        for (&entity_id, entity) in &game.entity_store.living {
+            // The camera entity never shows its own name.
+            if entity.player_uuid == Some(core.user.uuid) {
+                continue;
+            }
+            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            // `getDisplayName`: a player's account name, or a mob's custom
+            // name when it shows it or is under the crosshair.
+            let spans = match entity.player_uuid {
+                Some(_) => game.scoreboard.line(&name, None),
+                None => match &entity.custom_name_spans {
+                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                        game.scoreboard.line(&name, Some(custom))
+                    }
+                    _ => continue,
+                },
+            };
+            let dist_sq = (*entity.position - camera).length_squared();
+            if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
+                continue;
+            }
+            let visible = !entity.is_invisible
+                || spectating
+                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+            let shown = game
+                .scoreboard
+                .name_tag_shown(&viewer, &name, visible)
+                .unwrap_or(!game.hide_gui && visible);
+            if !shown {
+                continue;
+            }
+            let position = entity
+                .prev_position
+                .lerp(entity.position, partial_tick as f64)
+                + entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64)
+                    .render_offset
+                // `submitNameTag` lifts the tag half a block over its anchor.
+                + glam::DVec3::Y * (f64::from(entity.name_tag_height()) + 0.5);
+            list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                position: *position,
+                spans,
+                discrete: entity.is_crouching,
+                light: entity_light(
+                    &world_light,
+                    entity.entity_type,
+                    entity.eye_position(partial_tick),
+                    entity.is_on_fire,
+                    entity.dark_ticks,
+                ),
+            });
+        }
+        list
     };
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
@@ -4963,6 +5091,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &nameplate_renders,
         &sign_renders,
         &weather_columns,
         if no_ambience {
@@ -5095,7 +5224,8 @@ pub fn update_game(
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
             // Chat Settings opened from chat return to it, unpaused.
-            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
+            let to_chat = game.chat.return_from_settings(game.command_tree.as_deref());
+            game.paused = !to_chat && !std::mem::take(&mut game.options_close_to_game);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }

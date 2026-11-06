@@ -2095,6 +2095,8 @@ pub enum MenuElement {
         sprite: SpriteId,
         tint: [f32; 4],
     },
+    /// `src_rect` (`[u0, v0, u1, v1]`, fractions of the sprite) stretched
+    /// over the rect: `GuiGraphics.blit` of part of a texture.
     SubImage {
         x: f32,
         y: f32,
@@ -2526,14 +2528,11 @@ pub enum SpriteId {
     SpectatorScrollRight,
     SpectatorTeleportToPlayer,
     SpectatorTeleportToTeam,
+    /// `textures/gui/signs/<wood>.png`, by `SIGN_WOOD_NAMES` index.
     Sign(u8),
+    /// `textures/gui/hanging_signs/<wood>.png`.
     HangingSign(u8),
 }
-
-pub const SIGN_WOOD_TYPES: [&str; 12] = [
-    "dark_oak", "pale_oak", "acacia", "bamboo", "birch", "cherry", "crimson", "jungle", "mangrove",
-    "spruce", "warped", "oak",
-];
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
     [
@@ -3693,20 +3692,23 @@ fn build_sprite_atlas(
         boss_bar_sprite(SpriteId::BossBarNotchedProgress(i as u8), name, "progress");
     }
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
-    let sign_sprites = SIGN_WOOD_TYPES.iter().enumerate().flat_map(|(i, name)| {
-        [
-            (
-                SpriteId::Sign(i as u8),
-                format!("minecraft/textures/gui/signs/{name}.png"),
-                0.0,
-            ),
-            (
-                SpriteId::HangingSign(i as u8),
-                format!("minecraft/textures/gui/hanging_signs/{name}.png"),
-                0.0,
-            ),
-        ]
-    });
+    let sign_sprites = crate::world::block_entity::SIGN_WOOD_NAMES
+        .iter()
+        .enumerate()
+        .flat_map(|(i, name)| {
+            [
+                (
+                    SpriteId::Sign(i as u8),
+                    format!("minecraft/textures/gui/signs/{name}.png"),
+                    0.0,
+                ),
+                (
+                    SpriteId::HangingSign(i as u8),
+                    format!("minecraft/textures/gui/hanging_signs/{name}.png"),
+                    0.0,
+                ),
+            ]
+        });
     for (id, asset_key, border) in sprites
         .iter()
         .map(|&(id, key, border)| (id, key.to_string(), border))

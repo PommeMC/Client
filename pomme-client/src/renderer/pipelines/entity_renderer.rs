@@ -3599,7 +3599,7 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
 
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
-fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+pub(crate) fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
     // list kinds whose constant isn't the half-scale the fallback below
     // assumes. Every new baby mob must be checked against its class.

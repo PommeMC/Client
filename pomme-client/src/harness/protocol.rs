@@ -86,6 +86,11 @@ pub enum Command {
     /// bobbing and the autosave indicator, so two runs of a script draw the
     /// same frames.
     Deterministic,
+    /// Holds incoming packets unhandled until released, as a slow connection
+    /// would.
+    HoldPackets {
+        hold: bool,
+    },
     /// Shrinks or caps the chunk arenas, so a small render distance fills
     /// them.
     ChunkArenas(ChunkArenas),
@@ -302,6 +307,7 @@ pub fn inventory(game: &GameState) -> InventoryInfo {
             None if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) => {
                 "pause".into()
             }
+            None if game.sign_editor.is_some() => "sign".into(),
             None => "none".into(),
         }
     };
@@ -497,6 +503,7 @@ pub struct HudInfo {
     pub sidebar: Vec<String>,
     /// The listed players, in the tab overlay's order.
     pub tab_list: Vec<TabEntryInfo>,
+    pub chat_open: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -553,6 +560,7 @@ pub fn hud(game: &GameState) -> HudInfo {
                 latency: player.latency,
             })
             .collect(),
+        chat_open: game.chat.is_open(),
     }
 }
 

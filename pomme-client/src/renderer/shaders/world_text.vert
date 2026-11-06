@@ -2,6 +2,7 @@
 
 #include "fog.glsl"
 #include "camera_ubo.glsl"
+
 #include "lightmap.glsl"
 
 layout(location = 0) in vec3 position;
@@ -24,6 +25,7 @@ void main() {
     v_uv = uv;
     v_layer = layer;
     v_tex = tex_select;
+    // Vanilla `rendertype_text.vsh`: `Color * texelFetch(Sampler2, UV2 / 16)`.
     v_color = color * light_lane_color(light);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;

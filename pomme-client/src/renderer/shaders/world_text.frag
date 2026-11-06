@@ -16,6 +16,12 @@ layout(location = 5) in vec3 v_fog_color;
 layout(location = 0) out vec4 out_color;
 
 void main() {
+    if (v_tex < -0.5) {
+        vec3 color = apply_fog(v_color.rgb, v_fog, v_fog_color);
+        out_color = vec4(color, v_color.a);
+        return;
+    }
+
     float gray = texture(sampler2DArray(font_tex, font_tex_sampler), vec3(v_uv, v_layer)).r;
     vec4 colored = texture(sampler2DArray(font_color_tex, font_tex_sampler), vec3(v_uv, v_layer));
     vec4 glyph = mix(vec4(1.0, 1.0, 1.0, gray), colored, v_tex);

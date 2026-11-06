@@ -62,7 +62,7 @@ impl UserData {
 
     /// Vanilla `UUIDUtil.createOfflinePlayerUUID`: a bare MD5 of the prefixed
     /// name, not a namespaced v3 UUID.
-    fn offline_uuid(username: &str) -> uuid::Uuid {
+    pub(crate) fn offline_uuid(username: &str) -> uuid::Uuid {
         let digest = md5::Md5::digest(format!("OfflinePlayer:{username}").as_bytes());
         uuid::Builder::from_md5_bytes(digest.into()).into_uuid()
     }

@@ -15,6 +15,7 @@ use super::common::{
     FONT_SIZE, WHITE, hit_test, push_item_decorations, push_item_glyph, push_tooltip,
     push_tooltip_lines,
 };
+use super::text::strip_formatting;
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::net::sender::PacketSender;
 use crate::recipe::{
@@ -2419,24 +2420,6 @@ fn collection_search_text(collection: &Collection, book: &RecipeBookState) -> Ve
 
 fn line_text(line: TooltipLine) -> String {
     line.spans.into_iter().map(|span| span.text).collect()
-}
-
-/// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
-fn strip_formatting(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '§'
-            && chars.peek().is_some_and(
-                |code| matches!(code.to_ascii_lowercase(), '0'..='9' | 'a'..='f' | 'k'..='o' | 'r'),
-            )
-        {
-            chars.next();
-            continue;
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Vanilla `RecipeDisplayEntry.canCraft`: needs requirements, each taking one
