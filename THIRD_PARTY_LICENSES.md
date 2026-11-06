@@ -96,9 +96,11 @@ License: AGPL-3.0-or-later. Full text at
 
 ## kcat/openal-soft
 
-Release archives bundle, and the `just client-dev` / `client-build` /
+Release binaries embed, and the `just client-dev` / `client-build` /
 `client-release` recipes stage next to dev binaries, the unmodified OpenAL Soft
-native library shipped with Minecraft 26.2's LWJGL natives. The LWJGL release,
+native library shipped with Minecraft 26.2's LWJGL natives. A release unpacks
+it with its licence and notice into Pomme's data folder (`natives/`) to load
+it, and loads a build placed next to its executable instead. The LWJGL release,
 jar member and checksum are recorded in
 `pomme-client/third-party/openal-natives.txt`.
 

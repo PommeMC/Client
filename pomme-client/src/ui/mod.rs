@@ -1,13 +1,16 @@
 pub mod anvil;
 pub mod boss_bar;
+pub mod brewing_stand;
 pub mod chat;
 pub mod chest;
 pub mod common;
 pub mod container;
+pub mod crafter;
 pub mod crafting_table;
 pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;
+pub mod debug_entries;
 pub mod enchantment;
 pub mod font;
 pub mod friends;

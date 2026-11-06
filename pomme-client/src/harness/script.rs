@@ -51,6 +51,7 @@ struct StepFile {
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
+    hold_packets: Option<bool>,
     chunk_arenas: Option<protocol::ChunkArenas>,
     hover: Option<protocol::Hover>,
     cursor: Option<[f32; 2]>,
@@ -181,6 +182,7 @@ struct HudFields {
     sidebar: Option<Vec<String>>,
     /// Every listed player, in the tab overlay's order.
     tab_list: Option<Vec<TabEntryExpect>>,
+    chat_open: Option<bool>,
 }
 
 /// A tab list player; `game_mode` is checked when given.
@@ -347,6 +349,9 @@ impl StepFile {
         if self.deterministic == Some(true) {
             steps.push(Step::Run(Command::Deterministic));
         }
+        if let Some(hold) = self.hold_packets {
+            steps.push(Step::Run(Command::HoldPackets { hold }));
+        }
         if let Some(arenas) = self.chunk_arenas {
             steps.push(Step::Run(Command::ChunkArenas(arenas)));
         }
@@ -426,8 +431,7 @@ fn summarize(samples: &[FrameSample]) -> String {
         |f: fn(&FrameSample) -> f32| samples.iter().map(f).sum::<f32>() / samples.len() as f32;
     let mut intervals: Vec<f32> = samples.iter().map(|s| s.interval_ms).collect();
     intervals.sort_by(f32::total_cmp);
-    let slowest = &intervals[intervals.len() - intervals.len().div_ceil(100)..];
-    let low = slowest.iter().sum::<f32>() / slowest.len() as f32;
+    let low = crate::util::slowest_mean(&intervals, 100);
     // Per pass, in the order the frame stamps them.
     let mut passes: Vec<(&str, f32, u32)> = Vec::new();
     for &(name, ms) in samples.iter().flat_map(|s| &s.gpu) {
@@ -565,7 +569,7 @@ impl Script {
                 exec::screenshot_progress(phase, &path, started)
             }
             Step::MatchScreenshots(names, allowed) => Some(self.match_screenshots(names, *allowed)),
-            Step::Expect(expect, timeout) => match check(expect, phase) {
+            Step::Expect(expect, timeout) => match check(expect, core, phase) {
                 Ok(()) => Some(Ok(())),
                 Err(e) if started.elapsed() > *timeout => Some(Err(e)),
                 Err(_) => None,
@@ -669,7 +673,7 @@ impl Script {
 }
 
 /// Whether `expect` holds now; the error describes what was seen instead.
-fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
+fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String> {
     let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
@@ -787,9 +791,12 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                 || format!("player is {seen:?}"),
             )
         }
-        Expect::Sound(SoundExpect { sound }) => ensure(game.recent_sounds.contains(sound), || {
-            format!("{sound} not played; recent: {:?}", game.recent_sounds)
-        }),
+        Expect::Sound(SoundExpect { sound }) => {
+            let recent = core.audio.recent_sounds();
+            ensure(recent.contains(sound), || {
+                format!("{sound} not played; recent: {recent:?}")
+            })
+        }
         Expect::Hud(HudExpect { hud: want }) => {
             let seen = protocol::hud(game);
             let shown = |text: &Option<String>| text.as_deref().unwrap_or("").to_owned();
@@ -812,7 +819,8 @@ fn check(expect: &Expect, phase: &AppPhase) -> Result<(), String> {
                                 want.name == seen.name
                                     && want.game_mode.is_none_or(|m| m == seen.game_mode)
                             })
-                    }),
+                    })
+                    && want.chat_open.is_none_or(|open| open == seen.chat_open),
                 || format!("hud is {seen:?}"),
             )
         }
@@ -973,15 +981,18 @@ mod tests {
             [[step]]
             match_screenshots = ["first", "second"]
             max_differing_pixels = 64
+            [[step]]
+            hold_packets = true
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 22);
+        assert_eq!(steps.len(), 23);
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[21],
             Step::MatchScreenshots(["first".into(), "second".into()], 64)
         );
+        assert_eq!(steps[22], Step::Run(Command::HoldPackets { hold: true }));
         assert_eq!(
             steps[19],
             Step::Run(Command::Option(OptionSet {

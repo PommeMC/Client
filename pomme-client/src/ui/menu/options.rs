@@ -557,14 +557,9 @@ impl MainMenu {
         // area, the first 2 below its top, plus 4 of content padding.
         let list_y = chrome.content_top;
         let list_h = chrome.content_bottom - list_y;
-        let list_rect = [0.0, list_y, sw, list_h];
         let rows = entries.len() + categories.len();
         let total_h = rows as f32 * btn_h + 4.0 * gs;
-        let in_list = common::hit_test(input.cursor, list_rect);
-        if in_list {
-            self.scroll_offset -= input.scroll_delta * btn_h / 2.0;
-        }
-        self.scroll_offset = self.scroll_offset.clamp(0.0, (total_h - list_h).max(0.0));
+        let (row_cursor, row_clicked) = self.scroll_list(input, sw, list_y, list_h, total_h, btn_h);
 
         let cx = sw / 2.0;
         let label_x = cx - 168.0 * gs;
@@ -573,9 +568,6 @@ impl MainMenu {
         let reset_x = scrollbar_x - reset_w - 10.0 * gs;
         let change_w = 75.0 * gs;
         let change_x = reset_x - 5.0 * gs - change_w;
-        // Entries only take the mouse inside the list (getEntryAtPosition).
-        let row_cursor = if in_list { input.cursor } else { (-1.0, -1.0) };
-        let row_clicked = in_list && input.clicked;
         let label_scroll = common::LabelScroll {
             text_width_fn,
             time_secs: self.created.elapsed().as_secs_f64(),

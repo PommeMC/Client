@@ -230,6 +230,13 @@ fn open_url_android(url: &str) -> jni::errors::Result<()> {
     })
 }
 
+/// The mean of the largest `1/per` of `sorted` (ascending), at least one
+/// value: the "1% low" of frame times when `per` is 100.
+pub fn slowest_mean(sorted: &[f32], per: usize) -> f32 {
+    let slowest = &sorted[sorted.len() - sorted.len().div_ceil(per)..];
+    slowest.iter().sum::<f32>() / slowest.len() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

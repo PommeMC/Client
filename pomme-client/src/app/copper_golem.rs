@@ -27,8 +27,6 @@ pub(super) fn tick(audio: &AudioEngine, game: &mut GameState) {
             2 => "entity.copper_golem_weathered.spin",
             _ => "entity.copper_golem_oxidized.spin",
         });
-        #[cfg(feature = "test-harness")]
-        game.record_sound(&sound);
         audio.play_world_sound(&sound, CATEGORY_NEUTRAL, pos, 1.0, 1.0, fastrand::u64(..));
     }
 }

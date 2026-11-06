@@ -57,3 +57,18 @@ impl From<BlockPos> for azalea_core::position::BlockPos {
         Self::new(pos.x, pos.y, pos.z)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use glam::dvec3;
+
+    use super::*;
+
+    #[test]
+    fn columns_floor_negative_coordinates() {
+        let column = |x, z| ChunkPos::containing(BlockPos::containing(dvec3(x, 64.0, z)));
+        assert_eq!(column(0.5, 15.9), ChunkPos::new(0, 0));
+        assert_eq!(column(-0.5, -16.0), ChunkPos::new(-1, -1));
+        assert_eq!(column(-16.5, 16.0), ChunkPos::new(-2, 1));
+    }
+}

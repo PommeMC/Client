@@ -53,6 +53,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
+use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
@@ -106,11 +107,14 @@ pub enum ContainerScreen {
     Enchantment,
     Hopper,
     Dispenser,
+    BrewingStand,
+    Crafter,
 }
 
 impl ContainerScreen {
-    /// The click-prediction menu kind backing this screen.
-    pub fn click_kind(self) -> ContainerKind {
+    /// The click-prediction menu kind backing this screen, without the
+    /// synced data some slots read (see [`OpenContainer::click_kind`]).
+    pub fn click_kind(self) -> ContainerKind<'static> {
         match self {
             Self::CraftingTable => ContainerKind::CraftingTable,
             Self::Furnace(_) => ContainerKind::Furnace,
@@ -120,6 +124,8 @@ impl ContainerScreen {
             Self::Enchantment => ContainerKind::Enchantment,
             Self::Hopper => ContainerKind::Hopper,
             Self::Dispenser => ContainerKind::Dispenser,
+            Self::BrewingStand => ContainerKind::BrewingStand(None),
+            Self::Crafter => ContainerKind::Crafter { disabled: 0 },
         }
     }
 }
@@ -131,8 +137,8 @@ pub struct OpenContainer {
     #[cfg(feature = "test-harness")]
     pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
-    /// Menu slots in container indices; slots from `inv_start()` on are backed
-    /// by the player inventory.
+    /// Menu slots in container indices; `inv_slots()` are backed by the
+    /// player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
     /// lit/cook progress or the anvil repair cost. Vanilla data slots are
@@ -148,10 +154,23 @@ pub struct OpenContainer {
 }
 
 impl OpenContainer {
-    /// First container slot backed by the player inventory; container slot `i`
-    /// maps to player inventory slot `i - inv_start() + 9` from here on.
-    fn inv_start(&self) -> usize {
-        self.screen.click_kind().inv_start()
+    /// The container slots backed by the player inventory; container slot `i`
+    /// in them maps to player inventory slot `i - start + 9`.
+    fn inv_slots(&self) -> std::ops::Range<usize> {
+        let kind = self.screen.click_kind();
+        kind.inv_start()..kind.inv_end()
+    }
+
+    /// The click-prediction menu, with the crafter's disabled slots read from
+    /// the menu data and the brewing stand's rules from `recipes`.
+    pub fn click_kind<'a>(&self, recipes: &'a crate::recipe::RecipeBookState) -> ContainerKind<'a> {
+        match self.screen {
+            ContainerScreen::Crafter => ContainerKind::Crafter {
+                disabled: crate::ui::crafter::disabled_slots(&self.data),
+            },
+            ContainerScreen::BrewingStand => ContainerKind::BrewingStand(Some(recipes)),
+            screen => screen.click_kind(),
+        }
     }
 }
 
@@ -224,6 +243,8 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
+    /// The container screen's hand cursor is up.
+    pub screen_pointer: bool,
     /// The selected entry of a bundle in (menu id, slot). Vanilla keeps it on
     /// the stack but never sends it, so a server update of the slot drops it.
     pub bundle_selection: Option<(i32, u16, i32)>,
@@ -264,9 +285,6 @@ pub struct GameState {
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
-    /// The sound events most recently played, oldest first.
-    #[cfg(feature = "test-harness")]
-    pub recent_sounds: std::collections::VecDeque<String>,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
@@ -333,6 +351,9 @@ pub struct GameState {
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
     pub deterministic: bool,
+    /// Set by the test harness's `hold_packets` step: incoming packets wait,
+    /// as behind a slow connection.
+    pub hold_packets: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -348,6 +369,9 @@ pub struct GameState {
     pub was_sprinting: bool,
     pub position_send_counter: u32,
     pub options_from_game: bool,
+    /// The open options screen leaves to the game, not the pause menu:
+    /// Debug Options, which replaces any screen it opens over.
+    pub options_close_to_game: bool,
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
@@ -480,15 +504,6 @@ impl GameState {
             });
     }
 
-    /// Notes a played sound for the harness, keeping the last 64.
-    #[cfg(feature = "test-harness")]
-    pub fn record_sound(&mut self, sound: &crate::audio::SoundRef) {
-        if self.recent_sounds.len() == 64 {
-            self.recent_sounds.pop_front();
-        }
-        self.recent_sounds.push_back(sound.event_name().to_owned());
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
@@ -537,6 +552,7 @@ impl GameState {
             level_load: None,
             client_loaded: false,
             options_from_game: false,
+            options_close_to_game: false,
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
@@ -586,6 +602,7 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
+            screen_pointer: false,
             bundle_selection: None,
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
@@ -615,8 +632,6 @@ impl GameState {
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
-            #[cfg(feature = "test-harness")]
-            recent_sounds: std::collections::VecDeque::new(),
             tick_count: 0,
             saving_indicator_value: 0.0,
             last_saving_indicator_value: 0.0,
@@ -648,6 +663,7 @@ impl GameState {
             biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
+            hold_packets: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -772,9 +788,9 @@ impl GameState {
                     return;
                 };
                 *s = item.clone();
-                let inv_start = c.inv_start();
-                if index >= inv_start {
-                    self.player.inventory.set_slot(index - inv_start + 9, item);
+                let inv = c.inv_slots();
+                if inv.contains(&index) {
+                    self.player.inventory.set_slot(index - inv.start + 9, item);
                 }
             }
             None => self.player.inventory.set_slot(index, item),
@@ -787,9 +803,9 @@ impl GameState {
         let Some(c) = &mut self.open_container else {
             return;
         };
-        let inv_start = c.inv_start();
-        for (i, slot) in c.slots.iter_mut().enumerate().skip(inv_start) {
-            *slot = self.player.inventory.slot(i - inv_start + 9).clone();
+        let inv = c.inv_slots();
+        for i in inv.clone() {
+            c.slots[i] = self.player.inventory.slot(i - inv.start + 9).clone();
         }
     }
 
@@ -968,6 +984,7 @@ impl GameState {
         code: winit::keyboard::KeyCode,
         f3_held: bool,
         bindings: &KeyBindings,
+        menu: &mut crate::ui::menu::MainMenu,
         connection: &ConnectionHandle,
     ) -> bool {
         let input = InputKey::Keyboard(code);
@@ -1093,6 +1110,19 @@ impl GameState {
                 ));
                 true
             }
+            _ if bindings.matches(Action::DebugDebugOptions, &input) => {
+                if self.options_from_game && menu.is_debug_options() {
+                    menu.close_debug_options(bindings);
+                } else if self.options_from_game || self.input_live() {
+                    // TODO: vanilla also closes the pause menu, chat or a
+                    // container screen to open it (`canInterruptScreen`).
+                    menu.open_debug_options(bindings);
+                    self.options_from_game = true;
+                    self.options_close_to_game = true;
+                    self.paused = true;
+                }
+                true
+            }
             _ if bindings.matches(Action::DebugChunkOcclusion, &input) => {
                 // Pomme-specific: chunk occlusion culling toggle.
                 self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
@@ -1110,7 +1140,7 @@ impl GameState {
                 )]);
                 true
             }
-            // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
+            // TODO: F3+P pause-on-lost-focus,
             // F3+S dump dynamic textures, F3+T resource pack reload,
             // F3+L profiler, F3+1..4 debug charts (no backing features)
             _ => false,
@@ -1294,10 +1324,7 @@ impl GameState {
 
     /// The chunk column the player stands in.
     pub fn player_chunk(&self) -> ChunkPos {
-        ChunkPos::new(
-            (self.player.position.x as i32).div_euclid(16),
-            (self.player.position.z as i32).div_euclid(16),
-        )
+        ChunkPos::containing(BlockPos::containing(*self.player.position))
     }
 
     /// Runs one light update (vanilla `ClientLevel.update`, called per frame
@@ -2104,14 +2131,20 @@ pub(crate) fn send_container_clicks(
 
     use crate::player::menu_click;
 
-    let (container_id, kind, state_id) = match &game.open_container {
-        Some(c) => (c.id, c.screen.click_kind(), c.state_id),
-        None => (0, ContainerKind::Player, game.inventory_state_id),
+    let (container_id, state_id) = match &game.open_container {
+        Some(c) => (c.id, c.state_id),
+        None => (0, game.inventory_state_id),
     };
 
     let mut drag_kind = QuickCraftKind::Left;
     let mut drag_slots: Vec<u16> = Vec::new();
     for op in &ops {
+        crafter_slot_clicked(game, connection, audio, op);
+        // After the toggle, so a re-enabled crafter slot takes the click.
+        let kind = game
+            .open_container
+            .as_ref()
+            .map_or(ContainerKind::Player, |c| c.click_kind(&game.recipe_book));
         let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
             ClickOperation::QuickCraft(QuickCraftClick {
                 kind: qc_kind,
@@ -2191,6 +2224,81 @@ pub(crate) fn send_container_clicks(
             .packet_tx
             .send(ServerboundGamePacket::ContainerClick(click));
     }
+}
+
+/// Vanilla `CrafterScreen.slotClicked`, run before the click itself: a pickup
+/// on an empty grid slot enables it when disabled or, with nothing carried,
+/// disables it; a number-key swap of a held item into a disabled slot enables
+/// it. The new state is set locally and sent, with a click sound.
+fn crafter_slot_clicked(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    audio: &crate::audio::AudioEngine,
+    op: &azalea_inventory::operations::ClickOperation,
+) {
+    use azalea_inventory::operations::{ClickOperation, PickupClick};
+    use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
+
+    use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
+
+    let Some(c) = &mut game.open_container else {
+        return;
+    };
+    if c.screen != ContainerScreen::Crafter || crate::player::is_spectator(game.player.game_mode) {
+        return;
+    }
+    let (slot, enable) = match op {
+        ClickOperation::Pickup(
+            PickupClick::Left { slot: Some(s) } | PickupClick::Right { slot: Some(s) },
+        ) => {
+            let s = usize::from(*s);
+            if s >= GRID_SLOTS || !c.slots[s].is_empty() {
+                return;
+            }
+            if slot_disabled(&c.data, s) {
+                (s, true)
+            } else if game.cursor_item.is_empty() {
+                (s, false)
+            } else {
+                return;
+            }
+        }
+        ClickOperation::Swap(swap) => {
+            let s = usize::from(swap.source_slot);
+            if s >= GRID_SLOTS || !c.slots[s].is_empty() || !slot_disabled(&c.data, s) {
+                return;
+            }
+            // The player inventory is indexed like the player menu.
+            let Some(held) = ContainerKind::Player.swap_target_slot(swap.target_slot) else {
+                return;
+            };
+            if game.player.inventory.slot(held.into()).is_empty() {
+                return;
+            }
+            (s, true)
+        }
+        _ => return,
+    };
+    // `CrafterMenu.setSlotState`, then `handleSlotStateChanged`.
+    c.data[slot] = if enable { 0 } else { 1 };
+    connection
+        .packet_tx
+        .send(ServerboundGamePacket::ContainerSlotStateChanged(
+            ServerboundContainerSlotStateChanged {
+                slot_id: slot as u32,
+                container_id: c.id,
+                new_state: enable,
+            },
+        ));
+    // `player.playSound`: a local sound at the player, in the players source.
+    audio.play_world_sound(
+        &crate::audio::SoundRef::event("ui.button.click"),
+        crate::audio::CATEGORY_PLAYERS,
+        game.player.position,
+        0.4,
+        if enable { 1.0 } else { 0.75 },
+        fastrand::u64(..),
+    );
 }
 
 fn sleeping_head_pitch_deg(is_sleeping: bool, head_x_rot_deg: f32) -> f32 {
@@ -2590,8 +2698,25 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    // A harness press goes through the debug chords as a key event's press
+    // does, then releases.
     #[cfg(feature = "test-harness")]
     if let Some(code) = core.input.take_harness_release() {
+        let f3_held = core.input.action_held(Action::DebugModifier);
+        if game.handle_debug_key(
+            code,
+            f3_held,
+            &core.input.key_bindings,
+            &mut core.menu,
+            connection,
+        ) {
+            core.input.unclick(code);
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        game.on_key_released(code, &core.input, connection);
+    }
+    #[cfg(feature = "test-harness")]
+    if let Some(code) = core.input.take_harness_key_up() {
         game.on_key_released(code, &core.input, connection);
     }
 
@@ -2854,9 +2979,54 @@ pub fn update_game(
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
-    let debug = if game.show_debug {
-        Some(hud::DebugInfo {
-            fps: gfx.fps_counter.display_fps(),
+    // A player head resolves its profile when its item draws: on the HUD's
+    // hotbar and offhand, and in the open screen's slots and cursor.
+    let inventory = &game.player.inventory;
+    let screen_slots =
+        game.inventory_open || game.open_container.is_some() || game.creative_inventory_open;
+    let shown = if screen_slots {
+        game.menu_slots()
+    } else {
+        inventory.hotbar_slots()
+    };
+    for profile in shown
+        .iter()
+        .chain([inventory.offhand(), &game.cursor_item])
+        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(crate::ui::common::HeadProfile::of_stack)
+    {
+        core.request_head(profile);
+    }
+
+    // TODO: Pomme doesn't track the server's reduced debug info yet.
+    let enabled = core
+        .menu
+        .debug_entries
+        .currently_enabled(game.show_debug, false);
+    let mut debug = if enabled.is_empty() {
+        DebugColumns::default()
+    } else {
+        debug_entries::entry_columns(
+            &enabled,
+            &DebugEntryInput {
+                fps: gfx.fps_counter.display_fps(),
+                framerate_limit: core.menu.max_framerate,
+                present_mode: gfx.renderer.present_mode(),
+                refresh_rate_hz: gfx
+                    .window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz())
+                    .map(|millihertz| millihertz as f32 / 1000.0),
+                lows: gfx.fps_counter.lows(),
+            },
+        )
+    };
+    if game.show_debug {
+        let info = hud::DebugInfo {
+            debug_options_key: hud::format_debug_keybind(
+                &core.input.key_bindings,
+                Action::DebugDebugOptions,
+            ),
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
@@ -2902,10 +3072,9 @@ pub fn update_game(
                 draw_ms: gfx.renderer.last_timings().draw_ms,
                 present_ms: gfx.renderer.last_timings().present_ms,
             }),
-        })
-    } else {
-        None
-    };
+        };
+        hud::build_debug_overlay(&mut debug, &info);
+    }
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
@@ -2929,9 +3098,9 @@ pub fn update_game(
         );
     }
     if !benchmark_running && game.hide_gui {
-        // F1: vanilla still renders the debug overlay with the GUI hidden.
-        if let Some(info) = debug.as_ref() {
-            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
+        // F1 hides the debug lines too, unless a screen is open.
+        if !game.input_live() {
+            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
                 gfx.renderer.menu_text_width(t, s)
             });
         }
@@ -3114,7 +3283,7 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            debug.as_ref(),
+            &debug,
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -3462,6 +3631,7 @@ pub fn update_game(
 
     let mut player_preview = None;
     let mut book_preview = None;
+    let mut screen_pointer = false;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         let cursor = core.input.cursor_pos();
         let raw_left = core.input.left_just_pressed();
@@ -3579,7 +3749,7 @@ pub fn update_game(
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
-        let (clicked_outside, ops, hovered) = if hide_main_for_book {
+        let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
             // shows only the screen's background behind it, and the book
             // takes every click.
@@ -3618,7 +3788,7 @@ pub fn update_game(
                     player_preview = Some(preview);
                 }
             }
-            (false, Vec::new(), None)
+            (false, Vec::new(), None, false)
         } else if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
@@ -3685,6 +3855,41 @@ pub fn update_game(
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
+                ContainerScreen::BrewingStand => crate::ui::brewing_stand::build_brewing_stand(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.data,
+                    // 26.3 added the total fuel and brew time data slots.
+                    crate::version::session_protocol() >= 777,
+                    container.click_kind(&game.recipe_book),
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+                ContainerScreen::Crafter => crate::ui::crafter::build_crafter(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    container.click_kind(&game.recipe_book),
+                    &container.slots,
+                    &container.data,
+                    crate::player::is_spectator(game.player.game_mode),
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
                 ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
                     &mut elements,
                     sw,
@@ -3743,7 +3948,12 @@ pub fn update_game(
                         },
                     ));
             }
-            (result.clicked_outside, result.ops, result.hovered)
+            (
+                result.clicked_outside,
+                result.ops,
+                result.hovered,
+                result.pointer,
+            )
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -3760,7 +3970,7 @@ pub fn update_game(
                 recipe_book_visible.then_some(&mut deferred_recipe_cursor),
             );
             player_preview = Some(result.player_preview);
-            (result.clicked_outside, result.ops, result.hovered)
+            (result.clicked_outside, result.ops, result.hovered, false)
         };
 
         if let Some((spec, _)) = recipe_context.as_ref()
@@ -3803,6 +4013,7 @@ pub fn update_game(
         }
 
         close_inventory = clicked_outside;
+        screen_pointer = pointer;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
         let is_bundle_slot = |game: &GameState, slot: u16| {
@@ -3886,6 +4097,28 @@ pub fn update_game(
                 sh,
                 gs,
             );
+        } else if let Some(slot) = hovered
+            && game.cursor_item.is_empty()
+            && let Some(stack) = game
+                .menu_slots()
+                .get(usize::from(slot))
+                .and_then(azalea_inventory::ItemStack::as_present)
+        {
+            let lines = crate::ui::chat::stack_tooltip_lines(
+                stack,
+                &game.registries,
+                game.advanced_item_tooltips,
+            );
+            if !lines.is_empty() {
+                crate::ui::common::push_tooltip_lines(
+                    &mut elements,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                    lines,
+                );
+            }
         }
         core.input.clear_just_pressed_actions();
     }
@@ -3927,6 +4160,7 @@ pub fn update_game(
             drop,
             game.player.drop_spam.can_drop(),
             &game.player.inventory,
+            &game.registries,
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),
@@ -4073,16 +4307,17 @@ pub fn update_game(
         &text_events,
     );
 
+    if screen_pointer != game.screen_pointer {
+        game.screen_pointer = screen_pointer;
+        gfx.window
+            .set_cursor(crate::ui::common::cursor_icon(screen_pointer));
+    }
+
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
-        let icon = if game
+        let link = game
             .chat
-            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
-        {
-            winit::window::CursorIcon::Pointer
-        } else {
-            winit::window::CursorIcon::Default
-        };
-        gfx.window.set_cursor(icon);
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
+        gfx.window.set_cursor(crate::ui::common::cursor_icon(link));
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
@@ -4290,6 +4525,11 @@ pub fn update_game(
             game.player.look_dir.y_rot_deg(),
             partial_tick,
         );
+        let interp_body_y_rot_deg = lerp_angle(
+            game.player.prev_body_y_rot,
+            game.player.body_y_rot,
+            partial_tick,
+        );
 
         let (radius, strength) =
             crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
@@ -4300,7 +4540,7 @@ pub fn update_game(
                 game.player.is_sleeping(),
                 gfx.renderer.camera_look_dir().x_rot_deg(),
             ),
-            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            body_y_rot_deg: interp_body_y_rot_deg,
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
@@ -4520,6 +4760,73 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    // `EntityRenderer.extractNameTags` with the living renderers'
+    // `shouldShowName`.
+    // TODO: an entity carrying passengers hides its name (Pomme doesn't link
+    // passengers yet), the below-name score (`belowNameDisplay`), and custom
+    // names on entities that aren't living.
+    let nameplate_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        let target = match game.interaction.target {
+            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+            _ => None,
+        };
+        let camera = gfx.renderer.camera_render_position();
+        let mut list = Vec::new();
+        for (&entity_id, entity) in &game.entity_store.living {
+            // The camera entity never shows its own name.
+            if entity.player_uuid == Some(core.user.uuid) {
+                continue;
+            }
+            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            // `getDisplayName`: a player's account name, or a mob's custom
+            // name when it shows it or is under the crosshair.
+            let spans = match entity.player_uuid {
+                Some(_) => game.scoreboard.line(&name, None),
+                None => match &entity.custom_name_spans {
+                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                        game.scoreboard.line(&name, Some(custom))
+                    }
+                    _ => continue,
+                },
+            };
+            let dist_sq = (*entity.position - camera).length_squared();
+            if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
+                continue;
+            }
+            let visible = !entity.is_invisible
+                || spectating
+                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+            let shown = game
+                .scoreboard
+                .name_tag_shown(&viewer, &name, visible)
+                .unwrap_or(!game.hide_gui && visible);
+            if !shown {
+                continue;
+            }
+            let position = entity
+                .prev_position
+                .lerp(entity.position, partial_tick as f64)
+                + entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64)
+                    .render_offset
+                // `submitNameTag` lifts the tag half a block over its anchor.
+                + glam::DVec3::Y * (f64::from(entity.name_tag_height()) + 0.5);
+            list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                position: *position,
+                spans,
+                discrete: entity.is_crouching,
+                light: entity_light(
+                    &world_light,
+                    entity.entity_type,
+                    entity.eye_position(partial_tick),
+                    entity.is_on_fire,
+                    entity.dark_ticks,
+                ),
+            });
+        }
+        list
+    };
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
     let distant_terrain = if game.light_engine.has_sky() {
@@ -4639,6 +4946,7 @@ pub fn update_game(
             camera_len: camera_block_entities,
         },
         &particle_quads,
+        &nameplate_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off
@@ -4770,7 +5078,8 @@ pub fn update_game(
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
             // Chat Settings opened from chat return to it, unpaused.
-            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
+            let to_chat = game.chat.return_from_settings(game.command_tree.as_deref());
+            game.paused = !to_chat && !std::mem::take(&mut game.options_close_to_game);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }

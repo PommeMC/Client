@@ -1688,6 +1688,22 @@ impl MenuOverlayPipeline {
         Ok(())
     }
 
+    pub fn mc_font_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font.texture.handle()
+    }
+
+    pub fn mc_font_color_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font_color.texture.handle()
+    }
+
+    pub fn mc_font_sampler(&self) -> rhi::backend::Sampler {
+        self.mc_font.sampler
+    }
+
+    pub fn mc_glyph_map(&self) -> Option<&GlyphMap> {
+        self.geometry.mc_glyph_map.as_ref()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -2281,6 +2297,16 @@ pub enum SpriteId {
     ShulkerBoxBackground,
     HopperBackground,
     DispenserBackground,
+    BrewingStandBackground,
+    BrewingFuelLength,
+    BrewingProgress,
+    BrewingBubbles,
+    EmptyPotion,
+    EmptyBrewingFuel,
+    CrafterBackground,
+    CrafterDisabledSlot,
+    CrafterPoweredRedstone,
+    CrafterUnpoweredRedstone,
     AnvilBackground,
     AnvilTextField,
     AnvilTextFieldDisabled,
@@ -2972,6 +2998,46 @@ fn build_sprite_atlas(
         (
             SpriteId::EmptyLapisLazuli,
             "minecraft/textures/gui/sprites/container/slot/lapis_lazuli.png",
+            0.0,
+        ),
+        (
+            SpriteId::EmptyPotion,
+            "minecraft/textures/gui/sprites/container/slot/potion.png",
+            0.0,
+        ),
+        (
+            SpriteId::EmptyBrewingFuel,
+            "minecraft/textures/gui/sprites/container/slot/brewing_fuel.png",
+            0.0,
+        ),
+        (
+            SpriteId::BrewingFuelLength,
+            "minecraft/textures/gui/sprites/container/brewing_stand/fuel_length.png",
+            0.0,
+        ),
+        (
+            SpriteId::BrewingProgress,
+            "minecraft/textures/gui/sprites/container/brewing_stand/brew_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::BrewingBubbles,
+            "minecraft/textures/gui/sprites/container/brewing_stand/bubbles.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrafterDisabledSlot,
+            "minecraft/textures/gui/sprites/container/crafter/disabled_slot.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrafterPoweredRedstone,
+            "minecraft/textures/gui/sprites/container/crafter/powered_redstone.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrafterUnpoweredRedstone,
+            "minecraft/textures/gui/sprites/container/crafter/unpowered_redstone.png",
             0.0,
         ),
         (
@@ -3811,6 +3877,20 @@ fn build_sprite_atlas(
         (
             SpriteId::DispenserBackground,
             "minecraft/textures/gui/container/dispenser.png",
+            (0, 0),
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::BrewingStandBackground,
+            "minecraft/textures/gui/container/brewing_stand.png",
+            (0, 0),
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::CrafterBackground,
+            "minecraft/textures/gui/container/crafter.png",
             (0, 0),
             INV_TEX_W,
             INV_TEX_H,

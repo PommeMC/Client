@@ -73,7 +73,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Entities => to_value(protocol::entities(game)),
         Command::Player => to_value(protocol::player(game)),
         Command::Hud => to_value(protocol::hud(game)),
-        Command::Sounds => to_value(&game.recent_sounds),
+        Command::Sounds => to_value(core.audio.recent_sounds()),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
         Command::Press(press) => press_key(core, press),
         Command::KeyDown(key) | Command::KeyUp(key) => {
@@ -85,6 +85,10 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         }
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options),
+        Command::HoldPackets { hold } => {
+            game.hold_packets = *hold;
+            Ok(Value::Null)
+        }
         Command::Deterministic => {
             game.deterministic = true;
             game.block_light_flicker = 0.0;

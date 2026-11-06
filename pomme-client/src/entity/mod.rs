@@ -871,6 +871,8 @@ pub struct LivingEntity {
     pub death_time: u32,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
+    pub custom_name_spans: Option<Vec<crate::ui::text::TextSpan>>,
+    pub custom_name_visible: bool,
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
     /// zombie/skeleton arms.
     pub aggressive: bool,
@@ -1108,6 +1110,8 @@ impl LivingEntity {
             death_time: 0,
             age_in_ticks: 0,
             custom_name: None,
+            custom_name_spans: None,
+            custom_name_visible: false,
             aggressive: false,
             no_ai: false,
             powered: false,
@@ -1242,6 +1246,36 @@ impl LivingEntity {
             self.prev_interested_angle,
             self.interested_angle,
         )
+    }
+
+    /// The height of its `NAME_TAG` attachment above its feet: the top of
+    /// its current dimensions, or the sniffer's `nameTagOffset`, scaled with
+    /// a baby and by the `scale` attribute unless the size is fixed.
+    // TODO: poses Pomme doesn't track for other entities (swimming, gliding,
+    // a goat's long jump), which change the dimensions too.
+    pub fn name_tag_height(&self) -> f32 {
+        let bounds = |baby| {
+            crate::renderer::pipelines::entity_renderer::entity_bounds(self.entity_type, baby).1
+        };
+        let is_player = self.entity_type == EntityKind::Player;
+        // `LivingEntity.SLEEPING_DIMENSIONS` and a player's `Pose.DYING`, fixed
+        // sizes the scale leaves alone.
+        if self.sleeping_pos.is_some() || is_player && self.health <= 0.0 {
+            return 0.2;
+        }
+        let height = if is_player && self.is_crouching {
+            // `Avatar.POSES`' crouching height.
+            1.5
+        } else if self.entity_type == EntityKind::Sniffer {
+            2.05 * bounds(self.is_baby) / bounds(false)
+        } else {
+            bounds(self.is_baby) * self.stand_height_scale()
+        };
+        let scale = self
+            .attributes
+            .value(crate::attribute::AttributeKind::Scale)
+            .unwrap_or(1.0);
+        height * scale as f32
     }
 
     /// `PolarBear.getDefaultDimensions`' height stretch while standing. Its
@@ -1589,33 +1623,46 @@ impl LivingEntity {
         }
     }
 
-    /// Vanilla `LivingEntity.tickHeadTurn`.
+    /// [`turn_body`] for this tick's move.
     // TODO: a `Mob` turns its body through `BodyRotationControl.clientTick`
     // instead: the body snaps to its yaw while moving, follows the head past
     // `getMaxHeadYRot` (75 by default, 15 for a goat, 1 for an axolotl), and
     // turns to face the head after it holds still for 10 ticks.
     pub fn tick_body_rotation(&mut self) {
-        let dx = self.position.x - self.prev_position.x;
-        let dz = self.position.z - self.prev_position.z;
-        let dist_sq = (dx * dx + dz * dz) as f32;
-
-        if dist_sq > 0.0025 {
-            let walk_dir = -(dx as f32).atan2(dz as f32).to_degrees();
-            let diff_from_look = wrap_degrees(self.look_dir.y_rot_deg() - walk_dir).abs();
-            let body_target = if diff_from_look > 95.0 && diff_from_look < 265.0 {
-                walk_dir - 180.0
-            } else {
-                walk_dir
-            };
-            let diff = wrap_degrees(body_target - self.body_y_rot_deg);
-            self.body_y_rot_deg += diff * 0.3;
-        }
-
-        let head_diff = wrap_degrees(self.head_y_rot_deg - self.body_y_rot_deg);
-        if head_diff.abs() > 50.0 {
-            self.body_y_rot_deg += head_diff - head_diff.signum() * 50.0;
-        }
+        self.body_y_rot_deg = turn_body(
+            self.body_y_rot_deg,
+            self.look_dir.y_rot_deg(),
+            self.position.x - self.prev_position.x,
+            self.position.z - self.prev_position.z,
+            self.swing_time > 0,
+        );
     }
+}
+
+/// Vanilla `LivingEntity.tick`'s body turn into `tickHeadTurn`: the body
+/// turns toward a move of (`dx`, `dz`), facing backwards when the move is
+/// behind `yaw`, or toward `yaw` while the arm swings, and stays within 50
+/// degrees of `yaw`.
+pub fn turn_body(body: f32, yaw: f32, dx: f64, dz: f64, swinging: bool) -> f32 {
+    let mut target = body;
+    if ((dx * dx + dz * dz) as f32) > 0.0025000002 {
+        let walk = dz.atan2(dx) as f32 * 57.295776 - 90.0;
+        let diff = (wrap_degrees(yaw) - walk).abs();
+        target = if 95.0 < diff && diff < 265.0 {
+            walk - 180.0
+        } else {
+            walk
+        };
+    }
+    if swinging {
+        target = yaw;
+    }
+    let mut body = body + wrap_degrees(target - body) * 0.3;
+    let head_diff = wrap_degrees(yaw - body);
+    if head_diff.abs() > 50.0 {
+        body += head_diff - head_diff.signum() * 50.0;
+    }
+    body
 }
 
 pub struct ItemEntity {
@@ -2017,6 +2064,7 @@ impl EntityStore {
                 entity.is_invisible = shared_flags_invisible(f);
                 entity.is_glowing = shared_flags_glowing(f);
             }
+            (_, 3, Bool(b)) => entity.custom_name_visible = b,
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -2221,9 +2269,15 @@ impl EntityStore {
         }
     }
 
-    pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
+    pub fn set_custom_name(
+        &mut self,
+        id: i32,
+        name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
+    ) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
+            entity.custom_name_spans = spans;
         }
     }
 
@@ -2606,6 +2660,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_body_turns_toward_a_sideways_walk() {
+        // Facing south (yaw 0) and moving east: the walk direction is -90.
+        let body = turn_body(0.0, 0.0, 0.2, 0.0, false);
+        assert!((body + 27.0).abs() < 1e-4, "{body}");
+    }
+
+    #[test]
+    fn walking_backwards_keeps_the_body_facing_forwards() {
+        let body = turn_body(0.0, 0.0, 0.0, -0.2, false);
+        assert!(body.abs() < 1e-4, "{body}");
+    }
+
+    #[test]
+    fn the_head_drags_the_body_past_50_degrees() {
+        assert_eq!(turn_body(0.0, 120.0, 0.0, 0.0, false), 70.0);
+    }
+
+    #[test]
+    fn a_swing_turns_the_body_toward_the_yaw() {
+        assert!((turn_body(0.0, 40.0, 0.0, 0.0, true) - 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_tiny_move_leaves_the_body_alone() {
+        assert_eq!(turn_body(10.0, 0.0, 0.04, 0.0, false), 10.0);
+    }
+
+    #[test]
     fn copper_golem_spins_its_head_once_per_idle_cycle() {
         let mut golem = CopperGolemAnim {
             idle_start_tick: 300,
@@ -2623,6 +2705,29 @@ mod tests {
     fn spawn(store: &mut EntityStore, id: i32, kind: EntityKind, position: Position) {
         let uuid = uuid::Uuid::from_u128(id as u128);
         store.spawn_living(id, kind, position, LookDirection::default(), uuid);
+    }
+
+    #[test]
+    fn a_name_tag_sits_on_the_entitys_current_height() {
+        let entity = |kind| {
+            LivingEntity::new(
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            )
+        };
+        let mut player = entity(EntityKind::Player);
+        assert_eq!(player.name_tag_height(), 1.8);
+        player.is_crouching = true;
+        assert_eq!(player.name_tag_height(), 1.5);
+        player.sleeping_pos = Some(BlockPos::new(0, 0, 0));
+        assert_eq!(player.name_tag_height(), 0.2);
+
+        let mut sniffer = entity(EntityKind::Sniffer);
+        assert_eq!(sniffer.name_tag_height(), 2.05);
+        sniffer.is_baby = true;
+        assert!((sniffer.name_tag_height() - 1.025).abs() < 1e-5);
     }
 
     #[test]

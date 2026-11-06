@@ -1,5 +1,8 @@
-use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Unbreakable};
+use azalea_inventory::components::{
+    CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
+};
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_registry::builtin::ItemKind;
 use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
@@ -420,6 +423,16 @@ pub fn push_item_count(
     });
 }
 
+/// The hand over something clickable (vanilla `CursorTypes.POINTING_HAND`),
+/// else the arrow.
+pub fn cursor_icon(pointer: bool) -> winit::window::CursorIcon {
+    if pointer {
+        winit::window::CursorIcon::Pointer
+    } else {
+        winit::window::CursorIcon::Default
+    }
+}
+
 pub fn hit_test(cursor: (f32, f32), rect: [f32; 4]) -> bool {
     cursor.0 >= rect[0]
         && cursor.0 < rect[0] + rect[2]
@@ -463,24 +476,35 @@ pub(crate) fn push_slot_with_owner(
     empty_sprite: Option<SpriteId>,
     use_player_team: bool,
 ) -> bool {
-    // Vanilla `isHovering` reaches a pixel past each edge, so slots 18 apart
-    // leave no gap.
-    let hovered = hit_test(
-        cursor,
-        [x - scale, y - scale, size + 2.0 * scale, size + 2.0 * scale],
+    let hovered = slot_hovered(cursor, x, y, size, scale);
+    push_slot_contents(
+        elements,
+        x,
+        y,
+        size,
+        scale,
+        hovered,
+        item,
+        empty_sprite,
+        use_player_team,
     );
-    let highlight = |sprite| MenuElement::Image {
-        x: x - 4.0 * scale,
-        y: y - 4.0 * scale,
-        w: 24.0 * scale,
-        h: 24.0 * scale,
-        sprite,
-        tint: WHITE,
-    };
-    if hovered {
-        elements.push(highlight(SpriteId::SlotHighlightBack));
-    }
-    match item {
+    hovered
+}
+
+/// A slot's item, or its empty-slot sprite, between the hover highlights.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_slot_contents(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    hovered: bool,
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+    use_player_team: bool,
+) {
+    push_highlighted(elements, x, y, scale, hovered, |elements| match item {
         ItemStack::Empty => {
             if let Some(sprite) = empty_sprite {
                 elements.push(MenuElement::Image {
@@ -496,11 +520,52 @@ pub(crate) fn push_slot_with_owner(
         ItemStack::Present(data) => {
             push_item_icon_with_owner(elements, x, y, size, scale, data, use_player_team)
         }
-    }
+    });
+}
+
+/// `draw` between a hovered slot's back and front highlights.
+pub(crate) fn push_highlighted(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    hovered: bool,
+    draw: impl FnOnce(&mut Vec<MenuElement>),
+) {
     if hovered {
-        elements.push(highlight(SpriteId::SlotHighlightFront));
+        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightBack);
     }
-    hovered
+    draw(elements);
+    if hovered {
+        push_slot_highlight(elements, x, y, scale, SpriteId::SlotHighlightFront);
+    }
+}
+
+/// Whether the cursor is over the slot at (x, y). Vanilla `isHovering`
+/// reaches a pixel past each edge, so slots 18 apart leave no gap.
+pub(crate) fn slot_hovered(cursor: (f32, f32), x: f32, y: f32, size: f32, scale: f32) -> bool {
+    hit_test(
+        cursor,
+        [x - scale, y - scale, size + 2.0 * scale, size + 2.0 * scale],
+    )
+}
+
+/// The hovered slot's 24x24 highlight (back or front), centred on the slot.
+fn push_slot_highlight(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    sprite: SpriteId,
+) {
+    elements.push(MenuElement::Image {
+        x: x - 4.0 * scale,
+        y: y - 4.0 * scale,
+        w: 24.0 * scale,
+        h: 24.0 * scale,
+        sprite,
+        tint: WHITE,
+    });
 }
 
 /// Draws an item icon and the vanilla item decorations Pomme supports.
@@ -513,6 +578,122 @@ pub fn push_item_icon(
     data: &ItemStackData,
 ) {
     push_item_icon_with_owner(elements, x, y, size, scale, data, true);
+}
+
+/// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
+/// `ResolvableProfile`, so two heads with the same id but different textures
+/// are different entries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HeadProfile {
+    pub(crate) id: Option<uuid::Uuid>,
+    pub(crate) name: Option<String>,
+    pub(crate) textures: Option<String>,
+    /// The `skinPatch`'s body texture, `namespace/path` under `textures/`,
+    /// which replaces whatever skin the profile has.
+    pub(crate) patch_texture: Option<String>,
+}
+
+impl HeadProfile {
+    /// A player head item's `profile` component.
+    pub(crate) fn of_stack(data: &ItemStackData) -> Option<Self> {
+        if data.kind != ItemKind::PlayerHead {
+            return None;
+        }
+        let profile = data.get_component::<Profile>()?;
+        let textures = |properties: &azalea_auth::game_profile::GameProfileProperties| {
+            properties.map.get("textures").map(|p| p.value.clone())
+        };
+        let patch_texture = profile
+            .skin_patch
+            .body
+            .as_ref()
+            .map(|texture| format!("{}/{}", texture.id.namespace(), texture.id.path()));
+        Some(match &*profile.unpack {
+            PartialOrFullProfile::Partial(partial) => Self {
+                id: partial.id,
+                name: partial.name.clone(),
+                textures: textures(&partial.properties),
+                patch_texture,
+            },
+            PartialOrFullProfile::Full(full) => Self {
+                id: Some(full.uuid),
+                name: Some(full.name.clone()),
+                textures: textures(&full.properties),
+                patch_texture,
+            },
+        })
+    }
+
+    /// `ResolvableProfile.create`: a profile carrying properties, or both or
+    /// neither of id and name, is `Static` and never looks anything up; one
+    /// with exactly one of them is `Dynamic` and resolves first.
+    pub(crate) fn is_static(&self) -> bool {
+        self.textures.is_some() || self.id.is_some() == self.name.is_some()
+    }
+
+    /// The skin from the game's assets it draws while its own loads, or
+    /// when it has none: the `skinPatch` texture, which it always draws, else
+    /// `DefaultPlayerSkin.get(partialProfile())`, picked by the partial
+    /// profile's id (an offline id from the name when it has no id, else
+    /// nil). A `namespace/path` under `textures/`.
+    pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
+        const DEFAULT_SKINS: [&str; 18] = [
+            "minecraft/entity/player/slim/alex",
+            "minecraft/entity/player/slim/ari",
+            "minecraft/entity/player/slim/efe",
+            "minecraft/entity/player/slim/kai",
+            "minecraft/entity/player/slim/makena",
+            "minecraft/entity/player/slim/noor",
+            "minecraft/entity/player/slim/steve",
+            "minecraft/entity/player/slim/sunny",
+            "minecraft/entity/player/slim/zuri",
+            "minecraft/entity/player/wide/alex",
+            "minecraft/entity/player/wide/ari",
+            "minecraft/entity/player/wide/efe",
+            "minecraft/entity/player/wide/kai",
+            "minecraft/entity/player/wide/makena",
+            "minecraft/entity/player/wide/noor",
+            "minecraft/entity/player/wide/steve",
+            "minecraft/entity/player/wide/sunny",
+            "minecraft/entity/player/wide/zuri",
+        ];
+        if let Some(texture) = &self.patch_texture {
+            return texture.into();
+        }
+        let id = self
+            .id
+            .or_else(|| {
+                self.name
+                    .as_deref()
+                    .map(crate::user::UserData::offline_uuid)
+            })
+            .unwrap_or_default();
+        let hash = crate::world::waypoints::java_uuid_hash(&id);
+        DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
+    }
+
+    /// The key an [`Self::asset_skin`] texture is held under.
+    pub(crate) fn asset_skin_key(texture: &str) -> String {
+        format!("asset:{texture}")
+    }
+
+    /// The keys of the skins it can draw, in preference order: its own,
+    /// unless a `skinPatch` replaces it, then [`Self::asset_skin`].
+    pub(crate) fn skin_keys(&self) -> impl Iterator<Item = String> {
+        let own = self.patch_texture.is_none().then(|| self.skin_key());
+        own.into_iter()
+            .chain([Self::asset_skin_key(&self.asset_skin())])
+    }
+
+    /// The key its skin is held under: its id, else its skin textures, else
+    /// its name.
+    pub(crate) fn skin_key(&self) -> String {
+        match (self.id, &self.textures, &self.name) {
+            (Some(id), _, _) => id.to_string(),
+            (None, Some(textures), _) => format!("textures:{textures}"),
+            (None, None, name) => name.clone().unwrap_or_default(),
+        }
+    }
 }
 
 pub(crate) fn push_item_icon_with_owner(
@@ -690,20 +871,17 @@ pub struct LabelScroll<'a> {
 /// A widget label: plain text in one color, or styled spans.
 pub enum WidgetLabel<'a> {
     Text(&'a str, [f32; 4]),
+    /// Spans with their own colours, which an inactive widget keeps, as a
+    /// component's style colour wins over the label colour in vanilla.
     Spans(Vec<crate::ui::text::TextSpan>),
 }
 
 impl WidgetLabel<'_> {
-    /// Recolored to the inactive text color, keeping span formatting.
+    /// Plain text recoloured to the inactive text colour.
     fn disabled(self) -> Self {
         match self {
             Self::Text(text, _) => Self::Text(text, COL_DISABLED),
-            Self::Spans(mut spans) => {
-                for span in &mut spans {
-                    span.color = COL_DISABLED;
-                }
-                Self::Spans(spans)
-            }
+            spans @ Self::Spans(_) => spans,
         }
     }
 
@@ -981,9 +1159,41 @@ mod tests {
     use azalea_registry::builtin::ItemKind;
 
     use super::{
-        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, MenuElement, item_bar, push_item_count,
-        push_item_icon, push_slot_with_owner,
+        BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
+        push_item_count, push_item_icon, push_slot_with_owner,
     };
+
+    #[test]
+    fn a_head_draws_its_patch_or_its_ids_default_skin() {
+        let head = |id, name: Option<&str>, patch: Option<&str>| HeadProfile {
+            id,
+            name: name.map(str::to_owned),
+            textures: None,
+            patch_texture: patch.map(str::to_owned),
+        };
+        // `UUID.hashCode` of the nil id is 0: the first default skin.
+        assert_eq!(
+            head(None, None, None).asset_skin(),
+            "minecraft/entity/player/slim/alex"
+        );
+        // A name alone picks by its offline id.
+        assert_eq!(
+            head(None, Some("Steve"), None).asset_skin(),
+            head(
+                Some(crate::user::UserData::offline_uuid("Steve")),
+                None,
+                None
+            )
+            .asset_skin()
+        );
+        let patched = head(None, Some("Steve"), Some("pack/skins/knight"));
+        assert_eq!(patched.asset_skin(), "pack/skins/knight");
+        assert_eq!(
+            patched.skin_keys().collect::<Vec<_>>(),
+            ["asset:pack/skins/knight"]
+        );
+        assert_eq!(head(None, Some("Steve"), None).skin_keys().count(), 2);
+    }
 
     fn present(stack: ItemStack) -> ItemStackData {
         stack.as_present().expect("stack should be present").clone()

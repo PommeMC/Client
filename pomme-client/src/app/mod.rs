@@ -899,6 +899,7 @@ impl ApplicationHandler for App {
                                         code,
                                         f3_held,
                                         &self.core.input.key_bindings,
+                                        &mut self.core.menu,
                                         &connection,
                                     ) {
                                         self.core.input.on_menu_key_event(&event);
@@ -941,6 +942,7 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.on_menu_key_event(&event);
@@ -969,6 +971,7 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.on_menu_key_event(&event);
@@ -985,6 +988,7 @@ impl ApplicationHandler for App {
                                         code,
                                         f3_held,
                                         &self.core.input.key_bindings,
+                                        &mut self.core.menu,
                                         &connection,
                                     ) {
                                         self.core.input.on_menu_key_event(&event);
@@ -1034,9 +1038,15 @@ impl ApplicationHandler for App {
                                                 code,
                                                 f3_held,
                                                 &self.core.input.key_bindings,
+                                                &mut self.core.menu,
                                                 &connection,
                                             ) {
                                                 self.core.input.unclick(code);
+                                                // A chord can open a screen.
+                                                self.core.apply_cursor_grab(
+                                                    &gfx.window,
+                                                    Some(&mut game),
+                                                );
                                             }
                                         }
                                     }

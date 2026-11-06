@@ -35,7 +35,7 @@ use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_le
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
 use crate::world::block::render_assets::BlockRenderView;
-use crate::world::block::sound::block_sounds_for_id;
+use crate::world::block::sound::{BlockSounds, block_sounds_for_id};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::chunk::ChunkStore;
 
@@ -315,6 +315,11 @@ impl InteractionState {
         }
         let stage = (self.destroy_progress * 10.0) as u32;
         Some((self.destroy_pos, stage.min(9)))
+    }
+
+    /// Vanilla `SwingState.animation > 0`: an arm swing is under way.
+    pub fn arm_swinging(&self) -> bool {
+        self.attack_anim > 0.0
     }
 
     /// Vanilla `ItemInHandRenderer`'s attack value: `getAttackAnim` for the
@@ -801,6 +806,7 @@ impl InteractionState {
                 Some(HitResult::Block(hit)) => self.use_item_on(
                     block_registry,
                     sender,
+                    audio,
                     chunks,
                     hit,
                     hand,
@@ -839,6 +845,7 @@ impl InteractionState {
         &mut self,
         block_registry: &BlockRegistry,
         sender: &PacketSender,
+        audio: &AudioEngine,
         chunks: &ChunkStore,
         hit: BlockHitResult,
         hand: InteractionHand,
@@ -866,7 +873,7 @@ impl InteractionState {
             },
             seq: self.seq,
         }));
-        // TODO: other interactive blocks (brewing stand, crafter, ...)
+        // TODO: other interactive blocks (beacon, loom, ...)
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
             let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -881,6 +888,7 @@ impl InteractionState {
         }
         self.predict_place(
             block_registry.block_state_table(),
+            audio,
             hit,
             place_block,
             chunks,
@@ -1211,6 +1219,7 @@ impl InteractionState {
     fn predict_place(
         &mut self,
         block_state_table: BlockStateTable,
+        audio: &AudioEngine,
         hit: BlockHitResult,
         place_block: Option<BlockState>,
         chunks: &ChunkStore,
@@ -1241,6 +1250,15 @@ impl InteractionState {
         self.retain_known_server_state(pos, BlockState::AIR, player_pos);
         chunks.set_block_state(pos.x, pos.y, pos.z, state, block_state_table);
         mark_dirty(&pos, dirty_chunks);
+        // `BlockItem.place`, which the server sends only to other players.
+        // TODO: placements this can't predict (multi-state blocks, items
+        // named apart from their block, replaceable cells) play no place
+        // sound until each block's `getStateForPlacement` is ported.
+        let sounds = block_sounds_for_id(
+            block_state_table,
+            block_state_table.block_state_data(state).id(),
+        );
+        play_placed_or_broken(audio, &sounds.place_event, sounds, pos);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1621,6 +1639,8 @@ fn opens_menu(id: &str) -> bool {
             | "hopper"
             | "dispenser"
             | "dropper"
+            | "brewing_stand"
+            | "crafter"
     ) || id.ends_with("shulker_box")
         || id.ends_with("anvil")
 }
@@ -1749,20 +1769,26 @@ fn play_hit_sound(audio: &AudioEngine, table: BlockStateTable, id: &str, pos: Bl
 }
 
 /// Plays a block's break sound, matching vanilla `LevelEventHandler` event
-/// 2001: volume `(volume + 1) / 2`, pitch `pitch * 0.8`.
+/// 2001.
 pub(crate) fn play_break_sound_for_id(
     audio: &AudioEngine,
     table: BlockStateTable,
     id: &str,
     pos: BlockPos,
 ) {
-    let s = block_sounds_for_id(table, id);
+    let sounds = block_sounds_for_id(table, id);
+    play_placed_or_broken(audio, &sounds.break_event, sounds, pos);
+}
+
+/// A block's place or break `event`, which vanilla plays at volume
+/// `(volume + 1) / 2` and pitch `pitch * 0.8`.
+fn play_placed_or_broken(audio: &AudioEngine, event: &str, sounds: &BlockSounds, pos: BlockPos) {
     play_block_sound(
         audio,
-        &s.break_event,
+        event,
         pos,
-        (s.volume + 1.0) / 2.0,
-        s.pitch * 0.8,
+        (sounds.volume + 1.0) / 2.0,
+        sounds.pitch * 0.8,
     );
 }
 

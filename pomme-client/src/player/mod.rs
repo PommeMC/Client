@@ -154,6 +154,8 @@ pub struct LocalPlayer {
     pub velocity: Velocity,
     pub look_dir: LookDirection,
     pub prev_look_dir: LookDirection,
+    pub body_y_rot: f32,
+    pub prev_body_y_rot: f32,
     pub on_ground: bool,
     /// Vanilla `Entity.fallDistance`.
     pub fall_distance: f64,
@@ -283,6 +285,8 @@ impl LocalPlayer {
             velocity: Velocity::default(),
             look_dir: LookDirection::default(),
             prev_look_dir: LookDirection::default(),
+            body_y_rot: 0.0,
+            prev_body_y_rot: 0.0,
             on_ground: false,
             fall_distance: 0.0,
             health: 20.0,
@@ -392,6 +396,9 @@ impl LocalPlayer {
         self.was_jump_pressed = false;
         self.jump_riding_ticks = 0;
         self.jump_riding_scale = 0.0;
+        // Vanilla's new `LocalPlayer` starts with `yBodyRot` 0.
+        self.body_y_rot = 0.0;
+        self.prev_body_y_rot = 0.0;
         self.abilities_dirty = false;
         self.eye_height = STANDING_EYE_HEIGHT;
         self.prev_eye_height = STANDING_EYE_HEIGHT;
@@ -464,6 +471,7 @@ impl LocalPlayer {
         self.prev_position = self.position;
         self.prev_look_dir = self.look_dir;
         self.prev_eye_height = self.eye_height;
+        self.prev_body_y_rot = self.body_y_rot;
     }
 
     pub fn tick_death(&mut self) {
@@ -541,6 +549,12 @@ impl LocalPlayer {
         self.eye_height += (self.target_eye_height() - self.eye_height) * 0.5;
     }
 
+    /// [`crate::entity::turn_body`] for this tick's move of (`dx`, `dz`).
+    pub fn tick_body_rotation(&mut self, dx: f64, dz: f64, swinging: bool) {
+        self.body_y_rot =
+            crate::entity::turn_body(self.body_y_rot, self.look_dir.y_rot_deg(), dx, dz, swinging);
+    }
+
     /// Accumulates walk distance and a smoothed bob amplitude for view bobbing,
     /// mirroring vanilla `AbstractClientPlayer.updateBob`.
     pub fn tick_bob(&mut self, dx: f64, dz: f64, dead: bool) {
@@ -602,6 +616,7 @@ impl LocalPlayer {
         // deflated by 0.001; a block's fluid column is `amount / 9` of a
         // block, or a full block when more water sits directly above.
         const MARGIN: f64 = 0.001;
+        let velocity_before_current = *self.velocity;
         let feet_y = self.position.y;
         let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
         let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
@@ -685,7 +700,19 @@ impl LocalPlayer {
 
         self.fluid_height = fluid_height;
         // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
+        let was_in_water = self.in_water;
         self.in_water = fluid_height > 0.0;
+        // `Player.doWaterSplashEffect` skips spectators.
+        if self.in_water
+            && !was_in_water
+            && !self.movement_sounds.first_tick
+            && !is_spectator(self.game_mode)
+        {
+            crate::physics::movement_sound::splash(
+                &mut self.movement_sounds,
+                velocity_before_current,
+            );
+        }
         if self.in_water {
             // `Entity.updateFluidInteraction` resets fall distance.
             self.fall_distance = 0.0;

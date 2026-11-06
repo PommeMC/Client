@@ -11,7 +11,7 @@ use pomme_protocol::scoreboard::{
 use super::NetworkEvent;
 use super::chat::component_spans;
 use super::handler::send_ordered;
-use crate::ui::hud::{CollisionRule, ScoreNumberFormat};
+use crate::ui::hud::{CollisionRule, NameTagVisibility, ScoreNumberFormat};
 
 /// `DisplaySlot.SIDEBAR`'s id.
 const SIDEBAR: u32 = 1;
@@ -113,6 +113,7 @@ fn team(
         color,
         fill_color,
         collision_rule: collision_rule(parameters.collision_rule),
+        name_tag_visibility: name_tag_visibility(parameters.name_tag_visibility),
         // `PlayerTeam.unpackOptions`: bit 2.
         see_friendly_invisibles: parameters.options & 2 != 0,
         members,
@@ -146,6 +147,16 @@ fn team_color(id: u32) -> u32 {
     char::from_digit(id, 16)
         .and_then(crate::ui::text::legacy_rgb)
         .unwrap_or(0x000000)
+}
+
+/// `Team.Visibility` by id; out-of-range ids fall back to ALWAYS.
+fn name_tag_visibility(id: u32) -> NameTagVisibility {
+    match id {
+        1 => NameTagVisibility::Never,
+        2 => NameTagVisibility::HideForOtherTeams,
+        3 => NameTagVisibility::HideForOwnTeam,
+        _ => NameTagVisibility::Always,
+    }
 }
 
 /// `Team.CollisionRule` by id; out-of-range ids fall back to ALWAYS.

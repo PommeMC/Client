@@ -13,6 +13,15 @@ pub use vulkan as backend;
 /// backend.
 pub type Shader<'a> = &'a [u8];
 
+/// How the swapchain paces presents (vanilla `GpuSurface.PresentMode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    Immediate,
+    Mailbox,
+    Fifo,
+    FifoRelaxed,
+}
+
 /// A set of flags with `contains` and `|`, like WebGPU's flag types.
 macro_rules! flags {
     ($(#[$doc:meta])* $name:ident { $($flag:ident = $bit:literal),* $(,)? }) => {

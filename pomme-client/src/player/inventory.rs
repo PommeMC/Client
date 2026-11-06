@@ -8,7 +8,7 @@ const HOTBAR_END: usize = 45;
 pub const MAIN_START: usize = 9;
 const MAIN_END: usize = 36;
 pub const ARMOR_START: usize = 5;
-const ARMOR_END: usize = 9;
+pub const ARMOR_END: usize = 9;
 /// The equipment the armor slots hold, in slot order.
 pub const ARMOR_EQUIPMENT: [EquipmentSlot; 4] = [
     EquipmentSlot::Head,

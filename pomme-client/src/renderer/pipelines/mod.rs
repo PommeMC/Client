@@ -17,6 +17,7 @@ pub mod item_display;
 pub mod item_entity;
 pub mod lightmap;
 pub mod menu_overlay;
+pub mod nameplate;
 pub mod panorama;
 pub mod particle;
 pub mod post;

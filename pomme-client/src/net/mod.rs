@@ -334,6 +334,7 @@ pub enum NetworkEvent {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
+        name_tag_visibility: crate::ui::hud::NameTagVisibility,
         see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     },
@@ -596,6 +597,7 @@ pub enum NetworkEvent {
     EntityCustomName {
         id: i32,
         name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
     },
     EntitySwing {
         id: i32,
