@@ -1114,7 +1114,9 @@ impl Renderer {
         pack.run_full_screen(device, encoder, frame, false);
         // TODO: weather, clouds, dropped items, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
-        // block outline and chunk borders over the pack's depth.
+        // block outline and chunk borders over the pack's depth; name tags
+        // through `gbuffers_entities_translucent` (Iris's `TEXT` and
+        // `TEXT_BG`), which needs the glyph atlas as an RGBA 2D texture.
         if let Some((_, slot)) = &mut self.shader_pack {
             *slot = Some(pack);
         }
