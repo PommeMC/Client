@@ -101,14 +101,21 @@ struct Api {
 impl Api {
     fn load() -> Result<Self, String> {
         let mut candidates = Vec::new();
+        let mut errors = Vec::new();
+        // Beside the binary first: dev builds stage it there, and it's where a
+        // player swaps in their own build of the library.
         if let Ok(executable) = std::env::current_exe()
             && let Some(directory) = executable.parent()
         {
             candidates.extend(library_names().iter().map(|name| directory.join(name)));
         }
+        match super::embedded_openal::unpack() {
+            Some(Ok(path)) => candidates.push(path),
+            Some(Err(e)) => errors.push(e),
+            None => {}
+        }
         candidates.extend(library_names().iter().map(std::path::PathBuf::from));
 
-        let mut errors = Vec::new();
         for path in candidates {
             let display = path.display().to_string();
             // SAFETY: Loading a shared library is inherently unsafe because its

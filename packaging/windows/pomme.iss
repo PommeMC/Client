@@ -18,9 +18,16 @@ OutputDir={#OutDir}
 OutputBaseFilename={#OutName}
 SetupIconFile=..\..\pomme-client\assets\icon.ico
 UninstallDisplayIcon={app}\pomme-client.exe
+; The uninstaller's own name is fixed (unins000), so it gets its own folder.
+UninstallFilesDir={app}\uninstall
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
+
+; Installs from before UninstallFilesDir kept the uninstaller beside the game.
+[InstallDelete]
+Type: files; Name: "{app}\unins*.exe"
+Type: files; Name: "{app}\unins*.dat"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

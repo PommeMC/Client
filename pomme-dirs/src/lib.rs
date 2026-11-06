@@ -63,6 +63,11 @@ impl Layout {
         self.root.join("cache").join(version)
     }
 
+    /// Native libraries the client carries and unpacks to load.
+    pub fn natives(&self) -> PathBuf {
+        self.root.join("natives")
+    }
+
     pub fn launcher(&self) -> PathBuf {
         self.root.join("launcher")
     }
