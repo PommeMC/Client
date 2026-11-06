@@ -34,6 +34,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#Bundle}\*"; DestDir: "{app}"; Flags: ignoreversion
+; OpenAL Soft's licence and notice, out of the game's folder.
+Source: "..\..\pomme-client\third-party\OpenAL-Soft-*.txt"; DestDir: "{app}\uninstall"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Pomme"; Filename: "{app}\pomme-client.exe"
@@ -42,9 +44,11 @@ Name: "{autodesktop}\Pomme"; Filename: "{app}\pomme-client.exe"; Tasks: desktopi
 [Run]
 Filename: "{app}\pomme-client.exe"; Description: "{cm:LaunchProgram,Pomme}"; Flags: nowait postinstall skipifsilent
 
-; What the updater and the unpacked natives leave behind; the rest of the data
-; folder (%LOCALAPPDATA%\Pomme) stays.
+; What the updater, the unpacked natives and releases from before OpenAL was
+; embedded leave behind; the rest of the data folder (%LOCALAPPDATA%\Pomme)
+; stays.
 [UninstallDelete]
 Type: files; Name: "{app}\*.old"
+Type: files; Name: "{app}\OpenAL*"
 Type: filesandordirs; Name: "{app}\.pomme-update"
 Type: filesandordirs; Name: "{localappdata}\Pomme\natives"

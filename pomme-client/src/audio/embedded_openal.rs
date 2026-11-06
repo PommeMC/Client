@@ -48,13 +48,21 @@ pub fn remove_bundled_copy(dir: &Path) {
 fn unpack_to(natives: &Path, folder: &str, name: &str, library: &[u8]) -> std::io::Result<PathBuf> {
     let dir = natives.join(folder);
     let path = dir.join(name);
-    if !fs::metadata(&path).is_ok_and(|meta| meta.len() == library.len() as u64) {
-        // The library goes last, so a present one means the notices are too.
+    let unpacked = || fs::metadata(&path).is_ok_and(|meta| meta.len() == library.len() as u64);
+    // The library goes last, so a present one means the notices are too.
+    let write = || -> std::io::Result<()> {
         fs::create_dir_all(&dir)?;
         for (notice, text) in NOTICES {
             crate::util::write_atomic(&dir.join(notice), text.as_bytes())?;
         }
-        crate::util::write_atomic(&path, library)?;
+        crate::util::write_atomic(&path, library)
+    };
+    // Another Pomme unpacking the same build at once can win the write.
+    if !unpacked()
+        && let Err(e) = write()
+        && !unpacked()
+    {
+        return Err(e);
     }
     // A folder an older Pomme still has loaded stays until a later launch.
     for entry in fs::read_dir(natives)?.flatten() {
@@ -95,6 +103,14 @@ mod tests {
         fs::remove_file(dir.join(NOTICES[0].0)).unwrap();
         unpack_to(&natives, "openal-1", "OpenAL.dll", b"library").unwrap();
         assert!(!dir.join(NOTICES[0].0).exists());
+        fs::remove_dir_all(&natives).unwrap();
+    }
+
+    #[test]
+    fn a_failed_unpack_is_an_error() {
+        let natives = test_temp_dir("openal_unwritable");
+        fs::create_dir_all(natives.join("openal-1").join(NOTICES[0].0)).unwrap();
+        assert!(unpack_to(&natives, "openal-1", "OpenAL.dll", b"library").is_err());
         fs::remove_dir_all(&natives).unwrap();
     }
 
