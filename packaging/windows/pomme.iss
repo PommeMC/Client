@@ -42,7 +42,9 @@ Name: "{autodesktop}\Pomme"; Filename: "{app}\pomme-client.exe"; Tasks: desktopi
 [Run]
 Filename: "{app}\pomme-client.exe"; Description: "{cm:LaunchProgram,Pomme}"; Flags: nowait postinstall skipifsilent
 
-; What the updater leaves behind; the data folder (%LOCALAPPDATA%\Pomme) stays.
+; What the updater and the unpacked natives leave behind; the rest of the data
+; folder (%LOCALAPPDATA%\Pomme) stays.
 [UninstallDelete]
 Type: files; Name: "{app}\*.old"
 Type: filesandordirs; Name: "{app}\.pomme-update"
+Type: filesandordirs; Name: "{localappdata}\Pomme\natives"
