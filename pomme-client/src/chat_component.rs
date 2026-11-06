@@ -3,7 +3,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
-use crate::app::input::{Action, InputKey, KeyBindings, NOT_BOUND};
+use crate::app::input::{Action, KeyBindings};
 use crate::assets::{AssetId, identifier_chars};
 
 /// A vanilla text component, decoded by pomme because azalea's decoder drops
@@ -663,11 +663,7 @@ fn visit_translation(
 fn keybind_display_name<'a>(key: &'a str, bindings: &KeyBindings) -> std::borrow::Cow<'a, str> {
     match Action::from_id(key) {
         // Chat presents a single key, so use the first effective assignment.
-        Some(action) => bindings
-            .inputs_for_action(action)
-            .next()
-            .map(InputKey::display_name)
-            .unwrap_or_else(|| NOT_BOUND.resolve()),
+        Some(action) => bindings.key_name(action),
         None => std::borrow::Cow::Borrowed(crate::lang::translate(key).unwrap_or(key)),
     }
 }

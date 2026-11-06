@@ -4,11 +4,13 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use crate::app::input::{Action, KeyBindings};
 use crate::entity::wrap_degrees;
 use crate::mob_effect::ActiveMobEffects;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
+use crate::ui::debug_entries::{DebugColumns, push_debug_columns};
 use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
@@ -372,7 +374,8 @@ impl Scoreboard {
 }
 
 pub struct DebugInfo<'a> {
-    pub fps: u32,
+    /// [`format_debug_keybind`] for the Debug Options key.
+    pub debug_options_key: String,
     pub position: DVec3,
     pub y_rot_deg: f32,
     pub x_rot_deg: f32,
@@ -635,7 +638,7 @@ pub fn build_hud(
     effects: &ActiveMobEffects,
     boss_bars: &BossBarState,
     first_person: bool,
-    debug: Option<&DebugInfo<'_>>,
+    debug: &DebugColumns,
     gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
@@ -648,9 +651,7 @@ pub fn build_hud(
         build_crosshair(elements, cx, cy, gs, attack);
     }
 
-    if let Some(info) = debug {
-        build_debug_overlay(elements, info, gs, text_width_fn);
-    }
+    push_debug_columns(elements, debug, screen_w, gs, text_width_fn);
 
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
@@ -1618,15 +1619,8 @@ fn build_vehicle_hearts(
     }
 }
 
-pub fn build_debug_overlay(
-    elements: &mut Vec<MenuElement>,
-    info: &DebugInfo<'_>,
-    gs: f32,
-    text_width_fn: TextWidthFn,
-) {
-    let fs = super::common::FONT_SIZE * gs;
-    let pad = 4.0 * gs;
-
+/// The F3 lines not yet on debug entries, after the entries' lines.
+pub fn build_debug_overlay(columns: &mut DebugColumns, info: &DebugInfo<'_>) {
     let pos = info.position;
     let bx = pos.x.floor() as i32;
     let by = pos.y.floor() as i32;
@@ -1635,7 +1629,7 @@ pub fn build_debug_overlay(
     let cz = bz.div_euclid(16);
 
     let mut left_lines: Vec<String> = vec![
-        format!("Pomme ({}fps)", info.fps),
+        "Pomme".to_owned(),
         String::new(),
         format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z),
         format!("Block: {} {} {}", bx, by, bz),
@@ -1674,7 +1668,7 @@ pub fn build_debug_overlay(
         left_lines.push(format!("Face: {:?}", face));
     }
 
-    push_debug_lines(elements, left_lines, pad, pad, fs, true, text_width_fn);
+    columns.left.extend(left_lines);
 
     let mut right_lines: Vec<String> = vec![
         info.vulkan_version.to_string(),
@@ -1699,47 +1693,23 @@ pub fn build_debug_overlay(
             right_lines.push(format!("  {name}: {ms:.2}ms"));
         }
     }
-    let right_x = info.screen_w as f32 - pad;
-    push_debug_lines(
-        elements,
-        right_lines,
-        right_x,
-        pad,
-        fs,
-        false,
-        text_width_fn,
-    );
+    columns.right.extend(right_lines);
+
+    // TODO: the "Debug charts" lines before it, once Pomme has the charts.
+    columns.left.push(String::new());
+    columns
+        .left
+        .push(format!("To edit: press {}", info.debug_options_key));
 }
 
-fn push_debug_lines(
-    elements: &mut Vec<MenuElement>,
-    lines: Vec<String>,
-    x: f32,
-    start_y: f32,
-    fs: f32,
-    left_align: bool,
-    text_width_fn: TextWidthFn,
-) {
-    let line_h = fs * 1.25;
-    for (i, line) in lines.into_iter().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let y = start_y + i as f32 * line_h;
-        let tx = if left_align {
-            x
-        } else {
-            x - text_width_fn(&line, fs)
-        };
-        elements.push(MenuElement::Text {
-            x: tx,
-            y,
-            text: line,
-            scale: fs,
-            color: WHITE,
-            centered: false,
-        });
-    }
+/// Vanilla `DebugScreenOverlay.formatKeybind`: `[F3+key]`, without the
+/// modifier when it's unbound.
+pub fn format_debug_keybind(bindings: &KeyBindings, action: Action) -> String {
+    let modifier = bindings
+        .inputs_for_action(Action::DebugModifier)
+        .next()
+        .map_or_else(String::new, |key| format!("{}+", key.display_name()));
+    format!("[{modifier}{}]", bindings.key_name(action))
 }
 
 /// Vanilla `DebugEntryPosition`: the direction, which way it points, and

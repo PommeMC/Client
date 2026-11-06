@@ -1,7 +1,7 @@
 default:
     @just --list
 
-# Stage Minecraft's OpenAL Soft next to the dev binaries, as the release job does.
+# Stage Minecraft's OpenAL Soft next to the dev binaries; release builds embed it.
 openal:
     #!/usr/bin/env bash
     python=$(command -v python3 || command -v python) || {

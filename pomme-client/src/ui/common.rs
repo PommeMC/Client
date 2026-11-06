@@ -871,20 +871,17 @@ pub struct LabelScroll<'a> {
 /// A widget label: plain text in one color, or styled spans.
 pub enum WidgetLabel<'a> {
     Text(&'a str, [f32; 4]),
+    /// Spans with their own colours, which an inactive widget keeps, as a
+    /// component's style colour wins over the label colour in vanilla.
     Spans(Vec<crate::ui::text::TextSpan>),
 }
 
 impl WidgetLabel<'_> {
-    /// Recolored to the inactive text color, keeping span formatting.
+    /// Plain text recoloured to the inactive text colour.
     fn disabled(self) -> Self {
         match self {
             Self::Text(text, _) => Self::Text(text, COL_DISABLED),
-            Self::Spans(mut spans) => {
-                for span in &mut spans {
-                    span.color = COL_DISABLED;
-                }
-                Self::Spans(spans)
-            }
+            spans @ Self::Spans(_) => spans,
         }
     }
 

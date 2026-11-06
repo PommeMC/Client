@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,10 +64,16 @@ impl Panorama {
     }
 }
 
+/// How far back the lows look.
+const LOWS_WINDOW_SECS: f32 = 2.0;
+
 pub struct FpsCounter {
     frame_count: u32,
     elapsed: f32,
     display_fps: u32,
+    window: VecDeque<f32>,
+    window_time: f32,
+    lows: (u32, u32),
 }
 
 impl FpsCounter {
@@ -75,23 +82,54 @@ impl FpsCounter {
             frame_count: 0,
             elapsed: 0.0,
             display_fps: 0,
+            window: VecDeque::new(),
+            window_time: 0.0,
+            lows: (0, 0),
         }
     }
 
-    pub const fn update(&mut self, dt: f32) {
+    pub fn update(&mut self, dt: f32) {
         self.frame_count += 1;
         self.elapsed += dt;
+        self.window.push_back(dt);
+        self.window_time += dt;
+        while self.window_time > LOWS_WINDOW_SECS && self.window.len() > 1 {
+            self.window_time -= self.window.pop_front().unwrap_or_default();
+        }
         if self.elapsed >= 1.0 {
             self.display_fps = self.frame_count;
             self.frame_count = 0;
             self.elapsed -= 1.0;
+            self.lows = self.compute_lows();
         }
+    }
+
+    fn compute_lows(&self) -> (u32, u32) {
+        let mut sorted: Vec<f32> = self.window.iter().copied().collect();
+        sorted.sort_by(f32::total_cmp);
+        let fps = |per| {
+            let secs = crate::util::slowest_mean(&sorted, per);
+            if secs > 0.0 {
+                (1.0 / secs).round() as u32
+            } else {
+                0
+            }
+        };
+        (fps(100), fps(1000))
     }
 
     #[inline]
     #[must_use]
     pub const fn display_fps(&self) -> u32 {
         self.display_fps
+    }
+
+    /// The frame rate of the slowest 1% and 0.1% of the last two seconds'
+    /// frames, updated with `display_fps`.
+    #[inline]
+    #[must_use]
+    pub const fn lows(&self) -> (u32, u32) {
+        self.lows
     }
 }
 
@@ -237,4 +275,20 @@ pub fn draw_status(
     }
 
     clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_slow_frame_sets_both_lows() {
+        let mut counter = FpsCounter::new();
+        for _ in 0..99 {
+            counter.update(0.01);
+        }
+        counter.update(0.02);
+        assert_eq!(counter.display_fps(), 100);
+        assert_eq!(counter.lows(), (50, 50));
+    }
 }

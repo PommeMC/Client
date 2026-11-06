@@ -8,3 +8,5 @@ pub mod level;
 pub mod light;
 pub mod piston;
 pub mod waypoints;
+
+pub(crate) mod chunk_reader;
