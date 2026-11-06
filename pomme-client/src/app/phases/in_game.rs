@@ -350,6 +350,9 @@ pub struct GameState {
     pub block_light_flicker: f32,
     /// Set by the test harness's `deterministic` step.
     pub deterministic: bool,
+    /// Set by the test harness's `hold_packets` step: incoming packets wait,
+    /// as behind a slow connection.
+    pub hold_packets: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -655,6 +658,7 @@ impl GameState {
             biome_weights: Default::default(),
             block_light_flicker: 0.0,
             deterministic: false,
+            hold_packets: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
