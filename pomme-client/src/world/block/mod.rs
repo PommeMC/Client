@@ -203,19 +203,16 @@ pub(crate) struct BlockStateData {
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
     special_collision: SpecialCollision,
-    /// Vanilla state semantics dumped by `just stategen`, read by follow-up
-    /// branches; `None` where the version lacks it (`blocksMotion` is gone in
-    /// 26.3).
+    /// Vanilla blocksMotion; absent only where vanilla removed the accessor
+    /// (26.3 and newer). All other generated semantics are required.
     #[allow(dead_code)]
     blocks_motion: Option<bool>,
+    legacy_solid: bool,
     #[allow(dead_code)]
-    legacy_solid: Option<bool>,
-    #[allow(dead_code)]
-    replaceable: Option<bool>,
+    replaceable: bool,
     /// Direction ordinal bits for `isFaceSturdy(..., SupportType.FULL)`.
     // TODO: CENTER/RIGID support types and the interaction shape aren't dumped.
-    #[allow(dead_code)]
-    full_face_sturdy: Option<u8>,
+    full_face_sturdy: u8,
     /// Vanilla `hasLargeCollisionShape`: the collision shape leaves the cell.
     large_collision_shape: bool,
     /// Whether the collision/outline shape follows `getOffset(pos)`.
@@ -223,6 +220,9 @@ pub(crate) struct BlockStateData {
     outline_shape_uses_offset: bool,
     position_offset: Option<PositionOffset>,
     fluid: Fluid,
+    friction: f32,
+    speed_factor: f32,
+    jump_factor: f32,
     light: LightProps,
     /// Vanilla `getPistonPushReaction`, from the per-version piston table.
     push_reaction: PushReaction,
@@ -342,11 +342,9 @@ impl BlockStateData {
         !light.can_occlude || !light.use_shape_for_light_occlusion
     }
 
-    /// Cached `legacySolid`, falling back to `BlockBehaviour.calculateSolid`.
-    // TODO: older tables lack forceSolidOn/forceSolidOff (cobweb, bamboo_sapling).
+    /// Vanilla's cached legacySolid, including forceSolidOn/forceSolidOff.
     pub(crate) fn legacy_solid(&self) -> bool {
         self.legacy_solid
-            .unwrap_or_else(|| calculate_solid(self.shape))
     }
 
     /// Vanilla `BlockState.getOffset(pos)`; zero for states without one.
@@ -419,30 +417,24 @@ impl BlockStateData {
         self.blocks_motion.unwrap_or_else(|| self.has_collision())
     }
 
-    pub(crate) fn is_full_face_sturdy(&self, direction: model::Direction) -> Option<bool> {
-        self.full_face_sturdy
-            .map(|mask| mask & (1 << direction as u8) != 0)
+    /// Vanilla FULL support test for the selected face.
+    pub(crate) fn is_full_face_sturdy(&self, direction: model::Direction) -> bool {
+        self.full_face_sturdy & (1 << direction as u8) != 0
     }
 
-    // TODO: read friction, speed and jump factors from the generated state table.
+    /// Vanilla `Block.getFriction`, generated for the selected version.
     pub(crate) fn movement_friction(&self) -> f32 {
-        match self.id() {
-            "ice" | "packed_ice" | "frosted_ice" => 0.98,
-            "blue_ice" => 0.989,
-            "slime_block" => 0.8,
-            _ => 0.6,
-        }
+        self.friction
     }
 
+    /// Vanilla `Block.getSpeedFactor`, generated for the selected version.
     pub(crate) fn movement_speed_factor(&self) -> f32 {
-        match self.id() {
-            "soul_sand" | "honey_block" => 0.4,
-            _ => 1.0,
-        }
+        self.speed_factor
     }
 
+    /// Vanilla `Block.getJumpFactor`, generated for the selected version.
     pub(crate) fn movement_jump_factor(&self) -> f32 {
-        if self.id() == "honey_block" { 0.5 } else { 1.0 }
+        self.jump_factor
     }
 
     pub(crate) fn collision_shape_position(&self, x: i32, y: i32, z: i32) -> DVec3 {
@@ -498,9 +490,7 @@ struct StateFile {
     state_count: u32,
     /// Deduped face masks as 64-hex-char strings (16 rows of 4 chars).
     masks: Vec<String>,
-    /// Deduped exact vanilla collision/outline shapes. Older generated tables
-    /// omit this field and continue using the hand-computed fallback.
-    #[serde(default)]
+    /// Required deduplicated exact vanilla collision and outline shapes.
     shapes: Vec<Vec<f64>>,
     blocks: Vec<StateEntry>,
 }
@@ -511,6 +501,11 @@ struct StateFile {
 #[derive(serde::Deserialize)]
 struct StateEntry {
     name: String,
+    fr: PerState<f32>,
+    sf: PerState<f32>,
+    jf: PerState<f32>,
+    a: PerState<u8>,
+    sc: PerState<SpecialCollision>,
     e: PerState<u8>,
     d: PerState<u8>,
     p: PerState<u8>,
@@ -522,66 +517,21 @@ struct StateEntry {
     /// full-face sturdy bits.
     #[serde(default)]
     m: Option<PerState<u8>>,
-    #[serde(default)]
-    l: Option<PerState<u8>>,
-    #[serde(default)]
-    v: Option<PerState<u8>>,
-    #[serde(default)]
-    t: Option<PerState<u8>>,
+    l: PerState<u8>,
+    v: PerState<u8>,
+    t: PerState<u8>,
     /// Whether the collision/outline shape follows `getOffset(pos)`.
-    #[serde(default)]
-    co: Option<PerState<u8>>,
-    #[serde(default)]
-    oo: Option<PerState<u8>>,
+    co: PerState<u8>,
+    oo: PerState<u8>,
     /// `BlockBehaviour.OffsetType` (0 none, 1 XZ, 2 XYZ) and its clamps.
-    #[serde(default)]
-    q: Option<PerState<u8>>,
-    #[serde(default)]
-    h: Option<PerState<f32>>,
-    #[serde(default)]
-    y: Option<PerState<f32>>,
+    q: PerState<u8>,
+    h: PerState<f32>,
+    y: PerState<f32>,
     /// Collision and outline shape dictionary indices.
-    #[serde(default)]
-    s: Option<PerState<u32>>,
-    #[serde(default)]
-    r: Option<PerState<u32>>,
+    s: PerState<u32>,
+    r: PerState<u32>,
     #[serde(default)]
     f: Option<serde_json::Value>,
-}
-
-/// The generated shape and offset fields of a [`StateEntry`].
-struct GeneratedShapeFields<'a> {
-    collision_offset: &'a PerState<u8>,
-    outline_offset: &'a PerState<u8>,
-    offset_type: &'a PerState<u8>,
-    max_horizontal: &'a PerState<f32>,
-    max_vertical: &'a PerState<f32>,
-    collision: &'a PerState<u32>,
-    outline: &'a PerState<u32>,
-}
-
-impl StateEntry {
-    fn generated_shapes(&self) -> GeneratedShapeFields<'_> {
-        match (
-            &self.co, &self.oo, &self.q, &self.h, &self.y, &self.s, &self.r,
-        ) {
-            (Some(co), Some(oo), Some(q), Some(h), Some(y), Some(s), Some(r)) => {
-                GeneratedShapeFields {
-                    collision_offset: co,
-                    outline_offset: oo,
-                    offset_type: q,
-                    max_horizontal: h,
-                    max_vertical: y,
-                    collision: s,
-                    outline: r,
-                }
-            }
-            _ => panic!(
-                "{}: missing generated shape fields; run `just stategen`",
-                self.name
-            ),
-        }
-    }
 }
 
 /// A scalar when uniform across the block's states, else one value per state.
@@ -732,6 +682,8 @@ fn load_piston_data(data: &EmbeddedBlocks) -> HashMap<String, PistonEntry> {
     parse_embedded(data.piston)
 }
 
+/// Build one version's state data, sharing interned strings, shapes and sounds.
+/// Panics if the embedded registry layout and generated state tables disagree.
 fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
     let file: BlockFile = parse_embedded(data.blocks);
     assert_eq!(
@@ -821,15 +773,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             .iter()
             .map(|(k, vs)| (intern(k), vs.iter().map(|v| intern(v)).collect()))
             .collect();
-        let is_air = matches!(block.name.as_str(), "air" | "cave_air" | "void_air");
         let collides = state_entry.c != 0;
-        let special_collision = match block.name.as_str() {
-            "scaffolding" => SpecialCollision::Scaffolding,
-            "powder_snow" => SpecialCollision::PowderSnow,
-            "moving_piston" => SpecialCollision::MovingPiston,
-            name if name.ends_with("shulker_box") => SpecialCollision::ShulkerBox,
-            _ => SpecialCollision::None,
-        };
 
         let count: u32 = props.iter().map(|(_, vs)| vs.len() as u32).product();
         let face_indices = light_face_indices(state_entry, count as usize);
@@ -843,25 +787,19 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
             let i = offset as usize;
-            let flag = |field: &Option<PerState<u8>>| field.as_ref().map(|f| f.get(i) != 0);
-            let generated = state_entry.generated_shapes();
-            let collision = shapes[generated.collision.get(i) as usize];
-            let outline = shapes[generated.outline.get(i) as usize];
+            let is_air = state_entry.a.get(i) != 0;
+            let special_collision = state_entry.sc.get(i);
+            let collision = shapes[state_entry.s.get(i) as usize];
+            let outline = shapes[state_entry.r.get(i) as usize];
             let shape = (!is_full_cube_shape(collision)).then_some(collision);
             let outline = (outline != collision).then_some(outline);
-            let position_offset = match generated.offset_type.get(i) {
+            let position_offset = match state_entry.q.get(i) {
                 0 => None,
                 1 => Some(PositionOffsetKind::Xz),
                 2 => Some(PositionOffsetKind::Xyz),
                 value => panic!("{}: invalid position offset type {value}", block.name),
             }
-            .map(|kind| {
-                PositionOffset::new(
-                    kind,
-                    generated.max_horizontal.get(i),
-                    generated.max_vertical.get(i),
-                )
-            });
+            .map(|kind| PositionOffset::new(kind, state_entry.h.get(i), state_entry.y.get(i)));
             let light = LightProps {
                 emission: state_entry.e.get(i),
                 dampening: state_entry.d.get(i),
@@ -878,10 +816,10 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                 is_air,
                 collides,
                 special_collision,
-                blocks_motion: flag(&state_entry.m),
-                legacy_solid: flag(&state_entry.l),
-                replaceable: flag(&state_entry.v),
-                full_face_sturdy: state_entry.t.as_ref().map(|t| t.get(i)),
+                blocks_motion: state_entry.m.as_ref().map(|m| m.get(i) != 0),
+                legacy_solid: state_entry.l.get(i) != 0,
+                replaceable: state_entry.v.get(i) != 0,
+                full_face_sturdy: state_entry.t.get(i),
                 // Dynamic-shape blocks have no shape cache, which vanilla
                 // reports as large.
                 // TODO: dump `hasDynamicShape` for the other dynamic blocks.
@@ -891,10 +829,13 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                             b[..3].iter().any(|&v| v < 0.0) || b[3..].iter().any(|&v| v > 1.0)
                         })
                     }),
-                collision_shape_uses_offset: generated.collision_offset.get(i) != 0,
-                outline_shape_uses_offset: generated.outline_offset.get(i) != 0,
+                collision_shape_uses_offset: state_entry.co.get(i) != 0,
+                outline_shape_uses_offset: state_entry.oo.get(i) != 0,
                 position_offset,
                 fluid,
+                friction: state_entry.fr.get(i),
+                speed_factor: state_entry.sf.get(i),
+                jump_factor: state_entry.jf.get(i),
                 light,
                 push_reaction,
                 has_block_entity,
@@ -1085,22 +1026,20 @@ pub(crate) enum SpecialCollision {
     ShulkerBox,
 }
 
-fn calculate_solid(collision: Option<&[LocalBox]>) -> bool {
-    let Some(boxes) = collision else {
-        return true;
-    };
-    let Some(&first) = boxes.first() else {
-        return false;
-    };
-    let bounds = boxes.iter().fold(first, |mut b, bx| {
-        for i in 0..3 {
-            b[i] = b[i].min(bx[i]);
-            b[i + 3] = b[i + 3].max(bx[i + 3]);
+impl<'de> serde::Deserialize<'de> for SpecialCollision {
+    /// Decode the generator's class-based collision-handler discriminant.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match <u8 as serde::Deserialize>::deserialize(deserializer)? {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Scaffolding),
+            2 => Ok(Self::PowderSnow),
+            3 => Ok(Self::MovingPiston),
+            4 => Ok(Self::ShulkerBox),
+            value => Err(serde::de::Error::custom(format!(
+                "unknown special collision kind {value}"
+            ))),
         }
-        b
-    });
-    let [dx, dy, dz] = [0, 1, 2].map(|i| bounds[i + 3] - bounds[i]);
-    (dx + dy + dz) / 3.0 >= 0.7291666666666666 || dy >= 1.0
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1452,41 +1391,20 @@ mod tests {
         );
     }
 
+    /// Vanilla forceSolidOn overrides remain distinct from motion-blocking
+    /// flags.
     #[test]
     fn legacy_solid_is_distinct_from_blocks_motion_for_vanilla_exceptions() {
         let block_state_table = BlockStateTable::native();
         for name in ["cobweb", "bamboo_sapling"] {
             let state = block_state_table.find_state(name, &[]);
-            assert_eq!(
+            assert!(
                 block_state_table.block_state_data(state).legacy_solid,
-                Some(true),
                 "{name} is legacy-solid"
             );
             assert!(
                 !block_state_table.block_state_data(state).blocks_motion(),
                 "{name} doesn't block motion"
-            );
-        }
-    }
-
-    #[test]
-    fn calculate_solid_matches_the_dumped_legacy_solid() {
-        let block_state_table = BlockStateTable::native();
-        for (name, props) in [
-            ("stone", &[][..]),
-            ("air", &[]),
-            ("oak_slab", &[("type", "bottom")]),
-            ("white_carpet", &[]),
-            ("oak_fence", &[]),
-            ("chest", &[]),
-        ] {
-            let state = block_state_table.find_state(name, props);
-            assert_eq!(
-                Some(calculate_solid(
-                    block_state_table.block_state_data(state).shape
-                )),
-                block_state_table.block_state_data(state).legacy_solid,
-                "{name}"
             );
         }
     }
@@ -2018,9 +1936,50 @@ mod tests {
                     "{}",
                     data.protocol
                 );
-                assert!(state.legacy_solid.is_some(), "{}", data.protocol);
-                assert!(state.replaceable.is_some(), "{}", data.protocol);
-                assert!(state.full_face_sturdy.is_some(), "{}", data.protocol);
+            }
+            // Vanilla FenceBlock post: 6/16..10/16, 24/16 tall.
+            // LanternBlock: standing union bounds 5/16..11/16, 9/16 tall.
+            // BedBlock: mattress top 9/16; legs begin at the block floor.
+            for (name, props, expected_bounds) in [
+                (
+                    "oak_fence",
+                    &[
+                        ("north", "false"),
+                        ("east", "false"),
+                        ("south", "false"),
+                        ("west", "false"),
+                    ][..],
+                    [0.375, 0.0, 0.375, 0.625, 1.5, 0.625],
+                ),
+                (
+                    "lantern",
+                    &[("hanging", "false")][..],
+                    [0.3125, 0.0, 0.3125, 0.6875, 0.5625, 0.6875],
+                ),
+                (
+                    "red_bed",
+                    &[("facing", "north"), ("part", "foot")][..],
+                    [0.0, 0.0, 0.0, 1.0, 0.5625, 1.0],
+                ),
+            ] {
+                let state = table
+                    .iter()
+                    .find(|s| {
+                        s.id() == name && props.iter().all(|(k, v)| s.properties.get(k) == Some(*v))
+                    })
+                    .unwrap();
+                let boxes = state.collision_boxes().expect("partial vanilla shape");
+                let bounds = boxes.iter().fold(boxes[0], |mut bounds, b| {
+                    for axis in 0..3 {
+                        bounds[axis] = bounds[axis].min(b[axis]);
+                        bounds[axis + 3] = bounds[axis + 3].max(b[axis + 3]);
+                    }
+                    bounds
+                });
+                assert_eq!(bounds, expected_bounds, "{} {name}", data.protocol);
+                if name == "oak_fence" {
+                    assert_eq!(boxes, &[expected_bounds], "{} {name}", data.protocol);
+                }
             }
             let mud = table.iter().find(|state| state.id() == "mud").unwrap();
             assert_eq!(

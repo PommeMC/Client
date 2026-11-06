@@ -13,9 +13,10 @@ import java.util.Map;
  * Dumps per-block-state properties by running vanilla's own code: the baked
  * light set, hasCollision, blocksMotion/isSolid/canBeReplaced, full-face
  * sturdiness, the empty-context collision and outline shapes, and the
- * position offset parameters. Bootstraps the block registry from the server
- * jar on the classpath, then iterates Block.BLOCK_STATE_REGISTRY in state-id
- * order.
+ * position offset parameters, movement factors, air classification and
+ * entity-context collision handler classes. Bootstraps the block registry
+ * from the server jar on the classpath, then iterates
+ * Block.BLOCK_STATE_REGISTRY in state-id order.
  *
  * Everything is reflection so one binary covers the 26.x API
  * (getLightDampening), the 1.21.2+ API (getLightBlock, getOffset(BlockPos)),
@@ -42,6 +43,7 @@ public final class StateDump {
     // Y for down/up, Z for north/south, X for west/east.
     private static final char[] AXIS_BY_ORDINAL = {'Y', 'Y', 'Z', 'Z', 'X', 'X'};
 
+    /** Bootstrap vanilla and write required per-state properties in registry order. */
     public static void main(String[] args) throws Exception {
         if (args.length != 2 && args.length != 3) {
             System.err.println("usage: StateDump <version> <out.json> [<piston-out.json>]");
@@ -61,6 +63,11 @@ public final class StateDump {
             throw new IllegalStateException("expected 6 directions, got " + directions.length);
         }
 
+        List<Float> friction = new ArrayList<>();
+        List<Float> speedFactor = new ArrayList<>();
+        List<Float> jumpFactor = new ArrayList<>();
+        List<Integer> air = new ArrayList<>();
+        List<Integer> specialCollision = new ArrayList<>();
         List<Integer> emission = new ArrayList<>();
         List<Integer> dampening = new ArrayList<>();
         List<Integer> propagates = new ArrayList<>();
@@ -91,6 +98,12 @@ public final class StateDump {
             if (m == null) {
                 m = new Methods(state.getClass());
             }
+            Object physicsBlock = m.getBlock.invoke(state);
+            friction.add((Float) m.getFriction.invoke(physicsBlock));
+            speedFactor.add((Float) m.getSpeedFactor.invoke(physicsBlock));
+            jumpFactor.add((Float) m.getJumpFactor.invoke(physicsBlock));
+            air.add((Boolean) m.isAir.invoke(state) ? 1 : 0);
+            specialCollision.add(m.specialCollision(physicsBlock));
             boolean occludes = (Boolean) m.canOcclude.invoke(state);
             boolean shaped = (Boolean) m.useShapeForLightOcclusion.invoke(state);
             emission.add((Integer) m.getLightEmission.invoke(state));
@@ -157,6 +170,11 @@ public final class StateDump {
             w.write("{\n");
             w.write("  \"version\": \"" + version + "\",\n");
             w.write("  \"state_count\": " + id + ",\n");
+            writeArray(w, "friction", friction);
+            writeArray(w, "speed_factor", speedFactor);
+            writeArray(w, "jump_factor", jumpFactor);
+            writeArray(w, "air", air);
+            writeArray(w, "special_collision", specialCollision);
             writeArray(w, "emission", emission);
             writeArray(w, "dampening", dampening);
             writeArray(w, "propagates_skylight_down", propagates);
@@ -390,6 +408,11 @@ public final class StateDump {
 
     /** Resolved reflection handles; falls back across the 26.x / 1.21.x renames. */
     private static final class Methods {
+        final Method getFriction;
+        final Method getSpeedFactor;
+        final Method getJumpFactor;
+        final Method isAir;
+        final Class<?>[] specialCollisionClasses;
         final Method getLightEmission;
         final Method getLightDampening;
         final Method propagatesSkylightDown;
@@ -421,7 +444,19 @@ public final class StateDump {
         final Object probePos;
         private final Class<?> vec3Class;
 
+        /** Resolve vanilla accessors once for this version's state implementation. */
         Methods(Class<?> stateClass) throws Exception {
+            Class<?> block = Class.forName("net.minecraft.world.level.block.Block");
+            getFriction = block.getMethod("getFriction");
+            getSpeedFactor = block.getMethod("getSpeedFactor");
+            getJumpFactor = block.getMethod("getJumpFactor");
+            isAir = stateClass.getMethod("isAir");
+            specialCollisionClasses = new Class<?>[] {
+                Class.forName("net.minecraft.world.level.block.ScaffoldingBlock"),
+                Class.forName("net.minecraft.world.level.block.PowderSnowBlock"),
+                Class.forName("net.minecraft.world.level.block.piston.MovingPistonBlock"),
+                Class.forName("net.minecraft.world.level.block.ShulkerBoxBlock")
+            };
             Class<?> direction = Class.forName("net.minecraft.core.Direction");
             Class<?> getter = Class.forName("net.minecraft.world.level.BlockGetter");
             Class<?> pos = Class.forName("net.minecraft.core.BlockPos");
@@ -492,6 +527,16 @@ public final class StateDump {
             hasCollision.setAccessible(true);
             aabbClass = Class.forName("net.minecraft.world.phys.AABB");
             vec3Class = Class.forName("net.minecraft.world.phys.Vec3");
+        }
+
+        /** Class-based entity-context collision branches, in the client's enum order. */
+        int specialCollision(Object block) {
+            for (int i = 0; i < specialCollisionClasses.length; i++) {
+                if (specialCollisionClasses[i].isInstance(block)) {
+                    return i + 1;
+                }
+            }
+            return 0;
         }
 
         private Field field(Class<?> owner, String name) throws Exception {
