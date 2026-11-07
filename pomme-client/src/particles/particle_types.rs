@@ -17,6 +17,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) block: Rc<ParticleType<BlockParticleOption>>,
     pub(crate) dust: Rc<ParticleType<DustParticleOptions>>,
     pub(crate) small_flame: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) large_smoke: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -54,6 +55,9 @@ impl ParticleTypes {
         let small_flame = registry
             .register(resource_id!("minecraft:small_flame"), false)
             .map_err(registration_error)?;
+        let large_smoke = registry
+            .register(resource_id!("minecraft:large_smoke"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -65,6 +69,7 @@ impl ParticleTypes {
             block,
             dust,
             small_flame,
+            large_smoke,
         })
     }
 }
