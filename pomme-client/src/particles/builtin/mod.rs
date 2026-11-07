@@ -19,7 +19,9 @@ mod water_drop;
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
 use self::drip::{
     LavaFallParticleRegistration, LavaHangParticleRegistration, LavaLandParticleRegistration,
-    WaterFallParticleRegistration, WaterHangParticleRegistration,
+    ObsidianTearFallParticleRegistration, ObsidianTearHangParticleRegistration,
+    ObsidianTearLandParticleRegistration, WaterFallParticleRegistration,
+    WaterHangParticleRegistration,
 };
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
@@ -96,5 +98,17 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.landing_lava),
         &LavaLandParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_obsidian_tear),
+        &ObsidianTearHangParticleRegistration::new(Rc::clone(&types.falling_obsidian_tear)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_obsidian_tear),
+        &ObsidianTearFallParticleRegistration::new(Rc::clone(&types.landing_obsidian_tear)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.landing_obsidian_tear),
+        &ObsidianTearLandParticleRegistration,
     );
 }
