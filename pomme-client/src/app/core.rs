@@ -4370,6 +4370,7 @@ impl AppCore {
         let hand_stacks = hand_stacks.each_ref().map(Option::as_ref);
         let held_stack = hand_stacks[0];
         let creative = crate::player::is_creative(game.player.game_mode);
+        let may_build = matches!(game.player.game_mode, 0 | 1);
         let held_item = held_stack
             .as_ref()
             .map(|data| crate::player::inventory::item_resource_name(data.kind));
@@ -4441,6 +4442,7 @@ impl AppCore {
             game.player.look_dir,
             game.player.on_ground,
             creative,
+            may_build,
             game.player.food,
             input.selected_slot(),
             hands,
