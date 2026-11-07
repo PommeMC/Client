@@ -4,13 +4,12 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::resources::ResourceId;
-
 impl ResourceFilter {
-    /// Rust regex is not fully compatible with Java Pattern: lookaround and
-    /// backreferences are unsupported; other syntax and semantics may differ.
-    /// Compilation failure rejects the entire section, never
-    /// leaving partially compiled rules. Matching searches, without anchoring.
+    /// Compilation failure rejects the entire section, never leaving partially
+    /// compiled rules. Matching searches, without anchoring, as
+    /// `Pattern.asPredicate` does.
+    // TODO: Java `Pattern` syntax, not Rust `regex`: a pattern using lookaround
+    // or backreferences fails to compile, so that pack filters nothing.
     pub(super) fn compile(
         patterns: Vec<(Option<String>, Option<String>)>,
     ) -> Result<Self, regex::Error> {
@@ -52,12 +51,6 @@ impl ResourceFilter {
                 .as_ref()
                 .is_none_or(|pattern| pattern.is_match(path))
         })
-    }
-
-    pub(in crate::resources) fn blocks(&self, id: &ResourceId) -> bool {
-        // Vanilla 26.3 ResourceFilterSection + MultiPackResourceManager:
-        // ANY namespace AND ANY path across the filters, NOT paired rules.
-        self.namespace_blocked(id.namespace()) && self.path_blocked(id.path())
     }
 }
 

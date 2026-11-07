@@ -19,11 +19,10 @@ pub(crate) struct ResourceOrigin {
     pub(super) name: String,
 }
 
-/// Logical name with nonempty namespace and path, checked only for
-/// namespace characters and case-preserving ASCII path characters. Storage
-/// resolution belongs to the source adapter.
-/// Deterministic namespace-then-path ordering does not imply pack priority.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Vanilla `Identifier`: the same namespace and path characters, and the same
+/// path-then-namespace order (`Identifier.compareTo`), so listings iterate as
+/// vanilla's `TreeMap`s do. Storage resolution belongs to the source adapter.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResourceId {
     namespace: Cow<'static, str>,
     path: Cow<'static, str>,
@@ -36,6 +35,7 @@ impl ResourceId {
     }
 
     /// Validates and owns separate namespace and path components.
+    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
     pub(crate) fn from_parts(namespace: &str, path: &str) -> Result<Self, ResourceError> {
         if !valid_resource_id_parts(namespace, path) {
             return Err(ResourceError::InvalidId(format!("{namespace}:{path}")));
@@ -100,13 +100,30 @@ impl ResourceId {
     }
 }
 
+impl Ord for ResourceId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path
+            .cmp(&other.path)
+            .then_with(|| self.namespace.cmp(&other.namespace))
+    }
+}
+
+impl PartialOrd for ResourceId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Vanilla `Identifier.bySeparator`: no separator, or one at the start, means
+/// the `minecraft` namespace.
 const fn resource_id_parts(value: &str) -> (&str, &str) {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b':' {
             let (namespace, rest) = value.split_at(index);
-            return (namespace, rest.split_at(1).1);
+            let path = rest.split_at(1).1;
+            return (if index == 0 { "minecraft" } else { namespace }, path);
         }
         index += 1;
     }
@@ -114,14 +131,15 @@ const fn resource_id_parts(value: &str) -> (&str, &str) {
 }
 
 const fn valid_resource_id_parts(namespace: &str, path: &str) -> bool {
-    !namespace.is_empty()
-        && !path.is_empty()
-        && resource_namespace_chars(namespace)
-        && resource_path_chars(path)
+    resource_namespace_chars(namespace) && resource_path_chars(path)
 }
 
+/// Vanilla `Identifier.isValidNamespace`, which also refuses `..`.
 pub(super) const fn resource_namespace_chars(namespace: &str) -> bool {
     let bytes = namespace.as_bytes();
+    if bytes.len() == 2 && bytes[0] == b'.' && bytes[1] == b'.' {
+        return false;
+    }
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -136,12 +154,16 @@ pub(super) const fn resource_namespace_chars(namespace: &str) -> bool {
     true
 }
 
+/// Vanilla `Identifier.validPathChar`: lowercase only.
 pub(super) const fn resource_path_chars(path: &str) -> bool {
     let bytes = path.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'-')) {
+        if !(byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'.' | b'/' | b'-'))
+        {
             return false;
         }
         index += 1;
@@ -166,12 +188,8 @@ impl fmt::Debug for ResourceId {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResourceError {
-    #[error("missing resource: {0}")]
-    Missing(ResourceId),
     #[error("invalid resource identifier: {0}")]
     InvalidId(String),
-    #[error("invalid resource enumeration namespace/prefix: {namespace:?}/{prefix:?}")]
-    InvalidQuery { namespace: String, prefix: String },
     /// Source construction, enumeration and root pack.mcmeta have no ID.
     #[error("{operation} failed for {id:?} in {origin:?}: {source}")]
     Io {
@@ -230,6 +248,7 @@ impl ResourceContent {
 
     /// Reopens this content and reads at most one byte past the limit to
     /// detect oversized input, retaining ID/origin context on read errors.
+    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
     pub(crate) fn read_bytes(&self, limit: usize) -> Result<Vec<u8>, ResourceError> {
         read_bounded(self.open()?, limit, &self.id, &self.origin)
     }
@@ -270,6 +289,7 @@ fn read_bounded(
 #[derive(Clone)]
 pub(crate) struct Resource {
     content: ResourceContent,
+    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
     metadata: Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>,
 }
 
@@ -287,6 +307,7 @@ impl Resource {
 
     /// Uncached sidecar lookup; access errors are not absence. Calls and clones
     /// share a fixed source view but can observe filesystem changes.
+    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
     pub(crate) fn metadata(&self) -> Result<Option<ResourceContent>, ResourceError> {
         (self.metadata)()
     }
@@ -302,17 +323,41 @@ mod path_validation {
             ("test", "C:/outside/sentinel.txt"),
             ("test", "outside:sentinel.txt"),
             ("test", r"outside\sentinel.txt"),
+            ("test", "textures/block/Dirt.png"),
             ("bad/namespace", "sentinel.txt"),
+            ("..", "x"),
         ] {
             assert!(matches!(
                 ResourceId::from_parts(namespace, path),
                 Err(ResourceError::InvalidId(_))
             ));
         }
-        for (namespace, path) in [("test", "../x"), ("test", "/x"), ("..", "x")] {
+        for (namespace, path) in [("test", "../x"), ("test", "/x"), ("test", ""), (".", "x")] {
             let id = ResourceId::from_parts(namespace, path).unwrap();
             assert_eq!(id.namespace(), namespace);
             assert_eq!(id.path(), path);
         }
+    }
+
+    #[test]
+    fn parses_like_identifier() {
+        let id = ResourceId::new(":foo").unwrap();
+        assert_eq!((id.namespace(), id.path()), ("minecraft", "foo"));
+        let id = ResourceId::new("foo").unwrap();
+        assert_eq!((id.namespace(), id.path()), ("minecraft", "foo"));
+        let id = ResourceId::new("pomme:a:b").unwrap_err();
+        assert!(matches!(id, ResourceError::InvalidId(_)));
+    }
+
+    #[test]
+    fn orders_by_path_then_namespace() {
+        let mut ids = [
+            ResourceId::new("minecraft:b/x.png").unwrap(),
+            ResourceId::new("pomme:a/y.png").unwrap(),
+            ResourceId::new("aaa:b/x.png").unwrap(),
+        ];
+        ids.sort();
+        let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["pomme:a/y.png", "aaa:b/x.png", "minecraft:b/x.png"]);
     }
 }

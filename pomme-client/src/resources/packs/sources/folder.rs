@@ -7,12 +7,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::symlinks::prepare_pack_path;
-use super::{RepositorySource, SymlinkPolicy, path_error};
+use super::{RepositorySource, SymlinkPolicy};
 use crate::chat_component::Component;
 use crate::resources::pack_resources::{FileResourcesSupplier, PackType, PathResourcesSupplier};
 use crate::resources::packs::{
-    Pack, PackEnablementConfig, PackFormat, PackId, PackLocationInfo, PackPosition, PackSource,
-    ResourcesSupplier,
+    Pack, PackEnablementConfig, PackFormat, PackId, PackLocationInfo, ResourcesSupplier,
 };
 
 /// Box a clone in the repository and retain this handle for explicit updates.
@@ -97,8 +96,15 @@ impl RepositorySource for FolderRepositorySource {
                     }
                 };
                 for entry in entries {
-                    let entry =
-                        entry.map_err(|error| path_error("read discovery entry", root, error))?;
+                    // Vanilla `FolderRepositorySource.loadPacks` logs an I/O
+                    // error part-way through a root and keeps what it found.
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            tracing::warn!(path = %root.display(), %error, "Cannot read resource pack discovery entry; stopping this root");
+                            break;
+                        }
+                    };
                     let path = entry.path();
                     if excluded(&path) || !entries_seen.insert(path.clone()) {
                         continue;
@@ -107,7 +113,6 @@ impl RepositorySource for FolderRepositorySource {
                     let location = PackLocationInfo {
                         id: format!("file/{name}"),
                         title: Component::text(name),
-                        source: PackSource::default(),
                         known_pack_info: None,
                     };
                     let prepared = (|| -> io::Result<_> {
@@ -152,19 +157,14 @@ impl RepositorySource for FolderRepositorySource {
                         id,
                         location,
                         metadata,
-                        PackEnablementConfig {
-                            required: false,
-                            default_position: PackPosition::Top,
-                            fixed_position: false,
-                        },
+                        PackEnablementConfig::DISCOVERED,
                         resources,
                     ));
                 }
             }
             (packs, discovered)
         };
-        // Entry iteration errors preserve the old associations. A successful
-        // scan replaces them, including removal of packs from skipped roots.
+        // A scan replaces the associations, dropping packs from skipped roots.
         self.state.borrow_mut().discovered = discovered;
         Ok(packs)
     }
@@ -173,8 +173,7 @@ impl RepositorySource for FolderRepositorySource {
 #[cfg(test)]
 mod repository_source_tests {
     use std::fs::{self, File};
-    use std::io::{self, Write};
-    use std::path::PathBuf;
+    use std::io::Write;
 
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
@@ -182,35 +181,9 @@ mod repository_source_tests {
     use super::super::tests;
     use super::FolderRepositorySource;
     use crate::resources::pack_resources::PackType;
+    use crate::resources::test_dir::TempDir;
 
     const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-folder-source-api-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
 
     fn fixture() -> (TempDir, FolderRepositorySource) {
         let temp = TempDir::new().unwrap();
@@ -255,42 +228,15 @@ mod repository_source_tests {
 // environment.
 #[cfg(all(test, unix))]
 mod path_validation {
+    use std::fs;
     use std::os::unix::fs::symlink;
-    use std::path::PathBuf;
-    use std::{fs, io};
 
     use super::super::path_validation::assert_load_packs_catalog;
     use super::FolderRepositorySource;
     use crate::resources::pack_resources::PackType;
+    use crate::resources::test_dir::TempDir;
 
     const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-folder-validation-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
 
     #[test]
     fn load_packs_omits_forbidden_symlinks() {

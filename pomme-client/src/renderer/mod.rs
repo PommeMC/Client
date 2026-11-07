@@ -1915,22 +1915,6 @@ impl Renderer {
         );
     }
 
-    /// Refreshes the menu's resource images after successful view activation.
-    /// Activation sites with a live renderer must call this explicitly.
-    pub fn reload_resource_images(
-        &mut self,
-        resources: &dyn ResourceManager,
-        bedrock_ui_dir: &Path,
-    ) {
-        self.menu_pipeline.reload_resource_images(
-            resources,
-            &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
-            Some(bedrock_ui_dir),
-        );
-    }
-
     pub fn trigger_skin_swing(&mut self) {
         self.skin_preview.trigger_swing();
     }

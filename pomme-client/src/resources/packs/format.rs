@@ -52,8 +52,40 @@ impl PackFormatRange {
     }
 }
 
-/// Shared validation for installed version.json and selected pack metadata.
+/// DFU's `Codec.INT`: any JSON number through Gson's `Number.intValue`,
+/// which truncates fractions and keeps the low 32 bits of larger integers.
+pub(super) fn java_int(value: &Value) -> Option<i32> {
+    if let Some(value) = value.as_i64() {
+        Some(value as i32)
+    } else if let Some(value) = value.as_u64() {
+        Some(value as i32)
+    } else {
+        Some(value.as_f64()?.trunc() as i128 as i32)
+    }
+}
+
+/// `ExtraCodecs.NON_NEGATIVE_INT`, shared by installed version.json and
+/// selected pack metadata.
 pub(super) fn format_component(value: &Value) -> Option<u32> {
-    let value = u32::try_from(value.as_u64()?).ok()?;
-    (value <= MAX_COMPONENT).then_some(value)
+    u32::try_from(java_int(value)?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{format_component, java_int};
+
+    #[test]
+    fn numbers_read_like_codec_int() {
+        assert_eq!(java_int(&json!(46)), Some(46));
+        assert_eq!(java_int(&json!(46.0)), Some(46));
+        assert_eq!(java_int(&json!(46.9)), Some(46));
+        assert_eq!(java_int(&json!(-3.5)), Some(-3));
+        assert_eq!(java_int(&json!(4_294_967_297_i64)), Some(1));
+        assert_eq!(java_int(&json!("46")), None);
+        assert_eq!(java_int(&json!(true)), None);
+        assert_eq!(format_component(&json!(-1)), None);
+        assert_eq!(format_component(&json!(97.0)), Some(97));
+    }
 }

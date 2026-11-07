@@ -1,6 +1,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[allow(
+    dead_code,
+    reason = "the consumer migration (#785) downloads server packs"
+)]
 pub(crate) fn download_server_pack(
     cache_dir: &Path,
     url: &str,
@@ -22,6 +26,10 @@ pub(crate) fn download_server_pack(
 }
 
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "the consumer migration (#785) downloads server packs"
+)]
 pub(crate) enum PackDownloadError {
     Download(String),
     HashMismatch,

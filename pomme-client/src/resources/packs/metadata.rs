@@ -2,7 +2,7 @@ use std::io;
 
 use serde_json::Value;
 
-use super::format::{MAX_COMPONENT, PackFormat, PackFormatRange, format_component};
+use super::format::{MAX_COMPONENT, PackFormat, PackFormatRange, format_component, java_int};
 use super::{PackCompat, metadata};
 use crate::chat_component::Component;
 use crate::resources::pack_resources::PackType;
@@ -25,7 +25,6 @@ pub(super) const FORMAT_MAX_INCLUSIVE: &str = "max_inclusive";
 pub(super) fn last_pre_minor_format(pack_type: PackType) -> u32 {
     match pack_type {
         PackType::ClientResources => 64,
-        PackType::ServerData => 81,
     }
 }
 
@@ -172,15 +171,14 @@ impl DeclaredFormatRange {
 }
 
 fn parse_legacy_range(value: &Value) -> Option<LegacyFormatRange> {
-    let component = |value: &Value| i32::try_from(value.as_i64()?).ok();
     let (min, max) = match value {
-        Value::Array(list) if list.len() == 2 => (component(&list[0])?, component(&list[1])?),
+        Value::Array(list) if list.len() == 2 => (java_int(&list[0])?, java_int(&list[1])?),
         Value::Object(object) => (
-            component(object.get(metadata::FORMAT_MIN_INCLUSIVE)?)?,
-            component(object.get(metadata::FORMAT_MAX_INCLUSIVE)?)?,
+            java_int(object.get(metadata::FORMAT_MIN_INCLUSIVE)?)?,
+            java_int(object.get(metadata::FORMAT_MAX_INCLUSIVE)?)?,
         ),
         _ => {
-            let format = component(value)?;
+            let format = java_int(value)?;
             (format, format)
         }
     };
@@ -285,12 +283,9 @@ fn parse_overlays(
 fn parse_pack_range(pack: &Value, pack_type: PackType) -> io::Result<DeclaredFormatRange> {
     let boundary = last_pre_minor_format(pack_type);
     let main = match pack.get(metadata::PACK_FORMAT) {
-        Some(value) => Some(
-            value
-                .as_i64()
-                .and_then(|value| i32::try_from(value).ok())
-                .ok_or_else(|| invalid_format("pack_format must be a signed Java integer"))?,
-        ),
+        Some(value) => {
+            Some(java_int(value).ok_or_else(|| invalid_format("pack_format must be a number"))?)
+        }
         None => None,
     };
     let supported = match pack.get(metadata::PACK_SUPPORTED_FORMATS) {
@@ -352,5 +347,108 @@ fn parse_pack_range(pack: &Value, pack_type: PackType) -> io::Result<DeclaredFor
             min: main,
             max: main,
         }))
+    }
+}
+
+/// `PackFormat.IntermediaryFormat` validation and `PackCompatibility`.
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{decode_pack_section, selected_overlay_directories};
+    use crate::resources::pack_resources::PackType;
+    use crate::resources::packs::{PackCompat, PackFormat};
+
+    fn compat(section: Value, target: (u32, u32)) -> PackCompat {
+        let target = PackFormat::new(target.0, target.1);
+        decode_pack_section(&section, PackType::ClientResources, target, "test")
+            .unwrap()
+            .1
+    }
+
+    fn assert_compat(section: Value, target: (u32, u32), expected: PackCompat) {
+        assert!(
+            compat(section.clone(), target) == expected,
+            "{section} at {target:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_pack_format() {
+        let section = json!({"description": "", "pack_format": 46});
+        assert_compat(section.clone(), (46, 0), PackCompat::Compatible);
+        assert_compat(section.clone(), (47, 0), PackCompat::TooOld);
+        assert_compat(section, (45, 0), PackCompat::TooNew);
+        // `Codec.INT` reads a float through `intValue`.
+        assert_compat(
+            json!({"description": "", "pack_format": 46.0}),
+            (46, 0),
+            PackCompat::Compatible,
+        );
+    }
+
+    #[test]
+    fn legacy_supported_formats() {
+        let section = json!({"description": "", "pack_format": 34, "supported_formats": [34, 46]});
+        assert_compat(section.clone(), (40, 0), PackCompat::Compatible);
+        assert_compat(section, (47, 0), PackCompat::TooOld);
+    }
+
+    #[test]
+    fn modern_min_max_format() {
+        let section = json!({"description": "", "min_format": [97, 1], "max_format": 97});
+        assert_compat(section.clone(), (97, 1), PackCompat::Compatible);
+        assert_compat(section.clone(), (97, 5), PackCompat::Compatible);
+        assert_compat(section.clone(), (97, 0), PackCompat::TooNew);
+        assert_compat(section, (98, 0), PackCompat::TooOld);
+    }
+
+    /// A modern range reaching 64 or below must also carry the legacy fields.
+    #[test]
+    fn modern_range_over_old_formats_needs_legacy_fields() {
+        let bare = json!({"description": "", "min_format": 46, "max_format": 97});
+        assert_compat(bare, (90, 0), PackCompat::Unknown);
+        let full = json!({
+            "description": "", "min_format": 46, "max_format": 97,
+            "pack_format": 46, "supported_formats": [46, 97]
+        });
+        assert_compat(full, (90, 0), PackCompat::Compatible);
+    }
+
+    /// A broken format falls back to description only; a broken description
+    /// fails the pack.
+    #[test]
+    fn broken_formats_fall_back_but_descriptions_dont() {
+        assert_compat(json!({"description": ""}), (97, 1), PackCompat::Unknown);
+        assert!(
+            decode_pack_section(
+                &json!({"pack_format": 46}),
+                PackType::ClientResources,
+                None,
+                "t"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn overlays_select_by_target() {
+        let overlays = json!({"entries": [
+            {"directory": "old", "formats": [30, 40]},
+            {"directory": "new", "min_format": 90, "max_format": 99},
+        ]});
+        let target = PackFormat::new(97, 1);
+        let selected =
+            selected_overlay_directories(Some(&overlays), PackType::ClientResources, target, "t");
+        // An entry at 64 or below makes `formats` required on every entry.
+        assert!(selected.is_err());
+        let modern = json!({"entries": [
+            {"directory": "a", "min_format": 90, "max_format": 99},
+            {"directory": "b", "min_format": 98, "max_format": 99},
+        ]});
+        let selected =
+            selected_overlay_directories(Some(&modern), PackType::ClientResources, target, "t")
+                .unwrap();
+        assert_eq!(selected, ["a"]);
     }
 }

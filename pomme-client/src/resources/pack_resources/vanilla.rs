@@ -11,8 +11,7 @@ use std::rc::Rc;
 use serde_json::{Map, Value};
 
 use super::path::{
-    directory_namespaces, file_supplier, read_metadata, validate_namespace, validate_path,
-    validate_segment,
+    file_supplier, read_metadata, validate_namespace, validate_path, validate_segment,
 };
 use super::{
     IoSupplier, PACK_META, PackMetadataResources, PackResources, PackType, PathPackResources,
@@ -38,23 +37,23 @@ pub(crate) struct VanillaResourcesSupplier {
 }
 
 impl VanillaResourcesSupplier {
-    /// Anchors roots, reads the explicit index, and snapshots namespaces once.
-    /// extracted_root is the parent of assets/data. Fallbacks are named JSON
-    /// sections supplied by the logical source, not a synthetic root file.
+    /// Reads the explicit index once. extracted_root is the parent of assets.
+    /// Fallbacks are named JSON sections supplied by the logical source, not a
+    /// synthetic root file.
     pub(crate) fn new(
         extracted_root: PathBuf,
         index_file: &Path,
         objects_dir: &Path,
         built_in_metadata: Map<String, Value>,
-    ) -> io::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             prepared: Rc::new(PreparedVanillaResources::new(
                 extracted_root,
                 index_file,
                 objects_dir,
                 built_in_metadata,
-            )?),
-        })
+            )),
+        }
     }
 }
 
@@ -94,14 +93,14 @@ impl ResourcesSupplier for VanillaResourcesSupplier {
     }
 }
 
+/// Vanilla `ClientPackSource` builds its pack with
+/// `exposeNamespace("minecraft", "realms")`: every layer reports exactly these,
+/// whatever else the jar or index holds.
+const NAMESPACES: [&str; 2] = ["minecraft", "realms"];
+
 struct PreparedVanillaResources {
     extracted_root: PathBuf,
     indexed: HashMap<String, IndexedEntry>,
-    extracted_client_namespaces: HashSet<String>,
-    extracted_server_namespaces: HashSet<String>,
-    indexed_namespaces: HashSet<String>,
-    /// The useful combined view preserves its existing cross-domain union.
-    namespaces: HashSet<String>,
     built_in_metadata: Map<String, Value>,
 }
 
@@ -112,29 +111,23 @@ struct IndexedEntry {
 }
 
 impl VanillaPackResources {
-    /// Setup opens the explicit index once and validates/canonicalizes both
-    /// native directory roots once. extracted_root is the PARENT of assets,
-    /// not assets itself. No client JAR, downloads or configuration mutation.
-    ///
-    /// built_in_metadata contains named JSON sections, not an invented root
-    /// file. An empty map means no fallback sections. Namespaces are captured
-    /// from both extracted domains and valid indexed IDs at construction.
-    pub(crate) fn new(
+    #[cfg(test)]
+    fn new(
         location: PackLocationInfo,
         extracted_root: PathBuf,
         index_file: &Path,
         objects_dir: &Path,
         built_in_metadata: Map<String, Value>,
-    ) -> io::Result<Self> {
-        Ok(Self::from_prepared(
+    ) -> Self {
+        Self::from_prepared(
             location,
             Rc::new(PreparedVanillaResources::new(
                 extracted_root,
                 index_file,
                 objects_dir,
                 built_in_metadata,
-            )?),
-        ))
+            )),
+        )
     }
 
     fn from_prepared(location: PackLocationInfo, prepared: Rc<PreparedVanillaResources>) -> Self {
@@ -147,47 +140,34 @@ impl VanillaPackResources {
 }
 
 impl PreparedVanillaResources {
+    /// Vanilla `IndexedAssetSource.createIndexFs`: an index that can't be read
+    /// or parsed is logged and contributes nothing, and the extracted jar
+    /// assets still load. An entry with a bad hash is skipped on its own.
     fn new(
         extracted_root: PathBuf,
         index_file: &Path,
         objects_dir: &Path,
         built_in_metadata: Map<String, Value>,
-    ) -> io::Result<Self> {
-        let extracted_root = canonical_directory(&extracted_root)?;
-        let objects_dir = canonical_directory(objects_dir)?;
-        let index: Value = serde_json::from_reader(BufReader::new(File::open(index_file)?))
-            .map_err(|error| {
-                io::Error::new(
-                    error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData),
-                    format!("cannot read asset index {}: {error}", index_file.display()),
-                )
-            })?;
-        let objects = index
-            .get("objects")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "asset index objects must be an object",
-                )
-            })?;
-        let extracted_client_namespaces = directory_namespaces(&extracted_root.join("assets"))?;
-        let extracted_server_namespaces = directory_namespaces(&extracted_root.join("data"))?;
-        let mut indexed_namespaces = HashSet::new();
-        let mut indexed = HashMap::with_capacity(objects.len());
-        for (key, object) in objects {
-            let hash = object
-                .get("hash")
-                .and_then(Value::as_str)
-                .filter(|hash| {
-                    hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid asset-index hash for {key}"),
-                    )
-                })?;
+    ) -> Self {
+        let index = File::open(index_file).and_then(|file| {
+            serde_json::from_reader::<_, Value>(BufReader::new(file)).map_err(io::Error::other)
+        });
+        let index = match index {
+            Ok(index) => index,
+            Err(error) => {
+                tracing::error!(path = %index_file.display(), %error, "Can't read the resource index file");
+                Value::Null
+            }
+        };
+        let objects = index.get("objects").and_then(Value::as_object);
+        let mut indexed = HashMap::with_capacity(objects.map_or(0, Map::len));
+        for (key, object) in objects.into_iter().flatten() {
+            let Some(hash) = object.get("hash").and_then(Value::as_str).filter(|hash| {
+                hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) else {
+                tracing::warn!(%key, "Invalid asset-index hash; ignoring");
+                continue;
+            };
             // Logical keys never become native paths. Still reject traversal
             // components to match the directory view's lexical contract.
             if validate_path(key).is_err() {
@@ -206,9 +186,6 @@ impl PreparedVanillaResources {
                 },
                 None => None,
             };
-            if let Some(id) = &id {
-                indexed_namespaces.insert(id.namespace().to_owned());
-            }
             indexed.insert(
                 key.clone(),
                 IndexedEntry {
@@ -217,18 +194,11 @@ impl PreparedVanillaResources {
                 },
             );
         }
-        let mut namespaces = extracted_client_namespaces.clone();
-        namespaces.extend(extracted_server_namespaces.iter().cloned());
-        namespaces.extend(indexed_namespaces.iter().cloned());
-        Ok(Self {
+        Self {
             extracted_root,
             indexed,
-            extracted_client_namespaces,
-            extracted_server_namespaces,
-            indexed_namespaces,
-            namespaces,
             built_in_metadata,
-        })
+        }
     }
 
     fn indexed_resource(&self, key: &str) -> io::Result<Option<IoSupplier<ReadStream>>> {
@@ -241,11 +211,14 @@ impl PreparedVanillaResources {
         directory: &str,
         output: &mut ResourceOutput<'_>,
     ) -> io::Result<()> {
+        // An empty directory lists nothing, as in the folder layer.
+        if directory.is_empty() {
+            return Ok(());
+        }
         for entry in self.indexed.values() {
             let Some(id) = &entry.id else { continue };
             if id.namespace() != namespace
-                || !(directory.is_empty()
-                    || id.path() == directory
+                || !(id.path() == directory
                     || id
                         .path()
                         .strip_prefix(directory)
@@ -346,8 +319,7 @@ impl PackResources for VanillaPackResources {
     }
 
     fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
-        // Vanilla exposes one fixed set for both types, not a disk rescan.
-        Ok(self.prepared.namespaces.clone())
+        Ok(exposed_namespaces())
     }
 }
 
@@ -399,11 +371,8 @@ impl PackResources for ExtractedResources {
             .list_resources(pack_type, namespace, directory, output)
     }
 
-    fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        Ok(match pack_type {
-            PackType::ClientResources => self.prepared.extracted_client_namespaces.clone(),
-            PackType::ServerData => self.prepared.extracted_server_namespaces.clone(),
-        })
+    fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+        Ok(exposed_namespaces())
     }
 }
 
@@ -475,13 +444,16 @@ impl PackResources for IndexResources {
         Ok(())
     }
 
-    fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        Ok(if pack_type == PackType::ClientResources {
-            self.prepared.indexed_namespaces.clone()
-        } else {
-            HashSet::new()
-        })
+    fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+        Ok(exposed_namespaces())
     }
+}
+
+fn exposed_namespaces() -> HashSet<String> {
+    NAMESPACES
+        .iter()
+        .map(|&namespace| namespace.to_owned())
+        .collect()
 }
 
 /// Each view caches only its own root envelope. Missing sections fall back;
@@ -520,62 +492,19 @@ impl IndexedEntry {
     }
 }
 
-fn canonical_directory(path: &Path) -> io::Result<PathBuf> {
-    let root = path.canonicalize()?;
-    if !fs::metadata(&root)?.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotADirectory,
-            format!("not a resource directory: {}", root.display()),
-        ));
-    }
-    Ok(root)
-}
-
 #[cfg(test)]
 mod test_fixture {
-    use std::path::PathBuf;
-    use std::{fs, io};
+
+    use std::fs;
 
     use serde_json::Map;
 
     use super::VanillaPackResources;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
-
-    pub(super) struct TempDir(pub(super) PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-vanilla-location-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::test_dir::TempDir;
 
     pub(super) fn default_location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "vanilla-api".into(),
-            title: Component::text("Vanilla API fixture"),
-            source: PackSource::built_in(),
-            known_pack_info: None,
-        }
+        PackLocationInfo::test("vanilla-api")
     }
 
     pub(super) fn fixture(location: PackLocationInfo) -> (TempDir, VanillaPackResources) {
@@ -615,21 +544,19 @@ mod test_fixture {
             &index_file,
             &objects_root,
             Map::new(),
-        )
-        .unwrap();
+        );
         (temp, pack)
     }
 }
 
 #[cfg(test)]
 mod pack_metadata_resources_tests {
-    use pomme_protocol::KnownPack;
     use serde_json::json;
 
     use super::test_fixture::{default_location, fixture};
     use crate::chat_component::Component;
     use crate::resources::pack_resources::tests;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
+    use crate::resources::packs::PackLocationInfo;
 
     #[test]
     fn test_get_root_resource() {
@@ -666,8 +593,7 @@ mod pack_metadata_resources_tests {
         let expected = PackLocationInfo {
             id: "vanilla-location".into(),
             title: Component::translate("location.vanilla.title", Vec::new()),
-            source: PackSource::feature(),
-            known_pack_info: Some(KnownPack {
+            known_pack_info: Some(pomme_protocol::KnownPack {
                 namespace: "location_test".into(),
                 id: "vanilla_known".into(),
                 version: "test-1".into(),
@@ -679,70 +605,11 @@ mod pack_metadata_resources_tests {
 }
 
 #[cfg(test)]
-mod pack_metadata_resources_ext_tests {
-    use std::{fs, io};
-
-    use serde_json::json;
-
-    use super::test_fixture::{default_location, fixture};
-    use crate::resources::pack_resources::{MetadataSectionType, tests};
-
-    #[test]
-    fn test_get_metadata_section() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |value| {
-                value
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "expected string"))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section(&pack, &section, Some("vanilla".into()));
-    }
-
-    #[test]
-    fn test_get_metadata_section_missing() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_metadata_section_missing(&pack, "missing");
-    }
-
-    #[test]
-    fn test_get_metadata_section_null() {
-        let (temp, pack) = fixture(default_location());
-        fs::write(temp.0.join("extracted/pack.mcmeta"), br#"{"null":null}"#).unwrap();
-        tests::test_get_metadata_section_null(&pack, "null");
-    }
-
-    #[test]
-    fn test_get_metadata_section_decode_error() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |_| {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "decoder sentinel",
-                ))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section_decode_error(&pack, &section, io::ErrorKind::Unsupported);
-    }
-}
-
-#[cfg(test)]
 mod pack_resources_tests {
     use std::collections::HashSet;
 
-    use pomme_protocol::KnownPack;
-
     use super::test_fixture::{default_location, fixture};
     use crate::resources::pack_resources::{PackType, tests};
-    use crate::resources::packs::PackLocationInfo;
     use crate::resources::resource_id;
 
     #[test]
@@ -757,33 +624,12 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_resource_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_data:test/server.txt"),
-            b"server data",
-        );
-    }
-
-    #[test]
     fn test_get_resource_missing() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_resource_missing(
             &pack,
             PackType::ClientResources,
             &resource_id!("api_test:test/missing.txt"),
-        );
-    }
-
-    #[test]
-    fn test_get_resource_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource_missing(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_test:test/one.txt"),
         );
     }
 
@@ -809,39 +655,9 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ServerData,
-            "api_data",
-            "test",
-            &[(
-                resource_id!("api_data:test/server.txt"),
-                b"server data".to_vec(),
-            )],
-        );
-    }
-
-    #[test]
     fn test_list_resources_empty_directory() {
         let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ClientResources,
-            "api_test",
-            "",
-            &[
-                (
-                    resource_id!("api_test:test/one.txt"),
-                    b"client one".to_vec(),
-                ),
-                (
-                    resource_id!("api_test:test/nested/two.txt"),
-                    b"client two".to_vec(),
-                ),
-            ],
-        );
+        tests::test_list_resources(&pack, PackType::ClientResources, "api_test", "", &[]);
     }
 
     #[test]
@@ -857,28 +673,12 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(&pack, PackType::ServerData, "api_test", "test", &[]);
-    }
-
-    #[test]
     fn test_get_namespaces_client() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_namespaces(
             &pack,
             PackType::ClientResources,
-            &HashSet::from(["api_test".into(), "api_data".into()]),
-        );
-    }
-
-    #[test]
-    fn test_get_namespaces_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_namespaces(
-            &pack,
-            PackType::ServerData,
-            &HashSet::from(["api_test".into(), "api_data".into()]),
+            &HashSet::from(["minecraft".into(), "realms".into()]),
         );
     }
 
@@ -887,68 +687,18 @@ mod pack_resources_tests {
         let (_temp, pack) = fixture(default_location());
         tests::test_pack_id(&pack, "vanilla-api");
     }
-
-    #[test]
-    fn test_known_pack_info_none() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_known_pack_info(&pack, None);
-    }
-
-    #[test]
-    fn test_known_pack_info_some() {
-        let expected = KnownPack {
-            namespace: "api_identity".into(),
-            id: "vanilla_known".into(),
-            version: "api-2".into(),
-        };
-        let location = PackLocationInfo {
-            known_pack_info: Some(expected.clone()),
-            ..default_location()
-        };
-        let (_temp, pack) = fixture(location);
-        tests::test_known_pack_info(&pack, Some(&expected));
-    }
 }
 
 #[cfg(test)]
 mod resources_supplier_tests {
-    use std::path::PathBuf;
-    use std::{fs, io};
+
+    use std::fs;
 
     use serde_json::Map;
 
     use super::VanillaResourcesSupplier;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{
-        FeatureFlagSet, PackCompat, PackLocationInfo, PackMetadata, PackSource, ResourcesSupplier,
-    };
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-vanilla-supplier-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
+    use crate::resources::packs::ResourcesSupplier;
+    use crate::resources::test_dir::TempDir;
 
     fn fixture() -> (TempDir, VanillaResourcesSupplier) {
         let temp = TempDir::new().unwrap();
@@ -959,91 +709,35 @@ mod resources_supplier_tests {
         fs::create_dir(&objects_root).unwrap();
         fs::write(&index_file, br#"{"objects":{}}"#).unwrap();
         let supplier =
-            VanillaResourcesSupplier::new(extracted_root, &index_file, &objects_root, Map::new())
-                .unwrap();
+            VanillaResourcesSupplier::new(extracted_root, &index_file, &objects_root, Map::new());
         (temp, supplier)
     }
 
-    fn location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "vanilla-supplier-api".into(),
-            title: Component::text("Supplier API test"),
-            source: PackSource::default(),
-            known_pack_info: None,
-        }
-    }
-
     #[test]
-    fn test_open_metadata() {
+    fn test_open() {
         let (_temp, supplier) = fixture();
-        let location = location();
-        <dyn ResourcesSupplier>::test_open_metadata(&supplier, &location, "vanilla-supplier-api");
-    }
-
-    #[test]
-    fn test_open_resources() {
-        let (_temp, supplier) = fixture();
-        let location = location();
-        let metadata = PackMetadata {
-            description: Component::text("Supplier API test"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
-            overlays: Vec::new(),
-        };
-        <dyn ResourcesSupplier>::test_open_resources(
-            &supplier,
-            &location,
-            &metadata,
-            &["vanilla-supplier-api", "vanilla-supplier-api"],
-        );
+        <dyn ResourcesSupplier>::test_open(&supplier, 2);
     }
 }
 
 #[cfg(test)]
 mod path_validation {
-    use std::path::PathBuf;
+
+    use std::fs;
     use std::rc::Rc;
-    use std::{fs, io};
 
     use serde_json::{Map, json};
 
     use super::test_fixture::default_location;
     use super::{VanillaPackResources, VanillaResourcesSupplier};
-    use crate::chat_component::Component;
     use crate::resources::pack_resources::{
         PackResources, PackType, path_validation as assertions,
     };
-    use crate::resources::packs::{FeatureFlagSet, PackCompat, PackMetadata, ResourcesSupplier};
+    use crate::resources::packs::{PackMetadata, ResourcesSupplier};
     use crate::resources::resource::ResourceId;
+    use crate::resources::test_dir::TempDir;
 
     const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"indexed"}}"#;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-vanilla-validation-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
 
     // The trusted installation owns both pack/ and objects/, not pack/ alone.
     fn fixture() -> (TempDir, VanillaPackResources, Rc<dyn PackResources>) {
@@ -1093,21 +787,14 @@ mod path_validation {
             &index_file,
             &objects_dir,
             Map::new(),
-        )
-        .unwrap();
+        );
         let supplier = VanillaResourcesSupplier::new(
             temp.0.join("pack"),
             &index_file,
             &objects_dir,
             Map::new(),
-        )
-        .unwrap();
-        let metadata = PackMetadata {
-            description: Component::text("fixture"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
-            overlays: Vec::new(),
-        };
+        );
+        let metadata = PackMetadata::test();
         let layers = supplier.open_resources(&location, &metadata).unwrap();
         assert_eq!(layers.len(), 2);
         (temp, full, layers[1].clone())
@@ -1118,7 +805,6 @@ mod path_validation {
             ("test", "../../../outside/sentinel.txt"),
             ("test", "../../../pack-evil/sentinel.txt"),
             ("test", "/outside/sentinel.txt"),
-            ("..", "pack.mcmeta"),
         ]
         .into_iter()
         .map(|(namespace, path)| ResourceId::from_parts(namespace, path).unwrap());
@@ -1167,12 +853,6 @@ mod path_validation {
             &full,
             PackType::ClientResources,
             &[(&extracted, b"extracted"), (&indexed, b"indexed")],
-            &invalid_ids(&temp),
-        );
-        assertions::assert_get_resource_invalid_input(
-            &full,
-            PackType::ServerData,
-            &[(&extracted, b"extracted")],
             &invalid_ids(&temp),
         );
     }
@@ -1238,14 +918,6 @@ mod path_validation {
             "test",
             "valid",
             &[extracted.clone(), indexed],
-            &invalid_queries(absolute.to_str().unwrap()),
-        );
-        assertions::assert_list_resources_invalid_input(
-            &full,
-            PackType::ServerData,
-            "test",
-            "valid",
-            &[extracted],
             &invalid_queries(absolute.to_str().unwrap()),
         );
     }

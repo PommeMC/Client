@@ -1917,33 +1917,6 @@ impl MenuOverlayPipeline {
         self.publish_sprite_atlas(device, atlas, sprites);
     }
 
-    /// Missing content clears the logo; I/O/decode errors retain the last good
-    /// pixels and atlas without rolling back the already-active resource view.
-    pub fn reload_resource_images(
-        &mut self,
-        resources: &dyn ResourceManager,
-        device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        bedrock_ui_dir: Option<&Path>,
-    ) {
-        let pomme_logo = match load_pomme_logo(resources) {
-            Ok(logo) => logo,
-            Err(error) => {
-                tracing::warn!(%error, id = %POMME_ICON, "Failed to load Pomme logo; retaining the last good image and atlas");
-                return;
-            }
-        };
-        let (atlas, sprites) = build_sprite_atlas(
-            jar_assets_dir,
-            asset_index,
-            bedrock_ui_dir,
-            pomme_logo.as_ref(),
-        );
-        self.publish_sprite_atlas(device, atlas, sprites);
-        self.pomme_logo = pomme_logo;
-    }
-
     fn publish_sprite_atlas(
         &mut self,
         device: &rhi::backend::Device,

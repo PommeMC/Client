@@ -4561,7 +4561,6 @@ dependencies = [
  "freetype-rs",
  "gilrs",
  "glam",
- "glob",
  "glsl-lang",
  "image",
  "jni",

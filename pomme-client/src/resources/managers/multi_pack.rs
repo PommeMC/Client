@@ -5,7 +5,7 @@ use std::io;
 use std::rc::Rc;
 
 use super::fallback::{FallbackResourceManager, PathFilter};
-use super::{ResourceManager, Selector, io_error};
+use super::{ResourceManager, Selector};
 use crate::resources::pack_resources::{PackResources, PackType};
 use crate::resources::packs::{ResourceFilter, parse_filter};
 use crate::resources::{Resource, ResourceId, ResourceOrigin};
@@ -14,32 +14,32 @@ use crate::resources::{Resource, ResourceId, ResourceOrigin};
 /// registration identity across reloads; textual pack IDs are diagnostics only.
 /// Dropping this manager never explicitly closes shared backends.
 pub(crate) struct MultiPackResourceManager {
-    packs: Vec<(ResourceOrigin, Rc<dyn PackResources>)>,
     namespaces: BTreeMap<String, FallbackResourceManager>,
 }
 
 impl MultiPackResourceManager {
+    /// A pack whose namespaces can't be listed contributes none, and one whose
+    /// filter section can't be read or parsed filters nothing, as vanilla's
+    /// `getPackFilterSection` logs and returns null.
     pub(crate) fn new(
         pack_type: PackType,
         packs: Vec<(ResourceOrigin, Rc<dyn PackResources>)>,
-    ) -> io::Result<Self> {
+    ) -> Self {
         let mut prepared = Vec::with_capacity(packs.len());
         let mut namespaces = BTreeSet::new();
         for (origin, pack) in &packs {
-            let provided = pack
-                .get_namespaces(pack_type)
-                .map_err(|error| io_error("get namespaces", origin, None, error))?;
-            namespaces.extend(provided.iter().cloned());
-            // Storage/root errors propagate; invalid decoded sections are ignored
-            // as a whole, never retaining a successfully parsed prefix.
-            let section = pack.metadata_section_json("filter").map_err(|error| {
-                io_error("load pack.mcmeta filter section", origin, None, error)
-            })?;
-            let filter = parse_filter(section.as_ref()).unwrap_or_else(|error| {
-                tracing::warn!(pack = pack.pack_id(), %error,
-                    "Invalid pack.mcmeta filter metadata; ignoring entire filter section (Rust regex syntax, not full Java Pattern support)");
-                ResourceFilter::default()
+            let provided = pack.get_namespaces(pack_type).unwrap_or_else(|error| {
+                tracing::warn!(pack = %origin.name, %error, "Failed to list pack namespaces");
+                Default::default()
             });
+            namespaces.extend(provided.iter().cloned());
+            let filter = pack
+                .metadata_section_json("filter")
+                .and_then(|section| parse_filter(section.as_ref()))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(pack = %origin.name, %error, "Failed to get filter section from pack");
+                    ResourceFilter::default()
+                });
             prepared.push((provided, Rc::new(filter)));
         }
         let mut managers = BTreeMap::new();
@@ -68,38 +68,14 @@ impl MultiPackResourceManager {
                 }
             }
         }
-        Ok(Self {
-            packs,
+        Self {
             namespaces: managers,
-        })
+        }
     }
 
     pub(super) fn empty() -> Self {
         Self {
-            packs: Vec::new(),
             namespaces: BTreeMap::new(),
-        }
-    }
-
-    /// Explicitly closes every original registration once, not once per
-    /// namespace. This may invalidate retained handles and sibling backend
-    /// views. Attempts all entries, returning the first failure and logging
-    /// later ones.
-    pub(crate) fn close(&self) -> io::Result<()> {
-        let mut first_error = None;
-        for (origin, pack) in &self.packs {
-            if let Err(error) = pack.close() {
-                if first_error.is_none() {
-                    first_error = Some(io_error("close pack", origin, None, error));
-                } else {
-                    tracing::warn!(pack = %origin.name, pack_id = ?origin.pack_id, %error,
-                        "Additional pack close failure after an earlier error");
-                }
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
         }
     }
 }
@@ -148,10 +124,6 @@ impl ResourceManager for MultiPackResourceManager {
         }
         Ok(result)
     }
-
-    fn list_packs(&self) -> Box<dyn Iterator<Item = &dyn PackResources> + '_> {
-        Box::new(self.packs.iter().map(|(_, pack)| pack.as_ref()))
-    }
 }
 
 fn check_directory(directory: &str) -> io::Result<()> {
@@ -166,122 +138,300 @@ fn check_directory(directory: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod resource_manager_tests {
-    use std::collections::{BTreeMap, HashSet};
-    use std::rc::Rc;
-
     use super::MultiPackResourceManager;
-    use crate::chat_component::Component;
     use crate::resources::managers::tests;
-    use crate::resources::pack_resources::{
-        EmbeddedPackResources, EmbeddedResourcesSupplier, POMME_ICON, POMME_ICONS_FONT,
-        POMME_UI_FONT, PackResources, PackType,
-    };
-    use crate::resources::packs::{
-        FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata,
-        PackPosition, PackSource,
-    };
-    use crate::resources::{ResourceId, resource_id};
-
-    const ICON: &[u8] = include_bytes!("../../../assets/icon.png");
-    const UI_FONT: &[u8] = include_bytes!("../../renderer/fonts/Montserrat-Medium.ttf");
-    const ICONS_FONT: &[u8] = include_bytes!("../../renderer/fonts/fa-solid-900.ttf");
+    use crate::resources::pack_resources::PackType;
 
     fn fixture() -> MultiPackResourceManager {
-        let location = PackLocationInfo {
-            id: "resource-manager-api".to_owned(),
-            title: Component::text("Resource manager API fixture"),
-            source: PackSource::built_in(),
-            known_pack_info: None,
-        };
-        let metadata = PackMetadata {
-            description: Component::text("Resource manager API fixture"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
-            overlays: Vec::new(),
-        };
-        let enablement = PackEnablementConfig {
-            required: false,
-            default_position: PackPosition::Top,
-            fixed_position: false,
-        };
-        let pack = Pack::new(
-            location.clone(),
-            metadata,
-            enablement,
-            Rc::new(EmbeddedResourcesSupplier::new()),
-        );
-        let backend: Rc<dyn PackResources> = Rc::new(EmbeddedPackResources::new(location));
-        MultiPackResourceManager::new(PackType::ClientResources, vec![(pack.origin(), backend)])
-            .expect("single embedded pack fixture should construct")
+        MultiPackResourceManager::new(PackType::ClientResources, vec![tests::embedded_pack()])
+    }
+
+    tests::embedded_pack_tests!(fixture);
+}
+
+/// Vanilla `FallbackResourceManager` / `MultiPackResourceManager` behaviour
+/// across several packs: priority, filters, sidecar pairing and packs that
+/// fail.
+#[cfg(test)]
+mod priority_tests {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::io::{self, Read};
+    use std::rc::Rc;
+
+    use serde_json::{Value, json};
+
+    use super::MultiPackResourceManager;
+    use crate::resources::managers::ResourceManager;
+    use crate::resources::pack_resources::{
+        IoSupplier, PackMetadataResources, PackResources, PackType, ResourceOutput,
+    };
+    use crate::resources::packs::{PackId, PackLocationInfo};
+    use crate::resources::{ReadStream, Resource, ResourceContent, ResourceId, ResourceOrigin};
+
+    /// An in-memory pack: `assets/<namespace>/<path>` keys, an optional root
+    /// metadata object, and a switch that makes every lookup fail.
+    struct TestPack {
+        location: PackLocationInfo,
+        files: HashMap<String, &'static str>,
+        metadata: Option<Value>,
+        broken: bool,
+    }
+
+    impl TestPack {
+        fn new(id: &str, files: &[(&str, &'static str)]) -> Self {
+            Self {
+                location: PackLocationInfo::test(id),
+                files: files.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
+                metadata: None,
+                broken: false,
+            }
+        }
+
+        fn with_metadata(mut self, metadata: Value) -> Self {
+            self.metadata = Some(metadata);
+            self
+        }
+
+        fn broken(mut self) -> Self {
+            self.broken = true;
+            self
+        }
+
+        fn fail<T>(&self) -> io::Result<T> {
+            Err(io::Error::other(format!("{} is broken", self.location.id)))
+        }
+    }
+
+    fn supplier(bytes: &'static str) -> IoSupplier<ReadStream> {
+        Rc::new(move || Ok(Box::new(bytes.as_bytes()) as ReadStream))
+    }
+
+    impl PackMetadataResources for TestPack {
+        fn location(&self) -> &PackLocationInfo {
+            &self.location
+        }
+
+        fn get_root_resource(&self, _path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
+            Ok(None)
+        }
+
+        fn metadata_section_json(&self, name: &str) -> io::Result<Option<Value>> {
+            if self.broken {
+                return self.fail();
+            }
+            Ok(self.metadata.as_ref().and_then(|m| m.get(name)).cloned())
+        }
+
+        fn close(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PackResources for TestPack {
+        fn get_resource(
+            &self,
+            _pack_type: PackType,
+            id: &ResourceId,
+        ) -> io::Result<Option<IoSupplier<ReadStream>>> {
+            if self.broken {
+                return self.fail();
+            }
+            Ok(self
+                .files
+                .get(&format!("{}/{}", id.namespace(), id.path()))
+                .map(|bytes| supplier(bytes)))
+        }
+
+        fn list_resources(
+            &self,
+            _pack_type: PackType,
+            namespace: &str,
+            directory: &str,
+            output: &mut ResourceOutput<'_>,
+        ) -> io::Result<()> {
+            if self.broken {
+                return self.fail();
+            }
+            let prefix = format!("{namespace}/{directory}/");
+            for (key, bytes) in &self.files {
+                if let Some(path) = key.strip_prefix(&format!("{namespace}/"))
+                    && key.starts_with(&prefix)
+                {
+                    output(
+                        ResourceId::new(&format!("{namespace}:{path}")).unwrap(),
+                        supplier(bytes),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+            Ok(self
+                .files
+                .keys()
+                .filter_map(|key| key.split_once('/').map(|(ns, _)| ns.to_owned()))
+                .collect())
+        }
+    }
+
+    /// Packs low to high, as the repository opens them.
+    fn manager(packs: Vec<TestPack>) -> MultiPackResourceManager {
+        MultiPackResourceManager::new(
+            PackType::ClientResources,
+            packs
+                .into_iter()
+                .map(|pack| {
+                    let origin = ResourceOrigin {
+                        pack_id: PackId::allocate(),
+                        name: pack.location.id.clone(),
+                    };
+                    (origin, Rc::new(pack) as Rc<dyn PackResources>)
+                })
+                .collect(),
+        )
+    }
+
+    fn id(value: &str) -> ResourceId {
+        ResourceId::new(value).unwrap()
+    }
+
+    fn text(content: &ResourceContent) -> String {
+        let mut text = String::new();
+        content.open().unwrap().read_to_string(&mut text).unwrap();
+        text
+    }
+
+    fn read(resource: &Resource) -> String {
+        text(resource.content())
+    }
+
+    fn metadata(resource: &Resource) -> Option<String> {
+        resource.metadata().unwrap().as_ref().map(text)
+    }
+
+    fn stack(manager: &MultiPackResourceManager, path: &str) -> Vec<String> {
+        manager
+            .get_resource_stack(&id(path))
+            .unwrap()
+            .iter()
+            .map(read)
+            .collect()
+    }
+
+    fn filter(path: &str) -> Value {
+        json!({"filter": {"block": [{"namespace": "minecraft", "path": path}]}})
     }
 
     #[test]
-    fn test_get_resource() {
-        tests::test_get_resource(&fixture(), &POMME_ICON, ICON);
+    fn the_top_pack_wins_and_stacks_run_low_to_high() {
+        let manager = manager(vec![
+            TestPack::new("low", &[("minecraft/a.txt", "low")]),
+            TestPack::new("high", &[("minecraft/a.txt", "high")]),
+        ]);
+        let resource = manager.get_resource(&id("a.txt")).unwrap().unwrap();
+        assert_eq!(read(&resource), "high");
+        assert_eq!(stack(&manager, "a.txt"), ["low", "high"]);
     }
 
     #[test]
-    fn test_get_resource_missing() {
-        tests::test_get_resource_missing(&fixture(), &resource_id!("pomme:textures/missing.png"));
+    fn a_filter_hides_lower_packs_but_not_its_own_files() {
+        let manager = manager(vec![
+            TestPack::new(
+                "low",
+                &[("minecraft/a.txt", "low"), ("minecraft/b.txt", "low")],
+            ),
+            TestPack::new("high", &[("minecraft/b.txt", "high")])
+                .with_metadata(filter("^[ab]\\.txt$")),
+        ]);
+        assert!(manager.get_resource(&id("a.txt")).unwrap().is_none());
+        let resource = manager.get_resource(&id("b.txt")).unwrap().unwrap();
+        assert_eq!(read(&resource), "high");
+        assert_eq!(stack(&manager, "b.txt"), ["high"]);
     }
 
+    /// `FallbackResourceManager.pushFilterOnly`: a pack with no files in a
+    /// namespace still filters the packs below it there.
     #[test]
-    fn test_get_resource_stack() {
-        tests::test_get_resource_stack(&fixture(), &POMME_ICON, &[ICON.to_vec()]);
+    fn a_filter_only_pack_still_filters() {
+        let manager = manager(vec![
+            TestPack::new("low", &[("minecraft/a.txt", "low")]),
+            TestPack::new("high", &[("pomme/other.txt", "high")]).with_metadata(filter("a\\.txt")),
+        ]);
+        assert!(manager.get_resource(&id("a.txt")).unwrap().is_none());
     }
 
+    /// `createStackMetadataFinder`: the sidecar comes from the highest pack
+    /// at or above the one that supplied the file.
     #[test]
-    fn test_get_resource_stack_missing() {
-        tests::test_get_resource_stack(
-            &fixture(),
-            &resource_id!("pomme:textures/missing.png"),
-            &[],
-        );
+    fn metadata_comes_from_the_highest_pack_at_or_above_the_file() {
+        let manager = manager(vec![
+            TestPack::new(
+                "low",
+                &[
+                    ("minecraft/a.txt", "low"),
+                    ("minecraft/a.txt.mcmeta", "low meta"),
+                ],
+            ),
+            TestPack::new("high", &[("minecraft/a.txt.mcmeta", "high meta")]),
+        ]);
+        let resource = manager.get_resource(&id("a.txt")).unwrap().unwrap();
+        assert_eq!(read(&resource), "low");
+        assert_eq!(metadata(&resource).as_deref(), Some("high meta"));
     }
 
+    /// `listResources`: a sidecar below the winning file isn't paired with it.
     #[test]
-    fn test_list_resources() {
-        tests::test_list_resources(
-            &fixture(),
-            "font",
-            &|_| true,
-            &BTreeMap::from([
-                (POMME_UI_FONT, UI_FONT.to_vec()),
-                (POMME_ICONS_FONT, ICONS_FONT.to_vec()),
-            ]),
-        );
+    fn listing_pairs_only_sidecars_at_or_above_the_file() {
+        let manager = manager(vec![
+            TestPack::new("low", &[("minecraft/d/a.txt.mcmeta", "low meta")]),
+            TestPack::new("high", &[("minecraft/d/a.txt", "high")]),
+        ]);
+        let listed = manager.list_resources("d", &|_| true).unwrap();
+        let resource = &listed[&id("d/a.txt")];
+        assert_eq!(read(resource), "high");
+        assert_eq!(metadata(resource), None);
     }
 
+    /// Listings iterate in `Identifier.compareTo` order: path, then namespace.
     #[test]
-    fn test_list_resources_missing_directory() {
-        tests::test_list_resources(&fixture(), "missing", &|_| true, &BTreeMap::new());
+    fn listing_order_is_path_then_namespace() {
+        let manager = manager(vec![TestPack::new(
+            "pack",
+            &[("minecraft/d/b.txt", "1"), ("pomme/d/a.txt", "2")],
+        )]);
+        let listed: Vec<String> = manager
+            .list_resources("d", &|_| true)
+            .unwrap()
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(listed, ["pomme:d/a.txt", "minecraft:d/b.txt"]);
     }
 
+    /// Vanilla packs never throw from lookups: a pack that fails counts as
+    /// not having the resource, and its filter section counts as absent.
     #[test]
-    fn test_list_resource_stacks() {
-        tests::test_list_resource_stacks(
-            &fixture(),
-            "font",
-            &|_| true,
-            &BTreeMap::from([
-                (POMME_UI_FONT, vec![UI_FONT.to_vec()]),
-                (POMME_ICONS_FONT, vec![ICONS_FONT.to_vec()]),
-            ]),
-        );
+    fn a_failing_pack_is_skipped() {
+        let manager = manager(vec![
+            TestPack::new("low", &[("minecraft/d/a.txt", "low")]),
+            TestPack::new("broken", &[("minecraft/d/a.txt", "broken")]).broken(),
+        ]);
+        let resource = manager.get_resource(&id("d/a.txt")).unwrap().unwrap();
+        assert_eq!(read(&resource), "low");
+        let listed: BTreeMap<_, _> = manager.list_resources("d", &|_| true).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(read(&listed[&id("d/a.txt")]), "low");
     }
 
+    /// `getPackFilterSection` logs a bad section and filters nothing.
     #[test]
-    fn test_list_resource_stacks_missing_directory() {
-        tests::test_list_resource_stacks(&fixture(), "missing", &|_| true, &BTreeMap::new());
-    }
-
-    #[test]
-    fn test_get_namespaces() {
-        tests::test_get_namespaces(&fixture(), &HashSet::from(["pomme".to_owned()]));
-    }
-
-    #[test]
-    fn test_list_packs() {
-        tests::test_list_packs(&fixture(), &["resource-manager-api"]);
+    fn an_invalid_filter_filters_nothing() {
+        let manager = manager(vec![
+            TestPack::new("low", &[("minecraft/a.txt", "low")]),
+            TestPack::new("high", &[("pomme/x.txt", "x")])
+                .with_metadata(json!({"filter": {"block": "not a list"}})),
+        ]);
+        assert!(manager.get_resource(&id("a.txt")).unwrap().is_some());
     }
 }

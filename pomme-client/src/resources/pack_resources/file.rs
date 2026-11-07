@@ -107,14 +107,18 @@ impl FilePackResources {
     }
 
     fn locate(&self, path: &str) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        let opened = self.access.get_or_open()?;
+        let Some(opened) = self.access.get_or_open() else {
+            return Ok(None);
+        };
         let mut name = self.add_prefix(path);
         // Java ZipFile.getEntry also tries a trailing slash for directories.
         // Exact lookup allows them; enumeration below excludes directories.
-        let mut index = opened.archive.index_for_name(&name);
+        // The raw lookup is a hash probe; the decoded one scans every entry on
+        // a miss, and misses are most lookups in a pack layered over vanilla.
+        let mut index = opened.archive.index_for_name_raw(name.as_bytes());
         if index.is_none() && !name.ends_with('/') {
             name.push('/');
-            index = opened.archive.index_for_name(&name);
+            index = opened.archive.index_for_name_raw(name.as_bytes());
         }
         Ok(index.map(|index| entry_supplier(opened, index)))
     }
@@ -212,7 +216,9 @@ impl PackResources for FilePackResources {
                 "invalid resource namespace",
             ));
         }
-        let opened = self.access.get_or_open()?;
+        let Some(opened) = self.access.get_or_open() else {
+            return Ok(());
+        };
         let root = self.add_prefix(&format!("{}/{namespace}/", pack_type.directory()));
         let prefix = format!("{root}{directory}/");
         for index in 0..opened.archive.len() {
@@ -237,7 +243,9 @@ impl PackResources for FilePackResources {
     }
 
     fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        let opened = self.access.get_or_open()?;
+        let Some(opened) = self.access.get_or_open() else {
+            return Ok(HashSet::new());
+        };
         let prefix = self.add_prefix(&format!("{}/", pack_type.directory()));
         let mut namespaces = HashSet::new();
         // Vanilla includes explicit directory entries and even a bare name
@@ -351,17 +359,17 @@ struct SharedZipFileAccess {
 enum ZipState {
     Unopened,
     Opened(Rc<OpenedZip>),
-    Failed(Arc<io::Error>),
+    Failed,
 }
 
 impl SharedZipFileAccess {
-    fn get_or_open(&self) -> io::Result<Rc<OpenedZip>> {
+    /// Vanilla `SharedZipFileAccess.getOrCreateZipFile`: a failed open is
+    /// logged once and latched, and the pack then has nothing in it.
+    fn get_or_open(&self) -> Option<Rc<OpenedZip>> {
         let mut state = self.state.borrow_mut();
         match &*state {
-            ZipState::Opened(opened) => return Ok(opened.clone()),
-            ZipState::Failed(error) => {
-                return Err(io::Error::new(error.kind(), error.clone()));
-            }
+            ZipState::Opened(opened) => return Some(opened.clone()),
+            ZipState::Failed => return None,
             ZipState::Unopened => {}
         }
         match open_archive(&self.path) {
@@ -371,14 +379,12 @@ impl SharedZipFileAccess {
                     closed: Cell::new(false),
                 });
                 *state = ZipState::Opened(opened.clone());
-                Ok(opened)
+                Some(opened)
             }
             Err(error) => {
-                // Vanilla latches failures but returns absence. The Rust
-                // contract instead propagates the retained error on every call.
-                let error = Arc::new(error);
-                *state = ZipState::Failed(error.clone());
-                Err(io::Error::new(error.kind(), error))
+                tracing::error!(path = %self.path.display(), %error, "Failed to open pack");
+                *state = ZipState::Failed;
+                None
             }
         }
     }
@@ -422,49 +428,18 @@ impl Read for FilePackStream {
 
 #[cfg(test)]
 mod test_fixture {
-    use std::fs::{self, File};
-    use std::io::{self, Write};
-    use std::path::PathBuf;
+    use std::fs::File;
+    use std::io::Write;
 
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
     use super::FilePackResources;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
-
-    pub(super) struct TempDir(pub(super) PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir()
-                    .join(format!("pomme-file-api-{}-{attempt}", std::process::id()));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::test_dir::TempDir;
 
     pub(super) fn default_location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "file-api".into(),
-            title: Component::text("File API fixture"),
-            source: PackSource::built_in(),
-            known_pack_info: None,
-        }
+        PackLocationInfo::test("file-api")
     }
 
     pub(super) fn fixture(location: PackLocationInfo) -> (TempDir, FilePackResources) {
@@ -507,13 +482,12 @@ mod test_fixture {
 
 #[cfg(test)]
 mod pack_metadata_resources_tests {
-    use pomme_protocol::KnownPack;
     use serde_json::json;
 
     use super::test_fixture::{default_location, fixture};
     use crate::chat_component::Component;
     use crate::resources::pack_resources::tests;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
+    use crate::resources::packs::PackLocationInfo;
 
     #[test]
     fn test_get_root_resource() {
@@ -550,8 +524,7 @@ mod pack_metadata_resources_tests {
         let expected = PackLocationInfo {
             id: "file-location".into(),
             title: Component::translate("location.file.title", Vec::new()),
-            source: PackSource::feature(),
-            known_pack_info: Some(KnownPack {
+            known_pack_info: Some(pomme_protocol::KnownPack {
                 namespace: "location_test".into(),
                 id: "file_known".into(),
                 version: "test-1".into(),
@@ -563,78 +536,11 @@ mod pack_metadata_resources_tests {
 }
 
 #[cfg(test)]
-mod pack_metadata_resources_ext_tests {
-    use std::fs::File;
-    use std::io::{self, Write};
-
-    use serde_json::json;
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
-
-    use super::test_fixture::{default_location, fixture};
-    use crate::resources::pack_resources::{MetadataSectionType, tests};
-
-    #[test]
-    fn test_get_metadata_section() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |value| {
-                value
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "expected string"))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section(&pack, &section, Some("file".into()));
-    }
-
-    #[test]
-    fn test_get_metadata_section_missing() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_metadata_section_missing(&pack, "missing");
-    }
-
-    #[test]
-    fn test_get_metadata_section_null() {
-        let (temp, pack) = fixture(default_location());
-        let mut archive = ZipWriter::new(File::create(temp.0.join("pack.zip")).unwrap());
-        archive
-            .start_file("pack.mcmeta", SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(br#"{"null":null}"#).unwrap();
-        archive.finish().unwrap();
-        tests::test_get_metadata_section_null(&pack, "null");
-    }
-
-    #[test]
-    fn test_get_metadata_section_decode_error() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |_| {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "decoder sentinel",
-                ))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section_decode_error(&pack, &section, io::ErrorKind::Unsupported);
-    }
-}
-
-#[cfg(test)]
 mod pack_resources_tests {
     use std::collections::HashSet;
 
-    use pomme_protocol::KnownPack;
-
     use super::test_fixture::{default_location, fixture};
     use crate::resources::pack_resources::{PackType, tests};
-    use crate::resources::packs::PackLocationInfo;
     use crate::resources::resource_id;
 
     #[test]
@@ -649,33 +555,12 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_resource_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_data:test/server.txt"),
-            b"server data",
-        );
-    }
-
-    #[test]
     fn test_get_resource_missing() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_resource_missing(
             &pack,
             PackType::ClientResources,
             &resource_id!("api_test:test/missing.txt"),
-        );
-    }
-
-    #[test]
-    fn test_get_resource_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource_missing(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_test:test/one.txt"),
         );
     }
 
@@ -701,21 +586,6 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ServerData,
-            "api_data",
-            "test",
-            &[(
-                resource_id!("api_data:test/server.txt"),
-                b"server data".to_vec(),
-            )],
-        );
-    }
-
-    #[test]
     fn test_list_resources_empty_directory() {
         let (_temp, pack) = fixture(default_location());
         // Vanilla FilePackResources uses root + directory + "/", even when empty.
@@ -735,12 +605,6 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(&pack, PackType::ServerData, "api_test", "test", &[]);
-    }
-
-    #[test]
     fn test_get_namespaces_client() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_namespaces(
@@ -751,40 +615,9 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_namespaces_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_namespaces(
-            &pack,
-            PackType::ServerData,
-            &HashSet::from(["api_data".into()]),
-        );
-    }
-
-    #[test]
     fn test_pack_id() {
         let (_temp, pack) = fixture(default_location());
         tests::test_pack_id(&pack, "file-api");
-    }
-
-    #[test]
-    fn test_known_pack_info_none() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_known_pack_info(&pack, None);
-    }
-
-    #[test]
-    fn test_known_pack_info_some() {
-        let expected = KnownPack {
-            namespace: "api_identity".into(),
-            id: "file_known".into(),
-            version: "api-2".into(),
-        };
-        let location = PackLocationInfo {
-            known_pack_info: Some(expected.clone()),
-            ..default_location()
-        };
-        let (_temp, pack) = fixture(location);
-        tests::test_known_pack_info(&pack, Some(&expected));
     }
 }
 
@@ -793,42 +626,44 @@ mod resources_supplier_tests {
     use std::path::PathBuf;
 
     use super::FileResourcesSupplier;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{
-        FeatureFlagSet, PackCompat, PackLocationInfo, PackMetadata, PackSource, ResourcesSupplier,
-    };
+    use crate::resources::packs::ResourcesSupplier;
 
-    fn location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "file-supplier-api".into(),
-            title: Component::text("Supplier API test"),
-            source: PackSource::default(),
-            known_pack_info: None,
+    #[test]
+    fn test_open() {
+        let supplier = FileResourcesSupplier::new(PathBuf::from("unused-supplier.zip"));
+        <dyn ResourcesSupplier>::test_open(&supplier, 1);
+    }
+}
+
+#[cfg(test)]
+mod failed_open_tests {
+    use std::fs;
+
+    use super::FilePackResources;
+    use super::test_fixture::default_location;
+    use crate::resources::pack_resources::{PackMetadataResources, PackResources, PackType};
+    use crate::resources::resource_id;
+    use crate::resources::test_dir::TempDir;
+
+    #[test]
+    fn an_unreadable_archive_is_an_empty_pack() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.0.join("broken.zip");
+        fs::write(&path, b"not a zip").unwrap();
+        let pack = FilePackResources::new(default_location(), path);
+        for _ in 0..2 {
+            let id = resource_id!("minecraft:a.txt");
+            assert!(
+                pack.get_resource(PackType::ClientResources, &id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                pack.get_namespaces(PackType::ClientResources)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(pack.metadata_section_json("pack").unwrap().is_none());
         }
-    }
-
-    #[test]
-    fn test_open_metadata() {
-        let supplier = FileResourcesSupplier::new(PathBuf::from("unused-supplier.zip"));
-        let location = location();
-        <dyn ResourcesSupplier>::test_open_metadata(&supplier, &location, "file-supplier-api");
-    }
-
-    #[test]
-    fn test_open_resources() {
-        let supplier = FileResourcesSupplier::new(PathBuf::from("unused-supplier.zip"));
-        let location = location();
-        let metadata = PackMetadata {
-            description: Component::text("Supplier API test"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
-            overlays: Vec::new(),
-        };
-        <dyn ResourcesSupplier>::test_open_resources(
-            &supplier,
-            &location,
-            &metadata,
-            &["file-supplier-api"],
-        );
     }
 }

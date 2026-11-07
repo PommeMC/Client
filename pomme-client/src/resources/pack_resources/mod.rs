@@ -1,15 +1,12 @@
 //! Storage contracts used by resource managers and repository suppliers.
-//! Maps Vanilla 26.3 PackResources, PackMetadataResources, PackType,
-//! MetadataSectionType and IoSupplier into Rust.
-//! Fallible lookup uses Result<Option<_>>; typed metadata lives on an extension
-//! trait to keep the base traits object-safe. Suppliers own their captured
-//! state.
+//! Maps Vanilla 26.3 PackResources, PackMetadataResources, PackType and
+//! IoSupplier into Rust. Fallible lookup uses Result<Option<_>>; the managers
+//! turn a pack's errors into absence. Suppliers own their captured state.
 
 use std::collections::HashSet;
 use std::io;
 use std::rc::Rc;
 
-use pomme_protocol::KnownPack;
 use serde_json::Value;
 
 use crate::resources::packs::PackLocationInfo;
@@ -22,24 +19,19 @@ mod overlayed;
 mod path;
 mod vanilla;
 
-// Backends are exposed for subsequent application consumer adoption.
-#[allow(unused_imports)]
-pub(crate) use embedded::{EmbeddedPackResources, EmbeddedResourcesSupplier};
+#[cfg(test)]
+pub(crate) use embedded::EmbeddedPackResources;
+pub(crate) use embedded::{EmbeddedResourcesSupplier, POMME_ICON};
 #[allow(
     unused_imports,
-    reason = "Stable embedded resource IDs, pending asset-consumer adoption"
+    reason = "the consumer migration (#785) loads the menu fonts"
 )]
-pub(crate) use embedded::{POMME_ICON, POMME_ICONS_FONT, POMME_UI_FONT};
-#[allow(unused_imports)]
-pub(crate) use file::{FilePackResources, FileResourcesSupplier};
-#[allow(unused_imports)]
-pub(crate) use mapped::{MappedPackResources, MappedResourcesSupplier};
-#[allow(unused_imports)]
+pub(crate) use embedded::{POMME_ICONS_FONT, POMME_UI_FONT};
+pub(crate) use file::FileResourcesSupplier;
+pub(crate) use mapped::MappedResourcesSupplier;
 pub(crate) use overlayed::OverlayedPackResources;
-#[allow(unused_imports)]
 pub(crate) use path::{PathPackResources, PathResourcesSupplier};
-#[allow(unused_imports)]
-pub(crate) use vanilla::{VanillaPackResources, VanillaResourcesSupplier};
+pub(crate) use vanilla::VanillaResourcesSupplier;
 
 pub(crate) const METADATA_EXTENSION: &str = ".mcmeta";
 pub(crate) const PACK_META: &str = "pack.mcmeta";
@@ -53,31 +45,19 @@ pub(crate) type IoSupplier<T> = Rc<dyn Fn() -> io::Result<T> + 'static>;
 /// Enumeration transfers identifiers and unopened suppliers to the caller.
 pub(crate) type ResourceOutput<'a> = dyn FnMut(ResourceId, IoSupplier<ReadStream>) + 'a;
 
-/// Returns true when the identifier is blocked.
-pub(crate) type Filter<'a> = dyn Fn(&ResourceId) -> bool + 'a;
-
-/// Domain shape only; this does not add server-data support to the application.
+/// Vanilla `PackType`. Only client resources exist here; server data is the
+/// integrated server's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PackType {
     ClientResources,
-    ServerData,
 }
 
 impl PackType {
     pub(crate) const fn directory(self) -> &'static str {
         match self {
             Self::ClientResources => "assets",
-            Self::ServerData => "data",
         }
     }
-}
-
-/// Named section with both directions of Vanilla's Codec, expressed as JSON
-/// function pointers rather than a new codec framework. Codec errors propagate.
-pub(crate) struct MetadataSectionType<T> {
-    pub(crate) name: String,
-    pub(crate) decode: fn(&Value) -> io::Result<T>,
-    pub(crate) encode: fn(&T) -> io::Result<Value>,
 }
 
 /// Object-safe pack identity, root resources, metadata and explicit closure.
@@ -104,17 +84,6 @@ pub(crate) trait PackMetadataResources {
     fn close(&self) -> io::Result<()>;
 }
 
-/// Typed metadata lookup also available on unsized base-trait objects.
-pub(crate) trait PackMetadataResourcesExt: PackMetadataResources {
-    fn get_metadata_section<T>(&self, section: &MetadataSectionType<T>) -> io::Result<Option<T>> {
-        self.metadata_section_json(&section.name)?
-            .map(|value| (section.decode)(&value))
-            .transpose()
-    }
-}
-
-impl<P: PackMetadataResources + ?Sized> PackMetadataResourcesExt for P {}
-
 /// Object-safe resource access in a pack. Lookup and enumeration do not open
 /// content streams; their suppliers perform that I/O on demand.
 pub(crate) trait PackResources: PackMetadataResources {
@@ -139,31 +108,17 @@ pub(crate) trait PackResources: PackMetadataResources {
     fn pack_id(&self) -> &str {
         self.location().id.as_str()
     }
-
-    fn known_pack_info(&self) -> Option<&KnownPack> {
-        self.location().known_pack_info.as_ref()
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        dead_code,
-        reason = "Generic API assertions pending user review before fixtures"
-    )]
 
     use std::collections::HashSet;
-    use std::fmt::Debug;
-    use std::io::{self, Read};
+    use std::io::Read;
 
-    use pomme_protocol::KnownPack;
     use serde_json::Value;
 
-    use super::{
-        MetadataSectionType, PackMetadataResources, PackMetadataResourcesExt, PackResources,
-        PackType,
-    };
-    use crate::chat_component::Component;
+    use super::{PackMetadataResources, PackResources, PackType};
     use crate::resources::ResourceId;
     use crate::resources::packs::PackLocationInfo;
 
@@ -242,13 +197,6 @@ mod tests {
         assert_eq!(pack.pack_id(), expected, "pack_id result");
     }
 
-    pub(super) fn test_known_pack_info<P: PackResources + ?Sized>(
-        pack: &P,
-        expected: Option<&KnownPack>,
-    ) {
-        assert_eq!(pack.known_pack_info(), expected, "known_pack_info result");
-    }
-
     pub(super) fn test_location<P: PackMetadataResources + ?Sized>(
         pack: &P,
         expected: &PackLocationInfo,
@@ -256,17 +204,6 @@ mod tests {
         let actual = pack.location();
         assert_eq!(actual.id, expected.id, "location ID");
         assert_eq!(actual.title, expected.title, "location title");
-        assert_eq!(
-            actual.source.should_add_automatically(),
-            expected.source.should_add_automatically(),
-            "location source automatic selection"
-        );
-        let probe = Component::text("location source probe");
-        assert_eq!(
-            actual.source.decorate(probe.clone()),
-            expected.source.decorate(probe),
-            "location source decoration"
-        );
         assert_eq!(
             actual.known_pack_info, expected.known_pack_info,
             "location known pack"
@@ -314,70 +251,6 @@ mod tests {
             actual, expected,
             "metadata_section_json result for {name:?}"
         );
-    }
-
-    pub(super) fn test_get_metadata_section<
-        P: PackMetadataResourcesExt + ?Sized,
-        T: PartialEq + Debug,
-    >(
-        pack: &P,
-        section: &MetadataSectionType<T>,
-        expected: Option<T>,
-    ) {
-        let actual = pack
-            .get_metadata_section(section)
-            .expect("get_metadata_section should succeed");
-        assert_eq!(
-            actual, expected,
-            "get_metadata_section result for {:?}",
-            section.name
-        );
-    }
-
-    pub(super) fn test_get_metadata_section_missing<P: PackMetadataResourcesExt + ?Sized>(
-        pack: &P,
-        name: &str,
-    ) {
-        let section = MetadataSectionType::<()> {
-            name: name.to_owned(),
-            decode: |_| panic!("missing metadata section must not invoke the decoder"),
-            encode: |_| Ok(Value::Null),
-        };
-        assert!(
-            pack.get_metadata_section(&section)
-                .expect("get_metadata_section should succeed for a missing section")
-                .is_none(),
-            "get_metadata_section should return None for {name:?}"
-        );
-    }
-
-    pub(super) fn test_get_metadata_section_null<P: PackMetadataResourcesExt + ?Sized>(
-        pack: &P,
-        name: &str,
-    ) {
-        let section = MetadataSectionType {
-            name: name.to_owned(),
-            decode: |value| {
-                assert_eq!(value, &Value::Null, "decoder should receive JSON null");
-                Ok("decoded null")
-            },
-            encode: |_| Ok(Value::Null),
-        };
-        test_get_metadata_section(pack, &section, Some("decoded null"));
-    }
-
-    pub(super) fn test_get_metadata_section_decode_error<
-        P: PackMetadataResourcesExt + ?Sized,
-        T,
-    >(
-        pack: &P,
-        section: &MetadataSectionType<T>,
-        expected_kind: io::ErrorKind,
-    ) {
-        match pack.get_metadata_section(section) {
-            Err(error) => assert_eq!(error.kind(), expected_kind, "metadata decoder error kind"),
-            Ok(_) => panic!("get_metadata_section should propagate the decoder error"),
-        }
     }
 
     pub(super) fn test_close<P: PackMetadataResources + ?Sized>(pack: &P) {

@@ -5,9 +5,9 @@
 //! Repository sources own locations and discovery; the repository owns pack
 //! selection. Downloading is separate. PackResources suppliers open storage
 //! and hydrate asset indexes. Root metadata decoding is private; resource
-//! sidecars remain queryable. Bootstrap needs only the embedded Pomme pack.
-//! AppCore activates that bootstrap first, then configures local discovery,
-//! installation and theme sources. Optional local packs stay disabled here;
+//! sidecars remain queryable. As in vanilla, a pack or source that fails is
+//! logged and left out rather than failing a lookup or a reload, so the
+//! embedded Pomme pack always loads. Optional local packs stay disabled here;
 //! existing UI/server selection still controls the filesystem asset stack.
 //! The Vanilla supplier exposes extracted and indexed entries with their own
 //! root/fallback metadata: managers apply filters between those entries too,
@@ -22,19 +22,10 @@
 //! and pin a source or pathname, not immutable bytes; reopening may change or
 //! fail. Sources must retain required storage leases. Streams close on drop.
 //! Reload opens candidates before activation, then invokes a synchronous
-//! rebuild callback (empty until consumer adoption). Suppliers and resource
-//! handles remain on the application thread; they do not provide a transferable
-//! content API.
+//! rebuild callback (the menu's splash). Suppliers and resource handles remain
+//! on the application thread; they do not provide a transferable content API.
 
-#[allow(
-    dead_code,
-    reason = "Manager consumer API; application asset consumers are not yet migrated"
-)]
 pub(crate) mod managers;
-#[allow(
-    dead_code,
-    reason = "PackResources consumer API; adopted during a later migration"
-)]
 pub(crate) mod pack_resources;
 pub(crate) mod packs;
 mod resource;
@@ -48,12 +39,42 @@ macro_rules! resource_id {
     };
 }
 
-#[allow(
-    unused_imports,
-    reason = "Manager consumer API; application asset consumers are not yet migrated"
-)]
 pub(crate) use managers::ResourceManager;
 pub(crate) use resource::{
     ReadStream, Resource, ResourceContent, ResourceError, ResourceId, ResourceOrigin,
 };
 pub(crate) use resource_id;
+
+/// A scratch directory for tests, removed on drop. Names never repeat within
+/// a process: Windows refuses to create a directory whose deletion is still
+/// pending, which a reused name hits when tests run in parallel.
+#[cfg(test)]
+pub(crate) mod test_dir {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{fs, io};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) struct TempDir(pub(crate) PathBuf);
+
+    impl TempDir {
+        pub(crate) fn new() -> io::Result<Self> {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("pomme-resources-{}-{id}", std::process::id()));
+            // A leftover from an earlier process with the same id.
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
+            }
+        }
+    }
+}

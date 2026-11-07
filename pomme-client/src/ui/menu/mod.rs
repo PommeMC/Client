@@ -1337,9 +1337,9 @@ impl MainMenu {
         }
     }
 
-    /// Picks from the active resource view. Absence clears the splash;
-    /// read/decode failure retains the last good line without rolling back
-    /// resource activation.
+    /// Picks from the active resource view. Vanilla `SplashManager.prepare`
+    /// reads no lines when the file can't be read, so a failure shows no
+    /// splash, as absence does.
     pub fn load_splash(&mut self, resources: &dyn ResourceManager) {
         let now =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
@@ -1349,12 +1349,10 @@ impl MainMenu {
             now.month() as u32,
             u32::from(now.day()),
         );
-        match picked {
-            Ok(splash) => self.splash = splash,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to load minecraft:texts/splashes.txt; retaining the last good splash");
-            }
-        }
+        self.splash = picked.unwrap_or_else(|error| {
+            tracing::warn!(%error, "Failed to load minecraft:texts/splashes.txt");
+            None
+        });
     }
 
     fn is_server_list_screen(&self) -> bool {

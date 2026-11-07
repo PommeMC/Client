@@ -18,14 +18,13 @@ use crate::resources::pack_resources::{
 use crate::resources::packs::format::{MAX_COMPONENT, format_component};
 use crate::resources::packs::metadata::{PACK_SECTION, last_pre_minor_format};
 use crate::resources::packs::{
-    FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackFormat, PackId, PackLocationInfo,
-    PackMetadata, PackPosition, PackSource,
+    Pack, PackCompat, PackEnablementConfig, PackFormat, PackId, PackLocationInfo, PackMetadata,
+    PackPosition,
 };
 use crate::resources::{ResourceError, ResourceId};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ThemeSpecification {
-    Java,
     Pomme { root: PathBuf },
     Bedrock { root: PathBuf },
 }
@@ -40,9 +39,8 @@ struct ThemeMount<'a> {
 }
 
 impl ThemeSpecification {
-    fn mount(&self) -> Result<Option<ThemeMount<'_>>, ResourceError> {
+    fn mount(&self) -> Result<ThemeMount<'_>, ResourceError> {
         let (root, id, name, directory) = match self {
-            Self::Java => return Ok(None),
             Self::Pomme { root } => (root, "theme/pomme", "Pomme theme assets", "panoramas"),
             Self::Bedrock { root } => {
                 (root, "theme/bedrock", "Bedrock theme assets", "textures/ui")
@@ -57,13 +55,13 @@ impl ThemeSpecification {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, ResourceError>>()?;
-        Ok(Some(ThemeMount {
+        Ok(ThemeMount {
             root,
             id,
             name,
             namespace: "minecraft",
             remappings,
-        }))
+        })
     }
 }
 
@@ -151,28 +149,23 @@ impl BuiltinRepositorySource {
         self.state.borrow().target
     }
 
-    /// Explicit override of the comparison target, not installed identity or
-    /// fallback metadata. Propagation to other source handles remains explicit.
-    pub(crate) fn set_target_format(&self, target: Option<PackFormat>) {
-        self.state.borrow_mut().target = target;
-    }
-
     pub(crate) fn set_theme(&self, theme: Option<ThemeSpecification>) {
         let mut state = self.state.borrow_mut();
-        state.theme = theme
-            .filter(|theme| !matches!(theme, ThemeSpecification::Java))
-            .map(|theme| {
-                let id = state
-                    .theme
-                    .as_ref()
-                    .filter(|(old, _)| old == &theme)
-                    .map_or_else(PackId::allocate, |(_, id)| id.clone());
-                (theme, id)
-            });
+        state.theme = theme.map(|theme| {
+            let id = state
+                .theme
+                .as_ref()
+                .filter(|(old, _)| old == &theme)
+                .map_or_else(PackId::allocate, |(_, id)| id.clone());
+            (theme, id)
+        });
     }
 }
 
 impl RepositorySource for BuiltinRepositorySource {
+    /// The embedded pack always loads. An installation or theme that can't be
+    /// read is logged and left out, as vanilla's `FixedPathPackResources`
+    /// builder skips roots it can't use.
     fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
         let state = self.state.borrow();
         let mut packs = vec![Pack::with_id(
@@ -195,7 +188,7 @@ impl RepositorySource for BuiltinRepositorySource {
                     &input.index_file,
                     &input.objects_dir,
                     vanilla_metadata(installation.verified_format),
-                )?);
+                ));
                 let mut location = builtin_location(
                     "vanilla",
                     Component::translate("resourcePack.vanilla.name", Vec::new()),
@@ -221,67 +214,71 @@ impl RepositorySource for BuiltinRepositorySource {
                     installation.id.clone(),
                     location,
                     metadata,
-                    builtin_enablement(true),
+                    // Vanilla's `VANILLA_SELECTION_CONFIG`: required, bottom, not fixed.
+                    builtin_enablement(false),
                     resources,
                 ))
             };
-            packs.push(load().map_err(|error| {
-                path_error(
-                    &format!("load Minecraft installation {:?}", input.version),
-                    &input.extracted_root,
-                    error,
-                )
-            })?);
+            match load() {
+                Ok(pack) => packs.push(pack),
+                Err(error) => tracing::warn!(
+                    version = %input.version,
+                    path = %input.extracted_root.display(),
+                    %error,
+                    "Failed to load the Minecraft installation's resources"
+                ),
+            }
         }
+        // TODO: vanilla `ClientPackSource` also offers the index's
+        // `minecraft:resourcepacks/*` zips (programmer_art, high_contrast) as
+        // optional built-in packs.
         if let Some((theme, id)) = &state.theme {
-            let mount = theme.mount().map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("prepare theme mapping: {error}"),
-                )
-            })?;
-            if let Some(mount) = mount {
-                match std::fs::read_dir(mount.root) {
-                    Ok(_) => {
-                        let resources = MappedResourcesSupplier::new(
-                            mount.root.to_owned(),
-                            mount.namespace.to_owned(),
-                            mount.remappings,
-                        )
-                        .map_err(|error| path_error("prepare theme mapping", mount.root, error))?;
-                        packs.push(Pack::with_id(
-                            id.clone(),
-                            builtin_location(mount.id, Component::text(mount.name)),
-                            computed_metadata(mount.name, PackCompat::Unknown),
-                            builtin_enablement(false),
-                            Rc::new(resources),
-                        ));
-                    }
-                    // Keep the definition ID: later availability isn't a new theme.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(path_error("open theme directory", mount.root, error));
-                    }
-                }
+            match load_theme(theme, id) {
+                Ok(Some(pack)) => packs.push(pack),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "Failed to load theme resources"),
             }
         }
         Ok(packs)
     }
 }
 
+/// `None` while the theme's assets aren't downloaded; the definition keeps its
+/// ID, since later availability isn't a new theme.
+fn load_theme(theme: &ThemeSpecification, id: &PackId) -> io::Result<Option<Pack>> {
+    let mount = theme
+        .mount()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !mount.root.is_dir() {
+        return Ok(None);
+    }
+    let resources = MappedResourcesSupplier::new(
+        mount.root.to_owned(),
+        mount.namespace.to_owned(),
+        mount.remappings,
+    )
+    .map_err(|error| path_error("prepare theme mapping", mount.root, error))?;
+    Ok(Some(Pack::with_id(
+        id.clone(),
+        builtin_location(mount.id, Component::text(mount.name)),
+        computed_metadata(mount.name, PackCompat::Unknown),
+        builtin_enablement(false),
+        Rc::new(resources),
+    )))
+}
+
 fn builtin_location(id: &str, title: Component) -> PackLocationInfo {
     PackLocationInfo {
         id: id.to_owned(),
         title,
-        source: PackSource::built_in(),
         known_pack_info: None,
     }
 }
 
-/// COMPAT: Pomme's intentional fixed bootstrap prefix, not Java's Vanilla
-/// fixed flag (false). Sorted required insertion is pomme, theme/*, vanilla;
-/// the unfixed theme lets vanilla insert after pomme but before the theme.
-/// Explicit repository mutations can still override this default ordering.
+/// Required packs at the bottom. Only the Pomme-only embedded pack is fixed, so
+/// it stays below vanilla; vanilla and the theme insert above it in catalog
+/// order (pomme, theme/*, vanilla), each at the top of the fixed block, which
+/// leaves pomme, vanilla, theme.
 fn builtin_enablement(fixed_position: bool) -> PackEnablementConfig {
     PackEnablementConfig {
         required: true,
@@ -294,7 +291,6 @@ fn computed_metadata(description: &str, compatibility: PackCompat) -> PackMetada
     PackMetadata {
         description: Component::text(description),
         compatibility,
-        requested_features: FeatureFlagSet::empty(),
         overlays: Vec::new(),
     }
 }
@@ -364,8 +360,8 @@ enum FormatReadError {
 }
 
 /// Read the installed version.json, never selected packs or protocol metadata.
-/// Missing (installs extracted before it was kept) and corrupt metadata are
-/// both explicit errors.
+/// Missing and corrupt metadata are both explicit errors, which leave the
+/// format unknown.
 fn read_installed_pack_format(
     path: &Path,
     expected_version: &str,
@@ -456,7 +452,7 @@ mod repository_source_tests {
             ThemeSpecification::Pomme { root: root.clone() },
             ThemeSpecification::Bedrock { root: root.clone() },
         ] {
-            let mount = theme.mount().unwrap().unwrap();
+            let mount = theme.mount().unwrap();
             MappedResourcesSupplier::new(
                 mount.root.to_owned(),
                 mount.namespace.to_owned(),
