@@ -839,7 +839,7 @@ mod tests {
     use pomme_protocol::version::{NATIVE, VERSIONS};
     use simdnbt::owned::{NbtCompound, NbtList};
 
-    use super::super::translate::{Translation, joinable};
+    use super::super::translate::{TranslationSession, joinable};
     use super::*;
     use crate::chat_component::ClickEvent;
     use crate::net::chat_security::LastSeenUpdate;
@@ -909,7 +909,7 @@ mod tests {
         if protocol == NATIVE.protocol {
             return frame.into_boxed_slice();
         }
-        Translation::for_protocol(protocol)
+        TranslationSession::for_protocol(protocol)
             .unwrap()
             .translate_game_frame(frame.into_boxed_slice())
             .unwrap_or_else(|| panic!("frame did not translate from protocol {protocol}"))
@@ -977,7 +977,7 @@ mod tests {
             let frames = if protocol == NATIVE.protocol {
                 vec![native]
             } else {
-                Translation::for_protocol(protocol)
+                TranslationSession::for_protocol(protocol)
                     .unwrap()
                     .translate_outbound_game_frame(native)
             };
@@ -1362,7 +1362,7 @@ mod tests {
         };
         let native = encode_outbound_message("old signed", 9, 3, Some(&[4; 256]), &update);
         for protocol in [763, 765, 766, 769] {
-            let frame = super::super::translate::Translation::for_protocol(protocol)
+            let frame = super::super::translate::TranslationSession::for_protocol(protocol)
                 .unwrap()
                 .translate_outbound_game_frame(native.clone())
                 .into_iter()
@@ -1415,7 +1415,7 @@ mod tests {
             let frames = if protocol == pomme_protocol::version::NATIVE.protocol {
                 vec![native.clone()]
             } else {
-                super::super::translate::Translation::for_protocol(protocol)
+                super::super::translate::TranslationSession::for_protocol(protocol)
                     .unwrap()
                     .translate_outbound_game_frame(native.clone())
             };
