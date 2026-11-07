@@ -14,7 +14,7 @@ use super::block::particle_appearance::BlockParticleAppearance;
 use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
-use crate::particles::types::ParticleOptions;
+use crate::particles::types::{ParticleOptions, SimpleParticleType};
 use crate::particles::{ParticleRef, TerrainParticle};
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
@@ -299,6 +299,7 @@ impl LevelRuntime {
         block_registry: &BlockRegistry,
         player_pos: DVec3,
         level: &mut LevelContext<'_>,
+        lava: &SimpleParticleType,
     ) {
         let random = level.get_random().clone();
         animate_tick_with_draw(
@@ -307,24 +308,27 @@ impl LevelRuntime {
             |radius| random.next_int(radius as usize) as i32,
             level,
             fastrand::Rng::new(),
+            lava,
         );
     }
 }
 
 /// Own the effect stream for this pass; all sampled callbacks borrow it.
-// TODO: the rest of `doAnimateTick`: the fluid's `animateTick` and drip
-// particles, the creative marker particle and the ambient particles. The drip
-// and ambient steps draw from the level random between samples. Coordinate
-// draws release their random borrow before each block callback.
+// TODO: the rest of `doAnimateTick`: water animation, drip particles, the
+// creative marker particle and the ambient particles. The drip and ambient
+// steps draw from the level random between samples. Coordinate draws release
+// their random borrow before each block/fluid callback.
 fn animate_tick_with_draw(
     block_registry: &BlockRegistry,
     player_pos: DVec3,
     next: impl FnMut(i32) -> i32,
     level: &mut LevelContext<'_>,
     mut random: fastrand::Rng,
+    lava: &SimpleParticleType,
 ) {
     sample_animation_blocks(player_pos, next, |pos| {
         block_registry.animate_tick(pos, level, &mut random);
+        super::fluid::animate_tick(pos, level, &mut random, lava);
     });
 }
 
