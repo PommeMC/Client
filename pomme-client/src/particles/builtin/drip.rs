@@ -45,6 +45,8 @@ pub struct DripHangParticle {
     falling_particle: SimpleParticleType,
     fluid_kind: FluidKind,
     cooling: bool,
+    gravity: f32,
+    is_glowing: bool,
 }
 
 impl DripHangParticle {
@@ -81,6 +83,8 @@ impl DripHangParticle {
             falling_particle,
             fluid_kind,
             cooling,
+            gravity: 0.06_f32 * 0.02_f32,
+            is_glowing: false,
         }
     }
 }
@@ -115,11 +119,13 @@ impl Particle for DripHangParticle {
             return;
         }
         self.lifetime -= 1;
-        self.velocity.y -= f64::from(0.06_f32 * 0.02_f32);
+        self.velocity.y -= f64::from(self.gravity);
         self.move_by(context, self.velocity);
         self.velocity *= 0.02_f64;
         self.velocity *= f64::from(0.98_f32);
-        if touches_source_fluid(context, self.position, self.fluid_kind) {
+        if self.fluid_kind != FluidKind::Empty
+            && touches_source_fluid(context, self.position, self.fluid_kind)
+        {
             self.remove();
         }
     }
@@ -218,7 +224,11 @@ impl Particle for DripHangParticle {
         self.has_physics = enabled;
     }
     fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
+        let mut light = world.get_light_coords(self.position);
+        if self.is_glowing {
+            light.block = 240;
+        }
+        light
     }
 }
 
@@ -300,6 +310,8 @@ pub struct FallAndLandParticle {
     sprite: AtlasRegion,
     land_particle: SimpleParticleType,
     fluid_kind: FluidKind,
+    gravity: f32,
+    is_glowing: bool,
 }
 
 impl FallAndLandParticle {
@@ -335,6 +347,8 @@ impl FallAndLandParticle {
             sprite,
             land_particle,
             fluid_kind,
+            gravity: 0.06_f32,
+            is_glowing: false,
         }
     }
 }
@@ -360,7 +374,7 @@ impl Particle for FallAndLandParticle {
             return;
         }
         self.lifetime -= 1;
-        self.velocity.y -= f64::from(0.06_f32);
+        self.velocity.y -= f64::from(self.gravity);
         self.move_by(context, self.velocity);
         if self.on_ground {
             self.remove();
@@ -368,7 +382,9 @@ impl Particle for FallAndLandParticle {
             return;
         }
         self.velocity *= f64::from(0.98_f32);
-        if touches_source_fluid(context, self.position, self.fluid_kind) {
+        if self.fluid_kind != FluidKind::Empty
+            && touches_source_fluid(context, self.position, self.fluid_kind)
+        {
             self.remove();
         }
     }
@@ -467,7 +483,11 @@ impl Particle for FallAndLandParticle {
         self.has_physics = enabled;
     }
     fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
+        let mut light = world.get_light_coords(self.position);
+        if self.is_glowing {
+            light.block = 240;
+        }
+        light
     }
 }
 
@@ -547,6 +567,8 @@ pub struct DripLandParticle {
     roll: f32,
     previous_roll: f32,
     sprite: AtlasRegion,
+    fluid_kind: FluidKind,
+    is_glowing: bool,
 }
 
 impl DripLandParticle {
@@ -574,6 +596,8 @@ impl DripLandParticle {
             roll: 0.0,
             previous_roll: 0.0,
             sprite,
+            fluid_kind: FluidKind::Lava,
+            is_glowing: false,
         }
     }
 }
@@ -602,7 +626,9 @@ impl Particle for DripLandParticle {
         self.velocity.y -= f64::from(0.06_f32);
         self.move_by(context, self.velocity);
         self.velocity *= f64::from(0.98_f32);
-        if touches_source_fluid(context, self.position, FluidKind::Lava) {
+        if self.fluid_kind != FluidKind::Empty
+            && touches_source_fluid(context, self.position, self.fluid_kind)
+        {
             self.remove();
         }
     }
@@ -701,7 +727,11 @@ impl Particle for DripLandParticle {
         self.has_physics = enabled;
     }
     fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
+        let mut light = world.get_light_coords(self.position);
+        if self.is_glowing {
+            light.block = 240;
+        }
+        light
     }
 }
 
@@ -996,6 +1026,153 @@ impl SpriteParticleRegistration<SimpleParticleType> for LavaLandParticleRegistra
         sprite_set: Rc<dyn SpriteSet>,
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
         Rc::new(LavaLandProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct ObsidianTearHangProvider {
+    sprites: Rc<dyn SpriteSet>,
+    falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ObsidianTearHangProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = DripHangParticle::new(
+            position,
+            sprite,
+            SimpleParticleType::new(Rc::clone(&self.falling_obsidian_tear)),
+            FluidKind::Empty,
+            [0.51171875, 0.03125, 0.890625],
+            false,
+        );
+        particle.is_glowing = true;
+        particle.gravity *= 0.01_f32;
+        particle.lifetime = 100;
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ObsidianTearHangParticleRegistration {
+    falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+}
+
+impl ObsidianTearHangParticleRegistration {
+    pub(in crate::particles) fn new(
+        falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+    ) -> Self {
+        Self {
+            falling_obsidian_tear,
+        }
+    }
+}
+
+impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearHangParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ObsidianTearHangProvider {
+            sprites: sprite_set,
+            falling_obsidian_tear: Rc::clone(&self.falling_obsidian_tear),
+        })
+    }
+}
+
+pub struct ObsidianTearFallProvider {
+    sprites: Rc<dyn SpriteSet>,
+    landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ObsidianTearFallProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = FallAndLandParticle::new(
+            position,
+            sprite,
+            SimpleParticleType::new(Rc::clone(&self.landing_obsidian_tear)),
+            FluidKind::Empty,
+            [0.51171875, 0.03125, 0.890625],
+        );
+        particle.is_glowing = true;
+        particle.gravity = 0.01_f32;
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ObsidianTearFallParticleRegistration {
+    landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+}
+
+impl ObsidianTearFallParticleRegistration {
+    pub(in crate::particles) fn new(
+        landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+    ) -> Self {
+        Self {
+            landing_obsidian_tear,
+        }
+    }
+}
+
+impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearFallParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ObsidianTearFallProvider {
+            sprites: sprite_set,
+            landing_obsidian_tear: Rc::clone(&self.landing_obsidian_tear),
+        })
+    }
+}
+
+pub struct ObsidianTearLandProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ObsidianTearLandProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = DripLandParticle::new(position, sprite);
+        particle.fluid_kind = FluidKind::Empty;
+        particle.is_glowing = true;
+        particle.lifetime =
+            (28.0_f64 / (f64::from(random.next_float()) * 0.8_f64 + 0.2_f64)) as u32;
+        particle.color = [0.51171875, 0.03125, 0.890625];
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ObsidianTearLandParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearLandParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ObsidianTearLandProvider {
             sprites: sprite_set,
         })
     }
