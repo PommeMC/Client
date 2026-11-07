@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 
 pub use block_registry::{Block, BlockData};
 pub(crate) use block_state_table::BlockStateTable;
+pub(crate) use blocks::tick_campfires;
 use glam::{DVec3, dvec3};
 use pomme_block::BlockState;
 pub(crate) use render_props::{FaceCover, MeshKind, RenderProps};
