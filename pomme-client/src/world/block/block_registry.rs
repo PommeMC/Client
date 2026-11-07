@@ -7,7 +7,7 @@ use azalea_block::BlockState;
 
 use super::blocks::{
     BlastFurnaceBlock, EndRodBlock, FurnaceBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
-    SmokerBlock, TorchBlock, WallTorchBlock,
+    RedstoneWireBlock, SmokerBlock, TorchBlock, WallTorchBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -87,6 +87,7 @@ impl BlockFactory {
                 block_data,
                 DustParticleOptions::redstone(Rc::clone(&types.dust)),
             )),
+            "redstone_wire" => Box::new(RedstoneWireBlock::new(block_data, Rc::clone(&types.dust))),
             "end_rod" => Box::new(EndRodBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.end_rod)),
