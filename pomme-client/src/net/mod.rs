@@ -179,6 +179,10 @@ pub enum NetworkEvent {
         x_rot: f32,
         relative_x: bool,
     },
+    ItemCooldown {
+        group: String,
+        duration: i32,
+    },
     PlayerHealth {
         health: f32,
         food: u32,

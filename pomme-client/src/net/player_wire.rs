@@ -39,6 +39,9 @@ pub(super) fn handle_raw_player_packet(
 /// The client event for a packet, if the client acts on it.
 fn event(packet: PlayerPacket) -> Option<NetworkEvent> {
     Some(match packet {
+        PlayerPacket::Cooldown { group, duration } => {
+            NetworkEvent::ItemCooldown { group, duration }
+        }
         PlayerPacket::Health {
             health,
             food,

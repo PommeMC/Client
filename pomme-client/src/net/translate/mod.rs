@@ -372,8 +372,6 @@
 //!   which is 1.21.4's layout rather than 26.2's (native sessions and the
 //!   versions with an item grammar encode it with pomme's grammar instead; see
 //!   `net::item_codec`)
-//! - inbound `cooldown` carries an item registry id, where 26.2 names a
-//!   cooldown group
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};

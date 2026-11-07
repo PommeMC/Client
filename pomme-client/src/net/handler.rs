@@ -759,6 +759,91 @@ mod tests {
         }
     }
 
+    fn assert_native_cooldown_event(duration: i32) {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut raw = native_frame("cooldown");
+        wire::write_utf(&mut raw, "example:shared_igniters");
+        wire::write_varint(&mut raw, duration as u32);
+        let (took, mut out_rx) = handle_raw_for_test(&raw, BlockStateTable::native(), &event_tx);
+        assert!(
+            took,
+            "native Identifier cooldown must be claimed by the raw player path"
+        );
+        assert!(matches!(event_rx.try_recv().unwrap(),
+            NetworkEvent::ItemCooldown { group, duration: ticks }
+                if group == "example:shared_igniters" && ticks == duration));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "exactly one event per cooldown"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "cooldown requires no serverbound reply"
+        );
+    }
+
+    #[test]
+    fn raw_native_cooldown_group_emits_event() {
+        assert_native_cooldown_event(100);
+    }
+
+    #[test]
+    fn raw_native_cooldown_negative_duration_emits_event() {
+        assert_native_cooldown_event(-1);
+    }
+
+    #[test]
+    fn raw_native_cooldown_zero_duration_emits_event() {
+        assert_native_cooldown_event(0);
+    }
+
+    #[test]
+    fn raw_native_cooldown_malformed_is_consumed_without_event() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut group_only = Vec::new();
+        wire::write_utf(&mut group_only, "minecraft:flint_and_steel");
+        let mut truncated_ticks = group_only.clone();
+        truncated_ticks.push(0x80);
+        for payload in [vec![5, b'a'], group_only, truncated_ticks] {
+            let mut raw = native_frame("cooldown");
+            raw.extend(payload);
+            let (took, mut out_rx) =
+                handle_raw_for_test(&raw, BlockStateTable::native(), &event_tx);
+            assert!(
+                took,
+                "malformed cooldown must not fall through to the numeric Azalea decoder"
+            );
+            assert!(event_rx.try_recv().is_err());
+            assert!(out_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn raw_native_cooldown_events_keep_order_and_opaque_groups() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for (group, duration) in [
+            ("minecraft:chain", 3),
+            ("example:grass", -1),
+            ("minecraft:chain", 0),
+        ] {
+            let mut raw = native_frame("cooldown");
+            wire::write_utf(&mut raw, group);
+            wire::write_varint(&mut raw, duration as u32);
+            assert!(handle_raw_for_test(&raw, BlockStateTable::native(), &tx).0);
+        }
+        for (expected_group, expected_duration) in [
+            ("minecraft:chain", 3),
+            ("example:grass", -1),
+            ("minecraft:chain", 0),
+        ] {
+            assert!(
+                matches!(rx.try_recv().unwrap(), NetworkEvent::ItemCooldown { group, duration }
+                if group == expected_group && duration == expected_duration)
+            );
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
     fn explosion_prefix(knockback: Option<glam::DVec3>) -> Vec<u8> {
         let mut raw = Vec::new();
         wire::write_varint(&mut raw, explode_packet_id());
