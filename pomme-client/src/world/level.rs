@@ -8,9 +8,9 @@ use azalea_block::BlockState;
 use azalea_protocol::common::client_information::ParticleStatus;
 use glam::DVec3;
 
-use super::block::BlockStateTable;
 use super::block::block_registry::BlockRegistry;
 use super::block::particle_appearance::BlockParticleAppearance;
+use super::block::{BlockStateTable, FluidKind, model};
 use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
@@ -18,7 +18,7 @@ use crate::particles::types::{ParticleOptions, SimpleParticleType};
 use crate::particles::{ParticleRef, TerrainParticle};
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
-use crate::physics::collision::{CollisionWorld, resolve_collision};
+use crate::physics::collision::{CollisionWorld, resolve_collision, state_boxes};
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::renderer::chunk::block_lighter::{WorldLight, light_coords};
@@ -70,6 +70,38 @@ impl<'a> LevelContext<'a> {
     /// Missing chunks and positions outside the dimension height read as air.
     pub fn get_block_state(&self, pos: BlockPos) -> BlockState {
         self.chunks.get_block_state(pos.x, pos.y, pos.z)
+    }
+
+    pub(crate) fn get_fluid_height(&self, pos: BlockPos) -> f64 {
+        let table = self.block_state_table();
+        let fluid = table.block_state_data(self.get_block_state(pos)).fluid();
+        if fluid.kind == FluidKind::Empty {
+            return 0.0;
+        }
+        let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
+        if table
+            .block_state_data(self.get_block_state(above))
+            .fluid()
+            .kind
+            == fluid.kind
+        {
+            1.0
+        } else {
+            f64::from(f32::from(fluid.amount) / 9.0_f32)
+        }
+    }
+
+    pub(crate) fn get_collision_shape(&self, pos: BlockPos) -> Vec<Aabb> {
+        let mut boxes = Vec::new();
+        state_boxes(
+            self.block_state_table(),
+            self.get_block_state(pos),
+            pos,
+            &CollisionContext::EMPTY,
+            DVec3::ZERO,
+            &mut boxes,
+        );
+        boxes
     }
 
     /// A grid of terrain particles across each box of the block's outline.
@@ -301,6 +333,7 @@ impl LevelRuntime {
         level: &mut LevelContext<'_>,
         lava: &SimpleParticleType,
         underwater: &SimpleParticleType,
+        dripping_water: &SimpleParticleType,
     ) {
         let random = level.get_random().clone();
         animate_tick_with_draw(
@@ -311,13 +344,88 @@ impl LevelRuntime {
             fastrand::Rng::new(),
             lava,
             underwater,
+            dripping_water,
         );
+    }
+
+    fn try_spawn_drip_particles(
+        block_registry: &BlockRegistry,
+        level: &mut LevelContext<'_>,
+        pos: BlockPos,
+        dripping_water: &SimpleParticleType,
+        has_watertight_bottom: bool,
+    ) {
+        let table = level.block_state_table();
+        let state = table.block_state_data(level.get_block_state(pos));
+        if state.fluid().kind != FluidKind::Empty {
+            return;
+        }
+        let (min, max) = Self::shape_bounds(level, pos);
+        let origin = DVec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        if max.y < 1.0 {
+            if has_watertight_bottom {
+                Self::spawn_fluid_particle(
+                    level,
+                    dripping_water,
+                    origin,
+                    origin + DVec3::ONE,
+                    origin.y + 1.0 - 0.05,
+                );
+            }
+        } else if !block_registry
+            .tags()
+            .contains("minecraft:impermeable", state.id())
+        {
+            if min.y > 0.0 {
+                Self::spawn_fluid_particle(
+                    level,
+                    dripping_water,
+                    origin + min,
+                    origin + max,
+                    origin.y + min.y - 0.05,
+                );
+            } else {
+                let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+                let below_state = table.block_state_data(level.get_block_state(below));
+                if Self::shape_bounds(level, below).1.y < 1.0
+                    && below_state.fluid().kind == FluidKind::Empty
+                {
+                    Self::spawn_fluid_particle(
+                        level,
+                        dripping_water,
+                        origin + min,
+                        origin + max,
+                        origin.y - 0.05,
+                    );
+                }
+            }
+        }
+    }
+
+    fn shape_bounds(level: &LevelContext<'_>, pos: BlockPos) -> (DVec3, DVec3) {
+        let origin = DVec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        level.get_collision_shape(pos).into_iter().fold(
+            (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+            |(min, max), bounds| (min.min(bounds.min - origin), max.max(bounds.max - origin)),
+        )
+    }
+
+    fn spawn_fluid_particle(
+        level: &mut LevelContext<'_>,
+        dripping_water: &SimpleParticleType,
+        min: DVec3,
+        max: DVec3,
+        y: f64,
+    ) {
+        let x = min.x + level.get_random().next_double() * (max.x - min.x);
+        let z = min.z + level.get_random().next_double() * (max.z - min.z);
+        level.add_particle(dripping_water, DVec3::new(x, y, z), DVec3::ZERO);
     }
 }
 
 /// Own the effect stream for this pass; all sampled callbacks borrow it.
-// TODO: the rest of `doAnimateTick`: drip particles, the
-// creative marker particle and the ambient particles. The drip and ambient
+// TODO: lava drips await their complete provider chain; creative marker and
+// environmental ambient particles remain absent. The drip and ambient
 // steps draw from the level random between samples. Coordinate draws release
 // their random borrow before each block/fluid callback.
 fn animate_tick_with_draw(
@@ -328,10 +436,29 @@ fn animate_tick_with_draw(
     mut random: fastrand::Rng,
     lava: &SimpleParticleType,
     underwater: &SimpleParticleType,
+    dripping_water: &SimpleParticleType,
 ) {
     sample_animation_blocks(player_pos, next, |pos| {
+        let table = level.block_state_table();
+        let state = table.block_state_data(level.get_block_state(pos));
         block_registry.animate_tick(pos, level, &mut random);
-        super::fluid::animate_tick(pos, level, &mut random, lava, underwater);
+        let fluid = table.block_state_data(level.get_block_state(pos)).fluid();
+        super::fluid::animate_tick(pos, fluid, level, &mut random, lava, underwater);
+        if let Some(drip) = super::fluid::get_drip_particle(fluid, dripping_water)
+            && level.get_random().next_int(10) == 0
+        {
+            // COMPAT: absent sturdy metadata is conservatively not watertight.
+            let has_watertight_bottom = state
+                .is_full_face_sturdy(model::Direction::Down)
+                .unwrap_or(false);
+            LevelRuntime::try_spawn_drip_particles(
+                block_registry,
+                level,
+                BlockPos::new(pos.x, pos.y - 1, pos.z),
+                drip,
+                has_watertight_bottom,
+            );
+        }
     });
 }
 

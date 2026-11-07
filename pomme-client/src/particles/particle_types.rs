@@ -22,6 +22,9 @@ pub(crate) struct ParticleTypes {
     pub(crate) campfire_signal_smoke: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) lava: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) underwater: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dripping_water: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_water: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) splash: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -74,6 +77,15 @@ impl ParticleTypes {
         let underwater = registry
             .register(resource_id!("minecraft:underwater"), false)
             .map_err(registration_error)?;
+        let dripping_water = registry
+            .register(resource_id!("minecraft:dripping_water"), false)
+            .map_err(registration_error)?;
+        let falling_water = registry
+            .register(resource_id!("minecraft:falling_water"), false)
+            .map_err(registration_error)?;
+        let splash = registry
+            .register(resource_id!("minecraft:splash"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -90,6 +102,9 @@ impl ParticleTypes {
             campfire_signal_smoke,
             lava,
             underwater,
+            dripping_water,
+            falling_water,
+            splash,
         })
     }
 }

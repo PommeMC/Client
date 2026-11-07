@@ -6,6 +6,7 @@ use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
 mod campfire_smoke;
+mod drip;
 mod dust;
 mod end_rod;
 mod flame;
@@ -13,8 +14,10 @@ mod lava;
 mod smoke;
 mod suspended;
 mod terrain;
+mod water_drop;
 
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
+use self::drip::{WaterFallParticleRegistration, WaterHangParticleRegistration};
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
@@ -27,6 +30,7 @@ pub use self::smoke::{SmokeParticle, SmokeProvider};
 use self::suspended::UnderwaterParticleRegistration;
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
+use self::water_drop::SplashParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -69,4 +73,13 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.underwater),
         &UnderwaterParticleRegistration,
     );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_water),
+        &WaterHangParticleRegistration::new(Rc::clone(&types.falling_water)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_water),
+        &WaterFallParticleRegistration::new(Rc::clone(&types.splash)),
+    );
+    resources.register_sprite_provider(Rc::clone(&types.splash), &SplashParticleRegistration);
 }
