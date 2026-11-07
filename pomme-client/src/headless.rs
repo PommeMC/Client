@@ -19,6 +19,7 @@ use crate::chat_component::Component;
 use crate::dirs::DataDirs;
 use crate::net::NetworkEvent;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
+use crate::particles::ParticleTypes;
 use crate::position::ChunkPos;
 use crate::renderer::RenderTimings;
 use crate::renderer::chunk::mesh_source::CpuMeshAssets;
@@ -133,6 +134,13 @@ pub fn run(
             return 1;
         }
     };
+    let particle_types = match ParticleTypes::new() {
+        Ok(types) => types,
+        Err(error) => {
+            tracing::error!("Failed to initialize particle types: {error}");
+            return 1;
+        }
+    };
     let chat_options = ChatOptions::default();
     let skin_options = SkinOptions::default();
     let connection = spawn_connection(
@@ -154,7 +162,7 @@ pub fn run(
         world.is_some(),
         chat_options,
         skin_options,
-        Rc::new(BlockDefinitions::new()),
+        Rc::new(BlockDefinitions::new(&particle_types)),
         crate::version::selected_protocol(),
         None,
     );

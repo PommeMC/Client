@@ -10,6 +10,7 @@ pub(crate) struct ParticleTypes {
     registry: MappedParticleRegistry,
     pub(crate) smoke: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) flame: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) soul_fire_flame: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) end_rod: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) block: Rc<ParticleType<BlockParticleOption>>,
 }
@@ -31,6 +32,9 @@ impl ParticleTypes {
         let flame = registry
             .register(resource_id!("minecraft:flame"), false)
             .map_err(registration_error)?;
+        let soul_fire_flame = registry
+            .register(resource_id!("minecraft:soul_fire_flame"), false)
+            .map_err(registration_error)?;
         let end_rod = registry
             .register(resource_id!("minecraft:end_rod"), false)
             .map_err(registration_error)?;
@@ -42,6 +46,7 @@ impl ParticleTypes {
             registry,
             smoke,
             flame,
+            soul_fire_flame,
             end_rod,
             block,
         })

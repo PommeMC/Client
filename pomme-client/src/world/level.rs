@@ -14,7 +14,7 @@ use super::block::particle_appearance::BlockParticleAppearance;
 use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
-use crate::particles::types::{ParticleOptions, SimpleParticleType};
+use crate::particles::types::ParticleOptions;
 use crate::particles::{ParticleRef, TerrainParticle};
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};
@@ -299,8 +299,6 @@ impl LevelRuntime {
         block_registry: &BlockRegistry,
         player_pos: DVec3,
         level: &mut LevelContext<'_>,
-        smoke: &SimpleParticleType,
-        flame: &SimpleParticleType,
     ) {
         let random = level.get_random().clone();
         animate_tick_with_draw(
@@ -309,8 +307,6 @@ impl LevelRuntime {
             |radius| random.next_int(radius as usize) as i32,
             level,
             fastrand::Rng::new(),
-            smoke,
-            flame,
         );
     }
 }
@@ -326,11 +322,9 @@ fn animate_tick_with_draw(
     next: impl FnMut(i32) -> i32,
     level: &mut LevelContext<'_>,
     mut random: fastrand::Rng,
-    smoke: &SimpleParticleType,
-    flame: &SimpleParticleType,
 ) {
     sample_animation_blocks(player_pos, next, |pos| {
-        block_registry.animate_tick(pos, level, &mut random, smoke, flame);
+        block_registry.animate_tick(pos, level, &mut random);
     });
 }
 
