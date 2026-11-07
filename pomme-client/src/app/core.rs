@@ -4043,6 +4043,21 @@ impl AppCore {
             ));
     }
 
+    pub(crate) fn animate_level(
+        &self,
+        runtime: &mut crate::world::level::LevelRuntime,
+        block_registry: &crate::world::block::block_registry::BlockRegistry,
+        player_pos: glam::DVec3,
+        level: &mut LevelContext<'_>,
+    ) {
+        runtime.animate_tick(
+            block_registry,
+            player_pos,
+            level,
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.lava)),
+        );
+    }
+
     pub(crate) fn tick_campfires(&self, level: &mut LevelContext<'_>) {
         crate::world::block::tick_campfires(
             level,
