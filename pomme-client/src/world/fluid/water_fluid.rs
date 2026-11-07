@@ -5,13 +5,17 @@ use crate::position::BlockPos;
 use crate::world::block::Fluid;
 use crate::world::level::LevelContext;
 
-// COMPAT: Only WaterFluid's client ambient callback is implemented here.
-// Drips, source conversion, flow/spread/replacement, block destruction and
+// COMPAT: Only WaterFluid's client ambient callback and drip selection live
+// here. Source conversion, flow/spread/replacement, block destruction and
 // extinguishing contact semantics are outside this checkpoint. Entity travel/
 // buoyancy and rendering remain with their existing implementations.
 pub(super) struct WaterFluid;
 
 impl WaterFluid {
+    pub(super) fn get_drip_particle(dripping_water: &SimpleParticleType) -> &SimpleParticleType {
+        dripping_water
+    }
+
     pub(super) fn animate_tick(
         pos: BlockPos,
         fluid: Fluid,
