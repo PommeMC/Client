@@ -162,26 +162,36 @@ struct FontAtlas {
     glyphs: HashMap<char, GlyphEntry>,
 }
 
-fn build_font_atlas(resources: &dyn ResourceManager) -> (FontAtlas, AtlasImage) {
-    let bytes = |id: &crate::resources::ResourceId| {
+fn build_font_atlas(resources: &dyn ResourceManager) -> Result<(FontAtlas, AtlasImage), String> {
+    let load_font = |id: &ResourceId| {
         let resource = resources
             .get_resource(id)
-            .expect("failed to resolve UI font")
-            .expect("missing UI font");
+            .map_err(|error| format!("failed to resolve UI font {id}: {error}"))?
+            .ok_or_else(|| format!("missing UI font {id}"))?;
+        let content = resource.content();
         let mut bytes = Vec::new();
-        resource
-            .content()
+        content
             .open()
-            .expect("failed to open UI font")
+            .map_err(|error| error.to_string())?
             .read_to_end(&mut bytes)
-            .expect("failed to read UI font");
-        bytes
+            .map_err(|source| {
+                ResourceError::Io {
+                    operation: "read UI font",
+                    id: Some(id.clone()),
+                    origin: content.origin().clone(),
+                    source,
+                }
+                .to_string()
+            })?;
+        fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|error| {
+            format!(
+                "failed to parse UI font {id} from {:?}: {error}",
+                content.origin()
+            )
+        })
     };
-    let font = fontdue::Font::from_bytes(bytes(&POMME_UI_FONT), fontdue::FontSettings::default())
-        .expect("failed to parse Montserrat font");
-    let icon_font =
-        fontdue::Font::from_bytes(bytes(&POMME_ICONS_FONT), fontdue::FontSettings::default())
-            .expect("failed to parse Font Awesome font");
+    let font = load_font(&POMME_UI_FONT)?;
+    let icon_font = load_font(&POMME_ICONS_FONT)?;
 
     let mut glyphs = HashMap::new();
     let mut pixels = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE * 4) as usize];
@@ -259,14 +269,14 @@ fn build_font_atlas(resources: &dyn ResourceManager) -> (FontAtlas, AtlasImage) 
         cursor_x += metrics.width as u32 + 1;
     }
 
-    (
+    Ok((
         FontAtlas { glyphs },
         AtlasImage {
             pixels,
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
         },
-    )
+    ))
 }
 
 /// Extract an 8x8 RGBA player face (front face at (8,8) with the hat layer at
@@ -384,9 +394,9 @@ impl MenuGeometry {
         font_sources: FontSources<'_>,
         pomme_logo: Option<&image::RgbaImage>,
         font_layer_limit: u32,
-    ) -> (Self, MenuAtlases) {
+    ) -> Result<(Self, MenuAtlases), String> {
         let resources = font_sources.resources;
-        let (atlas, font) = build_font_atlas(resources);
+        let (atlas, font) = build_font_atlas(resources)?;
         let (sprite_atlas, sprites) = build_sprite_atlas(resources, pomme_logo);
         let (mc_glyph_map, glyphs) = match GlyphMap::load(font_sources, font_layer_limit) {
             Ok((map, pixels)) => (Some(map), Some(pixels)),
@@ -419,7 +429,7 @@ impl MenuGeometry {
             glyphs,
             camera_overlay,
         };
-        (geometry, atlases)
+        Ok((geometry, atlases))
     }
 
     /// Builds the vertices and draw batches for `elements`.
@@ -1571,7 +1581,7 @@ impl MenuOverlayPipeline {
             }
         };
         let (geometry, atlases) =
-            MenuGeometry::new(font_sources, pomme_logo.as_ref(), font_layer_limit);
+            MenuGeometry::new(font_sources, pomme_logo.as_ref(), font_layer_limit)?;
 
         let globals_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -1895,15 +1905,18 @@ impl MenuOverlayPipeline {
         );
     }
 
+    /// Font preparation errors leave the previous UI atlases and bindings
+    /// intact.
+    ///
     /// Missing content clears the logo; I/O/decode errors retain the last good
     /// pixels and atlas without rolling back the already-active resource view.
     pub fn reload_resource_images(
         &mut self,
         resources: &dyn ResourceManager,
         device: &rhi::backend::Device,
-    ) {
+    ) -> Result<(), String> {
+        let (atlas, font) = build_font_atlas(resources)?;
         device.wait_idle();
-        let (atlas, font) = build_font_atlas(resources);
         let font_texture = util::create_sampled_texture(
             device,
             "menu_font_atlas",
@@ -1941,12 +1954,13 @@ impl MenuOverlayPipeline {
             Ok(logo) => logo,
             Err(error) => {
                 tracing::warn!(%error, id = %POMME_ICON, "Failed to load Pomme logo; retaining the last good image and atlas");
-                return;
+                return Ok(());
             }
         };
         let (atlas, sprites) = build_sprite_atlas(resources, pomme_logo.as_ref());
         self.publish_sprite_atlas(device, atlas, sprites);
         self.pomme_logo = pomme_logo;
+        Ok(())
     }
 
     fn publish_sprite_atlas(

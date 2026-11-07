@@ -2093,13 +2093,16 @@ impl AppCore {
         !ids.is_empty()
     }
 
-    fn register_server_resource_pack(
+    fn activate_server_resource_pack(
         &mut self,
         uuid: uuid::Uuid,
         hash: &str,
         path: std::path::PathBuf,
-    ) -> PackId {
-        self.unregister_server_resource_packs(Some(uuid));
+    ) -> std::io::Result<()> {
+        let previous = self
+            .server_resource_ids
+            .get(&uuid)
+            .and_then(|id| self.registered_resources.take_registration(id));
         let id = self.registered_resources.register(
             PackLocationInfo {
                 id: uuid.to_string(),
@@ -2114,8 +2117,26 @@ impl AppCore {
                 fixed_position: false,
             },
         );
-        self.server_resource_ids.insert(uuid, id.clone());
-        id
+        let previous_id = self.server_resource_ids.insert(uuid, id.clone());
+        if let Err(error) = self.activate_resource_selection(Some((id.clone(), true))) {
+            self.registered_resources.unregister(&id);
+            if let Some(previous) = previous {
+                self.registered_resources.restore_registration(previous);
+            }
+            if self.server_resource_ids.get(&uuid) == Some(&id) {
+                match previous_id {
+                    Some(previous_id) => {
+                        self.server_resource_ids.insert(uuid, previous_id);
+                    }
+                    None => {
+                        self.server_resource_ids.remove(&uuid);
+                    }
+                }
+            }
+            return Err(error);
+        }
+        // The candidate is active now; consumer refresh errors must retain it.
+        Ok(())
     }
 
     pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
@@ -3694,14 +3715,15 @@ impl AppCore {
                     s_resource_pack::Action::FailedDownload
                 }
                 Ok(Ok(path)) => {
-                    let id = self.register_server_resource_pack(pending.id, &pending.hash, path);
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
-                    match self
-                        .activate_resource_selection(Some((id, true)))
-                        .and_then(|()| self.reload_live_resource_assets(game, renderer))
-                    {
+                    let reload =
+                        match self.activate_server_resource_pack(pending.id, &pending.hash, path) {
+                            Ok(()) => self.reload_live_resource_assets(game, renderer),
+                            Err(error) => Err(error),
+                        };
+                    match reload {
                         Ok(()) => {
                             tracing::info!("Resource pack {} loaded successfully", pending.id);
                             s_resource_pack::Action::SuccessfullyLoaded

@@ -1786,7 +1786,7 @@ impl Renderer {
         self.entity_renderer
             .reload_armor_assets(&self.ctx.device, resources);
 
-        self.reload_fixed_assets(resources);
+        self.reload_fixed_assets(resources)?;
 
         self.reload_fonts(font_sources);
 
@@ -1806,7 +1806,7 @@ impl Renderer {
     }
 
     /// The caller has made the device idle and retired atlas-dependent draws.
-    fn reload_fixed_assets(&mut self, resources: &dyn ResourceManager) {
+    fn reload_fixed_assets(&mut self, resources: &dyn ResourceManager) -> std::io::Result<()> {
         let device = &self.ctx.device;
         let targets = self.swapchain.targets();
         self.sky_pipeline.destroy(device);
@@ -1836,7 +1836,9 @@ impl Renderer {
             device,
             pipelines::panorama::resolve_panorama_faces(resources),
         );
-        self.menu_pipeline.reload_resource_images(resources, device);
+        self.menu_pipeline
+            .reload_resource_images(resources, device)
+            .map_err(std::io::Error::other)
     }
 
     /// Vanilla `FontManager.updateOptions`: only the font sets change.
