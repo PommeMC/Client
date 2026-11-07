@@ -74,7 +74,7 @@ pub fn connect_args(core: &AppCore, transport: Transport, username: String) -> C
         uuid: core.user.uuid,
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
-        chat_options: core.menu.chat_options,
+        chat_options: core.menu.options.chat_options,
         skin_options: core.menu.skin_options(),
     }
 }
@@ -139,9 +139,9 @@ pub fn update_menu(
 
     core.sync_display_mode(&gfx.window);
 
-    gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer.set_vsync(core.menu.options.vsync);
     gfx.renderer
-        .set_menu_blur_radius(core.menu.menu_background_blurriness);
+        .set_menu_blur_radius(core.menu.options.menu_background_blurriness);
 
     if core.menu.rescan_packs {
         core.menu.rescan_packs = false;

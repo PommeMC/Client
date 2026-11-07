@@ -1161,7 +1161,7 @@ impl AppCore {
             &mut input.key_bindings,
         );
 
-        let display_mode = menu.display_mode;
+        let display_mode = menu.options.display_mode;
 
         let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
@@ -1266,7 +1266,9 @@ impl AppCore {
     }
 
     pub fn sync_display_mode(&mut self, window: &Window) {
-        let wanted = self.display_mode_override.unwrap_or(self.menu.display_mode);
+        let wanted = self
+            .display_mode_override
+            .unwrap_or(self.menu.options.display_mode);
         if wanted != self.display_mode {
             self.display_mode = wanted;
             self.apply_display_mode(window);
@@ -1329,7 +1331,7 @@ impl AppCore {
 
     /// The chunk radius to ask a server for, from the video settings.
     pub const fn view_distance(&self) -> u8 {
-        self.menu.render_distance as u8
+        self.menu.options.render_distance as u8
     }
 
     /// Every return from a world or server, before the title screen shows.
@@ -1966,7 +1968,7 @@ impl AppCore {
                 }
                 NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
                 NetworkEvent::DimensionInfo(dim) => {
-                    game.enter_dimension(dim, self.menu.render_distance, &*renderer);
+                    game.enter_dimension(dim, self.menu.options.render_distance, &*renderer);
                     renderer.clear_chunk_meshes();
                     renderer.reset_distant();
                 }
@@ -3457,7 +3459,7 @@ impl AppCore {
         game.last_update_phases.visibility_ms = ms(t_vis);
 
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(self.menu.chunk_detail);
+        game.rescan_mesh_jobs(self.menu.options.chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
@@ -3615,7 +3617,7 @@ impl AppCore {
         }
 
         // Vanilla ticks the camera FOV interpolation even while dead.
-        renderer.set_base_fov(self.menu.fov as f32);
+        renderer.set_base_fov(self.menu.options.fov as f32);
         let fov_effect_scale = self.menu.fov_effect();
         renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
         // TODO: lava camera fluid (no eyes_in_lava).
