@@ -14,6 +14,7 @@ mod terrain;
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
+use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
@@ -37,4 +38,8 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(Rc::clone(&types.end_rod), &EndRodParticleRegistration);
     resources.register(Rc::clone(&types.block), Rc::new(TerrainProvider));
+    resources.register_sprite_provider(
+        Rc::clone(&types.small_flame),
+        &SmallFlameParticleRegistration,
+    );
 }
