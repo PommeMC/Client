@@ -2585,9 +2585,7 @@ impl Renderer {
 
         let frame_start = std::time::Instant::now();
         if let RenderMode::World {
-            nameplates,
-            signs,
-            ..
+            nameplates, signs, ..
         } = &mode
         {
             let mut text = WorldTextVertices::default();
