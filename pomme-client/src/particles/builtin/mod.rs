@@ -5,11 +5,13 @@ use std::rc::Rc;
 use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
+mod dust;
 mod end_rod;
 mod flame;
 mod smoke;
 mod terrain;
 
+use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
@@ -22,6 +24,7 @@ pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
     resources: &mut MappedParticleResources,
 ) {
+    resources.register_sprite_provider(Rc::clone(&types.dust), &DustParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.smoke), &SmokeParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.flame), &FlameParticleRegistration);
     resources.register_sprite_provider(
