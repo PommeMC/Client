@@ -70,6 +70,7 @@ use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::resources::ResourceManager;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{
     BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage,
@@ -381,6 +382,7 @@ impl Renderer {
     /// and atlas images on another thread; [`Self::finish`] builds the rest.
     pub fn begin(
         window: &Window,
+        resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
         cache_dir: &Path,
         vsync: bool,
@@ -414,7 +416,8 @@ impl Renderer {
             })
         };
 
-        let screen = boot::BootScreen::new(window, font_sources, Some(bedrock_ui_dir), vsync)?;
+        let screen =
+            boot::BootScreen::new(window, resources, font_sources, Some(bedrock_ui_dir), vsync)?;
         let mut boot = RendererBoot {
             screen,
             loaded,
@@ -1905,6 +1908,22 @@ impl Renderer {
             return;
         }
         self.menu_pipeline.reload_sprite_atlas(
+            &self.ctx.device,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            Some(bedrock_ui_dir),
+        );
+    }
+
+    /// Refreshes the menu's resource images after successful view activation.
+    /// Activation sites with a live renderer must call this explicitly.
+    pub fn reload_resource_images(
+        &mut self,
+        resources: &dyn ResourceManager,
+        bedrock_ui_dir: &Path,
+    ) {
+        self.menu_pipeline.reload_resource_images(
+            resources,
             &self.ctx.device,
             &self.jar_assets_dir,
             &self.asset_index,

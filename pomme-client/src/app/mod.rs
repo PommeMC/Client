@@ -678,6 +678,7 @@ impl ApplicationHandler for App {
 
                 let loading = match Renderer::begin(
                     &window,
+                    self.core.resources(),
                     self.core.font_sources(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
@@ -716,13 +717,12 @@ impl ApplicationHandler for App {
         if let Some(install) = &mut self.install {
             match event {
                 WindowEvent::RedrawRequested => {
-                    let step = install.frame(&self.core);
+                    let step = install.frame(&mut self.core);
                     if matches!(step, install::Step::Relaunched) {
                         event_loop.exit();
                     }
                     if let install::Step::Done(window) = step {
                         self.install = None;
-                        self.core.reload_installed_assets();
                         self.installed_window = Some(window);
                         // In the background there's no surface to build the
                         // renderer on; the real `resumed` builds it.
