@@ -2635,9 +2635,7 @@ impl Renderer {
 
         let frame_start = std::time::Instant::now();
         if let RenderMode::World {
-            nameplates,
-            signs,
-            ..
+            nameplates, signs, ..
         } = &mode
         {
             let camera = (self.camera_render_position() - self.camera.anchor()).as_vec3();
