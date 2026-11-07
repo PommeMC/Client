@@ -368,6 +368,7 @@ mod pack_repository_tests {
 
 #[cfg(test)]
 mod catalog_tests {
+    use std::cell::RefCell;
     use std::io;
     use std::rc::Rc;
 
@@ -383,6 +384,14 @@ mod catalog_tests {
     impl RepositorySource for Packs {
         fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
             Ok(self.0.clone())
+        }
+    }
+
+    struct Shared(Rc<RefCell<Packs>>);
+
+    impl RepositorySource for Shared {
+        fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
+            self.0.borrow_mut().load_packs()
         }
     }
 
@@ -456,17 +465,25 @@ mod catalog_tests {
         assert_eq!(titles(&repository), ["pomme"]);
     }
 
-    /// The built-in order: the fixed embedded pack stays lowest, and the
-    /// unfixed required packs insert above it in catalog order.
-    #[test]
-    fn required_packs_insert_at_their_edge_in_catalog_order() {
-        let mut repository = PackRepository::new(vec![Box::new(Packs(vec![
+    fn builtin(theme: &str) -> Packs {
+        Packs(vec![
             pack("vanilla", "vanilla", true, PackPosition::Bottom, false),
-            pack("theme/bedrock", "theme", true, PackPosition::Bottom, false),
+            pack(theme, theme, true, PackPosition::Top, false),
             pack("pomme", "pomme", true, PackPosition::Bottom, true),
             pack("file/x", "user", false, PackPosition::Top, false),
-        ]))]);
+        ])
+    }
+
+    /// The built-in order, and the same order once a reload swaps the theme for
+    /// a pack the enabled list hasn't seen.
+    #[test]
+    fn required_packs_insert_at_their_edge() {
+        let source = Rc::new(RefCell::new(builtin("theme/pomme")));
+        let mut repository = PackRepository::new(vec![Box::new(Shared(source.clone()))]);
         repository.reload();
-        assert_eq!(titles(&repository), ["pomme", "vanilla", "theme"]);
+        assert_eq!(titles(&repository), ["pomme", "vanilla", "theme/pomme"]);
+        *source.borrow_mut() = builtin("theme/bedrock");
+        repository.reload();
+        assert_eq!(titles(&repository), ["pomme", "vanilla", "theme/bedrock"]);
     }
 }

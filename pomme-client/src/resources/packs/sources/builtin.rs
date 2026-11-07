@@ -173,7 +173,7 @@ impl RepositorySource for BuiltinRepositorySource {
             builtin_location("pomme", Component::text("Pomme embedded assets")),
             // Embedded resources ship with this client, not an external format.
             computed_metadata("Pomme embedded assets", PackCompat::Compatible),
-            builtin_enablement(true),
+            required(PackPosition::Bottom, true),
             Rc::new(EmbeddedResourcesSupplier::new()),
         )];
         if let Some(installation) = &state.installation {
@@ -214,8 +214,8 @@ impl RepositorySource for BuiltinRepositorySource {
                     installation.id.clone(),
                     location,
                     metadata,
-                    // Vanilla's `VANILLA_SELECTION_CONFIG`: required, bottom, not fixed.
-                    builtin_enablement(false),
+                    // `ClientPackSource.VANILLA_SELECTION_CONFIG`.
+                    required(PackPosition::Bottom, false),
                     resources,
                 ))
             };
@@ -262,7 +262,7 @@ fn load_theme(theme: &ThemeSpecification, id: &PackId) -> io::Result<Option<Pack
         id.clone(),
         builtin_location(mount.id, Component::text(mount.name)),
         computed_metadata(mount.name, PackCompat::Unknown),
-        builtin_enablement(false),
+        required(PackPosition::Top, false),
         Rc::new(resources),
     )))
 }
@@ -275,14 +275,13 @@ fn builtin_location(id: &str, title: Component) -> PackLocationInfo {
     }
 }
 
-/// Required packs at the bottom. Only the Pomme-only embedded pack is fixed, so
-/// it stays below vanilla; vanilla and the theme insert above it in catalog
-/// order (pomme, theme/*, vanilla), each at the top of the fixed block, which
-/// leaves pomme, vanilla, theme.
-fn builtin_enablement(fixed_position: bool) -> PackEnablementConfig {
+/// The Pomme-only embedded pack is fixed at the bottom, below vanilla, which
+/// inserts just above it. The theme goes in at the top, so it lands above
+/// vanilla however the enabled list got there, including after a theme switch.
+fn required(default_position: PackPosition, fixed_position: bool) -> PackEnablementConfig {
     PackEnablementConfig {
         required: true,
-        default_position: PackPosition::Bottom,
+        default_position,
         fixed_position,
     }
 }

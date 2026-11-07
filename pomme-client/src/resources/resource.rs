@@ -1,21 +1,18 @@
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::io::Read;
 use std::rc::Rc;
 use std::{fmt, io};
 
 use super::pack_resources::{IoSupplier, METADATA_EXTENSION};
-use super::packs::PackId;
 
 /// Owned byte stream; dropping it releases its backing state.
 pub(crate) type ReadStream = Box<dyn Read + 'static>;
 
-/// Logical pack provenance and diagnostic display metadata, not source
-/// identity. Compare pack_id for identity; names can change and layers can
-/// share a pack. Metadata carries its own origin, which may belong to a
-/// different pack.
+/// The pack a resource came from, by ID, as vanilla's `Resource.sourcePackId`.
+/// Metadata carries its own origin, which may belong to a different pack.
 #[derive(Clone, Debug)]
 pub(crate) struct ResourceOrigin {
-    pub(super) pack_id: PackId,
     pub(super) name: String,
 }
 
@@ -82,12 +79,29 @@ impl ResourceId {
         &self.path
     }
 
+    /// The path is `directory` or lies inside it. Nothing lies inside the
+    /// empty directory, as `FileUtil.decomposePath` refuses it.
+    pub(crate) fn is_under(&self, directory: &str) -> bool {
+        self.path
+            .strip_prefix(directory)
+            .is_some_and(|tail| !directory.is_empty() && (tail.is_empty() || tail.starts_with('/')))
+    }
+
     /// Appending the metadata suffix preserves the already validated ID.
     pub(super) fn sidecar(&self) -> Self {
         Self {
             namespace: self.namespace.clone(),
             path: Cow::Owned(format!("{}{METADATA_EXTENSION}", self.path)),
         }
+    }
+
+    /// The resource a `.mcmeta` sidecar describes, which is always a valid ID.
+    pub(super) fn sidecar_base(&self) -> Option<Self> {
+        let path = self.path.strip_suffix(METADATA_EXTENSION)?;
+        Some(Self {
+            namespace: self.namespace.clone(),
+            path: Cow::Owned(path.to_owned()),
+        })
     }
 
     /// Omits only the default `minecraft` namespace.
@@ -201,6 +215,16 @@ pub(crate) enum ResourceError {
     },
 }
 
+impl From<ResourceError> for io::Error {
+    fn from(error: ResourceError) -> Self {
+        let kind = match &error {
+            ResourceError::Io { source, .. } => source.kind(),
+            ResourceError::InvalidId(_) => io::ErrorKind::InvalidInput,
+        };
+        io::Error::new(kind, error)
+    }
+}
+
 /// Reopenable resource or sidecar, independent of the manager's lifetime.
 /// Pins a source, not immutable bytes. Setup validation is trusted; each open
 /// performs ordinary candidate I/O, without revalidating source roots or
@@ -248,9 +272,12 @@ impl ResourceContent {
 
     /// Reopens this content and reads at most one byte past the limit to
     /// detect oversized input, retaining ID/origin context on read errors.
-    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
     pub(crate) fn read_bytes(&self, limit: usize) -> Result<Vec<u8>, ResourceError> {
         read_bounded(self.open()?, limit, &self.id, &self.origin)
+    }
+
+    pub(crate) fn read_all(&self) -> Result<Vec<u8>, ResourceError> {
+        self.read_bytes(usize::MAX)
     }
 }
 
@@ -290,26 +317,34 @@ fn read_bounded(
 pub(crate) struct Resource {
     content: ResourceContent,
     #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
-    metadata: Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>,
+    metadata: Rc<dyn Fn() -> Option<ResourceContent>>,
+    #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
+    cached_metadata: Rc<OnceCell<Option<ResourceContent>>>,
 }
 
 impl Resource {
     pub(super) fn new(
         content: ResourceContent,
-        metadata: Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>,
+        metadata: Rc<dyn Fn() -> Option<ResourceContent>>,
     ) -> Self {
-        Self { content, metadata }
+        Self {
+            content,
+            metadata,
+            cached_metadata: Rc::default(),
+        }
     }
 
     pub(crate) fn content(&self) -> &ResourceContent {
         &self.content
     }
 
-    /// Uncached sidecar lookup; access errors are not absence. Calls and clones
-    /// share a fixed source view but can observe filesystem changes.
+    /// Vanilla `Resource.metadata`: the sidecar is looked up on the first call
+    /// and kept, for this resource and its clones.
     #[allow(dead_code, reason = "the consumer migration (#785) uses it")]
-    pub(crate) fn metadata(&self) -> Result<Option<ResourceContent>, ResourceError> {
-        (self.metadata)()
+    pub(crate) fn metadata(&self) -> Option<ResourceContent> {
+        self.cached_metadata
+            .get_or_init(|| (self.metadata)())
+            .clone()
     }
 }
 

@@ -224,8 +224,7 @@ impl Pack {
 
     pub(crate) fn origin(&self) -> ResourceOrigin {
         ResourceOrigin {
-            pack_id: self.id.clone(),
-            name: self.location.title.plain_text(),
+            name: self.location.id.clone(),
         }
     }
 

@@ -1,10 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[allow(
-    dead_code,
-    reason = "the consumer migration (#785) downloads server packs"
-)]
 pub(crate) fn download_server_pack(
     cache_dir: &Path,
     url: &str,
@@ -26,10 +22,6 @@ pub(crate) fn download_server_pack(
 }
 
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the consumer migration (#785) downloads server packs"
-)]
 pub(crate) enum PackDownloadError {
     Download(String),
     HashMismatch,
@@ -60,7 +52,7 @@ fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackDownloadError> {
     Ok(())
 }
 
-fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
+pub(crate) fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest)?;
     let cursor = io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)?;

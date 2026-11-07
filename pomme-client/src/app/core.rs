@@ -56,7 +56,8 @@ pub struct PendingPackDownload {
     pub handle: std::thread::JoinHandle<PackDownloadResult>,
 }
 
-pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
+pub type PackDownloadResult =
+    Result<std::path::PathBuf, crate::resources::packs::PackDownloadError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlayerSkinSource {
@@ -1259,6 +1260,7 @@ impl AppCore {
         self.set_resource_theme(self.menu.theme());
         self.set_resource_installation();
         self.reload_resources();
+        self.menu.pick_splash();
     }
 
     /// Points the vanilla pack at the version's install, once it's complete.
@@ -1302,7 +1304,7 @@ impl AppCore {
         let opened = self.resource_repository.open_all_enabled();
         let menu = &mut self.menu;
         self.resources
-            .reload(opened, |resources| menu.load_splash(resources));
+            .reload(opened, |resources| menu.load_splashes(resources));
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -1438,7 +1440,8 @@ impl AppCore {
             p.set_in_menu(&self.version);
         }
         self.apply_cursor_grab(&gfx.window, None);
-        self.menu.load_splash(&self.resources);
+        self.menu.splash = None;
+        self.menu.pick_splash();
     }
 
     /// Releases the cursor, warping it to the window center only when it was
@@ -1972,6 +1975,7 @@ impl AppCore {
     pub(crate) fn reload_installed_assets(&mut self) {
         self.set_resource_installation();
         self.reload_resources();
+        self.menu.pick_splash();
         let (asset_index, audio) = load_assets(
             &self.data_dirs,
             &self.version,
@@ -3420,7 +3424,7 @@ impl AppCore {
                         required,
                         hash: hash.clone(),
                         handle: std::thread::spawn(move || {
-                            ResourcePackManager::download_server_pack(&cache_dir, &url, &hash)
+                            crate::resources::packs::download_server_pack(&cache_dir, &url, &hash)
                         }),
                     });
                 }

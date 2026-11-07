@@ -101,26 +101,6 @@ impl ResourcePackManager {
         self.server_cache_dir.join(hash)
     }
 
-    pub fn download_server_pack(
-        server_cache_dir: &Path,
-        url: &str,
-        hash: &str,
-    ) -> Result<PathBuf, PackError> {
-        let dir = server_cache_dir.join(hash);
-        if !dir.is_dir() {
-            let data = crate::net::http::blocking_builder()
-                .build()
-                .and_then(|client| client.get(url).send())
-                .map_err(|e| PackError::Download(e.to_string()))?
-                .bytes()
-                .map_err(|e| PackError::Download(e.to_string()))?;
-            tracing::info!("Downloaded {} bytes", data.len());
-            validate_hash(&data, hash)?;
-            extract_zip(&data, &dir)?;
-        }
-        Ok(dir)
-    }
-
     pub fn apply_server_pack(&mut self, id: uuid::Uuid, hash: &str) {
         let pack_id = id.to_string();
         self.active_packs.retain(|p| p.id != pack_id);
@@ -220,7 +200,7 @@ impl ResourcePackManager {
             && let Ok(data) = std::fs::read(&path)
         {
             let extract_dir = self.server_cache_dir.join(format!("_local_{name}"));
-            if let Err(e) = extract_zip(&data, &extract_dir) {
+            if let Err(e) = crate::resources::packs::extract_zip(&data, &extract_dir) {
                 tracing::error!("Failed to extract zip pack {name}: {e}");
                 return;
             }
@@ -259,35 +239,6 @@ impl ResourcePackManager {
     pub fn server_cache_dir(&self) -> &Path {
         &self.server_cache_dir
     }
-}
-
-#[derive(Debug)]
-pub enum PackError {
-    Download(String),
-    HashMismatch,
-    Extract(String),
-}
-
-impl std::fmt::Display for PackError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Download(e) => write!(f, "download failed: {e}"),
-            Self::HashMismatch => write!(f, "SHA-1 hash mismatch"),
-            Self::Extract(e) => write!(f, "extraction failed: {e}"),
-        }
-    }
-}
-
-fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackError> {
-    if expected.is_empty() {
-        return Ok(());
-    }
-    let actual = sha1_smol::Sha1::from(data).digest().to_string();
-    if actual != expected {
-        tracing::error!("Hash mismatch: expected {expected}, got {actual}");
-        return Err(PackError::HashMismatch);
-    }
-    Ok(())
 }
 
 fn parse_meta_value(v: &serde_json::Value, fallback: &str) -> (String, String, PackCompat) {
@@ -416,36 +367,4 @@ fn format_value(v: &serde_json::Value) -> u32 {
         return major as u32;
     }
     0
-}
-
-fn extract_zip(data: &[u8], dest: &Path) -> Result<(), PackError> {
-    let _ = std::fs::create_dir_all(dest);
-    let cursor = std::io::Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| PackError::Extract(e.to_string()))?;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| PackError::Extract(e.to_string()))?;
-
-        let Some(enclosed) = file.enclosed_name() else {
-            continue;
-        };
-        let out_path = dest.join(enclosed);
-
-        if file.is_dir() {
-            let _ = std::fs::create_dir_all(&out_path);
-        } else {
-            if let Some(parent) = out_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut out =
-                std::fs::File::create(&out_path).map_err(|e| PackError::Extract(e.to_string()))?;
-            std::io::copy(&mut file, &mut out).map_err(|e| PackError::Extract(e.to_string()))?;
-        }
-    }
-
-    tracing::info!("Extracted resource pack to {}", dest.display());
-    Ok(())
 }

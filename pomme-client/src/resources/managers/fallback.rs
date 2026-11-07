@@ -6,13 +6,11 @@ use std::io;
 use std::rc::Rc;
 
 use super::{ResourceManager, Selector};
-use crate::resources::pack_resources::{IoSupplier, METADATA_EXTENSION, PackResources, PackType};
-use crate::resources::{
-    ReadStream, Resource, ResourceContent, ResourceError, ResourceId, ResourceOrigin,
-};
+use crate::resources::pack_resources::{IoSupplier, PackResources, PackType};
+use crate::resources::{ReadStream, Resource, ResourceContent, ResourceId, ResourceOrigin};
 
 pub(super) type PathFilter = Rc<dyn Fn(&str) -> bool>;
-type MetadataFinder = Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>;
+type MetadataFinder = Rc<dyn Fn() -> Option<ResourceContent>>;
 
 // Deferred metadata lookups own both provenance and the backend, not the
 // manager.
@@ -196,13 +194,13 @@ impl FallbackResourceManager {
                 if let Some(source) = &entry.source
                     && let Some(metadata) = source.metadata(pack_type, &metadata_id)
                 {
-                    return Ok(Some(metadata));
+                    return Some(metadata);
                 }
                 if entry.is_filtered(&metadata_id) {
                     break;
                 }
             }
-            Ok(None)
+            None
         })
     }
 }
@@ -255,7 +253,7 @@ impl ResourceManager for FallbackResourceManager {
                     let source = source.clone();
                     let metadata_id = metadata_id.clone();
                     let pack_type = self.pack_type;
-                    Rc::new(move || Ok(source.metadata(pack_type, &metadata_id)))
+                    Rc::new(move || source.metadata(pack_type, &metadata_id))
                 };
                 resources.push(Resource::new(
                     source.content(id.clone(), supplier),
@@ -294,10 +292,8 @@ impl ResourceManager for FallbackResourceManager {
                     &self.namespace,
                     directory,
                     &mut |id, supplier| {
-                        if id.path().ends_with(METADATA_EXTENSION) {
-                            if let Some(base) = metadata_base(&id, &source.origin)
-                                && selector(&base)
-                            {
+                        if let Some(base) = id.sidecar_base() {
+                            if selector(&base) {
                                 let content = source.content(id.clone(), supplier);
                                 metadata.insert(id, (priority, content));
                             }
@@ -339,10 +335,8 @@ impl ResourceManager for FallbackResourceManager {
                     &self.namespace,
                     directory,
                     &mut |id, supplier| {
-                        if id.path().ends_with(METADATA_EXTENSION) {
-                            if let Some(base) = metadata_base(&id, &source.origin)
-                                && selector(&base)
-                            {
+                        if let Some(base) = id.sidecar_base() {
+                            if selector(&base) {
                                 let stack = stacks
                                     .entry(base.clone())
                                     .or_insert_with(|| EntryStack::new(&base));
@@ -367,19 +361,7 @@ impl ResourceManager for FallbackResourceManager {
 
 fn constant_metadata(content: Option<ResourceContent>) -> MetadataFinder {
     // Enumeration retains the exact supplier; metadata access must not relookup.
-    Rc::new(move || Ok(content.clone()))
-}
-
-fn metadata_base(id: &ResourceId, origin: &ResourceOrigin) -> Option<ResourceId> {
-    let path = id.path().strip_suffix(METADATA_EXTENSION)?;
-    match ResourceId::new(&format!("{}:{path}", id.namespace())) {
-        Ok(base) => Some(base),
-        Err(error) => {
-            tracing::warn!(%id, pack = %origin.name, pack_id = ?origin.pack_id, %error,
-                "Skipping metadata with an unrepresentable base resource ID");
-            None
-        }
-    }
+    Rc::new(move || content.clone())
 }
 
 #[cfg(test)]

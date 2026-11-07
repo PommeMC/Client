@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
-use super::path::{validate_namespace, validate_path, validate_segment};
+use super::path::{validate_namespace, validate_path, validate_root_path};
 use super::{IoSupplier, PackMetadataResources, PackResources, PackType, ResourceOutput};
 use crate::resources::packs::{PackLocationInfo, PackMetadata, ResourcesSupplier};
 use crate::resources::resource::{ReadStream, ResourceId};
@@ -79,15 +79,7 @@ impl PackMetadataResources for EmbeddedPackResources {
     }
 
     fn get_root_resource(&self, path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        if path.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty root resource path",
-            ));
-        }
-        for segment in path {
-            validate_segment(segment)?;
-        }
+        validate_root_path(path)?;
         // The static table represents assets/<namespace>/<path>, and no
         // other root files. In particular it contains no pack.mcmeta.
         let ["assets", namespace, resource_path @ ..] = path else {
@@ -114,54 +106,39 @@ impl PackMetadataResources for EmbeddedPackResources {
 impl PackResources for EmbeddedPackResources {
     fn get_resource(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
         validate_namespace(id.namespace())?;
         validate_path(id.path())?;
-        if pack_type != PackType::ClientResources {
-            return Ok(None);
-        }
         Ok(bytes(id).map(static_supplier))
     }
 
     fn list_resources(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         namespace: &str,
         directory: &str,
         output: &mut ResourceOutput<'_>,
     ) -> io::Result<()> {
         validate_namespace(namespace)?;
-        if !directory.is_empty() {
-            validate_path(directory)?;
+        if directory.is_empty() {
+            return Ok(());
         }
-        if pack_type == PackType::ClientResources {
-            for (id, bytes) in ENTRIES {
-                if id.namespace() == namespace
-                    && (directory.is_empty()
-                        || id.path() == directory
-                        || id
-                            .path()
-                            .strip_prefix(directory)
-                            .is_some_and(|tail| tail.starts_with('/')))
-                {
-                    output(id.clone(), static_supplier(bytes));
-                }
+        validate_path(directory)?;
+        for (id, bytes) in ENTRIES {
+            if id.namespace() == namespace && id.is_under(directory) {
+                output(id.clone(), static_supplier(bytes));
             }
         }
         Ok(())
     }
 
-    fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        Ok(if pack_type == PackType::ClientResources {
-            ENTRIES
-                .iter()
-                .map(|(id, _)| id.namespace().to_owned())
-                .collect()
-        } else {
-            HashSet::new()
-        })
+    fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+        Ok(ENTRIES
+            .iter()
+            .map(|(id, _)| id.namespace().to_owned())
+            .collect())
     }
 }
 
@@ -303,26 +280,7 @@ mod pack_resources_tests {
     #[test]
     fn test_list_resources_empty_directory() {
         let pack = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ClientResources,
-            "pomme",
-            "",
-            &[
-                (
-                    resource_id!("pomme:font/ui.ttf"),
-                    include_bytes!("../../renderer/fonts/Montserrat-Medium.ttf").to_vec(),
-                ),
-                (
-                    resource_id!("pomme:font/icons.ttf"),
-                    include_bytes!("../../renderer/fonts/fa-solid-900.ttf").to_vec(),
-                ),
-                (
-                    resource_id!("pomme:textures/icon.png"),
-                    include_bytes!("../../../assets/icon.png").to_vec(),
-                ),
-            ],
-        );
+        tests::test_list_resources(&pack, PackType::ClientResources, "pomme", "", &[]);
     }
 
     #[test]

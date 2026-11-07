@@ -157,12 +157,12 @@ impl PackMetadataResources for MappedPackResources {
 impl PackResources for MappedPackResources {
     fn get_resource(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
         validate_namespace(id.namespace())?;
         validate_path(id.path())?;
-        if pack_type != PackType::ClientResources || id.namespace() != self.mapping.namespace {
+        if id.namespace() != self.mapping.namespace {
             return Ok(None);
         }
         let relative = self
@@ -186,18 +186,16 @@ impl PackResources for MappedPackResources {
 
     fn list_resources(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         namespace: &str,
         directory: &str,
         output: &mut ResourceOutput<'_>,
     ) -> io::Result<()> {
         validate_namespace(namespace)?;
-        if !directory.is_empty() {
-            validate_path(directory)?;
-        }
-        if pack_type != PackType::ClientResources || namespace != self.mapping.namespace {
+        if directory.is_empty() || namespace != self.mapping.namespace {
             return Ok(());
         }
+        validate_path(directory)?;
         list_namespace(
             self.root.root(),
             namespace,
@@ -211,13 +209,7 @@ impl PackResources for MappedPackResources {
             },
         )?;
         for (id, relative) in &self.mapping.remappings {
-            if !(directory.is_empty()
-                || id.path() == directory
-                || id
-                    .path()
-                    .strip_prefix(directory)
-                    .is_some_and(|tail| tail.starts_with('/')))
-            {
+            if !id.is_under(directory) {
                 continue;
             }
             let path = self.root.root().join(relative);
@@ -233,12 +225,8 @@ impl PackResources for MappedPackResources {
         Ok(())
     }
 
-    fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        Ok(if pack_type == PackType::ClientResources {
-            HashSet::from([self.mapping.namespace.clone()])
-        } else {
-            HashSet::new()
-        })
+    fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+        Ok(HashSet::from([self.mapping.namespace.clone()]))
     }
 }
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2742,25 +2742,7 @@ fn load_pomme_logo(resources: &dyn ResourceManager) -> io::Result<Option<image::
         return Ok(None);
     };
     let content = resource.content();
-    let mut stream = content.open().map_err(|error| {
-        let kind = match &error {
-            ResourceError::Io { source, .. } => source.kind(),
-            _ => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, error)
-    })?;
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).map_err(|source| {
-        io::Error::new(
-            source.kind(),
-            ResourceError::Io {
-                operation: "read Pomme logo",
-                id: Some(content.id().clone()),
-                origin: content.origin().clone(),
-                source,
-            },
-        )
-    })?;
+    let bytes = content.read_all()?;
     let image = image::load_from_memory(&bytes).map_err(|source| {
         io::Error::new(
             io::ErrorKind::InvalidData,

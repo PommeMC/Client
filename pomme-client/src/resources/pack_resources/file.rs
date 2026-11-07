@@ -12,6 +12,7 @@ use self_cell::{MutBorrow, self_cell};
 use serde_json::{Map, Value};
 use zip::ZipArchive;
 
+use super::path::read_metadata;
 use super::{
     IoSupplier, OverlayedPackResources, PACK_META, PackMetadataResources, PackResources, PackType,
     ResourceOutput,
@@ -124,30 +125,10 @@ impl FilePackResources {
     }
 
     fn load_metadata(&self) -> io::Result<Map<String, Value>> {
-        let Some(supplier) = self.get_root_resource(&[PACK_META])? else {
-            return Ok(Map::new());
-        };
-        let value: Value = serde_json::from_reader(supplier()?).map_err(|error| {
-            io::Error::new(
-                error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData),
-                format!(
-                    "cannot read {} in {}: {error}",
-                    self.add_prefix(PACK_META),
-                    self.access.path.display()
-                ),
-            )
-        })?;
-        match value {
-            Value::Object(object) => Ok(object),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} in {} must contain a JSON object",
-                    self.add_prefix(PACK_META),
-                    self.access.path.display()
-                ),
-            )),
-        }
+        read_metadata(
+            self.get_root_resource(&[PACK_META])?,
+            &self.access.path.join(self.add_prefix(PACK_META)),
+        )
     }
 }
 

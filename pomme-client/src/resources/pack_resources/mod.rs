@@ -61,7 +61,8 @@ impl PackType {
 }
 
 /// Object-safe pack identity, root resources, metadata and explicit closure.
-/// I/O failures are errors, never resource or section absence.
+/// A backend reports its I/O failures; the managers log them and treat the
+/// pack as not having the resource.
 pub(crate) trait PackMetadataResources {
     fn location(&self) -> &PackLocationInfo;
 
@@ -357,6 +358,126 @@ mod path_validation {
                 ErrorKind::InvalidInput,
                 "list_resources error for {pack_type:?}, {namespace:?}, {directory:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_pack {
+    use std::collections::{HashMap, HashSet};
+    use std::io;
+    use std::rc::Rc;
+
+    use serde_json::Value;
+
+    use super::{IoSupplier, PackMetadataResources, PackResources, PackType, ResourceOutput};
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::{ReadStream, ResourceId};
+
+    /// An in-memory pack: `assets/<namespace>/<path>` keys, an optional root
+    /// metadata object, and a switch that makes every lookup fail.
+    pub(crate) struct TestPack {
+        pub(crate) location: PackLocationInfo,
+        files: HashMap<String, &'static str>,
+        metadata: Option<Value>,
+        broken: bool,
+    }
+
+    impl TestPack {
+        pub(crate) fn new(id: &str, files: &[(&str, &'static str)]) -> Self {
+            Self {
+                location: PackLocationInfo::test(id),
+                files: files.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
+                metadata: None,
+                broken: false,
+            }
+        }
+
+        pub(crate) fn with_metadata(mut self, metadata: Value) -> Self {
+            self.metadata = Some(metadata);
+            self
+        }
+
+        pub(crate) fn broken(mut self) -> Self {
+            self.broken = true;
+            self
+        }
+
+        fn fail<T>(&self) -> io::Result<T> {
+            Err(io::Error::other(format!("{} is broken", self.location.id)))
+        }
+    }
+
+    fn supplier(bytes: &'static str) -> IoSupplier<ReadStream> {
+        Rc::new(move || Ok(Box::new(bytes.as_bytes()) as ReadStream))
+    }
+
+    impl PackMetadataResources for TestPack {
+        fn location(&self) -> &PackLocationInfo {
+            &self.location
+        }
+
+        fn get_root_resource(&self, _path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
+            Ok(None)
+        }
+
+        fn metadata_section_json(&self, name: &str) -> io::Result<Option<Value>> {
+            if self.broken {
+                return self.fail();
+            }
+            Ok(self.metadata.as_ref().and_then(|m| m.get(name)).cloned())
+        }
+
+        fn close(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PackResources for TestPack {
+        fn get_resource(
+            &self,
+            _pack_type: PackType,
+            id: &ResourceId,
+        ) -> io::Result<Option<IoSupplier<ReadStream>>> {
+            if self.broken {
+                return self.fail();
+            }
+            Ok(self
+                .files
+                .get(&format!("{}/{}", id.namespace(), id.path()))
+                .map(|bytes| supplier(bytes)))
+        }
+
+        fn list_resources(
+            &self,
+            _pack_type: PackType,
+            namespace: &str,
+            directory: &str,
+            output: &mut ResourceOutput<'_>,
+        ) -> io::Result<()> {
+            if self.broken {
+                return self.fail();
+            }
+            let prefix = format!("{namespace}/{directory}/");
+            for (key, bytes) in &self.files {
+                if let Some(path) = key.strip_prefix(&format!("{namespace}/"))
+                    && key.starts_with(&prefix)
+                {
+                    output(
+                        ResourceId::new(&format!("{namespace}:{path}")).unwrap(),
+                        supplier(bytes),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+            Ok(self
+                .files
+                .keys()
+                .filter_map(|key| key.split_once('/').map(|(ns, _)| ns.to_owned()))
+                .collect())
         }
     }
 }

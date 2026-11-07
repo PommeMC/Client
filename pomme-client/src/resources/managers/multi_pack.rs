@@ -154,126 +154,17 @@ mod resource_manager_tests {
 /// fail.
 #[cfg(test)]
 mod priority_tests {
-    use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::io::{self, Read};
+    use std::collections::BTreeMap;
+    use std::io::Read;
     use std::rc::Rc;
 
     use serde_json::{Value, json};
 
     use super::MultiPackResourceManager;
     use crate::resources::managers::ResourceManager;
-    use crate::resources::pack_resources::{
-        IoSupplier, PackMetadataResources, PackResources, PackType, ResourceOutput,
-    };
-    use crate::resources::packs::{PackId, PackLocationInfo};
-    use crate::resources::{ReadStream, Resource, ResourceContent, ResourceId, ResourceOrigin};
-
-    /// An in-memory pack: `assets/<namespace>/<path>` keys, an optional root
-    /// metadata object, and a switch that makes every lookup fail.
-    struct TestPack {
-        location: PackLocationInfo,
-        files: HashMap<String, &'static str>,
-        metadata: Option<Value>,
-        broken: bool,
-    }
-
-    impl TestPack {
-        fn new(id: &str, files: &[(&str, &'static str)]) -> Self {
-            Self {
-                location: PackLocationInfo::test(id),
-                files: files.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
-                metadata: None,
-                broken: false,
-            }
-        }
-
-        fn with_metadata(mut self, metadata: Value) -> Self {
-            self.metadata = Some(metadata);
-            self
-        }
-
-        fn broken(mut self) -> Self {
-            self.broken = true;
-            self
-        }
-
-        fn fail<T>(&self) -> io::Result<T> {
-            Err(io::Error::other(format!("{} is broken", self.location.id)))
-        }
-    }
-
-    fn supplier(bytes: &'static str) -> IoSupplier<ReadStream> {
-        Rc::new(move || Ok(Box::new(bytes.as_bytes()) as ReadStream))
-    }
-
-    impl PackMetadataResources for TestPack {
-        fn location(&self) -> &PackLocationInfo {
-            &self.location
-        }
-
-        fn get_root_resource(&self, _path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-            Ok(None)
-        }
-
-        fn metadata_section_json(&self, name: &str) -> io::Result<Option<Value>> {
-            if self.broken {
-                return self.fail();
-            }
-            Ok(self.metadata.as_ref().and_then(|m| m.get(name)).cloned())
-        }
-
-        fn close(&self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl PackResources for TestPack {
-        fn get_resource(
-            &self,
-            _pack_type: PackType,
-            id: &ResourceId,
-        ) -> io::Result<Option<IoSupplier<ReadStream>>> {
-            if self.broken {
-                return self.fail();
-            }
-            Ok(self
-                .files
-                .get(&format!("{}/{}", id.namespace(), id.path()))
-                .map(|bytes| supplier(bytes)))
-        }
-
-        fn list_resources(
-            &self,
-            _pack_type: PackType,
-            namespace: &str,
-            directory: &str,
-            output: &mut ResourceOutput<'_>,
-        ) -> io::Result<()> {
-            if self.broken {
-                return self.fail();
-            }
-            let prefix = format!("{namespace}/{directory}/");
-            for (key, bytes) in &self.files {
-                if let Some(path) = key.strip_prefix(&format!("{namespace}/"))
-                    && key.starts_with(&prefix)
-                {
-                    output(
-                        ResourceId::new(&format!("{namespace}:{path}")).unwrap(),
-                        supplier(bytes),
-                    );
-                }
-            }
-            Ok(())
-        }
-
-        fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
-            Ok(self
-                .files
-                .keys()
-                .filter_map(|key| key.split_once('/').map(|(ns, _)| ns.to_owned()))
-                .collect())
-        }
-    }
+    use crate::resources::pack_resources::test_pack::TestPack;
+    use crate::resources::pack_resources::{PackResources, PackType};
+    use crate::resources::{Resource, ResourceContent, ResourceId, ResourceOrigin};
 
     /// Packs low to high, as the repository opens them.
     fn manager(packs: Vec<TestPack>) -> MultiPackResourceManager {
@@ -283,7 +174,6 @@ mod priority_tests {
                 .into_iter()
                 .map(|pack| {
                     let origin = ResourceOrigin {
-                        pack_id: PackId::allocate(),
                         name: pack.location.id.clone(),
                     };
                     (origin, Rc::new(pack) as Rc<dyn PackResources>)
@@ -307,7 +197,7 @@ mod priority_tests {
     }
 
     fn metadata(resource: &Resource) -> Option<String> {
-        resource.metadata().unwrap().as_ref().map(text)
+        resource.metadata().as_ref().map(text)
     }
 
     fn stack(manager: &MultiPackResourceManager, path: &str) -> Vec<String> {
@@ -433,5 +323,49 @@ mod priority_tests {
                 .with_metadata(json!({"filter": {"block": "not a list"}})),
         ]);
         assert!(manager.get_resource(&id("a.txt")).unwrap().is_some());
+    }
+
+    /// `listResourceStacks`: each file pairs with the sidecar from its own
+    /// pack.
+    #[test]
+    fn stacks_pair_each_file_with_its_own_packs_sidecar() {
+        let manager = manager(vec![
+            TestPack::new(
+                "low",
+                &[
+                    ("minecraft/d/a.txt", "low"),
+                    ("minecraft/d/a.txt.mcmeta", "low meta"),
+                ],
+            ),
+            TestPack::new("high", &[("minecraft/d/a.txt", "high")]),
+        ]);
+        let stacks = manager.list_resource_stacks("d", &|_| true).unwrap();
+        let stack = &stacks[&id("d/a.txt")];
+        assert_eq!(stack.iter().map(read).collect::<Vec<_>>(), ["low", "high"]);
+        assert_eq!(
+            stack.iter().map(metadata).collect::<Vec<_>>(),
+            [Some("low meta".to_owned()), None]
+        );
+    }
+
+    #[test]
+    fn a_filter_drops_lower_files_from_listings() {
+        let manager = manager(vec![
+            TestPack::new(
+                "low",
+                &[("minecraft/d/a.txt", "low"), ("minecraft/d/b.txt", "low")],
+            ),
+            TestPack::new("high", &[("minecraft/d/b.txt", "high")])
+                .with_metadata(filter("^d/[ab]\\.txt$")),
+        ]);
+        let listed = manager.list_resources("d", &|_| true).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(read(&listed[&id("d/b.txt")]), "high");
+        let stacks = manager.list_resource_stacks("d", &|_| true).unwrap();
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(
+            stacks[&id("d/b.txt")].iter().map(read).collect::<Vec<_>>(),
+            ["high"]
+        );
     }
 }

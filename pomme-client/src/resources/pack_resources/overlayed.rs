@@ -31,6 +31,16 @@ impl OverlayedPackResources {
     }
 }
 
+/// Vanilla's layers catch their own errors, so one that fails is logged and
+/// counts as empty; the rest of the stack still answers.
+fn logged<T>(pack: &dyn PackResources, operation: &str, result: io::Result<T>) -> Option<T> {
+    result
+        .inspect_err(|error| {
+            tracing::warn!(pack = %pack.location().id, operation, %error, "Pack layer failed");
+        })
+        .ok()
+}
+
 impl PackMetadataResources for OverlayedPackResources {
     fn location(&self) -> &PackLocationInfo {
         self.primary.location()
@@ -61,12 +71,14 @@ impl PackResources for OverlayedPackResources {
         pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        for pack in self.stack() {
-            if let Some(supplier) = pack.get_resource(pack_type, id)? {
-                return Ok(Some(supplier));
-            }
-        }
-        Ok(None)
+        Ok(self.stack().find_map(|pack| {
+            logged(
+                pack.as_ref(),
+                "get resource",
+                pack.get_resource(pack_type, id),
+            )
+            .flatten()
+        }))
     }
 
     fn list_resources(
@@ -78,11 +90,12 @@ impl PackResources for OverlayedPackResources {
     ) -> io::Result<()> {
         let mut resources = HashMap::new();
         for pack in self.stack() {
-            pack.list_resources(pack_type, namespace, directory, &mut |id, supplier| {
-                resources.entry(id).or_insert(supplier);
-            })?;
+            let result =
+                pack.list_resources(pack_type, namespace, directory, &mut |id, supplier| {
+                    resources.entry(id).or_insert(supplier);
+                });
+            logged(pack.as_ref(), "list resources", result);
         }
-        // Delay output until all layers succeed, retaining the first supplier.
         for (id, supplier) in resources {
             output(id, supplier);
         }
@@ -90,11 +103,17 @@ impl PackResources for OverlayedPackResources {
     }
 
     fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        let mut namespaces = HashSet::new();
-        for pack in self.stack() {
-            namespaces.extend(pack.get_namespaces(pack_type)?);
-        }
-        Ok(namespaces)
+        Ok(self
+            .stack()
+            .filter_map(|pack| {
+                logged(
+                    pack.as_ref(),
+                    "list namespaces",
+                    pack.get_namespaces(pack_type),
+                )
+            })
+            .flatten()
+            .collect())
     }
 }
 
@@ -302,5 +321,45 @@ mod pack_resources_tests {
     fn test_pack_id() {
         let (_temp, pack) = fixture(default_location());
         tests::test_pack_id(&pack, "overlayed-api");
+    }
+}
+
+#[cfg(test)]
+mod failing_layer_tests {
+    use std::rc::Rc;
+
+    use super::OverlayedPackResources;
+    use super::test_fixture::{default_location, fixture};
+    use crate::resources::pack_resources::test_pack::TestPack;
+    use crate::resources::pack_resources::{PackResources, PackType};
+    use crate::resources::resource_id;
+
+    #[test]
+    fn a_failing_overlay_leaves_the_primary_answering() {
+        let (_temp, overlayed) = fixture(default_location());
+        let pack = OverlayedPackResources::new(
+            Rc::new(overlayed),
+            vec![Rc::new(TestPack::new("broken", &[]).broken())],
+        );
+        let id = resource_id!("api_test:test/one.txt");
+        assert!(
+            pack.get_resource(PackType::ClientResources, &id)
+                .unwrap()
+                .is_some()
+        );
+        let mut listed = Vec::new();
+        pack.list_resources(
+            PackType::ClientResources,
+            "api_test",
+            "test",
+            &mut |id, _| listed.push(id),
+        )
+        .unwrap();
+        assert!(listed.contains(&id));
+        assert!(
+            pack.get_namespaces(PackType::ClientResources)
+                .unwrap()
+                .contains("api_test")
+        );
     }
 }

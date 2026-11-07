@@ -13,11 +13,7 @@ mod pack;
 mod repository;
 mod sources;
 
-#[allow(
-    unused_imports,
-    reason = "the consumer migration (#785) downloads server packs"
-)]
-pub(crate) use download::{PackDownloadError, download_server_pack};
+pub(crate) use download::{PackDownloadError, download_server_pack, extract_zip};
 pub(crate) use id::PackId;
 pub(crate) use location::PackLocationInfo;
 pub(crate) use pack::{Pack, PackEnablementConfig, PackMetadata, PackPosition, ResourcesSupplier};

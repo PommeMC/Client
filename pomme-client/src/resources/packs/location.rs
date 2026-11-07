@@ -6,6 +6,10 @@ use crate::chat_component::Component;
 #[derive(Clone)]
 pub(crate) struct PackLocationInfo {
     pub(crate) id: String,
+    #[allow(
+        dead_code,
+        reason = "the consumer migration (#785) shows it in pack selection"
+    )]
     pub(crate) title: Component,
     pub(crate) known_pack_info: Option<KnownPack>,
 }

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -105,18 +105,11 @@ impl PackMetadataResources for PathPackResources {
     }
 
     fn get_root_resource(&self, path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        if path.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty root resource path",
-            ));
-        }
-        let mut candidate = self.root.clone();
-        for segment in path {
-            validate_segment(segment)?;
-            candidate.push(segment);
-        }
-        locate(candidate)
+        validate_root_path(path)?;
+        locate(
+            path.iter()
+                .fold(self.root.clone(), |dir, segment| dir.join(segment)),
+        )
     }
 
     fn metadata_section_json(&self, name: &str) -> io::Result<Option<Value>> {
@@ -167,31 +160,40 @@ impl PackResources for PathPackResources {
     }
 
     fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        directory_namespaces(&self.root.join(pack_type.directory()))
+        Ok(directory_namespaces(&self.root.join(pack_type.directory())))
     }
 }
 
-/// Shared setup scan for built-in snapshots; ordinary Path views remain live.
-pub(super) fn directory_namespaces(root: &Path) -> io::Result<HashSet<String>> {
+/// Vanilla `PathPackResources.getNamespaces`: an entry that isn't a readable
+/// directory is skipped, and a root that can't be listed logs and keeps what it
+/// found.
+fn directory_namespaces(root: &Path) -> HashSet<String> {
     let mut namespaces = HashSet::new();
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(error) if missing_directory(&error) => return Ok(namespaces),
-        Err(error) => return Err(error),
+        Err(error) => {
+            if !missing_directory(&error) {
+                tracing::error!(path = %root.display(), %error, "Failed to list path");
+            }
+            return namespaces;
+        }
     };
     for entry in entries {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        // Ordinary directory entries need no additional stat. Namespace
-        // discovery follows links, unlike resource tree enumeration.
-        let is_directory = if kind.is_symlink() {
-            match fs::metadata(entry.path()) {
-                Ok(metadata) => metadata.is_dir(),
-                Err(error) if missing_directory(&error) => false,
-                Err(error) => return Err(error),
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::error!(path = %root.display(), %error, "Failed to list path");
+                break;
             }
-        } else {
-            kind.is_dir()
+        };
+        // `Files.isDirectory` follows links and reads any error as not a
+        // directory; an ordinary entry needs no extra stat.
+        let is_directory = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir())
+            }
+            Ok(kind) => kind.is_dir(),
+            Err(_) => false,
         };
         if !is_directory {
             tracing::warn!(path = %entry.path().display(), "Non-directory namespace entry; ignoring");
@@ -205,12 +207,24 @@ pub(super) fn directory_namespaces(root: &Path) -> io::Result<HashSet<String>> {
             _ => tracing::warn!(path = %entry.path().display(), "Invalid namespace; ignoring"),
         }
     }
-    Ok(namespaces)
+    namespaces
 }
 
 /// Logical IDs permit dot/parent components; filesystem resolution must not.
 /// The existing ASCII alphabet also excludes roots, drive prefixes and NULs,
 /// without imposing Java's lowercase-only restriction on resource paths.
+/// A root file's path: one or more segments, each valid on its own.
+pub(super) fn validate_root_path(path: &[&str]) -> io::Result<()> {
+    if path.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty root resource path",
+        ));
+    }
+    path.iter()
+        .try_for_each(|segment| validate_segment(segment))
+}
+
 pub(super) fn validate_segment(segment: &str) -> io::Result<()> {
     if segment.is_empty()
         || matches!(segment, "." | "..")
@@ -269,12 +283,21 @@ pub(super) fn read_metadata(
     let Some(supplier) = supplier else {
         return Ok(Map::new());
     };
-    let value: Value = serde_json::from_reader(supplier()?).map_err(|error| {
-        io::Error::new(
-            error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData),
-            format!("cannot read {}: {error}", path.display()),
-        )
-    })?;
+    let mut bytes = Vec::new();
+    supplier()?.read_to_end(&mut bytes)?;
+    // Gson's `JsonReader` skips a byte order mark and stops after the root
+    // value, never checking what follows it.
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    let value: Value = serde_json::Deserializer::from_slice(bytes)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Err(serde::de::Error::custom("empty file")))
+        .map_err(|error: serde_json::Error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("cannot read {}: {error}", path.display()),
+            )
+        })?;
     match value {
         Value::Object(object) => Ok(object),
         _ => Err(io::Error::new(
@@ -679,5 +702,37 @@ mod path_validation {
                 ("..", ""),
             ],
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_reader_tests {
+    use std::path::Path;
+    use std::rc::Rc;
+
+    use super::read_metadata;
+    use crate::resources::ReadStream;
+
+    fn read(bytes: &'static [u8]) -> std::io::Result<serde_json::Map<String, serde_json::Value>> {
+        read_metadata(
+            Some(Rc::new(move || Ok(Box::new(bytes) as ReadStream))),
+            Path::new("pack.mcmeta"),
+        )
+    }
+
+    #[test]
+    fn reads_like_gson() {
+        assert!(
+            read(b"\xEF\xBB\xBF{\"pack\":{}}")
+                .unwrap()
+                .contains_key("pack")
+        );
+        assert!(
+            read(b"{\"pack\":{}} trailing")
+                .unwrap()
+                .contains_key("pack")
+        );
+        assert!(read(b"").is_err());
+        assert!(read(b"[]").is_err());
     }
 }

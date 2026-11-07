@@ -57,13 +57,12 @@ mod tests {
 
     use super::{ResourceManager, Selector};
     use crate::resources::pack_resources::{EmbeddedPackResources, PackResources};
-    use crate::resources::packs::{PackId, PackLocationInfo};
+    use crate::resources::packs::PackLocationInfo;
     use crate::resources::{Resource, ResourceId, ResourceOrigin};
 
     pub(super) fn embedded_pack() -> (ResourceOrigin, Rc<dyn PackResources>) {
         let location = PackLocationInfo::test("resource-manager-api");
         let origin = ResourceOrigin {
-            pack_id: PackId::allocate(),
             name: location.id.clone(),
         };
         (origin, Rc::new(EmbeddedPackResources::new(location)))

@@ -237,6 +237,9 @@ pub(super) fn prepare_pack_path(
 ) -> io::Result<(PathBuf, FileType)> {
     let rules = &policy.rules;
     let mut effective = path.to_owned();
+    // TODO: on Windows, Rust counts a directory junction as a symlink and the
+    // JDK doesn't (`IO_REPARSE_TAG_SYMLINK` only), so a junctioned pack that
+    // loads in vanilla is checked against the allow list here.
     if kind.is_symlink() {
         // Java PackDetector follows one stored target, relative to CWD, not
         // the link parent. Open this effective path, never the original alias.
@@ -320,5 +323,24 @@ mod tests {
         ));
         assert!(parse_symlinks("[glob/a").is_err());
         assert!(parse_symlinks("[other]/a").is_err());
+    }
+
+    /// `parseValidator`: no file, or any bad line, denies every symlink.
+    #[test]
+    fn load_denies_all_unless_the_whole_file_parses() {
+        use std::fs;
+
+        use super::SymlinkPolicy;
+        use crate::resources::test_dir::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.0.join("allowed_symlinks.txt");
+        assert!(SymlinkPolicy::load(&path).rules.is_empty());
+        fs::write(&path, "# comment\n[prefix]/srv/packs\n").unwrap();
+        assert_eq!(SymlinkPolicy::load(&path).rules.len(), 1);
+        for bad in ["[prefix]/srv/packs\n[nope]x\n", "[regex](\n", "[glob][ab\n"] {
+            fs::write(&path, bad).unwrap();
+            assert!(SymlinkPolicy::load(&path).rules.is_empty(), "{bad:?}");
+        }
     }
 }

@@ -11,7 +11,7 @@ use std::rc::Rc;
 use serde_json::{Map, Value};
 
 use super::path::{
-    file_supplier, read_metadata, validate_namespace, validate_path, validate_segment,
+    file_supplier, read_metadata, validate_namespace, validate_path, validate_root_path,
 };
 use super::{
     IoSupplier, PACK_META, PackMetadataResources, PackResources, PackType, PathPackResources,
@@ -83,6 +83,7 @@ impl ResourcesSupplier for VanillaResourcesSupplier {
                     self.prepared.extracted_root.clone(),
                 ),
                 prepared: self.prepared.clone(),
+                metadata: RefCell::new(None),
             }),
             Rc::new(IndexResources {
                 location: location.clone(),
@@ -211,19 +212,9 @@ impl PreparedVanillaResources {
         directory: &str,
         output: &mut ResourceOutput<'_>,
     ) -> io::Result<()> {
-        // An empty directory lists nothing, as in the folder layer.
-        if directory.is_empty() {
-            return Ok(());
-        }
         for entry in self.indexed.values() {
             let Some(id) = &entry.id else { continue };
-            if id.namespace() != namespace
-                || !(id.path() == directory
-                    || id
-                        .path()
-                        .strip_prefix(directory)
-                        .is_some_and(|tail| tail.starts_with('/')))
-            {
+            if id.namespace() != namespace || !id.is_under(directory) {
                 continue;
             }
             if let Some(supplier) = entry.locate()? {
@@ -240,15 +231,7 @@ impl PackMetadataResources for VanillaPackResources {
     }
 
     fn get_root_resource(&self, path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        if path.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty root resource path",
-            ));
-        }
-        for segment in path {
-            validate_segment(segment)?;
-        }
+        validate_root_path(path)?;
         if let Some(supplier) = self.prepared.indexed_resource(&path.join("/"))? {
             return Ok(Some(supplier));
         }
@@ -274,10 +257,9 @@ impl PackResources for VanillaPackResources {
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
         validate_namespace(id.namespace())?;
         validate_path(id.path())?;
-        if pack_type == PackType::ClientResources
-            && let Some(supplier) =
-                self.prepared
-                    .indexed_resource(&format!("{}/{}", id.namespace(), id.path()))?
+        if let Some(supplier) =
+            self.prepared
+                .indexed_resource(&format!("{}/{}", id.namespace(), id.path()))?
         {
             return Ok(Some(supplier));
         }
@@ -296,12 +278,10 @@ impl PackResources for VanillaPackResources {
             validate_path(directory)?;
         }
         let mut resources = HashMap::new();
-        if pack_type == PackType::ClientResources {
-            self.prepared
-                .list_indexed(namespace, directory, &mut |id, supplier| {
-                    resources.insert(id, supplier);
-                })?;
-        }
+        self.prepared
+            .list_indexed(namespace, directory, &mut |id, supplier| {
+                resources.insert(id, supplier);
+            })?;
         // Match FixedPathPackResources' single/empty-upper-layer fast path.
         if resources.is_empty() {
             return self
@@ -328,6 +308,7 @@ impl PackResources for VanillaPackResources {
 struct ExtractedResources {
     root: PathPackResources,
     prepared: Rc<PreparedVanillaResources>,
+    metadata: RefCell<Option<Map<String, Value>>>,
 }
 
 impl PackMetadataResources for ExtractedResources {
@@ -340,10 +321,7 @@ impl PackMetadataResources for ExtractedResources {
     }
 
     fn metadata_section_json(&self, name: &str) -> io::Result<Option<Value>> {
-        Ok(self
-            .root
-            .metadata_section_json(name)?
-            .or_else(|| self.prepared.built_in_metadata.get(name).cloned()))
+        metadata_section(self, &self.metadata, &self.prepared.built_in_metadata, name)
     }
 
     fn close(&self) -> io::Result<()> {
@@ -390,15 +368,7 @@ impl PackMetadataResources for IndexResources {
     }
 
     fn get_root_resource(&self, path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        if path.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty root resource path",
-            ));
-        }
-        for segment in path {
-            validate_segment(segment)?;
-        }
+        validate_root_path(path)?;
         self.prepared.indexed_resource(&path.join("/"))
     }
 
@@ -415,21 +385,18 @@ impl PackMetadataResources for IndexResources {
 impl PackResources for IndexResources {
     fn get_resource(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
         validate_namespace(id.namespace())?;
         validate_path(id.path())?;
-        if pack_type != PackType::ClientResources {
-            return Ok(None);
-        }
         self.prepared
             .indexed_resource(&format!("{}/{}", id.namespace(), id.path()))
     }
 
     fn list_resources(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         namespace: &str,
         directory: &str,
         output: &mut ResourceOutput<'_>,
@@ -438,10 +405,7 @@ impl PackResources for IndexResources {
         if !directory.is_empty() {
             validate_path(directory)?;
         }
-        if pack_type == PackType::ClientResources {
-            self.prepared.list_indexed(namespace, directory, output)?;
-        }
-        Ok(())
+        self.prepared.list_indexed(namespace, directory, output)
     }
 
     fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
@@ -456,8 +420,9 @@ fn exposed_namespaces() -> HashSet<String> {
         .collect()
 }
 
-/// Each view caches only its own root envelope. Missing sections fall back;
-/// I/O/JSON errors propagate, unlike Java's catch-and-log fallback policy.
+/// Vanilla `FixedPathPackResources.getMetadataSection`: each view caches its
+/// own root envelope, and a missing section or one that can't be read falls
+/// back to the built-in sections. A failed read isn't cached, so it's retried.
 fn metadata_section(
     resources: &dyn PackMetadataResources,
     cache: &RefCell<Option<Map<String, Value>>>,
@@ -465,11 +430,13 @@ fn metadata_section(
     name: &str,
 ) -> io::Result<Option<Value>> {
     if cache.borrow().is_none() {
-        let metadata = read_metadata(
-            resources.get_root_resource(&[PACK_META])?,
-            Path::new(PACK_META),
-        )?;
-        *cache.borrow_mut() = Some(metadata);
+        let metadata = resources
+            .get_root_resource(&[PACK_META])
+            .and_then(|supplier| read_metadata(supplier, Path::new(PACK_META)));
+        match metadata {
+            Ok(metadata) => *cache.borrow_mut() = Some(metadata),
+            Err(error) => tracing::warn!(%error, "Failed to parse vanilla pack metadata"),
+        }
     }
     // Present null stays present and reaches the section decoder unchanged.
     Ok(cache
@@ -937,5 +904,42 @@ mod path_validation {
             )],
             &invalid_queries(absolute.to_str().unwrap()),
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_fallback_tests {
+    use std::fs;
+
+    use serde_json::{Map, json};
+
+    use super::VanillaResourcesSupplier;
+    use crate::resources::packs::{PackLocationInfo, ResourcesSupplier};
+    use crate::resources::test_dir::TempDir;
+
+    #[test]
+    fn unreadable_metadata_falls_back_to_built_in() {
+        let temp = TempDir::new().unwrap();
+        let extracted = temp.0.join("extracted");
+        fs::create_dir_all(extracted.join("assets")).unwrap();
+        fs::write(extracted.join("pack.mcmeta"), b"{\"pack\":").unwrap();
+        let index = temp.0.join("index.json");
+        fs::write(&index, br#"{"objects":{}}"#).unwrap();
+        let built_in = json!({"pack": {"description": "built in"}});
+        let built_in: Map<_, _> = built_in.as_object().unwrap().clone();
+        let supplier = VanillaResourcesSupplier::new(extracted, &index, &temp.0, built_in.clone());
+        let location = PackLocationInfo::test("vanilla");
+        let metadata = supplier.open_metadata(&location).unwrap();
+        assert_eq!(
+            metadata.metadata_section_json("pack").unwrap(),
+            built_in.get("pack").cloned()
+        );
+        let metadata = crate::resources::packs::PackMetadata::test();
+        for layer in supplier.open_resources(&location, &metadata).unwrap() {
+            assert_eq!(
+                layer.metadata_section_json("pack").unwrap(),
+                built_in.get("pack").cloned()
+            );
+        }
     }
 }
