@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::assets::{AssetId, AssetIndex};
+use crate::assets::AssetId;
 use crate::renderer::{packing, rhi, util};
+use crate::resources::managers::ResourceManager;
+use crate::resources::{ResourceContent, ResourceId};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::{BlockRenderAssets, LoadProgress, LoadStage};
 
@@ -143,14 +144,14 @@ fn uses_block_atlas_mip_chain(key: &str) -> bool {
         || path == "entity/enchantment/enchanting_table_book"
 }
 
-pub fn atlas_asset_path(key: &str) -> String {
+pub fn atlas_resource_id(key: &str) -> Option<ResourceId> {
     if key.contains(':') {
-        return AssetId::parse(key).asset_key("textures", ".png");
+        return AssetId::parse(key).resource_id("textures", ".png").ok();
     }
     if key.starts_with("item/") || key.starts_with("entity/") || key.starts_with("particle/") {
-        format!("minecraft/textures/{key}.png")
+        ResourceId::from_parts("minecraft", &format!("textures/{key}.png")).ok()
     } else {
-        format!("minecraft/textures/block/{key}.png")
+        ResourceId::from_parts("minecraft", &format!("textures/block/{key}.png")).ok()
     }
 }
 
@@ -416,12 +417,11 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
     }
 }
 
-fn read_texture_metadata(metadata_path: Option<&Path>) -> Option<TextureMetadataFile> {
-    let Some(metadata_path) = metadata_path else {
+fn read_texture_metadata(resource: &SpriteInput) -> Option<TextureMetadataFile> {
+    let Some(metadata) = resource.metadata.as_ref()? else {
         return Some(TextureMetadataFile::default());
     };
-    let json = std::fs::read_to_string(metadata_path).ok()?;
-    serde_json::from_str(&json).ok()
+    serde_json::from_reader(metadata.open().ok()?).ok()
 }
 
 fn animation_layout_from_metadata(
@@ -587,50 +587,44 @@ fn sprite_alpha_mask_from_rgba(
     }
 }
 
-fn resolve_texture_resource(
-    asset_key: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (PathBuf, Option<PathBuf>) {
-    if let Some((path, metadata)) =
-        packs.and_then(|packs| packs.resolve_asset_with_metadata(asset_key))
-    {
-        return (path, metadata);
-    }
-
-    let path = asset_index
-        .as_ref()
-        .and_then(|index| index.resolve(asset_key))
-        .unwrap_or_else(|| jar_assets_dir.join(asset_key));
-    let metadata_key = format!("{asset_key}.mcmeta");
-    let metadata = packs
-        .and_then(|packs| packs.resolve_asset(&metadata_key))
-        .or_else(|| {
-            asset_index
-                .as_ref()
-                .and_then(|index| index.resolve(&metadata_key))
-        })
-        .or_else(|| {
-            let path = jar_assets_dir.join(&metadata_key);
-            path.exists().then_some(path)
-        });
-    (path, metadata)
+/// Selected on the application thread; only source-pinned factories cross to
+/// the atlas workers, including metadata from the same winning resource floor.
+pub(crate) struct AtlasInputs {
+    sprites: HashMap<ResourceId, SpriteInput>,
 }
 
-fn load_source(
-    name: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    retain_alpha_mask: bool,
-) -> Source {
-    let asset_key = atlas_asset_path(name);
-    let (file_path, metadata_path) =
-        resolve_texture_resource(&asset_key, jar_assets_dir, asset_index, packs);
-    match util::load_png(&file_path) {
+struct SpriteInput {
+    content: ResourceContent,
+    // An outer None retains a metadata selection error, not missing metadata.
+    metadata: Option<Option<ResourceContent>>,
+}
+
+impl AtlasInputs {
+    pub(crate) fn prepare(resources: &dyn ResourceManager) -> std::io::Result<Self> {
+        let sprites = resources
+            .list_resources("textures", &|id| id.path().ends_with(".png"))?
+            .into_iter()
+            .map(|(id, resource)| {
+                let selected = SpriteInput {
+                    content: resource.content().clone(),
+                    metadata: resource.metadata().ok(),
+                };
+                (id, selected)
+            })
+            .collect();
+        Ok(Self { sprites })
+    }
+}
+
+fn load_source(name: &str, inputs: &AtlasInputs, retain_alpha_mask: bool) -> Source {
+    let resource = atlas_resource_id(name).and_then(|id| inputs.sprites.get(&id));
+    let Some(resource) = resource else {
+        tracing::warn!("Missing texture: {name}");
+        return Source::empty(name);
+    };
+    match util::load_resource_png(&resource.content) {
         Some((data, width, height)) => {
-            let Some(metadata) = read_texture_metadata(metadata_path.as_deref()) else {
+            let Some(metadata) = read_texture_metadata(resource) else {
                 tracing::warn!("Invalid texture metadata: {name}");
                 return Source::empty(name);
             };
@@ -703,20 +697,12 @@ pub(crate) struct AtlasCpu {
 impl TextureAtlas {
     pub fn build(
         device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, String> {
-        let cpu = Self::build_cpu(
-            jar_assets_dir,
-            asset_index,
-            texture_names,
-            generated_item_textures,
-            packs,
-            None,
-        );
+        let inputs = AtlasInputs::prepare(resources).map_err(|error| error.to_string())?;
+        let cpu = Self::build_cpu(&inputs, texture_names, generated_item_textures, None);
         Self::upload(device, cpu)
     }
 
@@ -921,23 +907,15 @@ impl TextureAtlas {
     /// The CPU half of [`Self::build`]: loads and packs every sprite into the
     /// level-0 atlas pixels and UV map, with no GPU work.
     pub(crate) fn build_cpu(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        inputs: &AtlasInputs,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
         progress: Option<&LoadProgress>,
     ) -> AtlasCpu {
         let names: Vec<&str> = texture_names.iter().copied().collect();
         LoadProgress::begin_stage(progress, LoadStage::Textures, names.len());
         let mut sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
-            let source = load_source(
-                name,
-                jar_assets_dir,
-                asset_index,
-                packs,
-                generated_item_textures.contains(name),
-            );
+            let source = load_source(name, inputs, generated_item_textures.contains(name));
             LoadProgress::step(progress);
             source
         });
@@ -2168,7 +2146,7 @@ mod tests {
     #[test]
     fn generated_sprite_uses_same_resource_pack_source_as_atlas() {
         let root = test_temp_dir("item_pack_source");
-        let jar_assets = root.join("jar");
+        let jar_assets = root.join("jar/assets");
         let instance = root.join("instance");
         let base_dir = jar_assets.join("minecraft/textures/item");
         let pack_dir = instance.join("resourcepacks/test_pack/assets/minecraft/textures/item");
@@ -2197,9 +2175,12 @@ mod tests {
         replacement.put_pixel(1, 3, image::Rgba([255, 255, 255, 255]));
         replacement.save(&pack_path).unwrap();
 
-        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
-        packs.enable_local_pack("test_pack");
-        let source = load_source("item/cocoa_beans", &jar_assets, &None, Some(&packs), true);
+        let resources = crate::test_util::test_resources(&[
+            root.join("jar"),
+            instance.join("resourcepacks/test_pack"),
+        ]);
+        let inputs = AtlasInputs::prepare(&resources).unwrap();
+        let source = load_source("item/cocoa_beans", &inputs, true);
         let mask = source.alpha_mask.as_ref().unwrap();
         assert_eq!((source.w, source.h), (2, 4));
         assert!(!mask.is_opaque_in_any_frame(0, 0));
@@ -2212,12 +2193,12 @@ mod tests {
     #[test]
     fn cross_namespace_texture_keys_resolve_without_minecraft_rewrite() {
         assert_eq!(
-            atlas_asset_path("other:block/custom"),
-            "other/textures/block/custom.png"
+            atlas_resource_id("other:block/custom").unwrap(),
+            ResourceId::new("other:textures/block/custom.png").unwrap()
         );
         assert_eq!(
-            atlas_asset_path("other:item/custom"),
-            "other/textures/item/custom.png"
+            atlas_resource_id("other:item/custom").unwrap(),
+            ResourceId::new("other:textures/item/custom.png").unwrap()
         );
         assert!(!uses_block_atlas_mip_chain("item/cocoa_beans"));
         assert!(!uses_block_atlas_mip_chain("particle/glitter_0"));

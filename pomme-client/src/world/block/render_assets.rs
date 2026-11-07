@@ -18,7 +18,6 @@ use super::block_state_table::BlockStateTable;
 use super::json_bundle::JsonBundle;
 use super::model;
 use super::model::BakedModel;
-use crate::assets::AssetIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tint {
@@ -95,12 +94,11 @@ struct StateRender {
 #[derive(Default)]
 pub struct BlockRenderAssets {
     textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
+    baked: model::BakedModelMap,
     /// Per block-state table slot, every state's resolved model lookups,
     /// indexed by state id; built on first use of the slot. The mesher queries
     /// these for every block and neighbour, so they must not hash or parse.
     state_render: [OnceLock<Box<[StateRender]>>; super::TABLE_SLOTS],
-    multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, Vec<Option<String>>>,
@@ -194,23 +192,20 @@ impl LoadProgress {
 
 impl BlockRenderAssets {
     pub fn load(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        inputs: &model::ModelInputs,
         cache_dir: Option<&Path>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
+        use_vanilla_cache: bool,
         progress: Option<&LoadProgress>,
     ) -> Self {
         // Only vanilla textures are cached, so a cache shared between
         // profiles never carries one profile's resource packs into another.
         let cache_path = cache_dir
-            .filter(|_| packs.is_none())
+            .filter(|_| use_vanilla_cache)
             .map(|dir| dir.join(BLOCK_CACHE_FILE));
 
-        // The bundle is the jar's files alone, so packs read from disk.
-        let bundle = packs
-            .is_none()
-            .then(|| JsonBundle::load(jar_assets_dir, asset_index, cache_dir, progress));
-        let bundle = bundle.as_ref();
+        // Parallel reads use selected contents even for custom packs. Never
+        // read or write their data through the shared vanilla bundle cache.
+        let bundle = JsonBundle::load(inputs, cache_dir.filter(|_| use_vanilla_cache), progress);
 
         let textures: Option<HashMap<String, FaceTextures>> =
             cache_path.as_deref().and_then(load_cache);
@@ -222,8 +217,7 @@ impl BlockRenderAssets {
         }
 
         let textures = textures.unwrap_or_else(|| {
-            let mut textures =
-                model::load_all_block_textures(jar_assets_dir, asset_index, packs, bundle);
+            let mut textures = model::load_all_block_textures(inputs, &bundle);
 
             textures
                 .entry("water".into())
@@ -239,20 +233,10 @@ impl BlockRenderAssets {
             textures
         });
 
-        LoadProgress::begin_stage(
-            progress,
-            LoadStage::Blockstates,
-            bundle.map_or(0, |b| b.blockstates().len()),
-        );
-        let (baked, multipart) =
-            model::bake_all_models(jar_assets_dir, asset_index, packs, bundle, progress);
-        LoadProgress::begin_stage(
-            progress,
-            LoadStage::Items,
-            bundle.map_or(0, |b| b.item_names().len()),
-        );
-        let baked_items =
-            model::bake_item_models(jar_assets_dir, asset_index, packs, bundle, progress);
+        LoadProgress::begin_stage(progress, LoadStage::Blockstates, bundle.blockstates().len());
+        let baked = model::bake_all_models(inputs, &bundle, progress);
+        LoadProgress::begin_stage(progress, LoadStage::Items, bundle.item_names().len());
+        let baked_items = model::bake_item_models(inputs, Some(&bundle), progress);
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
@@ -264,7 +248,6 @@ impl BlockRenderAssets {
             textures,
             baked,
             state_render: [const { OnceLock::new() }; super::TABLE_SLOTS],
-            multipart,
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
@@ -395,7 +378,7 @@ impl BlockRenderAssets {
     }
 
     fn resolve_model(&self, block: &str, props: &super::PropMap) -> Option<&Arc<BakedModel>> {
-        let variants = self.baked.get(block)?;
+        let variants = &self.blockstate_layer(block, props)?.variants;
 
         if variants.len() == 1 {
             return variants.values().next();
@@ -413,6 +396,26 @@ impl BlockRenderAssets {
             .or_else(|| variants.values().next())
     }
 
+    fn blockstate_layer(
+        &self,
+        block: &str,
+        props: &super::PropMap,
+    ) -> Option<&model::BakedBlockstate> {
+        let layers = self.baked.get(block)?;
+        // Vanilla merges instantiated states, not JSON keys: a higher partial
+        // variant definition leaves unmatched states in the lower layer.
+        layers
+            .iter()
+            .rev()
+            .find(|layer| {
+                !layer.multipart.is_empty()
+                    || layer.variants.keys().any(|key| {
+                        constraints_match(props, key.split(',').filter_map(|p| p.split_once('=')))
+                    })
+            })
+            .or_else(|| layers.first())
+    }
+
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {
         let face_textures = self.textures.values().flat_map(|ft| {
             let base = [
@@ -426,12 +429,14 @@ impl BlockRenderAssets {
         let models = self
             .baked
             .values()
-            .flat_map(|variants| variants.values().map(|model| &**model))
-            .chain(
-                self.multipart
+            .flatten()
+            .flat_map(|layer| {
+                layer
+                    .variants
                     .values()
-                    .flat_map(|entries| entries.iter().map(|entry| &*entry.model)),
-            )
+                    .map(|model| &**model)
+                    .chain(layer.multipart.iter().map(|entry| &*entry.model))
+            })
             .chain(self.item_models.values());
         let quad_textures =
             models.flat_map(|model| model.quads.iter().map(|quad| quad.texture.name()));
@@ -463,7 +468,10 @@ impl<'a> BlockRenderView<'a> {
         state: BlockState,
     ) -> Option<Vec<&'a model::BakedQuad>> {
         let block_state_data = self.block_state_table.block_state_data(state);
-        let entries = self.assets.multipart.get(block_state_data.id)?;
+        let entries = &self
+            .assets
+            .blockstate_layer(block_state_data.id, &block_state_data.properties)?
+            .multipart;
         let mut quads = Vec::new();
         for entry in entries {
             if entry.when.matches(&block_state_data.properties) {

@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{self, Read};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use glam::{Mat3, Mat4, Quat, Vec3};
@@ -7,10 +7,68 @@ use serde::Deserialize;
 
 use super::json_bundle::JsonBundle;
 use super::render_assets::{FaceTextures, LoadProgress, Tint};
-use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
+use crate::assets::AssetId;
 use crate::renderer::block_entity_model::{SkullKind, bake_skull_model};
 use crate::renderer::chunk::mesher::Colormap;
 use crate::renderer::entity_model::{PartAnim, cube_face_positions, cube_face_uvs};
+use crate::resources::managers::ResourceManager;
+use crate::resources::{ResourceContent, ResourceId};
+
+/// Source-pinned selections prepared before the model worker starts. Only
+/// content suppliers cross the thread boundary; parsing and baking stay there.
+pub(crate) struct ModelInputs {
+    pub(super) blockstates: BTreeMap<ResourceId, Vec<ResourceContent>>,
+    pub(crate) models: BTreeMap<ResourceId, ResourceContent>,
+    pub(crate) items: BTreeMap<ResourceId, ResourceContent>,
+    grass_colormap: Option<ResourceContent>,
+}
+
+impl ModelInputs {
+    pub(crate) fn prepare(resources: &dyn ResourceManager) -> io::Result<Self> {
+        // COMPAT: retain the existing shallow Minecraft blockstate/item scope;
+        // model parents and equipment definitions may use other namespaces.
+        let shallow_minecraft_json = |id: &ResourceId| {
+            id.namespace() == "minecraft"
+                && id.path().ends_with(".json")
+                && id
+                    .path()
+                    .split_once('/')
+                    .is_some_and(|(_, path)| !path.contains('/'))
+        };
+        let blockstates = resources
+            .list_resource_stacks("blockstates", &shallow_minecraft_json)?
+            .into_iter()
+            .map(|(id, stack)| (id, stack.into_iter().map(|r| r.content().clone()).collect()))
+            .collect();
+        let models = resources
+            .list_resources("models", &|id| id.path().ends_with(".json"))?
+            .into_iter()
+            .map(|(id, resource)| (id, resource.content().clone()))
+            .collect();
+        let items = resources
+            .list_resources("items", &shallow_minecraft_json)?
+            .into_iter()
+            .map(|(id, resource)| (id, resource.content().clone()))
+            .collect();
+        let grass_colormap = resources
+            .get_resource(&crate::resources::resource_id!(
+                "minecraft:textures/colormap/grass.png"
+            ))?
+            .map(|resource| resource.content().clone());
+        Ok(Self {
+            blockstates,
+            models,
+            items,
+            grass_colormap,
+        })
+    }
+}
+
+pub(crate) fn read_model_json(content: &ResourceContent) -> Option<String> {
+    let mut text = String::new();
+    content.open().ok()?.read_to_string(&mut text).ok()?;
+    Some(text)
+}
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -534,33 +592,19 @@ pub struct MultipartEntry {
 }
 
 pub fn load_all_block_textures(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    bundle: Option<&JsonBundle>,
+    inputs: &ModelInputs,
+    bundle: &JsonBundle,
 ) -> HashMap<String, FaceTextures> {
     let mut results = HashMap::new();
-    let mut model_cache = ModelLoader::new(bundle);
+    let mut model_cache = ModelLoader::new(Some(bundle));
 
-    for_each_blockstate(
-        jar_assets_dir,
-        asset_index,
-        packs,
-        bundle,
-        |block_name, blockstate| {
-            let model_ref = extract_default_model_ref(blockstate)?;
-            let resolved = resolve_model(
-                &model_ref.model,
-                jar_assets_dir,
-                asset_index,
-                &mut model_cache,
-                packs,
-            );
-            let face_textures = build_face_textures(block_name, &resolved.textures)?;
-            results.insert(block_name.to_string(), face_textures);
-            Some(())
-        },
-    );
+    for_each_blockstate(bundle, |block_name, blockstate| {
+        let model_ref = extract_default_model_ref(blockstate)?;
+        let resolved = resolve_model(&model_ref.model, inputs, &mut model_cache);
+        let face_textures = build_face_textures(block_name, &resolved.textures)?;
+        results.insert(block_name.to_string(), face_textures);
+        Some(())
+    });
 
     tracing::info!(
         "Loaded {} block texture mappings from vanilla assets",
@@ -569,107 +613,93 @@ pub fn load_all_block_textures(
     results
 }
 
-type BakedModelMap = HashMap<String, HashMap<String, Arc<BakedModel>>>;
-type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
+pub(crate) struct BakedBlockstate {
+    pub(crate) variants: HashMap<String, Arc<BakedModel>>,
+    pub(crate) multipart: Vec<MultipartEntry>,
+}
+
+pub(crate) type BakedModelMap = HashMap<String, Vec<BakedBlockstate>>;
 
 pub fn bake_all_models(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    bundle: Option<&JsonBundle>,
+    inputs: &ModelInputs,
+    bundle: &JsonBundle,
     progress: Option<&LoadProgress>,
-) -> (BakedModelMap, MultipartMap) {
+) -> BakedModelMap {
     let mut results: BakedModelMap = HashMap::new();
-    let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
-    let mut model_cache = ModelLoader::new(bundle);
+    let mut model_cache = ModelLoader::new(Some(bundle));
     let mut total = 0u32;
 
-    for_each_blockstate(
-        jar_assets_dir,
-        asset_index,
-        packs,
-        bundle,
-        |block_name, blockstate| {
-            total += 1;
-            LoadProgress::step(progress);
-            let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
-            // Variants (and multipart cases) naming the same model, rotation
-            // and uvlock share one bake. Per block, since tints are.
-            let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
-            let mut bake = |model_ref: &ModelRef| {
-                let key = (
-                    model_ref.model.clone(),
-                    model_ref.x,
-                    model_ref.y,
-                    model_ref.uvlock,
-                );
-                if let Some(baked) = shared.get(&key) {
-                    return Some(Arc::clone(baked));
-                }
-                let resolved = resolve_model(
-                    &model_ref.model,
-                    jar_assets_dir,
-                    asset_index,
-                    &mut model_cache,
-                    packs,
-                );
-                let mut baked =
-                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
-                apply_block_tints(&mut baked, block_name);
-                let baked = Arc::new(baked);
-                shared.insert(key, Arc::clone(&baked));
-                Some(baked)
-            };
+    for_each_blockstate(bundle, |block_name, blockstate| {
+        total += 1;
+        LoadProgress::step(progress);
+        let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
+        let mut multipart_entries = Vec::new();
+        // Variants (and multipart cases) naming the same model, rotation
+        // and uvlock share one bake. Per block, since tints are.
+        let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
+        let mut bake = |model_ref: &ModelRef| {
+            let key = (
+                model_ref.model.clone(),
+                model_ref.x,
+                model_ref.y,
+                model_ref.uvlock,
+            );
+            if let Some(baked) = shared.get(&key) {
+                return Some(Arc::clone(baked));
+            }
+            let resolved = resolve_model(&model_ref.model, inputs, &mut model_cache);
+            let mut baked = bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
+            apply_block_tints(&mut baked, block_name);
+            let baked = Arc::new(baked);
+            shared.insert(key, Arc::clone(&baked));
+            Some(baked)
+        };
 
-            if let Some(variants) = &blockstate.variants {
-                for (variant_key, variant_entry) in variants {
-                    if let Some(baked) = bake(variant_entry.first()?) {
-                        variants_map.insert(variant_key.clone(), baked);
-                    }
+        if let Some(variants) = &blockstate.variants {
+            for (variant_key, variant_entry) in variants {
+                if let Some(baked) = bake(variant_entry.first()?) {
+                    variants_map.insert(variant_key.clone(), baked);
                 }
-            } else if let Some(multipart) = &blockstate.multipart {
-                let mut entries = Vec::new();
-                for case in multipart {
-                    if let Some(baked) = bake(case.apply.first()?) {
-                        match super::condition::Condition::parse(case.when.as_ref()) {
-                            Ok(when) => entries.push(MultipartEntry { when, model: baked }),
-                            Err(error) => {
-                                tracing::warn!(block_name, %error, "Invalid multipart selector")
-                            }
+            }
+        } else if let Some(multipart) = &blockstate.multipart {
+            let mut entries = Vec::new();
+            for case in multipart {
+                if let Some(baked) = bake(case.apply.first()?) {
+                    match super::condition::Condition::parse(case.when.as_ref()) {
+                        Ok(when) => entries.push(MultipartEntry { when, model: baked }),
+                        Err(error) => {
+                            tracing::warn!(block_name, %error, "Invalid multipart selector")
                         }
                     }
                 }
-                if !entries.is_empty() {
-                    multipart_results.insert(block_name.to_string(), entries);
-                }
             }
+            multipart_entries = entries;
+        }
 
-            if !variants_map.is_empty() {
-                results.insert(block_name.to_string(), variants_map);
-            }
-            Some(())
-        },
-    );
+        if !variants_map.is_empty() || !multipart_entries.is_empty() {
+            results
+                .entry(block_name.to_string())
+                .or_default()
+                .push(BakedBlockstate {
+                    variants: variants_map,
+                    multipart: multipart_entries,
+                });
+        }
+        Some(())
+    });
 
     let mut missing_names: Vec<String> = Vec::new();
-    for_each_blockstate(
-        jar_assets_dir,
-        asset_index,
-        packs,
-        bundle,
-        |block_name, _| {
-            if !results.contains_key(block_name)
-                && !multipart_results.contains_key(block_name)
-                && !crate::world::block_entity::is_block_entity_block(block_name)
-                && !crate::world::block_entity::is_invisible_block(block_name)
-            {
-                missing_names.push(block_name.to_string());
-            }
-            Some(())
-        },
-    );
+    for_each_blockstate(bundle, |block_name, _| {
+        if !results.contains_key(block_name)
+            && !crate::world::block_entity::is_block_entity_block(block_name)
+            && !crate::world::block_entity::is_invisible_block(block_name)
+        {
+            missing_names.push(block_name.to_string());
+        }
+        Some(())
+    });
     missing_names.sort();
-    let baked_count = results.len() + multipart_results.len();
+    let baked_count = results.len();
     tracing::info!(
         "Baked models for {}/{} blocks ({} unhandled)",
         baked_count,
@@ -679,7 +709,7 @@ pub fn bake_all_models(
     if !missing_names.is_empty() {
         tracing::warn!("Unhandled baked models: {}", missing_names.join(", "));
     }
-    (results, multipart_results)
+    results
 }
 
 pub struct BakedItemModels {
@@ -705,32 +735,6 @@ pub enum ItemTintSource {
     MapColor { default: u32 },
     CustomModelData { index: usize, default: u32 },
     Team { default: u32 },
-}
-
-/// Every `minecraft/items/*.json` name across the jar and the active packs,
-/// so a pack can add an item, not only replace one. Vanilla walks every pack
-/// in `FallbackResourceManager`.
-pub(super) fn item_definition_names(
-    jar_assets_dir: &Path,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> std::collections::BTreeSet<String> {
-    let pack_dirs = packs
-        .into_iter()
-        .flat_map(|packs| packs.active_pack_dirs())
-        .map(|dir| dir.join("assets"));
-    std::iter::once(jar_assets_dir.to_path_buf())
-        .chain(pack_dirs)
-        .filter_map(|root| std::fs::read_dir(root.join("minecraft").join("items")).ok())
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            entry
-                .file_name()
-                .to_str()?
-                .strip_suffix(".json")
-                .map(str::to_owned)
-        })
-        .collect()
 }
 
 fn opaque(color: u32) -> u32 {
@@ -843,9 +847,7 @@ fn parse_item_tint_sources(
 }
 
 pub fn bake_item_models(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
+    inputs: &ModelInputs,
     bundle: Option<&JsonBundle>,
     progress: Option<&LoadProgress>,
 ) -> BakedItemModels {
@@ -855,12 +857,7 @@ pub fn bake_item_models(
     let mut gui_transforms: HashMap<String, DisplayTransform> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut tint_sources: HashMap<String, Vec<ItemTintSource>> = HashMap::new();
-    let grass_colormap = Colormap::load(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/colormap/grass.png",
-        packs,
-    );
+    let grass_colormap = Colormap::from_content(inputs.grass_colormap.as_ref());
     let mut model_cache = ModelLoader::new(bundle);
 
     let mut bake = |name: &str, parts: &[ModelPart]| {
@@ -874,13 +871,7 @@ pub fn bake_item_models(
         let mut gui_transform: Option<DisplayTransform> = None;
         let mut gui_light: Option<GuiLight> = None;
         for part in parts {
-            let resolved = resolve_model(
-                &part.path,
-                jar_assets_dir,
-                asset_index,
-                &mut model_cache,
-                packs,
-            );
+            let resolved = resolve_model(&part.path, inputs, &mut model_cache);
             match ground_transform {
                 None => ground_transform = Some(resolved.ground_transform),
                 Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
@@ -978,24 +969,16 @@ pub fn bake_item_models(
         }
     };
 
-    let item_names = match bundle {
-        Some(bundle) => bundle.item_names().to_vec(),
-        None => item_definition_names(jar_assets_dir, packs)
-            .into_iter()
-            .collect(),
-    };
-    for item_name in &item_names {
+    for (id, content) in &inputs.items {
         LoadProgress::step(progress);
-        let item_name = item_name.as_str();
-        let item_asset_key = format!("minecraft/items/{item_name}.json");
-        let Some(contents) = read_json(bundle, &item_asset_key, || {
-            Some(resolve_asset_path_with_packs(
-                jar_assets_dir,
-                asset_index,
-                &item_asset_key,
-                packs,
-            ))
-        }) else {
+        let Some(item_name) = id
+            .path()
+            .strip_prefix("items/")
+            .and_then(|path| path.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let Some(contents) = read_json(bundle, id, || Some(content)) else {
             continue;
         };
         let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
@@ -1023,13 +1006,7 @@ pub fn bake_item_models(
 
     // The mesh comes from the special renderer, but the chest's display
     // transforms live in `item/template_chest` like any other item's.
-    let chest = resolve_model(
-        "item/template_chest",
-        jar_assets_dir,
-        asset_index,
-        &mut model_cache,
-        packs,
-    );
+    let chest = resolve_model("item/template_chest", inputs, &mut model_cache);
     item_models.insert(
         "chest".to_string(),
         bake_chest_item_model(chest.gui_transform, chest.gui_light),
@@ -1046,7 +1023,7 @@ pub fn bake_item_models(
         } else {
             "item/template_skull"
         };
-        let base = resolve_model(base, jar_assets_dir, asset_index, &mut model_cache, packs);
+        let base = resolve_model(base, inputs, &mut model_cache);
         item_models.insert(
             name.to_string(),
             bake_skull_item_model(kind, base.gui_transform, base.gui_light),
@@ -1682,89 +1659,16 @@ pub fn find_first_string_for_key(json: &serde_json::Value, key: &str) -> Option<
 }
 
 fn for_each_blockstate(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    bundle: Option<&JsonBundle>,
+    bundle: &JsonBundle,
     mut callback: impl FnMut(&str, &BlockstateFile) -> Option<()>,
 ) {
-    if let Some(bundle) = bundle {
-        for (name, contents) in bundle.blockstates() {
-            if let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(contents) {
-                callback(name, &blockstate);
-            }
-        }
-        return;
-    }
-    let Some(blockstates_dir) = resolve_blockstates_dir(jar_assets_dir, asset_index, packs) else {
-        tracing::warn!("Blockstates directory not found");
-        return;
-    };
-
-    let entries = match std::fs::read_dir(&blockstates_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("Failed to read blockstates dir: {e}");
-            return;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(&contents) else {
-            continue;
-        };
-
-        callback(name, &blockstate);
-    }
-}
-
-pub(super) fn resolve_blockstates_dir(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> Option<PathBuf> {
-    let candidates = [
-        jar_assets_dir.join("assets/minecraft/blockstates"),
-        jar_assets_dir.join("jar/assets/minecraft/blockstates"),
-        PathBuf::from("reference/assets/assets/minecraft/blockstates"),
-    ];
-
-    for c in &candidates {
-        if c.is_dir() {
-            return Some(c.clone());
+    // Vanilla BlockStateModelLoader instantiates each definition low-to-high,
+    // replacing only states supplied by that layer. No native directory bypass.
+    for (name, contents) in bundle.blockstates() {
+        if let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(contents) {
+            callback(name, &blockstate);
         }
     }
-
-    // Also check the original simple path
-    let path = jar_assets_dir.join("minecraft/blockstates");
-    if path.is_dir() {
-        return Some(path);
-    }
-
-    if asset_index.is_some() {
-        let test_path = resolve_asset_path_with_packs(
-            jar_assets_dir,
-            asset_index,
-            "minecraft/blockstates/stone.json",
-            packs,
-        );
-        if test_path.exists() {
-            return test_path.parent().map(|p| p.to_path_buf());
-        }
-    }
-
-    None
 }
 
 fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
@@ -1803,10 +1707,8 @@ struct ResolvedModel {
 
 fn resolve_model(
     model_id: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    inputs: &ModelInputs,
     cache: &mut ModelLoader<'_>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
@@ -1817,7 +1719,7 @@ fn resolve_model(
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
-        let Some(model) = load_model(&current_id, jar_assets_dir, asset_index, cache, packs) else {
+        let Some(model) = load_model(&current_id, inputs, cache) else {
             break;
         };
 
@@ -1885,13 +1787,11 @@ fn resolve_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String
 
 fn load_model<'a>(
     model_id: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    inputs: &ModelInputs,
     cache: &'a mut ModelLoader<'_>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> Option<&'a ModelFile> {
     if !cache.models.contains_key(model_id) {
-        let model = read_model(model_id, jar_assets_dir, asset_index, cache.bundle, packs);
+        let model = read_model(model_id, inputs, cache.bundle);
         cache.models.insert(model_id.to_string(), model);
     }
     cache.models.get(model_id)?.as_ref()
@@ -1899,15 +1799,13 @@ fn load_model<'a>(
 
 fn read_model(
     model_id: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    inputs: &ModelInputs,
     bundle: Option<&JsonBundle>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> Option<ModelFile> {
-    let asset_key = model_id_to_asset_key(model_id);
-    let contents = read_json(bundle, &asset_key, || {
-        resolve_model_path(jar_assets_dir, asset_index, &asset_key, packs)
-    })?;
+    let id = AssetId::parse(model_id)
+        .resource_id("models", ".json")
+        .ok()?;
+    let contents = read_json(bundle, &id, || inputs.models.get(&id))?;
     match serde_json::from_str(&contents) {
         Ok(model) => Some(model),
         Err(error) => {
@@ -1918,42 +1816,17 @@ fn read_model(
     }
 }
 
-/// `asset_key`'s contents from the bundle, else from `path` on disk.
-fn read_json<'b>(
+/// Contents from the selected bundle, else the same source-pinned input.
+fn read_json<'b, 'i>(
     bundle: Option<&'b JsonBundle>,
-    asset_key: &str,
-    path: impl FnOnce() -> Option<PathBuf>,
+    id: &ResourceId,
+    content: impl FnOnce() -> Option<&'i ResourceContent>,
 ) -> Option<std::borrow::Cow<'b, str>> {
-    if let Some(contents) = bundle.and_then(|bundle| bundle.get(asset_key)) {
+    let asset_key = format!("{}/{}", id.namespace(), id.path());
+    if let Some(contents) = bundle.and_then(|bundle| bundle.get(&asset_key)) {
         return Some(std::borrow::Cow::Borrowed(contents));
     }
-    std::fs::read_to_string(path()?)
-        .ok()
-        .map(std::borrow::Cow::Owned)
-}
-
-fn resolve_model_path(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    asset_key: &str,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> Option<PathBuf> {
-    let primary = resolve_asset_path_with_packs(jar_assets_dir, asset_index, asset_key, packs);
-    if primary.exists() {
-        return Some(primary);
-    }
-
-    let ref_path = Path::new("reference/assets/assets")
-        .join(asset_key.strip_prefix("minecraft/").unwrap_or(asset_key));
-    if ref_path.exists() {
-        return Some(ref_path);
-    }
-
-    None
-}
-
-fn model_id_to_asset_key(model_id: &str) -> String {
-    AssetId::parse(model_id).asset_key("models", ".json")
+    read_model_json(content()?).map(std::borrow::Cow::Owned)
 }
 
 fn texture_to_name(texture_ref: &str) -> Option<String> {
@@ -3163,7 +3036,7 @@ mod tests {
     #[test]
     fn generated_item_layers_keep_their_layer_positions() {
         let root = test_temp_dir("generated_layer_gap");
-        let jar = root.join("jar");
+        let jar = root.join("jar/assets");
         let items = jar.join("minecraft/items");
         let models = jar.join("minecraft/models/item");
         std::fs::create_dir_all(&items).unwrap();
@@ -3203,14 +3076,16 @@ mod tests {
         .unwrap();
         std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
 
-        let baked = bake_item_models(&jar, &None, None, None, None);
+        let resources = crate::test_util::test_resources(&[root.join("jar")]);
+        let inputs = ModelInputs::prepare(&resources).unwrap();
+        let baked = bake_item_models(&inputs, None, None);
         assert_eq!(
             baked.flat_texture_keys.get("holey").map(Vec::as_slice),
             Some([Some("item/zero".to_string())].as_slice())
         );
         // Read through the bundle, the same files bake the same.
-        let bundle = JsonBundle::load(&jar, &None, None, None);
-        let from_bundle = bake_item_models(&jar, &None, None, Some(&bundle), None);
+        let bundle = JsonBundle::load(&inputs, None, None);
+        let from_bundle = bake_item_models(&inputs, Some(&bundle), None);
         assert_eq!(from_bundle.flat_texture_keys, baked.flat_texture_keys);
         assert_eq!(
             baked.flat_texture_keys.get("unresolved").map(Vec::as_slice),
@@ -3230,7 +3105,7 @@ mod tests {
     #[test]
     fn resolved_model_inherits_gui_transform() {
         let root = test_temp_dir("item_gui_transform");
-        let models = root.join("minecraft/models/block");
+        let models = root.join("assets/minecraft/models/block");
         std::fs::create_dir_all(&models).unwrap();
         std::fs::write(
             models.join("child.json"),
@@ -3244,7 +3119,9 @@ mod tests {
         .unwrap();
 
         let mut cache = ModelLoader::new(None);
-        let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
+        let resources = crate::test_util::test_resources(std::slice::from_ref(&root));
+        let inputs = ModelInputs::prepare(&resources).unwrap();
+        let resolved = resolve_model("block/child", &inputs, &mut cache);
         assert_eq!(resolved.gui_transform, gui_transform(135.0));
         assert_eq!(resolved.gui_light, GuiLight::Front);
 
@@ -3254,7 +3131,7 @@ mod tests {
     #[test]
     fn item_definition_and_display_transforms_follow_resource_pack_override() {
         let root = test_temp_dir("item_model_pack");
-        let jar = root.join("jar");
+        let jar = root.join("jar/assets");
         let instance = root.join("instance");
         let items = jar.join("minecraft/items");
         let models = jar.join("minecraft/models/item");
@@ -3301,9 +3178,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
-        packs.enable_local_pack("test_pack");
-        let baked = bake_item_models(&jar, &None, Some(&packs), None, None);
+        let resources = crate::test_util::test_resources(&[
+            root.join("jar"),
+            instance.join("resourcepacks/test_pack"),
+        ]);
+        let inputs = ModelInputs::prepare(&resources).unwrap();
+        let baked = bake_item_models(&inputs, None, None);
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
             Some([Some("other:item/replacement".to_string())].as_slice())
@@ -3330,7 +3210,7 @@ mod tests {
     #[test]
     fn bare_face_texture_slot_matches_vanilla_texture_slots() {
         let root = test_temp_dir("bare_texture_slot");
-        let models = root.join("minecraft/models/block");
+        let models = root.join("assets/minecraft/models/block");
         std::fs::create_dir_all(&models).unwrap();
         std::fs::write(
             models.join("test_core.json"),
@@ -3349,7 +3229,9 @@ mod tests {
         .unwrap();
 
         let mut cache = ModelLoader::new(None);
-        let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
+        let resources = crate::test_util::test_resources(std::slice::from_ref(&root));
+        let inputs = ModelInputs::prepare(&resources).unwrap();
+        let resolved = resolve_model("block/test_core", &inputs, &mut cache);
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
         assert!(

@@ -6,6 +6,7 @@ mod friends_screen;
 pub(crate) mod helpers;
 mod main_screen;
 mod options;
+pub(crate) use options::{apply_resource_pack_options, sync_resource_packs};
 mod servers;
 mod splash;
 mod title_screen;
@@ -27,9 +28,21 @@ use crate::renderer::pipelines::menu_overlay::{
     ICON_LINK, ICON_PAINTBRUSH, ICON_RETRY, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS,
     MenuElement, SpriteId, TooltipLine,
 };
+use crate::resources::ResourceManager;
+use crate::resources::packs::{PackCompat, PackId};
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+
+#[derive(Clone)]
+struct ResourcePackRow {
+    pub id: PackId,
+    pub name: String,
+    pub description: String,
+    pub compat: PackCompat,
+    pub is_server: bool,
+    pub enabled: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -354,17 +367,6 @@ impl PanoramaTheme {
             0 => Self::Pomme,
             2 => Self::Bedrock,
             _ => Self::Java,
-        }
-    }
-
-    /// The panorama cubemap each theme draws: vanilla's ships in the version
-    /// jar, Pomme's alongside the rest of the branded assets, Bedrock's with
-    /// its downloaded UI textures.
-    pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
-        match self {
-            Self::Java => dirs.jar_assets_dir.clone(),
-            Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
-            Self::Bedrock => dirs.bedrock_ui_dir(),
         }
     }
 }
@@ -820,12 +822,14 @@ pub struct MainMenu {
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
     favicon_dirty_since: Option<Instant>,
-    pub active_packs: Vec<crate::resource_pack::PackInfo>,
-    pub available_packs: Vec<crate::resource_pack::PackInfo>,
+    active_packs: Vec<ResourcePackRow>,
+    available_packs: Vec<ResourcePackRow>,
+    resource_completion_revision: u64,
+    asset_reload_revision: u64,
     pub packs_dir: PathBuf,
-    pub pack_toggle: Option<(String, bool)>,
-    pub rescan_packs: bool,
-    pub reload_assets: bool,
+    pack_toggle: Option<(PackId, bool)>,
+    rescan_packs: bool,
+    reload_assets: bool,
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
@@ -982,6 +986,8 @@ impl MainMenu {
             favicon_dirty_since: None,
             active_packs: Vec::new(),
             available_packs: Vec::new(),
+            resource_completion_revision: 0,
+            asset_reload_revision: 0,
             packs_dir: game_dir.join("resourcepacks"),
             pack_toggle: None,
             rescan_packs: false,
@@ -1320,6 +1326,11 @@ impl MainMenu {
         self.theme
     }
 
+    pub(crate) fn commit_theme(&mut self, theme: PanoramaTheme, key_bindings: &KeyBindings) {
+        self.theme = theme;
+        self.save_settings(key_bindings);
+    }
+
     /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
     /// have one; the vanilla title screen has no such thing.
     pub fn skin_preview(&self) -> Option<crate::renderer::MenuSkin> {
@@ -1336,22 +1347,24 @@ impl MainMenu {
         }
     }
 
-    /// Picks the title screen's splash line. Separate from `new` because the
-    /// asset index it reads through isn't built until after the menu is.
-    pub fn load_splash(
-        &mut self,
-        jar_assets_dir: &Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-    ) {
+    /// Picks from the active resource view. Absence clears the splash;
+    /// read/decode failure retains the last good line without rolling back
+    /// resource activation.
+    pub fn load_splash(&mut self, resources: &dyn ResourceManager) {
         let now =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        self.splash = splash::pick(
-            jar_assets_dir,
-            asset_index,
+        let picked = splash::pick(
+            resources,
             &self.username,
             now.month() as u32,
             u32::from(now.day()),
         );
+        match picked {
+            Ok(splash) => self.splash = splash,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to load minecraft:texts/splashes.txt; retaining the last good splash");
+            }
+        }
     }
 
     fn is_server_list_screen(&self) -> bool {
@@ -1508,12 +1521,9 @@ impl MainMenu {
             Screen::Main => {
                 let mut result =
                     self.build_main(screen_w, screen_h, input, text_width_fn, key_bindings);
-                if let Some(action) = self.drive_theme_transition(
-                    &mut result.elements,
-                    screen_w,
-                    screen_h,
-                    key_bindings,
-                ) {
+                if let Some(action) =
+                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
+                {
                     result.action = action;
                 }
                 result

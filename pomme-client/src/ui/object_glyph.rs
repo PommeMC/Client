@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde_json::Value;
 
-use crate::assets::{self, AssetId, AssetIndex};
+use crate::assets::{self, AssetId};
 use crate::chat_component::normalize_identifier;
 use crate::renderer::pipelines::menu_overlay::ATLAS_CELL;
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::{Resource, ResourceId, ResourceManager};
 
 #[derive(Clone, Debug)]
 enum Recipe {
@@ -29,46 +28,39 @@ enum Recipe {
 }
 
 struct AssetLookup<'a> {
-    jar_assets_dir: &'a Path,
-    asset_index: &'a Option<AssetIndex>,
-    packs: &'a ResourcePackManager,
+    resources: &'a dyn ResourceManager,
 }
 
 impl AssetLookup<'_> {
-    fn resolve(&self, key: &str) -> PathBuf {
-        assets::resolve_asset_path_with_packs(
-            self.jar_assets_dir,
-            self.asset_index,
-            key,
-            Some(self.packs),
-        )
+    fn resolve(&self, id: &ResourceId) -> std::io::Result<Option<Resource>> {
+        self.resources.get_resource(id)
     }
 
-    fn texture_exists(&self, resource: &str) -> bool {
-        self.resolve(&texture_key(resource)).exists()
+    fn texture_exists(&self, resource: &str) -> Option<bool> {
+        let Some(id) = texture_id(resource) else {
+            return Some(false);
+        };
+        self.resolve(&id).ok().map(|resource| resource.is_some())
     }
 
-    fn load_texture(&self, resource: &str) -> Option<(Vec<u8>, u32, u32)> {
-        crate::renderer::util::load_png(&self.resolve(&texture_key(resource)))
+    fn load_texture(&self, id: &ResourceId) -> Option<(Vec<u8>, u32, u32)> {
+        let resource = self.resolve(id).ok()??;
+        crate::renderer::util::load_resource_png(resource.content())
     }
 
     /// Every copy of the atlas definition, base assets first, so later packs'
     /// sources apply on top. A server-sent atlas id that escapes the assets
     /// directory resolves to nothing.
-    fn atlas_definition_stack(&self, atlas_key: &str) -> Vec<PathBuf> {
-        assets::resource_stack_paths(
-            self.jar_assets_dir,
-            self.asset_index,
-            atlas_key,
-            Some(self.packs),
-        )
+    fn atlas_definition_stack(&self, id: &ResourceId) -> Option<Vec<Resource>> {
+        self.resources.get_resource_stack(id).ok()
     }
 
     /// The sprite's frames: one for a plain texture, the animation's strip
     /// otherwise (`SpriteContents`).
-    fn load_direct_sprite(&self, resource: &str) -> Option<SpriteFrames> {
-        let (rgba, w, h) = self.load_texture(resource)?;
-        let animation = self.animation_meta(resource);
+    fn load_direct_sprite(&self, id: &ResourceId) -> Option<SpriteFrames> {
+        let resource = self.resolve(id).ok()??;
+        let (rgba, w, h) = crate::renderer::util::load_resource_png(resource.content())?;
+        let animation = self.animation_meta(&resource);
         let (frame_w, frame_h) = match &animation {
             Some(animation) => animation.frame_size(w, h),
             None => (w, h),
@@ -90,16 +82,19 @@ impl AssetLookup<'_> {
         SpriteFrames::new(frames, sequence)
     }
 
-    fn animation_meta(&self, resource: &str) -> Option<AnimationMeta> {
-        let path = self.resolve(&format!("{}.mcmeta", texture_key(resource)));
-        let text = std::fs::read_to_string(path).ok()?;
-        let value = serde_json::from_str::<Value>(&text).ok()?;
+    fn animation_meta(&self, resource: &Resource) -> Option<AnimationMeta> {
+        let content = resource.metadata().ok()??;
+        let value = serde_json::from_reader::<_, Value>(content.open().ok()?).ok()?;
         AnimationMeta::parse(value.get("animation")?)
     }
 }
 
-fn texture_key(resource: &str) -> String {
-    AssetId::parse(resource).asset_key("textures", ".png")
+fn resource_id(resource: &str, category: &str, suffix: &str) -> Option<ResourceId> {
+    AssetId::parse(resource).resource_id(category, suffix).ok()
+}
+
+fn texture_id(resource: &str) -> Option<ResourceId> {
+    resource_id(resource, "textures", ".png")
 }
 
 /// A sprite's animation metadata (vanilla `AnimationMetadataSection`).
@@ -271,29 +266,24 @@ pub fn is_known_atlas(atlas: &str) -> bool {
 }
 
 pub fn load_atlas_sprite(
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
+    resources: &dyn ResourceManager,
     atlas: &str,
     sprite: &str,
 ) -> Option<SpriteFrames> {
-    let lookup = AssetLookup {
-        jar_assets_dir,
-        asset_index,
-        packs,
-    };
+    let lookup = AssetLookup { resources };
     let sprite = AssetId::parse(sprite);
     let mut candidate: Option<Recipe> = None;
 
-    let atlas_key = AssetId::parse(atlas).asset_key("atlases", ".json");
-    for path in lookup.atlas_definition_stack(&atlas_key) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+    let atlas_id = resource_id(atlas, "atlases", ".json")?;
+    for resource in lookup.atlas_definition_stack(&atlas_id)? {
+        let content = resource.content();
+        let Ok(reader) = content.open() else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        let Ok(value) = serde_json::from_reader::<_, Value>(reader) else {
             tracing::warn!(
                 "Could not parse inline-object atlas definition {}",
-                path.display()
+                content.id()
             );
             continue;
         };
@@ -301,12 +291,12 @@ pub fn load_atlas_sprite(
             continue;
         };
         for source in sources {
-            apply_source(source, sprite, &lookup, &mut candidate);
+            apply_source(source, sprite, &lookup, &mut candidate)?;
         }
     }
 
     let image = match candidate? {
-        Recipe::Direct(resource) => return lookup.load_direct_sprite(&resource),
+        Recipe::Direct(resource) => return lookup.load_direct_sprite(&texture_id(&resource)?),
         Recipe::Unstitch {
             resource,
             x,
@@ -316,7 +306,7 @@ pub fn load_atlas_sprite(
             divisor_x,
             divisor_y,
         } => {
-            let (rgba, w, h) = lookup.load_texture(&resource)?;
+            let (rgba, w, h) = lookup.load_texture(&texture_id(&resource)?)?;
             crop_unstitch(&rgba, w, h, x, y, width, height, divisor_x, divisor_y)?
         }
         Recipe::Paletted {
@@ -324,9 +314,9 @@ pub fn load_atlas_sprite(
             palette_key,
             palette_value,
         } => {
-            let (base, w, h) = lookup.load_texture(&texture)?;
-            let (key, kw, kh) = lookup.load_texture(&palette_key)?;
-            let (value, vw, vh) = lookup.load_texture(&palette_value)?;
+            let (base, w, h) = lookup.load_texture(&texture_id(&texture)?)?;
+            let (key, kw, kh) = lookup.load_texture(&texture_id(&palette_key)?)?;
+            let (value, vw, vh) = lookup.load_texture(&texture_id(&palette_value)?)?;
             if kw != vw || kh != vh {
                 tracing::warn!(
                     "Inline-object palette dimensions differ for {palette_key} and {palette_value}"
@@ -364,9 +354,9 @@ fn apply_source(
     sprite: AssetId<'_>,
     lookup: &AssetLookup<'_>,
     candidate: &mut Option<Recipe>,
-) {
+) -> Option<()> {
     let Some(map) = source.as_object() else {
-        return;
+        return Some(());
     };
     let kind = map
         .get("type")
@@ -375,35 +365,35 @@ fn apply_source(
     match kind {
         Some("directory") => {
             let Some(prefix) = map.get("prefix").and_then(Value::as_str) else {
-                return;
+                return Some(());
             };
             let Some(source_path) = map.get("source").and_then(Value::as_str) else {
-                return;
+                return Some(());
             };
             let Some(rest) = sprite.path.strip_prefix(prefix) else {
-                return;
+                return Some(());
             };
             let path = join_resource_path(source_path, rest);
             let resource = format!("{}:{path}", sprite.namespace);
-            if lookup.texture_exists(&resource) {
+            if lookup.texture_exists(&resource)? {
                 *candidate = Some(Recipe::Direct(resource));
             }
         }
         Some("single") => {
             let Some(resource) = map.get("resource").and_then(Value::as_str) else {
-                return;
+                return Some(());
             };
             let target = map
                 .get("sprite")
                 .and_then(Value::as_str)
                 .unwrap_or(resource);
-            if AssetId::parse(target) == sprite && lookup.texture_exists(resource) {
+            if AssetId::parse(target) == sprite && lookup.texture_exists(resource)? {
                 *candidate = Some(Recipe::Direct(normalize_identifier(resource)));
             }
         }
         Some("filter") => {
             let Some(pattern) = map.get("pattern").and_then(Value::as_object) else {
-                return;
+                return Some(());
             };
             let namespace_matches = pattern
                 .get("namespace")
@@ -419,15 +409,15 @@ fn apply_source(
         }
         Some("unstitch") => {
             let Some(resource) = map.get("resource").and_then(Value::as_str) else {
-                return;
+                return Some(());
             };
-            if !lookup.texture_exists(resource) {
-                return;
+            if !lookup.texture_exists(resource)? {
+                return Some(());
             }
             let divisor_x = map.get("divisor_x").and_then(Value::as_f64).unwrap_or(1.0);
             let divisor_y = map.get("divisor_y").and_then(Value::as_f64).unwrap_or(1.0);
             let Some(regions) = map.get("regions").and_then(Value::as_array) else {
-                return;
+                return Some(());
             };
             for region in regions {
                 let Some(region) = region.as_object() else {
@@ -460,13 +450,13 @@ fn apply_source(
         }
         Some("paletted_permutations") => {
             let Some(textures) = map.get("textures").and_then(Value::as_array) else {
-                return;
+                return Some(());
             };
             let Some(palette_key) = map.get("palette_key").and_then(Value::as_str) else {
-                return;
+                return Some(());
             };
             let Some(permutations) = map.get("permutations").and_then(Value::as_object) else {
-                return;
+                return Some(());
             };
             let separator = map.get("separator").and_then(Value::as_str).unwrap_or("_");
             for texture in textures.iter().filter_map(Value::as_str) {
@@ -479,7 +469,7 @@ fn apply_source(
                         continue;
                     };
                     if sprite.path == format!("{}{separator}{suffix}", source.path)
-                        && lookup.texture_exists(texture)
+                        && lookup.texture_exists(texture)?
                     {
                         *candidate = Some(Recipe::Paletted {
                             texture: normalize_identifier(texture),
@@ -492,6 +482,7 @@ fn apply_source(
         }
         _ => {}
     }
+    Some(())
 }
 
 #[allow(clippy::too_many_arguments)]

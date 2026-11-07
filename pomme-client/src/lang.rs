@@ -1,25 +1,26 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::OnceLock;
 
 use azalea_registry::builtin::ItemKind;
 
 use crate::player::inventory::item_resource_name;
+use crate::resources::{ResourceManager, resource_id};
 
 static LANG: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Loads the translations once they're on disk; before a first-run download
 /// has put them there, a later call fills the table instead.
-pub fn load(jar_assets_dir: &Path) {
-    if let Some(map) = read(jar_assets_dir) {
+pub fn load(resources: &dyn ResourceManager) {
+    if let Some(map) = read(resources) {
         let _ = LANG.set(map);
     }
 }
 
-fn read(jar_assets_dir: &Path) -> Option<HashMap<String, String>> {
-    let path = jar_assets_dir.join("minecraft/lang/en_us.json");
-    serde_json::from_str(&std::fs::read_to_string(&path).ok()?)
-        .inspect_err(|e| tracing::warn!("Couldn't parse {}: {e}", path.display()))
+fn read(resources: &dyn ResourceManager) -> Option<HashMap<String, String>> {
+    let id = resource_id!("minecraft:lang/en_us.json");
+    let resource = resources.get_resource(&id).ok()??;
+    serde_json::from_reader(resource.content().open().ok()?)
+        .inspect_err(|e| tracing::warn!("Couldn't parse {id}: {e}"))
         .ok()
 }
 
@@ -56,23 +57,23 @@ pub(crate) fn title_case_snake(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::read;
-    use crate::test_util::test_temp_dir;
+    use crate::test_util::{test_resources, test_temp_dir};
 
     #[test]
     fn reads_only_a_parsable_file() {
         let dir = test_temp_dir("lang");
-        assert_eq!(read(&dir), None);
-
-        let lang = dir.join("minecraft/lang");
+        let lang = dir.join("assets/minecraft/lang");
         std::fs::create_dir_all(&lang).unwrap();
+        let resources = test_resources(std::slice::from_ref(&dir));
+        assert_eq!(read(&resources), None);
         std::fs::write(
             lang.join("en_us.json"),
             r#"{"chat.type.announcement": "[%s] %s"}"#,
         )
         .unwrap();
-        let map = read(&dir).unwrap();
+        let map = read(&resources).unwrap();
         std::fs::write(lang.join("en_us.json"), "{").unwrap();
-        let corrupt = read(&dir);
+        let corrupt = read(&resources);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(map["chat.type.announcement"], "[%s] %s");
         assert_eq!(corrupt, None);

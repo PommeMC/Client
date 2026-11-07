@@ -61,6 +61,19 @@ impl DataDirs {
         pomme_install::is_installed(&self.assets_dir, &self.versions_dir, version)
     }
 
+    pub(crate) fn installation_location(
+        &self,
+        version: &str,
+    ) -> crate::resources::packs::InstallationLocation {
+        crate::resources::packs::InstallationLocation {
+            version: version.to_owned(),
+            version_metadata: pomme_install::version_metadata_path(&self.versions_dir, version),
+            extracted_root: self.versions_dir.join(version).join("extracted"),
+            index_file: self.indexes_dir.join(format!("{version}.json")),
+            objects_dir: self.objects_dir.clone(),
+        }
+    }
+
     /// The downloaded Bedrock UI textures the Bedrock theme draws.
     pub fn bedrock_ui_dir(&self) -> PathBuf {
         pomme_install::bedrock::dir(&self.bedrock_assets_dir).join(pomme_install::bedrock::UI_DIR)

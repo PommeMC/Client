@@ -1,13 +1,27 @@
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::sync::Mutex;
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions, ReadOnlySource};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+
+use crate::resources::{ReadStream, ResourceContent};
+
+// Symphonia requires Sync even though reads use exclusive access.
+struct AudioReader(Mutex<ReadStream>);
+
+impl Read for AudioReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0
+            .get_mut()
+            .map_err(|_| io::Error::other("audio reader mutex poisoned"))?
+            .read(buf)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PcmFormat {
@@ -22,7 +36,7 @@ pub(super) struct DecodedSound {
 }
 
 pub(super) struct StreamDecoder {
-    path: PathBuf,
+    label: String,
     format_reader: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
@@ -32,10 +46,13 @@ pub(super) struct StreamDecoder {
 }
 
 impl StreamDecoder {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let file =
-            File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-        let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    pub fn open(content: &ResourceContent) -> Result<Self, String> {
+        let label = format!("{} from {:?}", content.id(), content.origin());
+        let reader = content
+            .open()
+            .map_err(|e| format!("failed to open {label}: {e}"))?;
+        let source = ReadOnlySource::new(AudioReader(Mutex::new(reader)));
+        let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         hint.with_extension("ogg");
         let probed = symphonia::default::get_probe()
@@ -45,38 +62,35 @@ impl StreamDecoder {
                 &FormatOptions::default(),
                 &MetadataOptions::default(),
             )
-            .map_err(|e| format!("failed to probe {}: {e}", path.display()))?;
+            .map_err(|e| format!("failed to probe {label}: {e}"))?;
         let format_reader = probed.format;
         let track = format_reader
             .default_track()
-            .ok_or_else(|| format!("{} has no default audio track", path.display()))?;
+            .ok_or_else(|| format!("{label} has no default audio track"))?;
         if track.codec_params.codec == CODEC_TYPE_NULL {
-            return Err(format!("{} has no decodable codec", path.display()));
+            return Err(format!("{label} has no decodable codec"));
         }
         let channels = track
             .codec_params
             .channels
-            .ok_or_else(|| format!("{} has no channel metadata", path.display()))?
+            .ok_or_else(|| format!("{label} has no channel metadata"))?
             .count();
-        let channels = u16::try_from(channels)
-            .map_err(|_| format!("{} has too many channels", path.display()))?;
+        let channels =
+            u16::try_from(channels).map_err(|_| format!("{label} has too many channels"))?;
         if !matches!(channels, 1 | 2) {
-            return Err(format!(
-                "{} uses unsupported {channels}-channel audio",
-                path.display()
-            ));
+            return Err(format!("{label} uses unsupported {channels}-channel audio"));
         }
         let sample_rate = track
             .codec_params
             .sample_rate
-            .ok_or_else(|| format!("{} has no sample-rate metadata", path.display()))?;
+            .ok_or_else(|| format!("{label} has no sample-rate metadata"))?;
         let track_id = track.id;
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
-            .map_err(|e| format!("failed to create decoder for {}: {e}", path.display()))?;
+            .map_err(|e| format!("failed to create decoder for {label}: {e}"))?;
 
         Ok(Self {
-            path: path.to_path_buf(),
+            label,
             format_reader,
             decoder,
             track_id,
@@ -110,7 +124,7 @@ impl StreamDecoder {
                     break;
                 }
                 Err(e) => {
-                    return Err(format!("failed to read {}: {e}", self.path.display()));
+                    return Err(format!("failed to read {}: {e}", self.label));
                 }
             };
             if packet.track_id() != self.track_id {
@@ -129,7 +143,7 @@ impl StreamDecoder {
                     break;
                 }
                 Err(e) => {
-                    return Err(format!("failed to decode {}: {e}", self.path.display()));
+                    return Err(format!("failed to decode {}: {e}", self.label));
                 }
             };
 
@@ -137,10 +151,7 @@ impl StreamDecoder {
             if spec.channels.count() != usize::from(self.format.channels)
                 || spec.rate != self.format.sample_rate
             {
-                return Err(format!(
-                    "{} changed PCM format mid-stream",
-                    self.path.display()
-                ));
+                return Err(format!("{} changed PCM format mid-stream", self.label));
             }
             let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
             samples.copy_interleaved_ref(decoded);
@@ -167,8 +178,8 @@ impl StreamDecoder {
     }
 }
 
-pub(super) fn decode_all(path: &Path) -> Result<DecodedSound, String> {
-    let mut decoder = StreamDecoder::open(path)?;
+pub(super) fn decode_all(content: &ResourceContent) -> Result<DecodedSound, String> {
+    let mut decoder = StreamDecoder::open(content)?;
     let format = decoder.format();
     let chunk_samples = usize::try_from(format.sample_rate)
         .unwrap_or(usize::MAX)

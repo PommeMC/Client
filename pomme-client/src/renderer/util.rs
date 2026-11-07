@@ -1,7 +1,5 @@
-use std::path::Path;
-
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::resources::{ResourceId, ResourceManager};
 
 /// A texture holding `pixels`, ready for shaders to read.
 pub fn create_sampled_texture(
@@ -26,16 +24,14 @@ pub fn create_sampled_texture(
 /// The texture at `key`, or a 16x16 white one if it won't load.
 pub fn load_asset_texture(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    key: &str,
+    resources: &dyn ResourceManager,
+    key: &ResourceId,
 ) -> rhi::backend::Texture {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = load_png(&path).unwrap_or_else(|| {
+    let (pixels, w, h) = load_asset_png(resources, key).unwrap_or_else(|| {
         tracing::warn!("Failed to load {key}, using fallback");
         (vec![255u8; 16 * 16 * 4], 16, 16)
     });
-    let texture = create_sampled_texture(device, key, &pixels, w, h);
+    let texture = create_sampled_texture(device, &key.to_string(), &pixels, w, h);
     tracing::info!("Loaded {key} ({w}x{h})");
     texture
 }
@@ -325,9 +321,24 @@ pub fn transition_image_to_shader_read(
     });
 }
 
-pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut decoder = png::Decoder::new(file);
+pub fn load_resource_png(
+    content: &crate::resources::ResourceContent,
+) -> Option<(Vec<u8>, u32, u32)> {
+    load_png_reader(content.open().ok()?, content.id())
+}
+
+pub fn load_asset_png(
+    resources: &dyn ResourceManager,
+    key: &ResourceId,
+) -> Option<(Vec<u8>, u32, u32)> {
+    load_resource_png(&crate::assets::resource_content(resources, key).ok()?)
+}
+
+fn load_png_reader(
+    reader: impl std::io::Read,
+    name: impl std::fmt::Display,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
@@ -361,7 +372,7 @@ pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
             rgba
         }
         other => {
-            tracing::warn!("Unsupported PNG color type {other:?}: {}", path.display());
+            tracing::warn!("Unsupported PNG color type {other:?}: {name}");
             return None;
         }
     };

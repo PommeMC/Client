@@ -30,7 +30,12 @@ mod player;
 mod position;
 mod recipe;
 mod renderer;
-mod resource_pack;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Resource views are initialized; asset-consumer API adoption is deferred"
+)]
+pub(crate) mod resources;
 mod shaderpack;
 mod singleplayer;
 #[cfg(test)]

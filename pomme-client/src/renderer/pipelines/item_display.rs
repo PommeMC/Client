@@ -1,9 +1,11 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap};
 
+use crate::resources::{ResourceContent, ResourceId};
 pub(crate) use crate::world::block::model::DisplayTransform;
-use crate::world::block::model::{first_item_model_ref, parse_display_transform, strip_mc_prefix};
+use crate::world::block::model::{
+    ModelInputs, first_item_model_ref, parse_display_transform, read_model_json, strip_mc_prefix,
+};
 
 const MODEL_PARENT_LIMIT: u32 = 16;
 
@@ -14,18 +16,17 @@ const MODEL_PARENT_LIMIT: u32 = 16;
 pub struct DisplayResolver {
     keys: &'static [&'static str],
     cache: RefCell<HashMap<String, DisplayTransform>>,
-    items_dir: PathBuf,
-    models_dir: PathBuf,
+    items: BTreeMap<ResourceId, ResourceContent>,
+    models: BTreeMap<ResourceId, ResourceContent>,
 }
 
 impl DisplayResolver {
-    pub fn new(jar_assets_dir: &Path, keys: &'static [&'static str]) -> Self {
-        let mc_base = jar_assets_dir.join("minecraft");
+    pub fn new(inputs: &ModelInputs, keys: &'static [&'static str]) -> Self {
         Self {
             keys,
             cache: RefCell::new(HashMap::new()),
-            items_dir: mc_base.join("items"),
-            models_dir: mc_base.join("models"),
+            items: inputs.items.clone(),
+            models: inputs.models.clone(),
         }
     }
 
@@ -33,8 +34,8 @@ impl DisplayResolver {
         if let Some(t) = self.cache.borrow().get(item_name) {
             return *t;
         }
-        let resolved = resolve_item_model_path(item_name, &self.items_dir)
-            .and_then(|path| resolve_display(&path, &self.models_dir, self.keys))
+        let resolved = resolve_item_model_path(item_name, &self.items)
+            .and_then(|path| resolve_display(&path, &self.models, self.keys))
             .unwrap_or(default);
         self.cache
             .borrow_mut()
@@ -43,19 +44,27 @@ impl DisplayResolver {
     }
 }
 
-fn read_json(path: &Path) -> Option<serde_json::Value> {
-    let s = std::fs::read_to_string(path).ok()?;
+fn read_json(content: &ResourceContent) -> Option<serde_json::Value> {
+    let s = read_model_json(content)?;
     serde_json::from_str(&s).ok()
 }
 
-fn resolve_item_model_path(name: &str, items_dir: &Path) -> Option<String> {
-    let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
+fn resolve_item_model_path(
+    name: &str,
+    items: &BTreeMap<ResourceId, ResourceContent>,
+) -> Option<String> {
+    let id = ResourceId::from_parts("minecraft", &format!("items/{name}.json")).ok()?;
+    let item_json = read_json(items.get(&id)?)?;
     first_item_model_ref(&item_json)
 }
 
 /// The first model up the parent chain with any of `keys` in its `display`,
 /// and its transform for the first of them it has.
-fn resolve_display(start_path: &str, models_dir: &Path, keys: &[&str]) -> Option<DisplayTransform> {
+fn resolve_display(
+    start_path: &str,
+    models: &BTreeMap<ResourceId, ResourceContent>,
+    keys: &[&str],
+) -> Option<DisplayTransform> {
     let mut current = Some(start_path.to_string());
     let mut depth = 0u32;
     while let Some(path) = current.take() {
@@ -64,8 +73,8 @@ fn resolve_display(start_path: &str, models_dir: &Path, keys: &[&str]) -> Option
         }
         depth += 1;
 
-        let file = models_dir.join(format!("{path}.json"));
-        let json = read_json(&file)?;
+        let id = ResourceId::from_parts("minecraft", &format!("models/{path}.json")).ok()?;
+        let json = read_json(models.get(&id)?)?;
 
         if let Some(display) = json.get("display")
             && let Some(t) = keys
@@ -91,7 +100,7 @@ mod tests {
     #[test]
     fn a_missing_left_hand_falls_back_to_the_same_models_right_hand() {
         let dir = crate::test_util::test_temp_dir("display_fallback");
-        let mc = dir.join("minecraft");
+        let mc = dir.join("assets/minecraft");
         std::fs::create_dir_all(mc.join("items")).unwrap();
         std::fs::create_dir_all(mc.join("models/item")).unwrap();
         let write = |path: &str, json: &str| std::fs::write(mc.join(path), json).unwrap();
@@ -107,7 +116,10 @@ mod tests {
             "models/item/base.json",
             r#"{"display": {"firstperson_lefthand": {"rotation": [0, 99, 0]}}}"#,
         );
-        let left = DisplayResolver::new(&dir, &["firstperson_lefthand", "firstperson_righthand"]);
+        let resources = crate::test_util::test_resources(std::slice::from_ref(&dir));
+        let inputs = ModelInputs::prepare(&resources).unwrap();
+        let left =
+            DisplayResolver::new(&inputs, &["firstperson_lefthand", "firstperson_righthand"]);
         let resolved = left.resolve("thing", DisplayTransform::IDENTITY);
         assert_eq!(resolved.rotation, glam::Vec3::new(0.0, 10.0, 0.0));
         std::fs::remove_dir_all(dir).unwrap();
