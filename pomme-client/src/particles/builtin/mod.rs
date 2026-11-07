@@ -5,17 +5,21 @@ use std::rc::Rc;
 use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
+mod campfire_smoke;
 mod dust;
 mod end_rod;
 mod flame;
+mod lava;
 mod smoke;
 mod terrain;
 
+use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
+use self::lava::LavaParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
@@ -46,5 +50,17 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.large_smoke),
         &LargeSmokeParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.campfire_cosy_smoke),
+        &CosyParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.campfire_signal_smoke),
+        &SignalParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.lava),
+        &LavaParticleRegistration::new(Rc::clone(&types.smoke)),
     );
 }

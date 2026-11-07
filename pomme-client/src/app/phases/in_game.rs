@@ -2981,6 +2981,7 @@ fn run_ticks(
                 engine_access.as_ref(),
             );
             if !game.deterministic {
+                core.tick_campfires(&mut level);
                 game.level_runtime.animate_tick(
                     &game.block_registry,
                     *game.player.position,

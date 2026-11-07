@@ -6,9 +6,9 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 
 use super::blocks::{
-    BlastFurnaceBlock, CandleBlock, CandleCakeBlock, EndRodBlock, FireBlock, FurnaceBlock,
-    RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock, SmokerBlock, SoulFireBlock,
-    TorchBlock, WallTorchBlock,
+    BlastFurnaceBlock, CampfireBlock, CandleBlock, CandleCakeBlock, EndRodBlock, FireBlock,
+    FurnaceBlock, RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock, SmokerBlock,
+    SoulFireBlock, TorchBlock, WallTorchBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -144,6 +144,16 @@ impl BlockFactory {
             "soul_fire" => Box::new(SoulFireBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.large_smoke)),
+            )),
+            "campfire" => Box::new(CampfireBlock::new(
+                block_data,
+                true,
+                SimpleParticleType::new(Rc::clone(&types.lava)),
+            )),
+            "soul_campfire" => Box::new(CampfireBlock::new(
+                block_data,
+                false,
+                SimpleParticleType::new(Rc::clone(&types.lava)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }

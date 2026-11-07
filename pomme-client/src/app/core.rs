@@ -4043,6 +4043,15 @@ impl AppCore {
             ));
     }
 
+    pub(crate) fn tick_campfires(&self, level: &mut LevelContext<'_>) {
+        crate::world::block::tick_campfires(
+            level,
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.campfire_cosy_smoke)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.campfire_signal_smoke)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.smoke)),
+        );
+    }
+
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
