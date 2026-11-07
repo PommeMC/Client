@@ -349,3 +349,42 @@ impl SpriteParticleRegistration<SimpleParticleType> for SmokeParticleRegistratio
         Rc::new(SmokeProvider::new(sprite_set))
     }
 }
+
+pub struct LargeSmokeProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl LargeSmokeProvider {
+    pub fn new(sprites: Rc<dyn SpriteSet>) -> Self {
+        Self { sprites }
+    }
+}
+
+impl ParticleProvider<SimpleParticleType> for LargeSmokeProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        _random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        Some(Rc::new(RefCell::new(SmokeParticle::new(
+            position,
+            auxiliary,
+            2.5_f32,
+            Rc::clone(&self.sprites),
+        ))))
+    }
+}
+
+pub(in crate::particles) struct LargeSmokeParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for LargeSmokeParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(LargeSmokeProvider::new(sprite_set))
+    }
+}
