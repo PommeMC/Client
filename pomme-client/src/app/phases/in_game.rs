@@ -27,6 +27,7 @@ use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::particles::render::{ParticleView, ParticlesRenderState};
+use crate::particles::types::SimpleParticleType;
 use crate::player::LocalPlayer;
 use crate::player::interaction::{
     HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
@@ -2981,10 +2982,14 @@ fn run_ticks(
                 engine_access.as_ref(),
             );
             if !game.deterministic {
+                let smoke = SimpleParticleType::new(Rc::clone(&core.particle_types.smoke));
+                let flame = SimpleParticleType::new(Rc::clone(&core.particle_types.flame));
                 game.level_runtime.animate_tick(
                     &game.block_registry,
                     *game.player.position,
                     &mut level,
+                    &smoke,
+                    &flame,
                 );
             }
             core.particle_engine.tick(&mut level);

@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 
+use super::blocks::{TorchBlock, WallTorchBlock};
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
 };
+use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
 use crate::world::level::LevelContext;
 
@@ -22,6 +24,8 @@ pub trait Block {
         _pos: BlockPos,
         _level: &mut LevelContext<'_>,
         _random: &mut fastrand::Rng,
+        _smoke: &SimpleParticleType,
+        _flame: &SimpleParticleType,
     ) {
     }
 }
@@ -45,13 +49,16 @@ impl super::Block for DefaultBlock {
 }
 
 /// Selects and constructs block implementations, without owning definitions
-/// or protocol bindings. Add name-specific selections here as rules land;
-/// currently every name uses the default no-op animation behavior.
+/// or protocol bindings. Unrecognized names retain no-op animation behavior.
 pub(crate) struct BlockFactory;
 
 impl BlockFactory {
-    pub(crate) fn create(&self, _name: &str, block_data: BlockData) -> Box<dyn Block> {
-        Box::new(DefaultBlock { block_data })
+    pub(crate) fn create(&self, name: &str, block_data: BlockData) -> Box<dyn Block> {
+        match name {
+            "torch" => Box::new(TorchBlock::new(block_data)),
+            "wall_torch" => Box::new(WallTorchBlock::new(block_data)),
+            _ => Box::new(DefaultBlock { block_data }),
+        }
     }
 }
 
@@ -185,9 +192,12 @@ impl BlockRegistry {
         pos: BlockPos,
         level: &mut LevelContext<'_>,
         random: &mut fastrand::Rng,
+        smoke: &SimpleParticleType,
+        flame: &SimpleParticleType,
     ) {
         let state = level.get_block_state(pos);
-        self.block(state).animate_tick(state, pos, level, random);
+        self.block(state)
+            .animate_tick(state, pos, level, random, smoke, flame);
     }
 }
 

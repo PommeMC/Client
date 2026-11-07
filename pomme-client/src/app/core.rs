@@ -1048,7 +1048,7 @@ pub struct AppCore {
     pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
     particle_resources: Rc<MappedParticleResources>,
     sprite_sources: SpriteSources,
-    particle_types: ParticleTypes,
+    pub(super) particle_types: ParticleTypes,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,

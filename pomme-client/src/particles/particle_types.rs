@@ -8,8 +8,8 @@ use crate::resources::resource_id;
 
 pub(crate) struct ParticleTypes {
     registry: MappedParticleRegistry,
-    pub(super) smoke: Rc<ParticleType<SimpleParticleType>>,
-    pub(super) flame: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) smoke: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) flame: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) end_rod: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) block: Rc<ParticleType<BlockParticleOption>>,
 }

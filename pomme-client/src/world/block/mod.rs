@@ -13,6 +13,7 @@
 pub(crate) mod block_colors;
 pub(crate) mod block_registry;
 mod block_state_table;
+mod blocks;
 mod condition;
 pub mod json_bundle;
 pub mod model;
