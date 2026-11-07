@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 
-use super::blocks::{RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock};
+use super::blocks::{
+    EndRodBlock, RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock,
+};
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
@@ -83,6 +85,10 @@ impl BlockFactory {
             "redstone_wall_torch" => Box::new(RedstoneWallTorchBlock::new(
                 block_data,
                 DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
+            "end_rod" => Box::new(EndRodBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.end_rod)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
