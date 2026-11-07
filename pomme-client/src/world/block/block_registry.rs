@@ -6,8 +6,8 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 
 use super::blocks::{
-    BlastFurnaceBlock, EndRodBlock, FurnaceBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
-    RedstoneWireBlock, SmokerBlock, TorchBlock, WallTorchBlock,
+    BlastFurnaceBlock, CandleBlock, CandleCakeBlock, EndRodBlock, FurnaceBlock, RedstoneTorchBlock,
+    RedstoneWallTorchBlock, RedstoneWireBlock, SmokerBlock, TorchBlock, WallTorchBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -104,6 +104,37 @@ impl BlockFactory {
             "smoker" => Box::new(SmokerBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "candle" | "white_candle" | "orange_candle" | "magenta_candle"
+            | "light_blue_candle" | "yellow_candle" | "lime_candle" | "pink_candle"
+            | "gray_candle" | "light_gray_candle" | "cyan_candle" | "purple_candle"
+            | "blue_candle" | "brown_candle" | "green_candle" | "red_candle" | "black_candle" => {
+                Box::new(CandleBlock::new(
+                    block_data,
+                    SimpleParticleType::new(Rc::clone(&types.smoke)),
+                    SimpleParticleType::new(Rc::clone(&types.small_flame)),
+                ))
+            }
+            "candle_cake"
+            | "white_candle_cake"
+            | "orange_candle_cake"
+            | "magenta_candle_cake"
+            | "light_blue_candle_cake"
+            | "yellow_candle_cake"
+            | "lime_candle_cake"
+            | "pink_candle_cake"
+            | "gray_candle_cake"
+            | "light_gray_candle_cake"
+            | "cyan_candle_cake"
+            | "purple_candle_cake"
+            | "blue_candle_cake"
+            | "brown_candle_cake"
+            | "green_candle_cake"
+            | "red_candle_cake"
+            | "black_candle_cake" => Box::new(CandleCakeBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+                SimpleParticleType::new(Rc::clone(&types.small_flame)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }

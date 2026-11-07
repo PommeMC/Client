@@ -314,3 +314,41 @@ impl SpriteParticleRegistration<SimpleParticleType> for FlameParticleRegistratio
         Rc::new(FlameProvider::new(sprite_set))
     }
 }
+
+/// Rust spelling of Vanilla `FlameParticle.SmallFlameProvider`.
+struct SmallFlameProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl SmallFlameProvider {
+    fn new(sprites: Rc<dyn SpriteSet>) -> Self {
+        Self { sprites }
+    }
+}
+
+impl ParticleProvider<SimpleParticleType> for SmallFlameProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = FlameParticle::new(position, auxiliary, sprite);
+        particle.scale(0.5_f32);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct SmallFlameParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for SmallFlameParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(SmallFlameProvider::new(sprite_set))
+    }
+}
