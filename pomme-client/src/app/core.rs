@@ -433,7 +433,7 @@ fn block_break_effect(
         crate::player::interaction::play_break_sound_for_id(
             audio,
             resources,
-            game.block_registry.block_state_table(),
+            level.block_state_table(),
             block_state_data.id(),
             pos,
         );
