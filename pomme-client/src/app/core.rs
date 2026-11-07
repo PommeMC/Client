@@ -4057,6 +4057,7 @@ impl AppCore {
             &SimpleParticleType::new(Rc::clone(&self.particle_types.lava)),
             &SimpleParticleType::new(Rc::clone(&self.particle_types.underwater)),
             &SimpleParticleType::new(Rc::clone(&self.particle_types.dripping_water)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.dripping_lava)),
         );
     }
 

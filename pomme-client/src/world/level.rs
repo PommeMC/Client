@@ -334,6 +334,7 @@ impl LevelRuntime {
         lava: &SimpleParticleType,
         underwater: &SimpleParticleType,
         dripping_water: &SimpleParticleType,
+        dripping_lava: &SimpleParticleType,
     ) {
         let random = level.get_random().clone();
         animate_tick_with_draw(
@@ -345,6 +346,7 @@ impl LevelRuntime {
             lava,
             underwater,
             dripping_water,
+            dripping_lava,
         );
     }
 
@@ -424,10 +426,10 @@ impl LevelRuntime {
 }
 
 /// Own the effect stream for this pass; all sampled callbacks borrow it.
-// TODO: lava drips await their complete provider chain; creative marker and
-// environmental ambient particles remain absent. The drip and ambient
-// steps draw from the level random between samples. Coordinate draws release
-// their random borrow before each block/fluid callback.
+// TODO: creative marker and environmental ambient particles remain absent.
+// The drip and ambient steps draw from the level random between samples.
+// Coordinate draws release their random borrow before each block/fluid
+// callback.
 fn animate_tick_with_draw(
     block_registry: &BlockRegistry,
     player_pos: DVec3,
@@ -437,6 +439,7 @@ fn animate_tick_with_draw(
     lava: &SimpleParticleType,
     underwater: &SimpleParticleType,
     dripping_water: &SimpleParticleType,
+    dripping_lava: &SimpleParticleType,
 ) {
     sample_animation_blocks(player_pos, next, |pos| {
         let table = level.block_state_table();
@@ -444,7 +447,7 @@ fn animate_tick_with_draw(
         block_registry.animate_tick(pos, level, &mut random);
         let fluid = table.block_state_data(level.get_block_state(pos)).fluid();
         super::fluid::animate_tick(pos, fluid, level, &mut random, lava, underwater);
-        if let Some(drip) = super::fluid::get_drip_particle(fluid, dripping_water)
+        if let Some(drip) = super::fluid::get_drip_particle(fluid, dripping_water, dripping_lava)
             && level.get_random().next_int(10) == 0
         {
             // COMPAT: absent sturdy metadata is conservatively not watertight.

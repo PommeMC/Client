@@ -27,13 +27,14 @@ pub(super) fn animate_tick(
     }
 }
 
-pub(super) fn get_drip_particle(
+pub(super) fn get_drip_particle<'a>(
     fluid: Fluid,
-    dripping_water: &SimpleParticleType,
-) -> Option<&SimpleParticleType> {
+    dripping_water: &'a SimpleParticleType,
+    dripping_lava: &'a SimpleParticleType,
+) -> Option<&'a SimpleParticleType> {
     match fluid.kind {
         FluidKind::Water => Some(WaterFluid::get_drip_particle(dripping_water)),
-        // TODO: Lava's drip option/chance awaits its complete provider chain.
-        FluidKind::Empty | FluidKind::Lava => None,
+        FluidKind::Lava => Some(LavaFluid::get_drip_particle(dripping_lava)),
+        FluidKind::Empty => None,
     }
 }
