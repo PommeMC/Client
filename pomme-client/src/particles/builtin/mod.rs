@@ -28,6 +28,10 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.soul_fire_flame),
         &FlameParticleRegistration,
     );
+    resources.register_sprite_provider(
+        Rc::clone(&types.copper_fire_flame),
+        &FlameParticleRegistration,
+    );
     resources.register_sprite_provider(Rc::clone(&types.end_rod), &EndRodParticleRegistration);
     resources.register(Rc::clone(&types.block), Rc::new(TerrainProvider));
 }
