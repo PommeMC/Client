@@ -15,7 +15,6 @@ use crate::ui::menu::PanoramaTheme;
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
 pub(crate) const CHUNK_DETAIL_MIN: u32 = 8;
 pub const CHUNK_DETAIL_OFF: u32 = 49;
-pub(crate) const CHUNK_DETAIL_SPAN: f32 = (CHUNK_DETAIL_OFF - CHUNK_DETAIL_MIN) as f32;
 pub(crate) const MAX_MENU_BACKGROUND_BLURRINESS: u8 = 10;
 pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
 
@@ -96,13 +95,13 @@ pub struct GameOptions {
     pub ambient_volume: f32,
     pub voice_volume: f32,
     pub ui_volume: f32,
-    #[serde(with = "cloud_mode_codec")]
+    #[serde(with = "ordinal_codec")]
     pub cloud_mode: CloudMode,
     /// The selected shader pack's file or folder name in `shaderpacks/`.
     pub shader_pack: Option<String>,
-    #[serde(with = "attack_indicator_codec")]
+    #[serde(with = "ordinal_codec")]
     pub attack_indicator: AttackIndicatorMode,
-    #[serde(with = "display_mode_codec")]
+    #[serde(with = "ordinal_codec")]
     pub display_mode: DisplayMode,
     // Legacy files without a theme selected Pomme; fresh games start on Java.
     #[serde(default)]
@@ -184,53 +183,42 @@ fn default_japanese_glyph_variants() -> bool {
         })
 }
 
-mod display_mode_codec {
-    use super::*;
-    /// Retains the saved ordinal used by existing options files.
-    pub fn serialize<S: serde::Serializer>(
-        value: &DisplayMode,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.to_u8().serialize(serializer)
-    }
-    /// Resolves legacy ordinals using the game's existing fallback.
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<DisplayMode, D::Error> {
-        Ok(DisplayMode::from_u8(u8::deserialize(deserializer)?))
-    }
+/// Enums saved by their ordinal, unknown ordinals falling back as the enum
+/// decides.
+trait Ordinal: Sized {
+    fn ordinal(&self) -> u8;
+    fn from_ordinal(value: u8) -> Self;
 }
 
-mod cloud_mode_codec {
-    use super::*;
-    /// Retains the saved ordinal used by existing options files.
-    pub fn serialize<S: serde::Serializer>(
-        value: &CloudMode,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.to_u8().serialize(serializer)
-    }
-    /// Resolves legacy ordinals using the game's existing fallback.
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<CloudMode, D::Error> {
-        Ok(CloudMode::from_u8(u8::deserialize(deserializer)?))
-    }
+macro_rules! ordinal {
+    ($($ty:ty),*) => {$(
+        impl Ordinal for $ty {
+            fn ordinal(&self) -> u8 {
+                self.to_u8()
+            }
+            fn from_ordinal(value: u8) -> Self {
+                Self::from_u8(value)
+            }
+        }
+    )*};
 }
+ordinal!(DisplayMode, CloudMode, AttackIndicatorMode);
 
-mod attack_indicator_codec {
-    use super::*;
-    /// Retains the saved ordinal used by existing options files.
-    pub fn serialize<S: serde::Serializer>(
-        value: &AttackIndicatorMode,
+mod ordinal_codec {
+    use serde::{Deserialize, Serialize};
+
+    use super::Ordinal;
+
+    pub fn serialize<T: Ordinal, S: serde::Serializer>(
+        value: &T,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        value.to_u8().serialize(serializer)
+        value.ordinal().serialize(serializer)
     }
-    /// Resolves legacy ordinals using the game's existing fallback.
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+
+    pub fn deserialize<'de, T: Ordinal, D: serde::Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<AttackIndicatorMode, D::Error> {
-        Ok(AttackIndicatorMode::from_u8(u8::deserialize(deserializer)?))
+    ) -> Result<T, D::Error> {
+        Ok(T::from_ordinal(u8::deserialize(deserializer)?))
     }
 }

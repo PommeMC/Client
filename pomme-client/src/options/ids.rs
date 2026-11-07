@@ -1,5 +1,4 @@
 use super::*;
-/// Stable identity of an options widget, independent of visible copy.
 macro_rules! define_option_ids {
     ($($id:ident),* $(,)?) => {
         /// Stable control identities, shared by rows, input and option descriptors.
@@ -12,7 +11,6 @@ macro_rules! define_option_ids {
     };
 }
 define_option_ids! {
-
 Fov,
 Online,
 SkinCustomization,
@@ -143,6 +141,7 @@ ShowCurrentServer,
 }
 
 /// How a widget edits its stored value. A zero slider step is continuous.
+/// `Action` covers buttons and the options not editable yet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OptionKind {
     Toggle,
@@ -151,138 +150,6 @@ pub enum OptionKind {
     Action,
 }
 impl OptionId {
-    /// Stable translation key for the option's name.
-    pub fn label_key(self) -> &'static str {
-        match self {
-            Self::Fov => "options.fov",
-            Self::Online => "options.online",
-            Self::SkinCustomization => "options.skin_customization",
-            Self::MusicSounds => "options.music_sounds",
-            Self::VideoSettings => "options.video_settings",
-            Self::Controls => "options.controls",
-            Self::Language => "options.language",
-            Self::ChatSettings => "options.chat_settings",
-            Self::ResourcePacks => "options.resource_packs",
-            Self::AccessibilitySettings => "options.accessibility_settings",
-            Self::TelemetryData => "options.telemetry_data",
-            Self::CreditsAttribution => "options.credits_attribution",
-            Self::FullscreenResolution => "options.fullscreen_resolution",
-            Self::MaxFramerate => "options.max_framerate",
-            Self::VSync => "options.vsync",
-            Self::InactivityFpsLimit => "options.inactivity_fps_limit",
-            Self::GuiScale => "options.gui_scale_setting",
-            Self::Fullscreen => "options.display_mode",
-            Self::ExclusiveFullscreen => "options.exclusive_fullscreen",
-            Self::Brightness => "options.brightness",
-            Self::GraphicsBackend => "options.graphics_backend",
-            Self::Graphics => "options.graphics",
-            Self::BiomeBlend => "options.biome_blend",
-            Self::RenderDistance => "options.render_distance",
-            Self::PrioritizeChunkUpdates => "options.prioritize_chunk_updates",
-            Self::SimulationDistance => "options.simulation_distance",
-            Self::SmoothLighting => "options.smooth_lighting",
-            Self::Clouds => "options.cloud_mode",
-            Self::ChunkDetail => "options.chunk_detail",
-            Self::DistantTerrain => "options.distant_terrain",
-            Self::Particles => "options.particles",
-            Self::MipmapLevels => "options.mipmap_levels",
-            Self::EntityShadows => "options.entity_shadows",
-            Self::EntityDistance => "options.entity_distance",
-            Self::MenuBackgroundBlur => "options.menu_background_blurriness",
-            Self::CloudRange => "options.cloud_range",
-            Self::CutoutLeaves => "options.cutout_leaves",
-            Self::ImprovedTransparency => "options.improved_transparency",
-            Self::TextureFiltering => "options.texture_filtering",
-            Self::MaxAnisotropy => "options.max_anisotropy",
-            Self::WeatherRadius => "options.weather_radius",
-            Self::ShaderPack => "options.shader_pack",
-            Self::ShowAutosaveIndicator => "options.show_autosave_indicator",
-            Self::Vignette => "options.vignette",
-            Self::AttackIndicator => "options.attack_indicator",
-            Self::ChunkFadeIn => "options.chunk_fade_in",
-            Self::MouseSettings => "options.mouse_settings",
-            Self::KeyBinds => "options.key_binds",
-            Self::Sneak => "options.sneak",
-            Self::Sprint => "options.sprint",
-            Self::AttackDestroy => "options.attack_destroy",
-            Self::UseItemPlaceBlock => "options.use_item_place_block",
-            Self::AutoJump => "options.auto_jump",
-            Self::SprintWindow => "options.sprint_window",
-            Self::OperatorItemsTab => "options.operator_items_tab",
-            Self::Sensitivity => "options.sensitivity",
-            Self::ScrollSensitivity => "options.scroll_sensitivity",
-            Self::DiscreteScrolling => "options.discrete_scrolling",
-            Self::InvertMouseX => "options.invert_mouse_x",
-            Self::InvertMouseY => "options.invert_mouse_y",
-            Self::AllowCursorChanges => "options.allow_cursor_changes",
-            Self::RawInput => "options.raw_input",
-            Self::Chat => "options.chat_options.visibility",
-            Self::Colors => "options.chat_options.colors",
-            Self::WebLinks => "options.chat_options.links",
-            Self::PromptOnLinks => "options.chat_options.links_prompt",
-            Self::ChatTextOpacity => "options.chat_options.opacity",
-            Self::TextBackgroundOpacity => "options.chat_options.text_background_opacity",
-            Self::ChatTextSize => "options.chat_options.scale",
-            Self::LineSpacing => "options.chat_options.line_spacing",
-            Self::ChatDelay => "options.chat_options.delay_secs",
-            Self::Width => "options.chat_options.width",
-            Self::FocusedHeight => "options.chat_options.height_focused",
-            Self::UnfocusedHeight => "options.chat_options.height_unfocused",
-            Self::Narrator => "options.narrator",
-            Self::CommandSuggestions => "options.chat_options.auto_suggestions",
-            Self::HideMatchedNames => "options.hide_matched_names",
-            Self::ReducedDebugInfo => "options.reduced_debug_info",
-            Self::OnlyShowSecureChat => "options.chat_options.only_secure",
-            Self::SaveUnsentChats => "options.chat_options.save_drafts",
-            Self::ForceUnicodeFont => "options.force_unicode_font",
-            Self::JapaneseGlyphVariants => "options.japanese_glyph_variants",
-            Self::ShowSubtitles => "options.show_subtitles",
-            Self::HighContrast => "options.high_contrast",
-            Self::BackgroundForChatOnly => "options.background_for_chat_only",
-            Self::NotificationTime => "options.notification_time",
-            Self::ViewBobbing => "options.view_bobbing",
-            Self::DistortionEffects => "options.distortion_effects",
-            Self::FovEffects => "options.fov_effect_scale",
-            Self::DarknessPulsing => "options.darkness_pulsing",
-            Self::DamageTilt => "options.damage_tilt_strength",
-            Self::GlintSpeed => "options.glint_speed",
-            Self::GlintStrength => "options.glint_strength",
-            Self::HideLightningFlashes => "options.hide_lightning_flashes",
-            Self::DarkLoadingScreen => "options.dark_loading_screen",
-            Self::PanoramaScrollSpeed => "options.panorama_scroll_speed",
-            Self::HideSplashTexts => "options.hide_splash_texts",
-            Self::NarratorHotkey => "options.narrator_hotkey",
-            Self::RotateWithMinecart => "options.rotate_with_minecart",
-            Self::HighContrastOutlines => "options.high_contrast_outlines",
-            Self::MasterVolume => "options.master_volume",
-            Self::Music => "options.music_volume",
-            Self::JukeboxNoteBlocks => "options.jukebox_volume",
-            Self::Weather => "options.weather_volume",
-            Self::Blocks => "options.blocks_volume",
-            Self::HostileCreatures => "options.hostile_volume",
-            Self::FriendlyCreatures => "options.friendly_volume",
-            Self::Players => "options.players_volume",
-            Self::AmbientEnvironment => "options.ambient_volume",
-            Self::VoiceSpeech => "options.voice_volume",
-            Self::Ui => "options.ui_volume",
-            Self::Device => "options.device",
-            Self::DirectionalAudio => "options.directional_audio",
-            Self::MusicFrequency => "options.music_frequency",
-            Self::MusicToast => "options.music_toast",
-            Self::Cape => "options.skin_cape",
-            Self::Jacket => "options.skin_jacket",
-            Self::LeftSleeve => "options.skin_left_sleeve",
-            Self::RightSleeve => "options.skin_right_sleeve",
-            Self::LeftPantsLeg => "options.skin_left_pants",
-            Self::RightPantsLeg => "options.skin_right_pants",
-            Self::Hat => "options.skin_hat",
-            Self::MainHand => "options.skin_main_hand_right",
-            Self::RealmsNotifications => "options.realms_notifications",
-            Self::AllowServerListings => "options.allow_server_listings",
-            Self::ShowOnlineStatus => "options.show_online_status",
-            Self::ShowCurrentServer => "options.show_current_server",
-        }
-    }
     /// Widget behavior and numeric range, before applying contextual server
     /// limits.
     pub fn kind(self) -> OptionKind {
@@ -306,7 +173,7 @@ impl OptionId {
             Self::FullscreenResolution => OptionKind::Action,
             Self::MaxFramerate => OptionKind::Slider {
                 min: 10.0,
-                max: 260.0,
+                max: MAX_FRAMERATE_UNLIMITED as f32,
                 step: 10.0,
             },
             Self::VSync => OptionKind::Toggle,
@@ -336,10 +203,11 @@ impl OptionId {
             Self::SmoothLighting => OptionKind::Action,
             Self::Clouds => OptionKind::Cycle { count: Some(3) },
             Self::ChunkDetail => OptionKind::Slider {
-                min: 8.0,
-                max: 49.0,
+                min: CHUNK_DETAIL_MIN as f32,
+                max: CHUNK_DETAIL_OFF as f32,
                 step: 1.0,
             },
+            // Off, then 32 to 256 chunks 16 apart; the screen moves it by step.
             Self::DistantTerrain => OptionKind::Slider {
                 min: 0.0,
                 max: 256.0,
@@ -351,7 +219,7 @@ impl OptionId {
             Self::EntityDistance => OptionKind::Action,
             Self::MenuBackgroundBlur => OptionKind::Slider {
                 min: 0.0,
-                max: 10.0,
+                max: MAX_MENU_BACKGROUND_BLURRINESS as f32,
                 step: 1.0,
             },
             Self::CloudRange => OptionKind::Action,
@@ -541,87 +409,32 @@ impl OptionId {
     pub fn get(self, options: &GameOptions) -> Option<f32> {
         match self {
             Self::Fov => Some(options.fov as f32),
-            Self::Online => None,
-            Self::SkinCustomization => None,
-            Self::MusicSounds => None,
-            Self::VideoSettings => None,
-            Self::Controls => None,
-            Self::Language => None,
-            Self::ChatSettings => None,
-            Self::ResourcePacks => None,
-            Self::AccessibilitySettings => None,
-            Self::TelemetryData => None,
-            Self::CreditsAttribution => None,
-            Self::FullscreenResolution => None,
             Self::MaxFramerate => Some(options.max_framerate as f32),
-            Self::VSync => Some(if options.vsync { 1.0 } else { 0.0 }),
-            Self::InactivityFpsLimit => None,
+            Self::VSync => Some(flag(options.vsync)),
             Self::GuiScale => Some(options.gui_scale_setting as f32),
             Self::Fullscreen => Some(options.display_mode.to_u8() as f32),
-            Self::ExclusiveFullscreen => None,
             Self::Brightness => Some(options.brightness),
-            Self::GraphicsBackend => None,
-            Self::Graphics => None,
-            Self::BiomeBlend => None,
             Self::RenderDistance => Some(options.render_distance as f32),
-            Self::PrioritizeChunkUpdates => None,
             Self::SimulationDistance => Some(options.simulation_distance as f32),
-            Self::SmoothLighting => None,
             Self::Clouds => Some(options.cloud_mode.to_u8() as f32),
             Self::ChunkDetail => Some(options.chunk_detail as f32),
             Self::DistantTerrain => Some(options.distant_terrain as f32),
-            Self::Particles => None,
-            Self::MipmapLevels => None,
-            Self::EntityShadows => Some(if options.entity_shadows { 1.0 } else { 0.0 }),
-            Self::EntityDistance => None,
+            Self::EntityShadows => Some(flag(options.entity_shadows)),
             Self::MenuBackgroundBlur => Some(options.menu_background_blurriness as f32),
-            Self::CloudRange => None,
-            Self::CutoutLeaves => None,
-            Self::ImprovedTransparency => None,
-            Self::TextureFiltering => None,
-            Self::MaxAnisotropy => None,
-            Self::WeatherRadius => None,
-            Self::ShaderPack => None,
-            Self::ShowAutosaveIndicator => Some(if options.show_autosave_indicator {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::Vignette => Some(if options.vignette { 1.0 } else { 0.0 }),
+            Self::ShowAutosaveIndicator => Some(flag(options.show_autosave_indicator)),
+            Self::Vignette => Some(flag(options.vignette)),
             Self::AttackIndicator => Some(options.attack_indicator.to_u8() as f32),
-            Self::ChunkFadeIn => None,
-            Self::MouseSettings => None,
-            Self::KeyBinds => None,
-            Self::Sneak => None,
-            Self::Sprint => None,
-            Self::AttackDestroy => None,
-            Self::UseItemPlaceBlock => None,
-            Self::AutoJump => None,
-            Self::SprintWindow => None,
-            Self::OperatorItemsTab => None,
             Self::Sensitivity => Some(options.sensitivity),
-            Self::ScrollSensitivity => None,
-            Self::DiscreteScrolling => None,
-            Self::InvertMouseX => Some(if options.invert_mouse_x { 1.0 } else { 0.0 }),
-            Self::InvertMouseY => Some(if options.invert_mouse_y { 1.0 } else { 0.0 }),
-            Self::AllowCursorChanges => None,
-            Self::RawInput => None,
+            Self::InvertMouseX => Some(flag(options.invert_mouse_x)),
+            Self::InvertMouseY => Some(flag(options.invert_mouse_y)),
             Self::Chat => Some(match options.chat_options.visibility {
                 crate::ui::chat::ChatVisibilitySetting::Full => 0.0,
                 crate::ui::chat::ChatVisibilitySetting::System => 1.0,
                 crate::ui::chat::ChatVisibilitySetting::Hidden => 2.0,
             }),
-            Self::Colors => Some(if options.chat_options.colors {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::WebLinks => Some(if options.chat_options.links { 1.0 } else { 0.0 }),
-            Self::PromptOnLinks => Some(if options.chat_options.links_prompt {
-                1.0
-            } else {
-                0.0
-            }),
+            Self::Colors => Some(flag(options.chat_options.colors)),
+            Self::WebLinks => Some(flag(options.chat_options.links)),
+            Self::PromptOnLinks => Some(flag(options.chat_options.links_prompt)),
             Self::ChatTextOpacity => Some(options.chat_options.opacity),
             Self::TextBackgroundOpacity => Some(options.chat_options.text_background_opacity),
             Self::ChatTextSize => Some(options.chat_options.scale),
@@ -630,48 +443,15 @@ impl OptionId {
             Self::Width => Some(options.chat_options.width),
             Self::FocusedHeight => Some(options.chat_options.height_focused),
             Self::UnfocusedHeight => Some(options.chat_options.height_unfocused),
-            Self::Narrator => None,
-            Self::CommandSuggestions => Some(if options.chat_options.auto_suggestions {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::HideMatchedNames => None,
-            Self::ReducedDebugInfo => None,
-            Self::OnlyShowSecureChat => Some(if options.chat_options.only_secure {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::SaveUnsentChats => Some(if options.chat_options.save_drafts {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::ForceUnicodeFont => Some(if options.force_unicode_font { 1.0 } else { 0.0 }),
-            Self::JapaneseGlyphVariants => Some(if options.japanese_glyph_variants {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::ShowSubtitles => Some(if options.show_subtitles { 1.0 } else { 0.0 }),
-            Self::HighContrast => None,
-            Self::BackgroundForChatOnly => None,
-            Self::NotificationTime => None,
-            Self::ViewBobbing => Some(if options.view_bobbing { 1.0 } else { 0.0 }),
-            Self::DistortionEffects => None,
+            Self::CommandSuggestions => Some(flag(options.chat_options.auto_suggestions)),
+            Self::OnlyShowSecureChat => Some(flag(options.chat_options.only_secure)),
+            Self::SaveUnsentChats => Some(flag(options.chat_options.save_drafts)),
+            Self::ForceUnicodeFont => Some(flag(options.force_unicode_font)),
+            Self::JapaneseGlyphVariants => Some(flag(options.japanese_glyph_variants)),
+            Self::ShowSubtitles => Some(flag(options.show_subtitles)),
+            Self::ViewBobbing => Some(flag(options.view_bobbing)),
             Self::FovEffects => Some(options.fov_effect_scale),
-            Self::DarknessPulsing => None,
             Self::DamageTilt => Some(options.damage_tilt_strength),
-            Self::GlintSpeed => None,
-            Self::GlintStrength => None,
-            Self::HideLightningFlashes => None,
-            Self::DarkLoadingScreen => None,
-            Self::PanoramaScrollSpeed => None,
-            Self::HideSplashTexts => None,
-            Self::NarratorHotkey => None,
-            Self::RotateWithMinecart => None,
-            Self::HighContrastOutlines => None,
             Self::MasterVolume => Some(options.master_volume),
             Self::Music => Some(options.music_volume),
             Self::JukeboxNoteBlocks => Some(options.jukebox_volume),
@@ -683,101 +463,46 @@ impl OptionId {
             Self::AmbientEnvironment => Some(options.ambient_volume),
             Self::VoiceSpeech => Some(options.voice_volume),
             Self::Ui => Some(options.ui_volume),
-            Self::Device => None,
-            Self::DirectionalAudio => None,
-            Self::MusicFrequency => None,
-            Self::MusicToast => None,
-            Self::Cape => Some(if options.skin_cape { 1.0 } else { 0.0 }),
-            Self::Jacket => Some(if options.skin_jacket { 1.0 } else { 0.0 }),
-            Self::LeftSleeve => Some(if options.skin_left_sleeve { 1.0 } else { 0.0 }),
-            Self::RightSleeve => Some(if options.skin_right_sleeve { 1.0 } else { 0.0 }),
-            Self::LeftPantsLeg => Some(if options.skin_left_pants { 1.0 } else { 0.0 }),
-            Self::RightPantsLeg => Some(if options.skin_right_pants { 1.0 } else { 0.0 }),
-            Self::Hat => Some(if options.skin_hat { 1.0 } else { 0.0 }),
-            Self::MainHand => Some(if options.skin_main_hand_right {
-                1.0
-            } else {
-                0.0
-            }),
-            Self::RealmsNotifications => None,
-            Self::AllowServerListings => None,
-            Self::ShowOnlineStatus => Some(if options.show_online_status { 1.0 } else { 0.0 }),
-            Self::ShowCurrentServer => Some(if options.show_current_server {
-                1.0
-            } else {
-                0.0
-            }),
+            Self::Cape => Some(flag(options.skin_cape)),
+            Self::Jacket => Some(flag(options.skin_jacket)),
+            Self::LeftSleeve => Some(flag(options.skin_left_sleeve)),
+            Self::RightSleeve => Some(flag(options.skin_right_sleeve)),
+            Self::LeftPantsLeg => Some(flag(options.skin_left_pants)),
+            Self::RightPantsLeg => Some(flag(options.skin_right_pants)),
+            Self::Hat => Some(flag(options.skin_hat)),
+            Self::MainHand => Some(flag(options.skin_main_hand_right)),
+            Self::ShowOnlineStatus => Some(flag(options.show_online_status)),
+            Self::ShowCurrentServer => Some(flag(options.show_current_server)),
+            _ => None,
         }
     }
+
     /// Writes one option. Actions have no stored value and return false.
     pub fn set(self, options: &mut GameOptions, value: f32) -> bool {
         match self {
             Self::Fov => options.fov = value as u32,
-            Self::Online => return false,
-            Self::SkinCustomization => return false,
-            Self::MusicSounds => return false,
-            Self::VideoSettings => return false,
-            Self::Controls => return false,
-            Self::Language => return false,
-            Self::ChatSettings => return false,
-            Self::ResourcePacks => return false,
-            Self::AccessibilitySettings => return false,
-            Self::TelemetryData => return false,
-            Self::CreditsAttribution => return false,
-            Self::FullscreenResolution => return false,
             Self::MaxFramerate => options.max_framerate = value as u32,
             Self::VSync => options.vsync = value != 0.0,
-            Self::InactivityFpsLimit => return false,
             Self::GuiScale => options.gui_scale_setting = value as u32,
             Self::Fullscreen => options.display_mode = DisplayMode::from_u8(value as u8),
-            Self::ExclusiveFullscreen => return false,
             Self::Brightness => options.brightness = value,
-            Self::GraphicsBackend => return false,
-            Self::Graphics => return false,
-            Self::BiomeBlend => return false,
             Self::RenderDistance => options.render_distance = value as u32,
-            Self::PrioritizeChunkUpdates => return false,
             Self::SimulationDistance => options.simulation_distance = value as u32,
-            Self::SmoothLighting => return false,
             Self::Clouds => options.cloud_mode = CloudMode::from_u8(value as u8),
             Self::ChunkDetail => options.chunk_detail = value as u32,
             Self::DistantTerrain => {
                 options.distant_terrain = distant_terrain_chunks(distant_terrain_step(value as u32))
             }
-            Self::Particles => return false,
-            Self::MipmapLevels => return false,
             Self::EntityShadows => options.entity_shadows = value != 0.0,
-            Self::EntityDistance => return false,
             Self::MenuBackgroundBlur => options.menu_background_blurriness = value as u8,
-            Self::CloudRange => return false,
-            Self::CutoutLeaves => return false,
-            Self::ImprovedTransparency => return false,
-            Self::TextureFiltering => return false,
-            Self::MaxAnisotropy => return false,
-            Self::WeatherRadius => return false,
-            Self::ShaderPack => return false,
             Self::ShowAutosaveIndicator => options.show_autosave_indicator = value != 0.0,
             Self::Vignette => options.vignette = value != 0.0,
             Self::AttackIndicator => {
                 options.attack_indicator = AttackIndicatorMode::from_u8(value as u8)
             }
-            Self::ChunkFadeIn => return false,
-            Self::MouseSettings => return false,
-            Self::KeyBinds => return false,
-            Self::Sneak => return false,
-            Self::Sprint => return false,
-            Self::AttackDestroy => return false,
-            Self::UseItemPlaceBlock => return false,
-            Self::AutoJump => return false,
-            Self::SprintWindow => return false,
-            Self::OperatorItemsTab => return false,
             Self::Sensitivity => options.sensitivity = value,
-            Self::ScrollSensitivity => return false,
-            Self::DiscreteScrolling => return false,
             Self::InvertMouseX => options.invert_mouse_x = value != 0.0,
             Self::InvertMouseY => options.invert_mouse_y = value != 0.0,
-            Self::AllowCursorChanges => return false,
-            Self::RawInput => return false,
             Self::Chat => {
                 options.chat_options.visibility = match value as u8 {
                     1 => crate::ui::chat::ChatVisibilitySetting::System,
@@ -796,32 +521,15 @@ impl OptionId {
             Self::Width => options.chat_options.width = value,
             Self::FocusedHeight => options.chat_options.height_focused = value,
             Self::UnfocusedHeight => options.chat_options.height_unfocused = value,
-            Self::Narrator => return false,
             Self::CommandSuggestions => options.chat_options.auto_suggestions = value != 0.0,
-            Self::HideMatchedNames => return false,
-            Self::ReducedDebugInfo => return false,
             Self::OnlyShowSecureChat => options.chat_options.only_secure = value != 0.0,
             Self::SaveUnsentChats => options.chat_options.save_drafts = value != 0.0,
             Self::ForceUnicodeFont => options.force_unicode_font = value != 0.0,
             Self::JapaneseGlyphVariants => options.japanese_glyph_variants = value != 0.0,
             Self::ShowSubtitles => options.show_subtitles = value != 0.0,
-            Self::HighContrast => return false,
-            Self::BackgroundForChatOnly => return false,
-            Self::NotificationTime => return false,
             Self::ViewBobbing => options.view_bobbing = value != 0.0,
-            Self::DistortionEffects => return false,
             Self::FovEffects => options.fov_effect_scale = value,
-            Self::DarknessPulsing => return false,
             Self::DamageTilt => options.damage_tilt_strength = value,
-            Self::GlintSpeed => return false,
-            Self::GlintStrength => return false,
-            Self::HideLightningFlashes => return false,
-            Self::DarkLoadingScreen => return false,
-            Self::PanoramaScrollSpeed => return false,
-            Self::HideSplashTexts => return false,
-            Self::NarratorHotkey => return false,
-            Self::RotateWithMinecart => return false,
-            Self::HighContrastOutlines => return false,
             Self::MasterVolume => options.master_volume = value,
             Self::Music => options.music_volume = value,
             Self::JukeboxNoteBlocks => options.jukebox_volume = value,
@@ -833,10 +541,6 @@ impl OptionId {
             Self::AmbientEnvironment => options.ambient_volume = value,
             Self::VoiceSpeech => options.voice_volume = value,
             Self::Ui => options.ui_volume = value,
-            Self::Device => return false,
-            Self::DirectionalAudio => return false,
-            Self::MusicFrequency => return false,
-            Self::MusicToast => return false,
             Self::Cape => options.skin_cape = value != 0.0,
             Self::Jacket => options.skin_jacket = value != 0.0,
             Self::LeftSleeve => options.skin_left_sleeve = value != 0.0,
@@ -845,12 +549,16 @@ impl OptionId {
             Self::RightPantsLeg => options.skin_right_pants = value != 0.0,
             Self::Hat => options.skin_hat = value != 0.0,
             Self::MainHand => options.skin_main_hand_right = value != 0.0,
-            Self::RealmsNotifications => return false,
-            Self::AllowServerListings => return false,
             Self::ShowOnlineStatus => options.show_online_status = value != 0.0,
             Self::ShowCurrentServer => options.show_current_server = value != 0.0,
+            _ => return false,
         }
-        tracing::trace!(option = self.label_key(), value, "Changed game option");
+        tracing::trace!(option = ?self, value, "Changed game option");
         true
     }
+}
+
+/// A toggle's value as `get` reports it.
+fn flag(on: bool) -> f32 {
+    if on { 1.0 } else { 0.0 }
 }

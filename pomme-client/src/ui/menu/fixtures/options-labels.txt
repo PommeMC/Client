@@ -160,6 +160,8 @@ Copy Location
 Reset
 Cycle Spectator
 Reset
+Debug Options
+Reset
 Dump Version Info
 Reset
 Game Mode Switcher

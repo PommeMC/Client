@@ -213,9 +213,9 @@ fn start_connecting(
     let game = GameState::new(
         &*gfx.renderer,
         Some(&core.resource_packs),
-        core.menu.render_distance,
+        core.menu.options.render_distance,
         world.is_some(),
-        core.menu.chat_options,
+        core.menu.options.chat_options,
         core.menu.skin_options(),
         block_definitions,
         protocol,
@@ -513,7 +513,7 @@ impl App {
         } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
             Some(60)
         } else {
-            let max = self.core.menu.max_framerate;
+            let max = self.core.menu.options.max_framerate;
             (max < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max)
         }
     }
@@ -680,7 +680,7 @@ impl ApplicationHandler for App {
                     &window,
                     self.core.font_sources(),
                     &self.core.data_dirs.cache_dir,
-                    self.core.menu.vsync,
+                    self.core.menu.options.vsync,
                     &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
                     Ok(boot) => {

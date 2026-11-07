@@ -20,12 +20,11 @@ use winit::keyboard::KeyCode;
 use crate::app::core::DisplayMode;
 use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
-use crate::options::{
-    CHUNK_DETAIL_MIN, CHUNK_DETAIL_SPAN, GameOptions, MAX_MENU_BACKGROUND_BLURRINESS,
-    distant_terrain_chunks, distant_terrain_step,
-};
 pub use crate::options::{
     CHUNK_DETAIL_OFF, DEFAULT_MENU_BACKGROUND_BLURRINESS, MAX_FRAMERATE_UNLIMITED,
+};
+use crate::options::{
+    GameOptions, MAX_MENU_BACKGROUND_BLURRINESS, distant_terrain_chunks, distant_terrain_step,
 };
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_DOWNLOAD, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE,
@@ -452,7 +451,7 @@ pub struct MainMenu {
     credits_scroll: f32,
     credits_keys: u8,
     last_click_index: Option<usize>,
-    /// Saved options. Deref preserves stage-A field access for game code.
+    /// The options saved to `options.json`.
     pub options: GameOptions,
     /// Server-announced view distance cap; 0 when unknown.
     pub server_render_distance: u32,
@@ -495,22 +494,6 @@ const MAX_NAME: usize = 32;
 const MAX_ADDRESS: usize = 128;
 const MAX_FRIEND: usize = 16;
 const MAX_SEARCH: usize = 128;
-
-/// Temporary stage-A compatibility for game-side field access.
-impl std::ops::Deref for MainMenu {
-    type Target = GameOptions;
-    /// Borrows saved options through the stage-A compatibility path.
-    fn deref(&self) -> &Self::Target {
-        &self.options
-    }
-}
-/// Preserves assignments through the legacy menu paths during stage A.
-impl std::ops::DerefMut for MainMenu {
-    /// Mutably borrows saved options through the stage-A compatibility path.
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.options
-    }
-}
 
 impl MainMenu {
     pub fn new(
@@ -676,7 +659,7 @@ impl MainMenu {
     /// (vanilla `fovEffectScale` xmaps the slider position through
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
-        self.fov_effect_scale * self.fov_effect_scale
+        self.options.fov_effect_scale * self.options.fov_effect_scale
     }
 
     /// The player whose skin the title screen shows, `None` without a
@@ -726,15 +709,15 @@ impl MainMenu {
         crate::ui::hud::gui_scale(
             screen_w,
             screen_h,
-            self.gui_scale_setting,
-            self.force_unicode_font,
+            self.options.gui_scale_setting,
+            self.options.force_unicode_font,
         )
     }
 
     pub(crate) fn font_options(&self) -> FontOptions {
         FontOptions {
-            uniform: self.force_unicode_font,
-            japanese_variants: self.japanese_glyph_variants,
+            uniform: self.options.force_unicode_font,
+            japanese_variants: self.options.japanese_glyph_variants,
         }
     }
 
@@ -743,17 +726,17 @@ impl MainMenu {
     /// slider.
     pub fn category_volumes(&self) -> [f32; SoundCategory::COUNT] {
         std::array::from_fn(|index| match SoundCategory::from_index(index as u8) {
-            SoundCategory::Master => self.master_volume,
-            SoundCategory::Music => self.music_volume,
-            SoundCategory::Records => self.jukebox_volume,
-            SoundCategory::Weather => self.weather_volume,
-            SoundCategory::Blocks => self.blocks_volume,
-            SoundCategory::Hostile => self.hostile_volume,
-            SoundCategory::Neutral => self.friendly_volume,
-            SoundCategory::Players => self.players_volume,
-            SoundCategory::Ambient => self.ambient_volume,
-            SoundCategory::Voice => self.voice_volume,
-            SoundCategory::Ui => self.ui_volume,
+            SoundCategory::Master => self.options.master_volume,
+            SoundCategory::Music => self.options.music_volume,
+            SoundCategory::Records => self.options.jukebox_volume,
+            SoundCategory::Weather => self.options.weather_volume,
+            SoundCategory::Blocks => self.options.blocks_volume,
+            SoundCategory::Hostile => self.options.hostile_volume,
+            SoundCategory::Neutral => self.options.friendly_volume,
+            SoundCategory::Players => self.options.players_volume,
+            SoundCategory::Ambient => self.options.ambient_volume,
+            SoundCategory::Voice => self.options.voice_volume,
+            SoundCategory::Ui => self.options.ui_volume,
         })
     }
 
@@ -808,24 +791,24 @@ impl MainMenu {
     }
 
     pub fn set_display_mode(&mut self, display_mode: DisplayMode, key_bindings: &KeyBindings) {
-        self.display_mode = display_mode;
+        self.options.display_mode = display_mode;
         self.save_settings(key_bindings);
     }
 
     pub fn main_hand_right(&self) -> bool {
-        self.skin_main_hand_right
+        self.options.skin_main_hand_right
     }
 
     pub fn skin_options(&self) -> SkinOptions {
         SkinOptions {
-            cape: self.skin_cape,
-            jacket: self.skin_jacket,
-            left_sleeve: self.skin_left_sleeve,
-            right_sleeve: self.skin_right_sleeve,
-            left_pants: self.skin_left_pants,
-            right_pants: self.skin_right_pants,
-            hat: self.skin_hat,
-            main_hand_right: self.skin_main_hand_right,
+            cape: self.options.skin_cape,
+            jacket: self.options.skin_jacket,
+            left_sleeve: self.options.skin_left_sleeve,
+            right_sleeve: self.options.skin_right_sleeve,
+            left_pants: self.options.skin_left_pants,
+            right_pants: self.options.skin_right_pants,
+            hat: self.options.skin_hat,
+            main_hand_right: self.options.skin_main_hand_right,
         }
     }
 
@@ -833,16 +816,16 @@ impl MainMenu {
     /// slider's steps, as a script asks.
     #[cfg(feature = "test-harness")]
     pub(crate) fn set_distant_terrain(&mut self, chunks: u32) {
-        self.distant_terrain = distant_terrain_chunks(distant_terrain_step(chunks));
+        self.options.distant_terrain = distant_terrain_chunks(distant_terrain_step(chunks));
     }
 
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
-        self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
+        self.options.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
         self.settings_dirty = true;
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
-        self.skin_main_hand_right = right;
+        self.options.skin_main_hand_right = right;
         self.save_settings(key_bindings);
     }
 
@@ -1238,7 +1221,7 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
         None,
         key_bindings,
     );
-    menu.gui_scale_setting = 1;
+    menu.options.gui_scale_setting = 1;
     menu
 }
 
@@ -1338,15 +1321,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
-        menu.render_distance = 12;
+        menu.options.render_distance = 12;
         menu.set_bench_render_distance(2);
-        menu.chunk_detail = 4;
+        menu.options.chunk_detail = 4;
         menu.save_settings(&key_bindings);
         let saved = load_settings(&dir).render_distance;
         let chunk_detail = saved_chunk_detail(&dir);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(saved, 12);
-        assert_eq!(menu.render_distance, 2);
+        assert_eq!(menu.options.render_distance, 2);
         assert_eq!(chunk_detail, 4);
     }
 
@@ -1364,7 +1347,7 @@ mod tests {
         let mut menu = test_menu("menu-blur-clamp", &mut key_bindings);
         menu.set_menu_background_blurriness(42);
         assert_eq!(
-            menu.menu_background_blurriness,
+            menu.options.menu_background_blurriness,
             MAX_MENU_BACKGROUND_BLURRINESS
         );
     }

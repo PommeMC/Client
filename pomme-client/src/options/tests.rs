@@ -11,6 +11,9 @@ fn option_ids_change_one_field() {
     }
     for &id in OptionId::ALL {
         let mut options = GameOptions::default();
+        // The shader pack's value is a pack name, not a number.
+        let scalar = id.kind() != OptionKind::Action && id != OptionId::ShaderPack;
+        assert_eq!(id.get(&options).is_some(), scalar, "{id:?}");
         let before = serde_json::to_value(&options).unwrap();
         if let Some(value) = id.get(&options) {
             let next = match id.kind() {
@@ -32,6 +35,5 @@ fn option_ids_change_one_field() {
                 "{id:?}"
             );
         }
-        assert!(!id.label_key().is_empty());
     }
 }

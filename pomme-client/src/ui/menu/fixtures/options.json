@@ -29,6 +29,9 @@
     "key.debug.copyRecreateCommand": [
       "key.keyboard.i"
     ],
+    "key.debug.debugOptions": [
+      "key.keyboard.f6"
+    ],
     "key.debug.dumpVersion": [
       "key.keyboard.v"
     ],
