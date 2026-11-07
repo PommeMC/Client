@@ -1,6 +1,8 @@
 mod lava_fluid;
+mod water_fluid;
 
 use lava_fluid::LavaFluid;
+use water_fluid::WaterFluid;
 
 use super::block::FluidKind;
 use super::level::LevelContext;
@@ -12,6 +14,7 @@ pub(super) fn animate_tick(
     level: &mut LevelContext<'_>,
     random: &mut fastrand::Rng,
     lava: &SimpleParticleType,
+    underwater: &SimpleParticleType,
 ) {
     let fluid = level
         .block_state_table()
@@ -20,7 +23,9 @@ pub(super) fn animate_tick(
     // COMPAT: Vanilla FluidState delegates animateTick to its registered Fluid.
     // This particle-only change uses FluidKind; an equivalent fluid registry is out
     // of scope.
-    if fluid.kind == FluidKind::Lava {
-        LavaFluid::animate_tick(pos, level, random, lava);
+    match fluid.kind {
+        FluidKind::Lava => LavaFluid::animate_tick(pos, level, random, lava),
+        FluidKind::Water => WaterFluid::animate_tick(pos, fluid, level, random, underwater),
+        FluidKind::Empty => {}
     }
 }

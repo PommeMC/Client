@@ -4055,6 +4055,7 @@ impl AppCore {
             player_pos,
             level,
             &SimpleParticleType::new(Rc::clone(&self.particle_types.lava)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.underwater)),
         );
     }
 
