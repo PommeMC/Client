@@ -25,6 +25,9 @@ pub(crate) struct ParticleTypes {
     pub(crate) dripping_water: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_water: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) splash: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dripping_lava: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_lava: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) landing_lava: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -86,6 +89,15 @@ impl ParticleTypes {
         let splash = registry
             .register(resource_id!("minecraft:splash"), false)
             .map_err(registration_error)?;
+        let dripping_lava = registry
+            .register(resource_id!("minecraft:dripping_lava"), false)
+            .map_err(registration_error)?;
+        let falling_lava = registry
+            .register(resource_id!("minecraft:falling_lava"), false)
+            .map_err(registration_error)?;
+        let landing_lava = registry
+            .register(resource_id!("minecraft:landing_lava"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -105,6 +117,9 @@ impl ParticleTypes {
             dripping_water,
             falling_water,
             splash,
+            dripping_lava,
+            falling_lava,
+            landing_lava,
         })
     }
 }

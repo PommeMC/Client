@@ -17,7 +17,10 @@ mod terrain;
 mod water_drop;
 
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
-use self::drip::{WaterFallParticleRegistration, WaterHangParticleRegistration};
+use self::drip::{
+    LavaFallParticleRegistration, LavaHangParticleRegistration, LavaLandParticleRegistration,
+    WaterFallParticleRegistration, WaterHangParticleRegistration,
+};
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
@@ -82,4 +85,16 @@ pub(crate) fn register_builtin_providers(
         &WaterFallParticleRegistration::new(Rc::clone(&types.splash)),
     );
     resources.register_sprite_provider(Rc::clone(&types.splash), &SplashParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_lava),
+        &LavaHangParticleRegistration::new(Rc::clone(&types.falling_lava)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_lava),
+        &LavaFallParticleRegistration::new(Rc::clone(&types.landing_lava)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.landing_lava),
+        &LavaLandParticleRegistration,
+    );
 }
