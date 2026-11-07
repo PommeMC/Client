@@ -59,15 +59,19 @@ impl BlockFactory {
         types: &ParticleTypes,
     ) -> Box<dyn Block> {
         match name {
-            "torch" | "wall_torch" | "soul_torch" | "soul_wall_torch" => {
+            "torch" | "wall_torch" | "soul_torch" | "soul_wall_torch" | "copper_torch"
+            | "copper_wall_torch" => {
                 let flame_type = match name {
                     "soul_torch" | "soul_wall_torch" => &types.soul_fire_flame,
+                    "copper_torch" | "copper_wall_torch" => &types.copper_fire_flame,
                     _ => &types.flame,
                 };
                 let smoke = SimpleParticleType::new(Rc::clone(&types.smoke));
                 let flame = SimpleParticleType::new(Rc::clone(flame_type));
                 match name {
-                    "torch" | "soul_torch" => Box::new(TorchBlock::new(block_data, smoke, flame)),
+                    "torch" | "soul_torch" | "copper_torch" => {
+                        Box::new(TorchBlock::new(block_data, smoke, flame))
+                    }
                     _ => Box::new(WallTorchBlock::new(block_data, smoke, flame)),
                 }
             }
