@@ -4,14 +4,18 @@ use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
 use crate::world::level::LevelContext;
 
-// COMPAT: Only Vanilla LavaFluid's client ambient animation is implemented
-// here. Its drip selection, lava-specific flow/spread/replacement rules, random
+// COMPAT: Vanilla LavaFluid's client ambient animation and drip selection are
+// implemented here. Its lava-specific flow/spread/replacement rules, random
 // fire ignition, and entityInside contact-effect dispatch belong here as added.
 // Most are not yet implemented in Pomme. Entity travel/buoyancy and rendering
 // remain with their entity and renderer implementations.
 pub(super) struct LavaFluid;
 
 impl LavaFluid {
+    pub(super) fn get_drip_particle(dripping_lava: &SimpleParticleType) -> &SimpleParticleType {
+        dripping_lava
+    }
+
     pub(super) fn animate_tick(
         pos: BlockPos,
         level: &mut LevelContext<'_>,
