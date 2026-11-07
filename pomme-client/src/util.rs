@@ -37,6 +37,14 @@ pub(crate) mod random_source {
             self.random.borrow_mut().f32()
         }
 
+        pub fn next_double(&self) -> f64 {
+            self.random.borrow_mut().f64()
+        }
+
+        pub fn next_boolean(&self) -> bool {
+            self.random.borrow_mut().bool()
+        }
+
         pub fn next_int(&self, bound: usize) -> usize {
             assert!(
                 bound > 0,
