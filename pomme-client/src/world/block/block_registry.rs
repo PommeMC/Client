@@ -10,6 +10,7 @@ use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderV
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
 };
+use crate::particles::ParticleTypes;
 use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
 use crate::world::level::LevelContext;
@@ -24,8 +25,6 @@ pub trait Block {
         _pos: BlockPos,
         _level: &mut LevelContext<'_>,
         _random: &mut fastrand::Rng,
-        _smoke: &SimpleParticleType,
-        _flame: &SimpleParticleType,
     ) {
     }
 }
@@ -53,10 +52,25 @@ impl super::Block for DefaultBlock {
 pub(crate) struct BlockFactory;
 
 impl BlockFactory {
-    pub(crate) fn create(&self, name: &str, block_data: BlockData) -> Box<dyn Block> {
+    pub(crate) fn create(
+        &self,
+        name: &str,
+        block_data: BlockData,
+        types: &ParticleTypes,
+    ) -> Box<dyn Block> {
         match name {
-            "torch" => Box::new(TorchBlock::new(block_data)),
-            "wall_torch" => Box::new(WallTorchBlock::new(block_data)),
+            "torch" | "wall_torch" | "soul_torch" | "soul_wall_torch" => {
+                let flame_type = match name {
+                    "soul_torch" | "soul_wall_torch" => &types.soul_fire_flame,
+                    _ => &types.flame,
+                };
+                let smoke = SimpleParticleType::new(Rc::clone(&types.smoke));
+                let flame = SimpleParticleType::new(Rc::clone(flame_type));
+                match name {
+                    "torch" | "soul_torch" => Box::new(TorchBlock::new(block_data, smoke, flame)),
+                    _ => Box::new(WallTorchBlock::new(block_data, smoke, flame)),
+                }
+            }
             _ => Box::new(DefaultBlock { block_data }),
         }
     }
@@ -67,16 +81,19 @@ pub(crate) struct BlockDefinitions {
 }
 
 impl BlockDefinitions {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(types: &ParticleTypes) -> Self {
         let factory = BlockFactory;
         let mut entries: Vec<_> = load_behaviors().iter().collect();
         entries.sort_unstable_by_key(|(name, _)| *name);
         let mut registry = Self {
             definitions: Vec::with_capacity(entries.len() + 1),
         };
-        registry.register("", factory.create("", BlockData::default()));
+        registry.register("", factory.create("", BlockData::default(), types));
         for (name, entry) in entries {
-            registry.register(name.as_str(), factory.create(name, entry.block_data()));
+            registry.register(
+                name.as_str(),
+                factory.create(name, entry.block_data(), types),
+            );
         }
         registry
     }
@@ -118,8 +135,9 @@ impl BlockRegistry {
     /// The native version's registry with no render assets.
     #[cfg(test)]
     pub(crate) fn native() -> Self {
+        let particle_types = ParticleTypes::new().expect("builtin particle types");
         Self::new(
-            Rc::new(BlockDefinitions::new()),
+            Rc::new(BlockDefinitions::new(&particle_types)),
             Arc::new(BlockRenderAssets::default()),
             pomme_protocol::version::NATIVE.protocol,
         )
@@ -192,12 +210,9 @@ impl BlockRegistry {
         pos: BlockPos,
         level: &mut LevelContext<'_>,
         random: &mut fastrand::Rng,
-        smoke: &SimpleParticleType,
-        flame: &SimpleParticleType,
     ) {
         let state = level.get_block_state(pos);
-        self.block(state)
-            .animate_tick(state, pos, level, random, smoke, flame);
+        self.block(state).animate_tick(state, pos, level, random);
     }
 }
 

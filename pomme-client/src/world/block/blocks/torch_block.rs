@@ -8,11 +8,21 @@ use crate::world::level::LevelContext;
 
 pub(in crate::world::block) struct TorchBlock {
     block_data: BlockData,
+    smoke: SimpleParticleType,
+    flame: SimpleParticleType,
 }
 
 impl TorchBlock {
-    pub(in crate::world::block) fn new(block_data: BlockData) -> Self {
-        Self { block_data }
+    pub(in crate::world::block) fn new(
+        block_data: BlockData,
+        smoke: SimpleParticleType,
+        flame: SimpleParticleType,
+    ) -> Self {
+        Self {
+            block_data,
+            smoke,
+            flame,
+        }
     }
 }
 
@@ -27,21 +37,29 @@ impl Block for TorchBlock {
         pos: BlockPos,
         level: &mut LevelContext<'_>,
         _random: &mut fastrand::Rng,
-        smoke: &SimpleParticleType,
-        flame: &SimpleParticleType,
     ) {
         let position = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.7, pos.z as f64 + 0.5);
-        emit_torch_particles(level, position, smoke, flame);
+        emit_torch_particles(level, position, &self.smoke, &self.flame);
     }
 }
 
 pub(in crate::world::block) struct WallTorchBlock {
     block_data: BlockData,
+    smoke: SimpleParticleType,
+    flame: SimpleParticleType,
 }
 
 impl WallTorchBlock {
-    pub(in crate::world::block) fn new(block_data: BlockData) -> Self {
-        Self { block_data }
+    pub(in crate::world::block) fn new(
+        block_data: BlockData,
+        smoke: SimpleParticleType,
+        flame: SimpleParticleType,
+    ) -> Self {
+        Self {
+            block_data,
+            smoke,
+            flame,
+        }
     }
 }
 
@@ -56,8 +74,6 @@ impl Block for WallTorchBlock {
         pos: BlockPos,
         level: &mut LevelContext<'_>,
         _random: &mut fastrand::Rng,
-        smoke: &SimpleParticleType,
-        flame: &SimpleParticleType,
     ) {
         let properties = level
             .block_state_table()
@@ -76,7 +92,7 @@ impl Block for WallTorchBlock {
             pos.y as f64 + 0.7 + 0.22,
             pos.z as f64 + 0.5 + offset_z,
         );
-        emit_torch_particles(level, position, smoke, flame);
+        emit_torch_particles(level, position, &self.smoke, &self.flame);
     }
 }
 
