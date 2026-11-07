@@ -2,6 +2,7 @@ use std::io;
 use std::rc::Rc;
 
 use super::block_particle_option::BlockParticleOption;
+use super::dust_particle_options::DustParticleOptions;
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::types::{ParticleType, SimpleParticleType};
 use crate::resources::resource_id;
@@ -14,6 +15,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) copper_fire_flame: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) end_rod: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) block: Rc<ParticleType<BlockParticleOption>>,
+    pub(crate) dust: Rc<ParticleType<DustParticleOptions>>,
 }
 
 impl ParticleTypes {
@@ -45,6 +47,9 @@ impl ParticleTypes {
         let block = registry
             .register(resource_id!("minecraft:block"), false)
             .map_err(registration_error)?;
+        let dust = registry
+            .register(resource_id!("minecraft:dust"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -54,6 +59,7 @@ impl ParticleTypes {
             copper_fire_flame,
             end_rod,
             block,
+            dust,
         })
     }
 }

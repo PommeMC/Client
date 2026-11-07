@@ -26,6 +26,7 @@
 pub(crate) mod block_particle_option;
 mod builtin;
 mod contract_exemplars;
+pub(crate) mod dust_particle_options;
 mod particle;
 pub(crate) mod particle_engine_access;
 mod particle_provider;

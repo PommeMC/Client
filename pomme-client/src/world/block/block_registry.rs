@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 
-use super::blocks::{TorchBlock, WallTorchBlock};
+use super::blocks::{RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock};
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
 };
 use crate::particles::ParticleTypes;
+use crate::particles::dust_particle_options::DustParticleOptions;
 use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
 use crate::world::level::LevelContext;
@@ -75,6 +76,14 @@ impl BlockFactory {
                     _ => Box::new(WallTorchBlock::new(block_data, smoke, flame)),
                 }
             }
+            "redstone_torch" => Box::new(RedstoneTorchBlock::new(
+                block_data,
+                DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
+            "redstone_wall_torch" => Box::new(RedstoneWallTorchBlock::new(
+                block_data,
+                DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
             _ => Box::new(DefaultBlock { block_data }),
         }
     }
