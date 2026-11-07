@@ -5,6 +5,7 @@ pub mod border;
 pub mod chunk;
 pub mod clock;
 pub mod environment;
+mod fluid;
 pub mod level;
 pub mod light;
 pub mod piston;
