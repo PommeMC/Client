@@ -212,7 +212,7 @@ fn start_connecting(
     let connection = spawn_connection(&core.tokio_rt, connect_args);
     let game = GameState::new(
         &*gfx.renderer,
-        Some(&core.resource_packs),
+        core.resources(),
         core.menu.render_distance,
         world.is_some(),
         core.menu.chat_options,
@@ -221,6 +221,7 @@ fn start_connecting(
         protocol,
         distant_cache,
     );
+    core.particle_engine.set_level();
     core.apply_cursor_grab(&gfx.window, None);
     AppPhase::Connecting {
         gfx,
@@ -241,10 +242,10 @@ impl App {
         user: UserData,
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let pending_skin_uuid = user.has_profile.then_some(user.uuid);
-        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
-        Self {
+        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size)?;
+        Ok(Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
                 pending_skin_uuid,
@@ -261,7 +262,7 @@ impl App {
             #[cfg(feature = "test-harness")]
             harness: None,
             chunk_bench: None,
-        }
+        })
     }
 
     /// A `--chunk-bench` run: borderless, as most players play, never paused
@@ -396,7 +397,6 @@ impl App {
                     boot,
                     self.core.font_sources(),
                     &self.core.data_dirs.game_dir,
-                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -540,8 +540,11 @@ fn create_window(
     core: &AppCore,
 ) -> Result<Arc<Window>, winit::error::OsError> {
     let window_icon = {
-        let img =
-            image::load_from_memory(crate::assets::POMME_ICON_PNG).expect("failed to decode icon");
+        let img = crate::assets::load_resource_image(
+            core.resources(),
+            &crate::resources::pack_resources::POMME_ICON,
+        )
+        .expect("failed to decode icon");
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
@@ -676,14 +679,32 @@ impl ApplicationHandler for App {
                     }
                 };
 
+                let prepared_particles = match self.core.prepare_particle_assets() {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::error!("Failed to prepare particle assets: {error}");
+                        event_loop.exit();
+                        return AppPhase::Setup {
+                            quick_play,
+                            pending_skin_uuid,
+                            loading: None,
+                        };
+                    }
+                };
                 let loading = match Renderer::begin(
                     &window,
+                    self.core.resources(),
                     self.core.font_sources(),
+                    prepared_particles.cpu,
+                    self.core.use_vanilla_block_cache(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
-                    &self.core.data_dirs.bedrock_ui_dir(),
                 ) {
                     Ok(boot) => {
+                        self.core.apply_particle_assets(
+                            prepared_particles.descriptions,
+                            prepared_particles.sprites,
+                        );
                         window.request_redraw();
                         Some(Box::new(Loading {
                             boot,
@@ -716,13 +737,12 @@ impl ApplicationHandler for App {
         if let Some(install) = &mut self.install {
             match event {
                 WindowEvent::RedrawRequested => {
-                    let step = install.frame(&self.core);
+                    let step = install.frame(&mut self.core);
                     if matches!(step, install::Step::Relaunched) {
                         event_loop.exit();
                     }
                     if let install::Step::Done(window) = step {
                         self.install = None;
-                        self.core.reload_installed_assets();
                         self.installed_window = Some(window);
                         // In the background there's no surface to build the
                         // renderer on; the real `resumed` builds it.

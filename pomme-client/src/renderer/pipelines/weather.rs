@@ -1,12 +1,10 @@
-use std::path::Path;
-
-use crate::assets::AssetIndex;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::chunk::mesher::BiomeClimate;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceManager, resource_id};
 
 /// Block radius of the rain/snow grid sampled around the camera (vanilla
 /// `weatherRadius`). Also used for the per-column distance alpha falloff.
@@ -94,8 +92,7 @@ impl WeatherPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -128,17 +125,15 @@ impl WeatherPipeline {
 
         let rain = util::load_asset_texture(
             device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/rain.png",
+            resources,
+            &resource_id!("minecraft:textures/environment/rain.png"),
         );
         let rain_set = util::create_texture_group(device, tex_layout, rain.handle(), sampler);
 
         let snow = util::load_asset_texture(
             device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/snow.png",
+            resources,
+            &resource_id!("minecraft:textures/environment/snow.png"),
         );
         let snow_set = util::create_texture_group(device, tex_layout, snow.handle(), sampler);
 

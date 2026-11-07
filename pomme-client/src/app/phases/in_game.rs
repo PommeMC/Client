@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
@@ -25,6 +26,7 @@ use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
+use crate::particles::render::{ParticleView, ParticlesRenderState};
 use crate::player::LocalPlayer;
 use crate::player::interaction::{
     HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
@@ -52,17 +54,20 @@ use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
 use crate::renderer::pipelines::sign_text::{SignFace, SignRenderInfo};
 use crate::renderer::{Renderer, SkyState};
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::managers::ResourceManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::block_registry::{BlockDefinitions, BlockRegistry};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
+use crate::world::level::LevelContext;
 
 /// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
 /// those skipped as occluded (the per-section occlusion win). Kept as each
@@ -518,7 +523,7 @@ impl GameState {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mesh_source: &impl MeshSource,
-        resource_packs: Option<&ResourcePackManager>,
+        resources: &dyn ResourceManager,
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
@@ -538,7 +543,7 @@ impl GameState {
         let mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             block_registry.owned_render_view(),
             biome_climate,
-            resource_packs,
+            resources,
             Default::default(),
         );
 
@@ -572,15 +577,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
-            particle_store: {
-                let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
-                crate::particle::ParticleStore::new(
-                    mesh_source.uv_map().clone(),
-                    grass,
-                    foliage,
-                    dry_foliage,
-                )
-            },
+            particle_store: crate::particle::ParticleStore::new(mesh_source.uv_map().clone()),
             block_entity_anim: BlockEntityAnimStore::default(),
             level_runtime: crate::world::level::LevelRuntime::new(),
             player: LocalPlayer::new(),
@@ -2114,7 +2111,7 @@ pub(crate) fn build_server_screens(
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
         );
         if dialog.take_click_sound() {
-            core.audio.play_ui_click();
+            core.audio.play_ui_click(core.resources());
         }
         settle_server_dialog(action, core, connection, game);
         core.input.clear_just_pressed_actions();
@@ -2127,7 +2124,7 @@ pub(crate) fn build_server_screens(
         // `AbstractButton.onClick` plays the click; this is the same
         // last-frame hit test the modal presses with.
         if clicked && game.chat.hovering_clickable(cursor, false) {
-            core.audio.play_ui_click();
+            core.audio.play_ui_click(core.resources());
         }
         if let Some(action) =
             game.chat
@@ -2391,6 +2388,7 @@ pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
+    resources: &dyn crate::resources::ResourceManager,
     ops: Vec<azalea_inventory::operations::ClickOperation>,
 ) {
     use azalea_inventory::ItemStack;
@@ -2411,7 +2409,7 @@ pub(crate) fn send_container_clicks(
     let mut drag_kind = QuickCraftKind::Left;
     let mut drag_slots: Vec<u16> = Vec::new();
     for op in &ops {
-        crafter_slot_clicked(game, connection, audio, op);
+        crafter_slot_clicked(game, connection, audio, resources, op);
         // After the toggle, so a re-enabled crafter slot takes the click.
         let kind = game
             .open_container
@@ -2468,7 +2466,7 @@ pub(crate) fn send_container_clicks(
                     game.bundle_selection = None;
                 }
                 if let Some(sound) = bundle.sound {
-                    sound.play(audio, game.player.position);
+                    sound.play(audio, resources, game.player.position);
                 }
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
@@ -2506,6 +2504,7 @@ fn crafter_slot_clicked(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
+    resources: &dyn crate::resources::ResourceManager,
     op: &azalea_inventory::operations::ClickOperation,
 ) {
     use azalea_inventory::operations::{ClickOperation, PickupClick};
@@ -2564,6 +2563,7 @@ fn crafter_slot_clicked(
         ));
     // `player.playSound`: a local sound at the player, in the players source.
     audio.play_world_sound(
+        resources,
         &crate::audio::SoundRef::event("ui.button.click"),
         crate::audio::CATEGORY_PLAYERS,
         game.player.position,
@@ -2882,18 +2882,40 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        if !game.deterministic {
-            game.level_runtime.animate_tick(
-                &game.block_registry,
-                &game.chunk_store,
-                *game.player.position,
+        {
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
             );
+            let mut level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                gfx.renderer.camera_render_position(),
+                // The client currently advertises ParticleStatus::All; no quality setting exists.
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
+            if !game.deterministic {
+                game.level_runtime.animate_tick(
+                    &game.block_registry,
+                    *game.player.position,
+                    &mut level,
+                );
+            }
+            core.particle_engine.tick(&mut level);
         }
         game.particle_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
         game.block_entity_anim.tick();
         crate::app::core::tick_moving_pistons(game);
-        crate::app::core::play_movement_sounds(&core.audio, game);
+        crate::app::core::play_movement_sounds(&core.audio, core.resources(), game);
         game.title.tick();
         tick_tool_highlight(core, game);
         // LocalPlayer.handlePortalTransitionEffect belongs to aiStep, which is
@@ -2906,6 +2928,7 @@ fn run_ticks(
             // Vanilla forLocalAmbience: AMBIENT category at the listener,
             // volume 0.25, pitch 0.8..1.2.
             core.audio.play_world_sound(
+                core.resources(),
                 &SoundRef::event("block.portal.trigger"),
                 CATEGORY_AMBIENT,
                 game.player.position,
@@ -3021,6 +3044,7 @@ pub fn update_game(
     core.tick_accumulator += dt;
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
+    crate::ui::menu::sync_resource_packs(core);
     if let Some(reason) = disconnect_reason {
         return GameUpdateResult::Disconnected { reason };
     }
@@ -3436,6 +3460,7 @@ pub fn update_game(
                 let volume = 0.5 + 0.1 * (bubbles.empty - 3 + 1).max(0) as f32;
                 let pitch = 1.0 + 0.1 * (bubbles.empty - 5 + 1).max(0) as f32;
                 core.audio.play_world_sound(
+                    core.resources(),
                     &SoundRef::event("ui.hud.bubble_pop"),
                     CATEGORY_PLAYERS,
                     game.player.position,
@@ -4348,7 +4373,7 @@ pub fn update_game(
                 );
             }
         }
-        send_container_clicks(game, connection, &core.audio, ops);
+        send_container_clicks(game, connection, &core.audio, core.resources(), ops);
 
         // Vanilla `extractContents`: after the clicks, leaving a slot that
         // holds a bundle unselects it (`onStopHovering`).
@@ -4560,7 +4585,7 @@ pub fn update_game(
                 true,
             );
             if hovered && core.input.left_just_pressed() && !chat_takes_click {
-                core.audio.play_ui_click();
+                core.audio.play_ui_click(core.resources());
                 game.stop_sleeping_requested = true;
             }
         }
@@ -4591,7 +4616,7 @@ pub fn update_game(
     // Vanilla Gui.update() runs the toast manager every frame regardless of
     // screens or F1; only rendering is gated (ToastManager.extractRenderState).
     for event in game.toasts.update() {
-        core.audio.play_ui_sound(event, 1.0, 1.0);
+        core.audio.play_ui_sound(core.resources(), event, 1.0, 1.0);
     }
     if !benchmark_running && !game.hide_gui {
         game.toasts.build(&mut elements, sw, gs, &|spans, s| {
@@ -5109,6 +5134,13 @@ pub fn update_game(
         )
     };
 
+    let effective_rd = if game.server_render_distance > 0 {
+        core.menu.render_distance.min(game.server_render_distance)
+    } else {
+        core.menu.render_distance
+    };
+    gfx.renderer.set_render_distance(effective_rd);
+
     if game.deterministic {
         game.particle_store.clear();
     }
@@ -5121,11 +5153,6 @@ pub fn update_game(
             .extract(partial_tick, gfx.renderer.camera_anchor(), &world_light)
     };
 
-    let effective_rd = if game.server_render_distance > 0 {
-        core.menu.render_distance.min(game.server_render_distance)
-    } else {
-        core.menu.render_distance
-    };
     // `EntityRenderer.extractNameTags` with the living renderers'
     // `shouldShowName`.
     // TODO: an entity carrying passengers hides its name (Pomme doesn't link
@@ -5280,52 +5307,88 @@ pub fn update_game(
             .set_terrain_format(game.mesh_dispatcher.format());
         game.rebuild_meshes();
     }
-    if let Err(e) = gfx.renderer.render_world(
-        game.block_registry.render_view(),
-        &gfx.window,
-        hide_cursor,
-        elements,
-        swing_progress,
-        use_anim,
-        held_items,
-        core.menu.main_hand_right(),
-        player_light,
-        shown_hands,
-        game.scoreboard.member_team_color(&core.user.username),
-        renders_first_person_hand(game),
-        destroy_info,
-        block_outline,
-        game.show_chunk_borders,
-        sky,
-        ShadowScene {
-            casters: &shadow_casters,
-            chunks: &game.chunk_store,
-            block_state_table: game.block_registry.block_state_table(),
-            sky_darken: game.sky_darken(),
-            ambient_light: game.ambient_light,
-        },
-        &moving_block_renders,
-        &entity_renders,
-        &item_renders,
-        crate::renderer::BlockEntityList {
-            items: &block_entity_renders,
-            camera_len: camera_block_entities,
-        },
-        &particle_quads,
-        &nameplate_renders,
-        &sign_renders,
-        &weather_columns,
-        if no_ambience {
-            crate::renderer::CloudMode::Off
+    let result = gfx.renderer.prepare_swapchain().and_then(|()| {
+        let frustum = gfx.renderer.camera_frustum();
+        let engine_particles = if no_ambience {
+            ParticlesRenderState::default()
         } else {
-            core.menu.cloud_mode
-        },
-        effective_rd,
-        distant_terrain,
-        player_preview,
-        book_preview,
-        game.player.eyes_in_water,
-    ) {
+            let eye = gfx.renderer.camera_render_position();
+            let view = ParticleView {
+                position: eye,
+                rotation: gfx.renderer.camera_billboard_rotation(),
+                partial_tick,
+                frustum: &frustum,
+            };
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
+            let level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                eye,
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
+            core.particle_engine.extract(&level, &view)
+        };
+        gfx.renderer.render_world(
+            game.block_registry.render_view(),
+            &gfx.window,
+            hide_cursor,
+            elements,
+            swing_progress,
+            use_anim,
+            held_items,
+            core.menu.main_hand_right(),
+            player_light,
+            shown_hands,
+            game.scoreboard.member_team_color(&core.user.username),
+            renders_first_person_hand(game),
+            destroy_info,
+            block_outline,
+            game.show_chunk_borders,
+            sky,
+            ShadowScene {
+                casters: &shadow_casters,
+                chunks: &game.chunk_store,
+                block_state_table: game.block_registry.block_state_table(),
+                sky_darken: game.sky_darken(),
+                ambient_light: game.ambient_light,
+            },
+            &moving_block_renders,
+            &entity_renders,
+            &item_renders,
+            crate::renderer::BlockEntityList {
+                items: &block_entity_renders,
+                camera_len: camera_block_entities,
+            },
+            &particle_quads,
+            &nameplate_renders,
+            &sign_renders,
+            &engine_particles,
+            &frustum,
+            &weather_columns,
+            if no_ambience {
+                crate::renderer::CloudMode::Off
+            } else {
+                core.menu.cloud_mode
+            },
+            effective_rd,
+            distant_terrain,
+            player_preview,
+            book_preview,
+            game.player.eyes_in_water,
+        )
+    });
+    if let Err(e) = result {
         tracing::error!("Render error: {e}");
     }
     // Whole-frame wall time (incl. render), read next frame to align with `raw_dt`.
@@ -5439,8 +5502,7 @@ pub fn update_game(
         );
     }
     if game.options_from_game {
-        // TODO: a resource-pack toggle's `menu.reload_assets` is only applied
-        // once back on the title screen.
+        crate::ui::menu::apply_resource_pack_options(core, &mut gfx.renderer, Some(game));
         core.apply_font_options(&mut gfx.renderer);
         if !core.menu.is_options_screen() {
             game.options_from_game = false;

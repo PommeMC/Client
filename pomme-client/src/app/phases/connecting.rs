@@ -47,6 +47,7 @@ pub fn update_connecting(
         &gfx.window,
         game,
     );
+    crate::ui::menu::sync_resource_packs(core);
     if let Some(reason) = disconnect_reason {
         return ConnectingUpdateResult::Disconnected { reason };
     }

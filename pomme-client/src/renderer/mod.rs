@@ -23,13 +23,13 @@ const AMBIENT_HAZE_END: f32 = 1024.0;
 const KEEPS_SURFACE_WHEN_SUSPENDED: bool = cfg!(target_os = "ios");
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
 pub use camera::CloudMode;
-use camera::{Camera, CameraUniform};
-use chunk::atlas::{AtlasUVMap, TextureAtlas};
+use camera::{Camera, CameraFrustum, CameraUniform, FrustumPlanes};
+use chunk::atlas::{AtlasCpu, AtlasUVMap, TextureAtlas};
 use chunk::buffer::{ChunkBufferStore, Layer, View};
 use chunk::mesh_source::MeshSource;
 use chunk::mesher::{ChunkMeshData, TerrainFormat};
@@ -62,14 +62,15 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::app::input::InputState;
-use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::particles::render::ParticlesRenderState;
 use crate::physics::block_shape::LocalBox;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::resources::ResourceManager;
 use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{
     BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage,
@@ -83,14 +84,6 @@ impl MeshSource for Renderer {
 
     fn uv_map(&self) -> &AtlasUVMap {
         &self.atlas.uv_map
-    }
-
-    fn jar_assets_dir(&self) -> &Path {
-        &self.jar_assets_dir
-    }
-
-    fn asset_index(&self) -> &Option<AssetIndex> {
-        &self.asset_index
     }
 }
 
@@ -107,6 +100,9 @@ pub enum RendererError {
 
     #[error("failed to build the texture atlas: {0}")]
     Atlas(String),
+
+    #[error("failed to prepare particles: {0}")]
+    Particle(String),
 }
 
 /// The loading splash: logo, progress bar and status line.
@@ -223,6 +219,8 @@ enum RenderMode<'a> {
         particles: &'a [ParticleQuad],
         nameplates: &'a [NameplateRenderInfo],
         signs: &'a [SignRenderInfo],
+        engine_particles: &'a ParticlesRenderState,
+        frustum: &'a CameraFrustum,
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -272,8 +270,6 @@ pub struct Renderer {
     camera: Camera,
 
     render_assets: Arc<BlockRenderAssets>,
-    jar_assets_dir: PathBuf,
-    asset_index: Option<AssetIndex>,
 
     chunk_pipeline: ChunkPipeline,
     lightmap: Lightmap,
@@ -303,6 +299,7 @@ pub struct Renderer {
     font_options: FontOptions,
 
     atlas: TextureAtlas,
+    particle_atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     entity_shadow_pipeline: EntityShadowPipeline,
     moving_block_buffers: MovingBlockBuffers,
@@ -348,7 +345,9 @@ const LOADING_SHARE: f32 = 0.5;
 /// window hang.
 pub struct RendererBoot {
     screen: boot::BootScreen,
+    particle_cpu: AtlasCpu,
     loaded: std::thread::JoinHandle<(BlockRenderAssets, chunk::atlas::AtlasCpu)>,
+    model_inputs: Arc<crate::world::block::model::ModelInputs>,
     progress: Arc<LoadProgress>,
     /// The bar as drawn, eased towards `progress` each frame.
     shown: f32,
@@ -381,43 +380,50 @@ impl Renderer {
     /// and atlas images on another thread; [`Self::finish`] builds the rest.
     pub fn begin(
         window: &Window,
+        resources: &dyn ResourceManager,
         font_sources: FontSources<'_>,
+        particle_cpu: AtlasCpu,
+        use_vanilla_cache: bool,
         cache_dir: &Path,
         vsync: bool,
-        bedrock_ui_dir: &Path,
     ) -> Result<RendererBoot, RendererError> {
+        let model_inputs = Arc::new(
+            crate::world::block::model::ModelInputs::prepare(resources).map_err(|error| {
+                RendererError::Atlas(format!("prepare model resources: {error}"))
+            })?,
+        );
+        let atlas_inputs = chunk::atlas::AtlasInputs::prepare(resources)
+            .map_err(|error| RendererError::Atlas(format!("prepare texture resources: {error}")))?;
         let progress = Arc::new(LoadProgress::default());
         let loaded = {
-            let jar_assets_dir = font_sources.jar_assets_dir.to_path_buf();
-            let asset_index = font_sources.asset_index.clone();
+            let model_inputs = Arc::clone(&model_inputs);
             let cache_dir = cache_dir.to_path_buf();
             let progress = Arc::clone(&progress);
             std::thread::spawn(move || {
                 let render_assets = BlockRenderAssets::load(
-                    &jar_assets_dir,
-                    &asset_index,
+                    &model_inputs,
                     Some(&cache_dir),
-                    None,
+                    use_vanilla_cache,
                     Some(&progress),
                 );
                 let (texture_names, generated_item_textures) =
                     chunk::atlas::atlas_texture_names(&render_assets);
                 let atlas = TextureAtlas::build_cpu(
-                    &jar_assets_dir,
-                    &asset_index,
+                    &atlas_inputs,
                     &texture_names,
                     &generated_item_textures,
-                    None,
                     Some(&progress),
                 );
                 (render_assets, atlas)
             })
         };
 
-        let screen = boot::BootScreen::new(window, font_sources, Some(bedrock_ui_dir), vsync)?;
+        let screen = boot::BootScreen::new(window, resources, font_sources, vsync)?;
         let mut boot = RendererBoot {
             screen,
+            particle_cpu,
             loaded,
+            model_inputs,
             progress,
             shown: 0.0,
         };
@@ -431,15 +437,18 @@ impl Renderer {
         boot: RendererBoot,
         font_sources: FontSources<'_>,
         game_dir: &Path,
-        panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
         let FontSources {
-            jar_assets_dir,
-            asset_index,
-            packs,
+            resources,
             options: font_options,
         } = font_sources;
-        let RendererBoot { screen, loaded, .. } = boot;
+        let RendererBoot {
+            screen,
+            particle_cpu,
+            loaded,
+            model_inputs,
+            ..
+        } = boot;
         let vsync = screen.vsync();
         let boot::BootParts {
             ctx,
@@ -478,49 +487,22 @@ impl Renderer {
         let chunk_pipeline =
             ChunkPipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
 
-        let hand_pipeline = HandPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let hand_pipeline =
+            HandPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
-        let block_overlay_pipeline = BlockOverlayPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let block_overlay_pipeline =
+            BlockOverlayPipeline::new(&ctx.device, swapchain_state.targets(), resources);
         let block_outline_pipeline =
             BlockOutlinePipeline::new(&ctx.device, swapchain_state.targets());
 
         splash(&mut menu_pipeline, 0.7, "Loading sky and panorama...");
 
-        let sky_pipeline = SkyPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let sky_pipeline = SkyPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
-        let weather_pipeline = WeatherPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let weather_pipeline =
+            WeatherPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
-        let particle_pipeline =
-            ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
-
-        let cloud_pipeline = CloudPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let cloud_pipeline = CloudPipeline::new(&ctx.device, swapchain_state.targets(), resources);
         let world_text_pipeline = WorldTextPipeline::new(
             &ctx.device,
             swapchain_state.targets(),
@@ -533,7 +515,7 @@ impl Renderer {
         let panorama_pipeline = PanoramaPipeline::new(
             &ctx.device,
             swapchain_state.targets(),
-            pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
+            pipelines::panorama::resolve_panorama_faces(resources),
         );
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
@@ -547,12 +529,8 @@ impl Renderer {
             false,
         );
 
-        let book_preview = BookPreviewPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let book_preview =
+            BookPreviewPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
         let entity_outline =
             EntityOutline::new(&ctx.device, swapchain_state.targets(), swapchain_extent);
@@ -564,31 +542,16 @@ impl Renderer {
             post_effects.blurred_sampler(),
         );
 
-        let entity_renderer = EntityRenderer::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            packs,
-            &lightmap,
-        );
+        let entity_renderer =
+            EntityRenderer::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
         let moving_block_buffers = MovingBlockBuffers::new(&ctx.device);
 
-        let entity_shadow_pipeline = EntityShadowPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-        );
+        let entity_shadow_pipeline =
+            EntityShadowPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
-        let block_entity_pipeline = BlockEntityPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            jar_assets_dir,
-            asset_index,
-            &lightmap,
-        );
+        let block_entity_pipeline =
+            BlockEntityPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
@@ -616,7 +579,7 @@ impl Renderer {
             &ctx.device,
             swapchain_state.targets(),
             &atlas,
-            jar_assets_dir,
+            &model_inputs,
             &lightmap,
         );
 
@@ -642,14 +605,23 @@ impl Renderer {
         );
         let gpu_timer = rhi::backend::GpuTimer::new(&ctx, 16);
 
+        let particle_atlas = TextureAtlas::upload(&ctx.device, particle_cpu)
+            .map_err(|error| RendererError::Atlas(format!("upload particle atlas: {error}")))?;
+        let particle_pipeline = ParticlePipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            &atlas,
+            &particle_atlas,
+            &lightmap,
+        );
+
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
             camera,
             render_assets,
-            jar_assets_dir: jar_assets_dir.to_path_buf(),
-            asset_index: asset_index.clone(),
             atlas,
+            particle_atlas,
             chunk_pipeline,
             lightmap,
             hand_pipeline,
@@ -898,6 +870,7 @@ impl Renderer {
         use pipelines::shaderpack::{PackFrame, PackGeometry, PackRenderer};
         let RenderMode::World {
             sky,
+            frustum,
             moving_blocks,
             entities,
             block_entities,
@@ -1013,7 +986,7 @@ impl Renderer {
         let cull_distance = entity_cull_distance(*render_distance);
         let entity_renderer = &mut self.entity_renderer;
         let mut draw_entities =
-            |pack: &mut PackRenderer, geometry, frustum: &[[f32; 4]; 6], shadow| {
+            |pack: &mut PackRenderer, geometry, frustum: &FrustumPlanes, shadow| {
                 if let Some((mut pass, binding)) =
                     pack.begin_geometry(device, encoder, frame, geometry)
                 {
@@ -1090,9 +1063,8 @@ impl Renderer {
             .collect();
         pack.draw_sky(device, encoder, frame, &self.sky_pipeline, &draws);
 
-        let frustum = self.camera.frustum_planes();
         terrain(&mut pack, PackGeometry::Terrain, View::Camera);
-        draw_entities(&mut pack, PackGeometry::Entities, &frustum, None);
+        draw_entities(&mut pack, PackGeometry::Entities, frustum.planes(), None);
         draw_block_entities(&mut pack, PackGeometry::BlockEntities);
         // TODO: `separateEntityDraws`, which draws these after translucent
         // terrain instead.
@@ -1124,6 +1096,15 @@ impl Renderer {
             *slot = Some(pack);
         }
         true
+    }
+
+    /// Finalizes the drawable extent and camera aspect before world culling is
+    /// captured.
+    pub(crate) fn prepare_swapchain(&mut self) -> Result<(), RendererError> {
+        if !self.suspended && self.swapchain_dirty {
+            self.recreate_swapchain()?;
+        }
+        Ok(())
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
@@ -1268,10 +1249,12 @@ impl Renderer {
 
     pub fn tick_texture_animations(&mut self) {
         self.atlas.tick_animations();
+        self.particle_atlas.tick_animations();
     }
 
     pub fn hold_texture_animations(&mut self) {
         self.atlas.hold_animations();
+        self.particle_atlas.hold_animations();
     }
 
     /// Redraws the lightmap with `info` on the next frame, as vanilla does
@@ -1419,6 +1402,14 @@ impl Renderer {
         self.camera.position
     }
 
+    pub(crate) fn set_render_distance(&mut self, chunks: u32) {
+        self.camera.set_render_distance(chunks);
+    }
+
+    pub(crate) fn camera_billboard_rotation(&self) -> glam::Quat {
+        self.camera.billboard_rotation()
+    }
+
     /// Camera position used for rendering (eye plus any third-person offset).
     pub fn camera_render_position(&self) -> glam::DVec3 {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
@@ -1445,15 +1436,19 @@ impl Renderer {
         ))
     }
 
+    pub(crate) fn camera_frustum(&self) -> camera::CameraFrustum {
+        self.camera.frustum()
+    }
+
     /// Six normalized frustum planes (camera-relative, same convention as the
     /// GPU cull), for CPU-side visibility classification of
     /// mesh-scheduling.
-    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
+    pub fn frustum_planes(&self) -> FrustumPlanes {
         self.camera.frustum_planes()
     }
 
     /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
+    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> FrustumPlanes {
         self.camera.frustum_planes_dilated(extra_radians)
     }
 
@@ -1674,7 +1669,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn render_world(
+    pub(crate) fn render_world(
         &mut self,
         block_render: BlockRenderView<'_>,
         window: &Window,
@@ -1700,6 +1695,8 @@ impl Renderer {
         particles: &[ParticleQuad],
         nameplates: &[NameplateRenderInfo],
         signs: &[SignRenderInfo],
+        engine_particles: &ParticlesRenderState,
+        frustum: &CameraFrustum,
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -1708,8 +1705,6 @@ impl Renderer {
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     ) -> Result<(), RendererError> {
-        // Refresh the far plane before this frame's view/projection and fog.
-        self.camera.set_render_distance(render_distance);
         let held_items = held_items.map(|held| {
             held.map(|(name, stack)| {
                 let model = self.render_assets.stack_model_key(&name, &stack);
@@ -1761,6 +1756,8 @@ impl Renderer {
                 particles,
                 nameplates,
                 signs,
+                engine_particles,
+                frustum,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1795,18 +1792,15 @@ impl Renderer {
 
     pub fn reload_assets(
         &mut self,
-        packs: &crate::resource_pack::ResourcePackManager,
-        font_options: FontOptions,
-    ) {
+        font_sources: FontSources<'_>,
+        particle_cpu: AtlasCpu,
+    ) -> std::io::Result<()> {
+        let resources = font_sources.resources;
+        let model_inputs = crate::world::block::model::ModelInputs::prepare(resources)
+            .map_err(|error| std::io::Error::other(format!("prepare model resources: {error}")))?;
         self.ctx.device.wait_idle();
 
-        self.render_assets = Arc::new(BlockRenderAssets::load(
-            &self.jar_assets_dir,
-            &self.asset_index,
-            None,
-            Some(packs),
-            None,
-        ));
+        self.render_assets = Arc::new(BlockRenderAssets::load(&model_inputs, None, false, None));
 
         self.item_entity_pipeline.clear_meshes(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
@@ -1814,11 +1808,9 @@ impl Renderer {
             chunk::atlas::atlas_texture_names(&self.render_assets);
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
+            resources,
             &texture_names,
             &generated_item_textures,
-            Some(packs),
         )
         .expect("failed to rebuild atlas");
 
@@ -1830,6 +1822,7 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.held_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.held_item_pipeline.reload_display(&model_inputs);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         // The pack binds the old atlas; it rebuilds on the next frame.
@@ -1838,14 +1831,12 @@ impl Renderer {
         {
             pack.destroy(&self.ctx.device);
         }
-        self.entity_renderer.reload_armor_assets(
-            &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
-            packs,
-        );
+        self.entity_renderer
+            .reload_armor_assets(&self.ctx.device, resources);
 
-        self.reload_fonts(packs, font_options);
+        self.reload_fixed_assets(resources)?;
+
+        self.reload_fonts(font_sources);
 
         warm_item_meshes(
             &self.ctx.device,
@@ -1858,26 +1849,61 @@ impl Renderer {
         // enough: reused slots are marked stale and cleared before rebaking.
         self.gui_item_atlas.invalidate_all();
 
+        let particle_atlas = TextureAtlas::upload(&self.ctx.device, particle_cpu)
+            .map_err(|error| std::io::Error::other(format!("upload particle atlas: {error}")))?;
+        self.particle_pipeline
+            .rebind_particle_atlas(&self.ctx.device, &particle_atlas);
+        let mut retired = std::mem::replace(&mut self.particle_atlas, particle_atlas);
+        retired.destroy(&self.ctx.device);
+
         tracing::info!("Assets reloaded");
+        Ok(())
+    }
+
+    /// The caller has made the device idle and retired atlas-dependent draws.
+    fn reload_fixed_assets(&mut self, resources: &dyn ResourceManager) -> std::io::Result<()> {
+        let device = &self.ctx.device;
+        let targets = self.swapchain.targets();
+        self.sky_pipeline.destroy(device);
+        self.sky_pipeline = SkyPipeline::new(device, targets, resources);
+        self.weather_pipeline.destroy(device);
+        self.weather_pipeline = WeatherPipeline::new(device, targets, resources, &self.lightmap);
+        self.cloud_pipeline.destroy(device);
+        self.cloud_pipeline = CloudPipeline::new(device, targets, resources);
+        self.block_overlay_pipeline.destroy(device);
+        self.block_overlay_pipeline = BlockOverlayPipeline::new(device, targets, resources);
+        self.block_entity_pipeline.destroy(device);
+        self.block_entity_pipeline =
+            BlockEntityPipeline::new(device, targets, resources, &self.lightmap);
+        self.entity_shadow_pipeline.destroy(device);
+        self.entity_shadow_pipeline = EntityShadowPipeline::new(device, targets, resources);
+        self.book_preview.destroy(device);
+        self.book_preview = BookPreviewPipeline::new(device, targets, resources);
+        self.entity_renderer.reload_textures(device, resources);
+        if self.hand_pipeline.reload_default_skin(device, resources) {
+            self.skin_preview.rebind_skin(
+                device,
+                self.hand_pipeline.skin_texture(),
+                self.hand_pipeline.skin_sampler(),
+            );
+        }
+        self.panorama_pipeline.reload_cubemap(
+            device,
+            pipelines::panorama::resolve_panorama_faces(resources),
+        );
+        self.menu_pipeline
+            .reload_resource_images(resources, device)
+            .map_err(std::io::Error::other)
     }
 
     /// Vanilla `FontManager.updateOptions`: only the font sets change.
-    pub fn reload_fonts(
-        &mut self,
-        packs: &crate::resource_pack::ResourcePackManager,
-        font_options: FontOptions,
-    ) {
-        self.font_options = font_options;
+    pub fn reload_fonts(&mut self, font_sources: FontSources<'_>) {
+        self.font_options = font_sources.options;
         self.ctx.device.wait_idle();
-        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
-            &self.ctx.device,
-            FontSources {
-                jar_assets_dir: &self.jar_assets_dir,
-                asset_index: &self.asset_index,
-                packs,
-                options: font_options,
-            },
-        ) {
+        if let Err(error) = self
+            .menu_pipeline
+            .reload_minecraft_fonts(&self.ctx.device, font_sources)
+        {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         }
         self.world_text_pipeline.rebind_font(
@@ -1885,30 +1911,6 @@ impl Renderer {
             self.menu_pipeline.mc_font_texture(),
             self.menu_pipeline.mc_font_color_texture(),
             self.menu_pipeline.mc_font_sampler(),
-        );
-    }
-
-    pub fn reload_panorama(&mut self, panorama_dir: &Path) {
-        let faces = pipelines::panorama::resolve_panorama_faces(
-            panorama_dir,
-            &self.jar_assets_dir,
-            &self.asset_index,
-        );
-        self.panorama_pipeline
-            .reload_cubemap(&self.ctx.device, faces);
-    }
-
-    /// Brings the Bedrock title and button sprites into the menu atlas when
-    /// their files arrived after the atlas was built.
-    pub fn load_bedrock_sprites(&mut self, bedrock_ui_dir: &Path) {
-        if self.menu_pipeline.has_sprite(SpriteId::BedrockTitle) {
-            return;
-        }
-        self.menu_pipeline.reload_sprite_atlas(
-            &self.ctx.device,
-            &self.jar_assets_dir,
-            &self.asset_index,
-            Some(bedrock_ui_dir),
         );
     }
 
@@ -1980,9 +1982,16 @@ impl Renderer {
     }
 
     /// Holds the skins player head items are drawn with, by head key.
-    pub fn sync_head_skins<'a>(&mut self, heads: impl IntoIterator<Item = (&'a str, &'a [u8])>) {
+    pub fn sync_head_skins<'a>(
+        &mut self,
+        heads: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        invalidate_cached_items: bool,
+    ) {
         self.gui_item_pipeline
             .sync_head_skins(&self.ctx.device, heads);
+        if invalidate_cached_items {
+            self.gui_item_atlas.invalidate_all();
+        }
     }
 
     /// Player faces reuse the string-keyed favicon atlas, which holds only
@@ -2075,9 +2084,7 @@ impl Renderer {
             return Ok(());
         }
         self.apply_fetched_skin();
-        if self.swapchain_dirty {
-            self.recreate_swapchain()?;
-        }
+        self.prepare_swapchain()?;
 
         let frame = self.frames.index();
 
@@ -2095,6 +2102,25 @@ impl Renderer {
         self.chunk_buffers.begin_frame(&self.ctx.device);
         self.distant_buffers.begin_frame(&self.ctx.device, frame);
         self.screenshot.collect_ready(frame, &self.ctx.device);
+
+        if let RenderMode::World {
+            particles,
+            engine_particles,
+            ..
+        } = &mode
+        {
+            let eye_to_anchor = (self.camera_render_position() - self.camera_anchor()).as_vec3();
+            self.particle_pipeline
+                .prepare(
+                    &self.ctx.device,
+                    frame,
+                    &self.camera,
+                    particles,
+                    engine_particles,
+                    eye_to_anchor,
+                )
+                .map_err(RendererError::Particle)?;
+        }
 
         let t_acquire = std::time::Instant::now();
         let (image_index, suboptimal) =
@@ -2145,19 +2171,19 @@ impl Renderer {
         self.atlas.record_animation_upload(&encoder, frame);
         self.distant_buffers.record_model_upload(&encoder, frame);
         self.distant_buffers.record_uploads(&encoder, frame);
+        self.particle_atlas.record_animation_upload(&encoder, frame);
         self.lightmap.record(&self.ctx.device, &encoder);
         self.gpu_stamp(&encoder, frame, "uploads");
 
         let scissor = rhi::Rect::covering(self.swapchain.extent);
 
-        if matches!(&mode, RenderMode::World { .. }) {
-            let frustum = self.camera.frustum_planes();
+        if let RenderMode::World { frustum, .. } = &mode {
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
             self.chunk_buffers.dispatch_cull(
                 &encoder,
                 frame,
-                &frustum,
+                frustum.planes(),
                 self.camera.anchor(),
                 self.camera_render_position(),
             );
@@ -2349,14 +2375,9 @@ impl Renderer {
 
         let frame_start = std::time::Instant::now();
         if let RenderMode::World {
-            particles,
-            nameplates,
-            signs,
-            ..
+            nameplates, signs, ..
         } = &mode
         {
-            self.particle_pipeline
-                .prepare(frame, &self.camera, particles);
             let mut text = WorldTextVertices::default();
             if let Some(glyph_map) = self.menu_pipeline.mc_glyph_map() {
                 let anchor = self.camera.anchor();
@@ -2412,6 +2433,8 @@ impl Renderer {
                 particles: _,
                 nameplates: _,
                 signs: _,
+                engine_particles: _,
+                frustum,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2520,7 +2543,6 @@ impl Renderer {
                             *stage,
                         );
                     }
-                    let ent_frustum = self.camera.frustum_planes();
                     let ent_cull_dist = entity_cull_distance(*render_distance);
 
                     self.entity_shadow_pipeline
@@ -2530,7 +2552,7 @@ impl Renderer {
                         &mut pass,
                         frame,
                         entities,
-                        &ent_frustum,
+                        frustum.planes(),
                         anchor,
                         eye,
                         ent_cull_dist,
@@ -3213,6 +3235,7 @@ impl Drop for Renderer {
         self.gui_item_pipeline.destroy(&self.ctx.device);
         self.gui_item_atlas.destroy(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
+        self.particle_atlas.destroy(&self.ctx.device);
 
         if let Some(timer) = &mut self.gpu_timer {
             timer.destroy(&self.ctx.device);

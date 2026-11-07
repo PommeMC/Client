@@ -4,8 +4,6 @@
 //! each frame and written to a per-frame vertex buffer; the uniform holds the
 //! screen-space projection.
 
-use std::path::Path;
-
 use glam::{Mat4, Vec3, Vec4};
 
 use super::entity_renderer::WHITE_TINT;
@@ -13,8 +11,9 @@ use super::skin_preview::{
     PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_pipeline, preview_push_constant_range,
     push_preview_style, write_uniform,
 };
-use crate::assets::{AssetIndex, load_image, resolve_asset_path};
+use crate::assets::load_resource_image;
 use crate::renderer::{BookPreview, rhi, util};
+use crate::resources::{ResourceManager, resource_id};
 
 /// Base mesh of one book part, posed per frame.
 struct Part {
@@ -42,8 +41,7 @@ impl BookPreviewPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
     ) -> Self {
         let mvp_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let tex_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -62,12 +60,11 @@ impl BookPreviewPipeline {
             "book_mvp",
         );
 
-        let path = resolve_asset_path(
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/entity/enchantment/enchanting_table_book.png",
+        let image = load_resource_image(
+            resources,
+            &resource_id!("minecraft:textures/entity/enchantment/enchanting_table_book.png"),
         );
-        let (pixels, tex_w, tex_h) = match load_image(&path) {
+        let (pixels, tex_w, tex_h) = match image {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let (w, h) = (rgba.width(), rgba.height());

@@ -10,11 +10,13 @@
 //! current world queries and a per-pass RNG, independent of coordinate
 //! sampling.
 
+pub(crate) mod block_colors;
 pub(crate) mod block_registry;
 mod block_state_table;
 mod condition;
 pub mod json_bundle;
 pub mod model;
+pub(crate) mod particle_appearance;
 pub mod render_assets;
 pub mod sound;
 

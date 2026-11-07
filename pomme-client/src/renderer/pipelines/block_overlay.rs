@@ -1,14 +1,13 @@
 use std::f32::consts::{FRAC_PI_2, PI};
-use std::path::Path;
 
 use azalea_block::BlockState;
 use glam::{Quat, Vec3};
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
 use crate::world::block::BlockStateData;
 use crate::world::block::model::{BakedQuad, Direction, direction_from_positions};
 use crate::world::block::render_assets::BlockRenderView;
@@ -50,8 +49,7 @@ impl BlockOverlayPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
         let texture_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
@@ -73,7 +71,7 @@ impl BlockOverlayPipeline {
             "block_overlay_camera",
         );
 
-        let atlas = load_destroy_atlas(device, jar_assets_dir, asset_index);
+        let atlas = load_destroy_atlas(device, resources);
 
         let atlas_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
 
@@ -287,16 +285,25 @@ fn face_rotation(dir: Direction) -> Quat {
 
 fn load_destroy_atlas(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &dyn ResourceManager,
 ) -> rhi::backend::Texture {
+    const STAGE_TEXTURES: [ResourceId; STAGE_COUNT as usize] = [
+        resource_id!("minecraft:textures/block/destroy_stage_0.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_1.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_2.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_3.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_4.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_5.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_6.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_7.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_8.png"),
+        resource_id!("minecraft:textures/block/destroy_stage_9.png"),
+    ];
     let mut atlas_pixels = Vec::new();
     let mut tile_size = 16u32;
 
-    for stage in 0..STAGE_COUNT {
-        let key = format!("minecraft/textures/block/destroy_stage_{stage}.png");
-        let path = resolve_asset_path(jar_assets_dir, asset_index, &key);
-        if let Some((pixels, w, _h)) = util::load_png(&path) {
+    for key in &STAGE_TEXTURES {
+        if let Some((pixels, w, _h)) = util::load_asset_png(resources, key) {
             tile_size = w;
             atlas_pixels.extend_from_slice(&pixels);
         } else {

@@ -1,11 +1,10 @@
 use std::f32::consts::{FRAC_PI_4, TAU};
-use std::path::Path;
 
 use glam::{Mat4, Vec3, Vec4};
 
-use crate::assets::AssetIndex;
 use crate::renderer::camera::Camera;
 use crate::renderer::{rhi, shader, util};
+use crate::resources::{ResourceManager, resource_id};
 use crate::world::block::model::CardinalLightType;
 use crate::world::environment::{EnvAttributes, Skybox};
 
@@ -190,8 +189,7 @@ impl SkyPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
     ) -> Self {
         let ubo_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -216,36 +214,34 @@ impl SkyPipeline {
 
         let sun = util::load_asset_texture(
             device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/celestial/sun.png",
+            resources,
+            &resource_id!("minecraft:textures/environment/celestial/sun.png"),
         );
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
         let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sampler);
 
-        let moon_phase_paths = [
-            "minecraft/textures/environment/celestial/moon/full_moon.png",
-            "minecraft/textures/environment/celestial/moon/waning_gibbous.png",
-            "minecraft/textures/environment/celestial/moon/third_quarter.png",
-            "minecraft/textures/environment/celestial/moon/waning_crescent.png",
-            "minecraft/textures/environment/celestial/moon/new_moon.png",
-            "minecraft/textures/environment/celestial/moon/waxing_crescent.png",
-            "minecraft/textures/environment/celestial/moon/first_quarter.png",
-            "minecraft/textures/environment/celestial/moon/waxing_gibbous.png",
+        let moon_phase_ids = [
+            resource_id!("minecraft:textures/environment/celestial/moon/full_moon.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/waning_gibbous.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/third_quarter.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/waning_crescent.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/new_moon.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/waxing_crescent.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/first_quarter.png"),
+            resource_id!("minecraft:textures/environment/celestial/moon/waxing_gibbous.png"),
         ];
         let mut moons = Vec::with_capacity(8);
         let mut moon_sets = [rhi::backend::BindGroup::default(); 8];
-        for (i, &path) in moon_phase_paths.iter().enumerate() {
-            let moon = util::load_asset_texture(device, jar_assets_dir, asset_index, path);
+        for (i, id) in moon_phase_ids.iter().enumerate() {
+            let moon = util::load_asset_texture(device, resources, id);
             moon_sets[i] = util::create_texture_group(device, tex_layout, moon.handle(), sampler);
             moons.push(moon);
         }
 
         let end_sky = util::load_asset_texture(
             device,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/end_sky.png",
+            resources,
+            &resource_id!("minecraft:textures/environment/end_sky.png"),
         );
         let end_sky_sampler =
             rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);

@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::assets::{AssetId, AssetIndex};
+use crate::assets::AssetId;
 use crate::renderer::{packing, rhi, util};
+use crate::resources::managers::ResourceManager;
+use crate::resources::{Resource, ResourceContent, ResourceId};
 use crate::world::block::model::TextureId;
 use crate::world::block::render_assets::{BlockRenderAssets, LoadProgress, LoadStage};
 
@@ -143,14 +144,14 @@ fn uses_block_atlas_mip_chain(key: &str) -> bool {
         || path == "entity/enchantment/enchanting_table_book"
 }
 
-pub fn atlas_asset_path(key: &str) -> String {
+pub fn atlas_resource_id(key: &str) -> Option<ResourceId> {
     if key.contains(':') {
-        return AssetId::parse(key).asset_key("textures", ".png");
+        return AssetId::parse(key).resource_id("textures", ".png").ok();
     }
     if key.starts_with("item/") || key.starts_with("entity/") || key.starts_with("particle/") {
-        format!("minecraft/textures/{key}.png")
+        ResourceId::from_parts("minecraft", &format!("textures/{key}.png")).ok()
     } else {
-        format!("minecraft/textures/block/{key}.png")
+        ResourceId::from_parts("minecraft", &format!("textures/block/{key}.png")).ok()
     }
 }
 
@@ -178,7 +179,7 @@ const MISSING_TILE: u32 = 16;
 /// this globally when any stitched block-atlas sprite cannot support them.
 const MAX_MIP_LEVEL: u32 = 4;
 
-struct Source {
+pub(super) struct Source {
     name: String,
     data: Vec<u8>,
     w: u32,
@@ -192,6 +193,82 @@ struct Source {
 }
 
 impl Source {
+    pub(super) fn from_resource(
+        name: &str,
+        resource: &Resource,
+        retain_alpha_mask: bool,
+        block_mips: bool,
+    ) -> Option<Self> {
+        let input = SpriteInput {
+            content: resource.content().clone(),
+            metadata: resource.metadata().ok(),
+        };
+        Self::from_input(name, &input, retain_alpha_mask, block_mips)
+    }
+
+    fn from_input(
+        name: &str,
+        resource: &SpriteInput,
+        retain_alpha_mask: bool,
+        block_mips: bool,
+    ) -> Option<Self> {
+        let Some((data, width, height)) = util::load_resource_png(&resource.content) else {
+            tracing::warn!("Missing texture: {name}");
+            return None;
+        };
+        let Some(metadata) = read_texture_metadata(resource) else {
+            tracing::warn!("Invalid texture metadata: {name}");
+            return None;
+        };
+        let Some(animation) =
+            animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
+        else {
+            tracing::warn!("Invalid texture animation metadata: {name}");
+            return None;
+        };
+        let alpha_mask =
+            retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
+        let (opaque, translucent) = sprite_transparency(&data);
+        let display = extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
+        let sprite_animation = SpriteAnimation::new(&data, width, &animation);
+        let texture = metadata.texture.as_ref();
+        let mip_source = block_mips.then(|| MipSource {
+            full_data: data,
+            full_width: width,
+            full_height: height,
+            animation: animation.clone(),
+            strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
+            alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
+        });
+        Some(Self {
+            name: name.to_string(),
+            data: display,
+            w: animation.frame_width,
+            h: animation.frame_height,
+            opaque,
+            translucent,
+            alpha_mask,
+            mip_source,
+            animation: sprite_animation,
+        })
+    }
+
+    /// Transforms produce one static frame and never inherit PNG metadata.
+    pub(super) fn from_rgba(name: &str, data: Vec<u8>, width: u32, height: u32) -> Self {
+        let (opaque, translucent) = sprite_transparency(&data);
+        Self {
+            name: name.to_string(),
+            data,
+            w: width,
+            h: height,
+            opaque,
+            translucent,
+            alpha_mask: None,
+            mip_source: None,
+            animation: None,
+        }
+    }
+
     /// A texture that failed to load; packs as the missing tile.
     fn empty(name: &str) -> Self {
         Self {
@@ -416,12 +493,11 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
     }
 }
 
-fn read_texture_metadata(metadata_path: Option<&Path>) -> Option<TextureMetadataFile> {
-    let Some(metadata_path) = metadata_path else {
+fn read_texture_metadata(resource: &SpriteInput) -> Option<TextureMetadataFile> {
+    let Some(metadata) = resource.metadata.as_ref()? else {
         return Some(TextureMetadataFile::default());
     };
-    let json = std::fs::read_to_string(metadata_path).ok()?;
-    serde_json::from_str(&json).ok()
+    serde_json::from_reader(metadata.open().ok()?).ok()
 }
 
 fn animation_layout_from_metadata(
@@ -587,91 +663,48 @@ fn sprite_alpha_mask_from_rgba(
     }
 }
 
-fn resolve_texture_resource(
-    asset_key: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (PathBuf, Option<PathBuf>) {
-    if let Some((path, metadata)) =
-        packs.and_then(|packs| packs.resolve_asset_with_metadata(asset_key))
-    {
-        return (path, metadata);
-    }
-
-    let path = asset_index
-        .as_ref()
-        .and_then(|index| index.resolve(asset_key))
-        .unwrap_or_else(|| jar_assets_dir.join(asset_key));
-    let metadata_key = format!("{asset_key}.mcmeta");
-    let metadata = packs
-        .and_then(|packs| packs.resolve_asset(&metadata_key))
-        .or_else(|| {
-            asset_index
-                .as_ref()
-                .and_then(|index| index.resolve(&metadata_key))
-        })
-        .or_else(|| {
-            let path = jar_assets_dir.join(&metadata_key);
-            path.exists().then_some(path)
-        });
-    (path, metadata)
+/// Selected on the application thread; only source-pinned factories cross to
+/// the atlas workers, including metadata from the same winning resource floor.
+pub(crate) struct AtlasInputs {
+    sprites: HashMap<ResourceId, SpriteInput>,
 }
 
-fn load_source(
-    name: &str,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&crate::resource_pack::ResourcePackManager>,
-    retain_alpha_mask: bool,
-) -> Source {
-    let asset_key = atlas_asset_path(name);
-    let (file_path, metadata_path) =
-        resolve_texture_resource(&asset_key, jar_assets_dir, asset_index, packs);
-    match util::load_png(&file_path) {
-        Some((data, width, height)) => {
-            let Some(metadata) = read_texture_metadata(metadata_path.as_deref()) else {
-                tracing::warn!("Invalid texture metadata: {name}");
-                return Source::empty(name);
-            };
-            let Some(animation) =
-                animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
-            else {
-                tracing::warn!("Invalid texture animation metadata: {name}");
-                return Source::empty(name);
-            };
-            let alpha_mask =
-                retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
-            let (opaque, translucent) = sprite_transparency(&data);
-            let display =
-                extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
-            let sprite_animation = SpriteAnimation::new(&data, width, &animation);
-            let texture = metadata.texture.as_ref();
-            let mip_source = uses_block_atlas_mip_chain(name).then(|| MipSource {
-                full_data: data,
-                full_width: width,
-                full_height: height,
-                animation: animation.clone(),
-                strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
-                alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
-            });
-            Source {
-                name: name.to_string(),
-                data: display,
-                w: animation.frame_width,
-                h: animation.frame_height,
-                opaque,
-                translucent,
-                alpha_mask,
-                mip_source,
-                animation: sprite_animation,
-            }
-        }
-        None => {
-            tracing::warn!("Missing texture: {name}");
-            Source::empty(name)
-        }
+struct SpriteInput {
+    content: ResourceContent,
+    // An outer None retains a metadata selection error, not missing metadata.
+    metadata: Option<Option<ResourceContent>>,
+}
+
+impl AtlasInputs {
+    pub(crate) fn prepare(resources: &dyn ResourceManager) -> std::io::Result<Self> {
+        let sprites = resources
+            .list_resources("textures", &|id| id.path().ends_with(".png"))?
+            .into_iter()
+            .map(|(id, resource)| {
+                let selected = SpriteInput {
+                    content: resource.content().clone(),
+                    metadata: resource.metadata().ok(),
+                };
+                (id, selected)
+            })
+            .collect();
+        Ok(Self { sprites })
     }
+}
+
+fn load_source(name: &str, inputs: &AtlasInputs, retain_alpha_mask: bool) -> Source {
+    let resource = atlas_resource_id(name).and_then(|id| inputs.sprites.get(&id));
+    let Some(resource) = resource else {
+        tracing::warn!("Missing texture: {name}");
+        return Source::empty(name);
+    };
+    Source::from_input(
+        name,
+        resource,
+        retain_alpha_mask,
+        uses_block_atlas_mip_chain(name),
+    )
+    .unwrap_or_else(|| Source::empty(name))
 }
 
 /// Every texture the block atlas packs for `render_assets`, and the
@@ -683,7 +716,6 @@ pub(crate) fn atlas_texture_names(
     let texture_names = render_assets
         .texture_names()
         .chain(generated_item_textures.iter().copied())
-        .chain(crate::particle::END_ROD_SPRITES)
         .collect();
     (texture_names, generated_item_textures)
 }
@@ -700,23 +732,61 @@ pub(crate) struct AtlasCpu {
     missing: (u32, u32),
 }
 
+impl AtlasCpu {
+    pub(super) fn realized_region(&self, key: &str) -> Option<AtlasRegion> {
+        self.placements.get(key).copied().flatten()?;
+        self.uv_map.regions.get(key).copied()
+    }
+
+    pub(super) fn resolve_source_list_missing_collision(&mut self) {
+        const NAME: &str = "minecraft:missingno";
+        let mip_align = 1 << self.mip_level;
+        let cell_key = |w: u32, h: u32, pad: u32| {
+            (
+                (h + 2 * pad).next_multiple_of(mip_align),
+                (w + 2 * pad).next_multiple_of(mip_align),
+            )
+        };
+        let builtin = cell_key(
+            MISSING_TILE,
+            MISSING_TILE,
+            sprite_padding(self.mip_level, true),
+        );
+        // Last realized duplicate wins in Pomme's shelf traversal: descending
+        // padded height/width, built-in first on ties; shelves never backfill.
+        // COMPAT: Vanilla's region-tree gather can resolve collisions differently.
+        let missing = self
+            .sources
+            .iter()
+            .find(|source| source.name == NAME)
+            .filter(|source| {
+                cell_key(source.w, source.h, source.padding(self.mip_level)) <= builtin
+            })
+            .and_then(|source| self.realized_region(&source.name))
+            .unwrap_or(self.uv_map.missing);
+        self.uv_map.missing = missing;
+        for region in self.uv_map.regions.values_mut() {
+            if region.sprite == 0 {
+                *region = missing;
+            }
+        }
+        self.uv_map.regions.insert(NAME.to_string(), missing);
+        self.uv_map.by_texture = TextureId::all_names()
+            .into_iter()
+            .map(|name| self.uv_map.get_region(name))
+            .collect();
+    }
+}
+
 impl TextureAtlas {
     pub fn build(
         device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, String> {
-        let cpu = Self::build_cpu(
-            jar_assets_dir,
-            asset_index,
-            texture_names,
-            generated_item_textures,
-            packs,
-            None,
-        );
+        let inputs = AtlasInputs::prepare(resources).map_err(|error| error.to_string())?;
+        let cpu = Self::build_cpu(&inputs, texture_names, generated_item_textures, None);
         Self::upload(device, cpu)
     }
 
@@ -921,28 +991,24 @@ impl TextureAtlas {
     /// The CPU half of [`Self::build`]: loads and packs every sprite into the
     /// level-0 atlas pixels and UV map, with no GPU work.
     pub(crate) fn build_cpu(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        inputs: &AtlasInputs,
         texture_names: &HashSet<&str>,
         generated_item_textures: &HashSet<&str>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
         progress: Option<&LoadProgress>,
     ) -> AtlasCpu {
         let names: Vec<&str> = texture_names.iter().copied().collect();
         LoadProgress::begin_stage(progress, LoadStage::Textures, names.len());
-        let mut sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
-            let source = load_source(
-                name,
-                jar_assets_dir,
-                asset_index,
-                packs,
-                generated_item_textures.contains(name),
-            );
+        let sources: Vec<Source> = crate::util::parallel_map(&names, |&name| {
+            let source = load_source(name, inputs, generated_item_textures.contains(name));
             LoadProgress::step(progress);
             source
         });
 
-        let mip_level = effective_mip_level(&sources);
+        Self::prepare_sources(sources, MAX_MIP_LEVEL)
+    }
+
+    pub(super) fn prepare_sources(mut sources: Vec<Source>, max_mip: u32) -> AtlasCpu {
+        let mip_level = max_mip.min(effective_mip_level(&sources));
         let mip_align = 1 << mip_level;
         let block_pad = sprite_padding(mip_level, true);
         // Vanilla `Stitcher.HOLDER_COMPARATOR`'s last key; the packer sorts by
@@ -2168,7 +2234,7 @@ mod tests {
     #[test]
     fn generated_sprite_uses_same_resource_pack_source_as_atlas() {
         let root = test_temp_dir("item_pack_source");
-        let jar_assets = root.join("jar");
+        let jar_assets = root.join("jar/assets");
         let instance = root.join("instance");
         let base_dir = jar_assets.join("minecraft/textures/item");
         let pack_dir = instance.join("resourcepacks/test_pack/assets/minecraft/textures/item");
@@ -2197,9 +2263,12 @@ mod tests {
         replacement.put_pixel(1, 3, image::Rgba([255, 255, 255, 255]));
         replacement.save(&pack_path).unwrap();
 
-        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
-        packs.enable_local_pack("test_pack");
-        let source = load_source("item/cocoa_beans", &jar_assets, &None, Some(&packs), true);
+        let resources = crate::test_util::test_resources(&[
+            root.join("jar"),
+            instance.join("resourcepacks/test_pack"),
+        ]);
+        let inputs = AtlasInputs::prepare(&resources).unwrap();
+        let source = load_source("item/cocoa_beans", &inputs, true);
         let mask = source.alpha_mask.as_ref().unwrap();
         assert_eq!((source.w, source.h), (2, 4));
         assert!(!mask.is_opaque_in_any_frame(0, 0));
@@ -2212,12 +2281,12 @@ mod tests {
     #[test]
     fn cross_namespace_texture_keys_resolve_without_minecraft_rewrite() {
         assert_eq!(
-            atlas_asset_path("other:block/custom"),
-            "other/textures/block/custom.png"
+            atlas_resource_id("other:block/custom").unwrap(),
+            ResourceId::new("other:textures/block/custom.png").unwrap()
         );
         assert_eq!(
-            atlas_asset_path("other:item/custom"),
-            "other/textures/item/custom.png"
+            atlas_resource_id("other:item/custom").unwrap(),
+            ResourceId::new("other:textures/item/custom.png").unwrap()
         );
         assert!(!uses_block_atlas_mip_chain("item/cocoa_beans"));
         assert!(!uses_block_atlas_mip_chain("particle/glitter_0"));

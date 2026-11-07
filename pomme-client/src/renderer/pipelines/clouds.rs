@@ -1,10 +1,8 @@
-use std::path::Path;
-
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::{Camera, CameraUniform, CloudMode, MIN_FAR};
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::resources::{ResourceManager, resource_id};
 
 /// Vertical thickness of the cloud layer in blocks.
 const CLOUD_THICKNESS: f32 = 4.0;
@@ -127,8 +125,7 @@ impl CloudPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
     ) -> Self {
         let camera_layout =
             rhi::backend::create_bind_group_layout(device, util::VERTEX_FRAGMENT_UNIFORM);
@@ -157,7 +154,7 @@ impl CloudPipeline {
             "cloud_faces",
         );
 
-        let grid = load_cloud_grid(jar_assets_dir, asset_index);
+        let grid = load_cloud_grid(resources);
 
         Self {
             fancy_pipeline,
@@ -403,10 +400,9 @@ fn build_extruded_cell(
 /// Loads and parses `clouds.png` into a cell grid. A texel is a cloud cell when
 /// its alpha is >= 10 (vanilla `isCellEmpty`). The texel colour is ignored —
 /// vanilla colours clouds purely from the uniform tint times the face shade.
-fn load_cloud_grid(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> Option<CloudGrid> {
-    let key = "minecraft/textures/environment/clouds.png";
-    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-    let (pixels, w, h) = util::load_png(&path)?;
+fn load_cloud_grid(resources: &dyn ResourceManager) -> Option<CloudGrid> {
+    let key = resource_id!("minecraft:textures/environment/clouds.png");
+    let (pixels, w, h) = util::load_asset_png(resources, &key)?;
     let width = w as usize;
     let height = h as usize;
 

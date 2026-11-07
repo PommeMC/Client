@@ -15,6 +15,38 @@ pub fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// Vanilla-style shared stream handles, not Java seeded-sequence compatibility.
+pub(crate) mod random_source {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Cloning shares the stream; each draw releases its borrow before
+    /// returning.
+    #[derive(Clone, Default)]
+    pub struct RandomSource {
+        random: Rc<RefCell<fastrand::Rng>>,
+    }
+
+    impl RandomSource {
+        /// Construct a new stream, independent of other constructed sources.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn next_float(&self) -> f32 {
+            self.random.borrow_mut().f32()
+        }
+
+        pub fn next_int(&self, bound: usize) -> usize {
+            assert!(
+                bound > 0,
+                "RandomSource::next_int requires a positive bound"
+            );
+            self.random.borrow_mut().usize(..bound)
+        }
+    }
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///
