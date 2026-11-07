@@ -11,6 +11,7 @@ mod end_rod;
 mod flame;
 mod lava;
 mod smoke;
+mod suspended;
 mod terrain;
 
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
@@ -23,6 +24,7 @@ use self::lava::LavaParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
+use self::suspended::UnderwaterParticleRegistration;
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
 
@@ -62,5 +64,9 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.lava),
         &LavaParticleRegistration::new(Rc::clone(&types.smoke)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.underwater),
+        &UnderwaterParticleRegistration,
     );
 }

@@ -300,6 +300,7 @@ impl LevelRuntime {
         player_pos: DVec3,
         level: &mut LevelContext<'_>,
         lava: &SimpleParticleType,
+        underwater: &SimpleParticleType,
     ) {
         let random = level.get_random().clone();
         animate_tick_with_draw(
@@ -309,12 +310,13 @@ impl LevelRuntime {
             level,
             fastrand::Rng::new(),
             lava,
+            underwater,
         );
     }
 }
 
 /// Own the effect stream for this pass; all sampled callbacks borrow it.
-// TODO: the rest of `doAnimateTick`: water animation, drip particles, the
+// TODO: the rest of `doAnimateTick`: drip particles, the
 // creative marker particle and the ambient particles. The drip and ambient
 // steps draw from the level random between samples. Coordinate draws release
 // their random borrow before each block/fluid callback.
@@ -325,10 +327,11 @@ fn animate_tick_with_draw(
     level: &mut LevelContext<'_>,
     mut random: fastrand::Rng,
     lava: &SimpleParticleType,
+    underwater: &SimpleParticleType,
 ) {
     sample_animation_blocks(player_pos, next, |pos| {
         block_registry.animate_tick(pos, level, &mut random);
-        super::fluid::animate_tick(pos, level, &mut random, lava);
+        super::fluid::animate_tick(pos, level, &mut random, lava, underwater);
     });
 }
 
