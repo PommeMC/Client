@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_inventory::components::{MaxDamage, Rarity};
+use azalea_inventory::components::{AttributeModifiers, MaxDamage, Rarity};
 use azalea_inventory::default_components::get_default_component;
 use azalea_registry::builtin::ItemKind;
 use simdnbt::owned::{NbtCompound, NbtTag};
@@ -1081,7 +1081,7 @@ fn push_hover_tooltip(
         // (`HoverEvent::Item`), so its components lose payload types and Java
         // number text; the dialog's item body passes its raw tag.
         HoverEvent::Item(value) => {
-            item_tooltip_lines_with_bindings(value, None, advanced_item_tooltips, bindings)
+            item_tooltip_lines_with_bindings(value, None, None, advanced_item_tooltips, bindings)
         }
         HoverEvent::Entity(value) if advanced_item_tooltips => {
             entity_tooltip_lines(value, bindings)
@@ -1219,12 +1219,92 @@ pub(crate) fn item_tooltip_lines(
     raw_components: Option<&NbtCompound>,
     advanced: bool,
 ) -> Vec<TooltipLine> {
-    item_tooltip_lines_with_bindings(value, raw_components, advanced, &KeyBindings::default())
+    item_tooltip_lines_with_bindings(
+        value,
+        raw_components,
+        None,
+        advanced,
+        &KeyBindings::default(),
+    )
 }
 
+/// A held stack's tooltip, vanilla `ItemStack.getTooltipLines`: what a
+/// container slot and the creative inventory show.
+pub(crate) fn stack_tooltip_lines(
+    data: &azalea_inventory::ItemStackData,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    advanced: bool,
+) -> Vec<TooltipLine> {
+    item_tooltip_lines_with_bindings(
+        &stack_json(data, registries),
+        None,
+        Some(super::creative_inventory::total_component_count(data)),
+        advanced,
+        &KeyBindings::default(),
+    )
+}
+
+/// The stack in `show_item`'s JSON shape, for [`item_tooltip_lines`].
+/// azalea's serde writes an enchantment as an enum variant, which can't key a
+/// JSON map, so enchantments go in by their registry names.
+// TODO: pomme's item grammar has no JSON output yet, so the rest still goes
+// through azalea's serde shape.
+fn stack_json(
+    data: &azalea_inventory::ItemStackData,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> serde_json::Value {
+    use azalea_inventory::components::{Enchantments, StoredEnchantments};
+    use azalea_registry::DataRegistry;
+
+    let stack = azalea_inventory::ItemStack::Present(data.clone())
+        .with_component::<Enchantments>(None)
+        .with_component::<StoredEnchantments>(None);
+    let mut value = serde_json::to_value(&stack).unwrap_or_default();
+    let names = |levels: &std::collections::HashMap<azalea_registry::data::Enchantment, i32>| {
+        levels
+            .iter()
+            .filter_map(|(enchantment, level)| {
+                let (id, _) = registries
+                    .enchantment
+                    .map
+                    .get_index(enchantment.protocol_id() as usize)?;
+                Some((id.to_string(), serde_json::Value::from(*level)))
+            })
+            .collect::<serde_json::Map<_, _>>()
+    };
+    let enchantments = [
+        (
+            "minecraft:enchantments",
+            data.get_component::<Enchantments>()
+                .map(|e| names(&e.levels)),
+        ),
+        (
+            "minecraft:stored_enchantments",
+            data.get_component::<StoredEnchantments>()
+                .map(|e| names(&e.enchantments)),
+        ),
+    ];
+    if let Some(map) = value.as_object_mut() {
+        let components = map
+            .entry("components")
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if let Some(components) = components.as_object_mut() {
+            for (key, levels) in enchantments {
+                if let Some(levels) = levels {
+                    components.insert(key.to_owned(), serde_json::Value::Object(levels));
+                }
+            }
+        }
+    }
+    value
+}
+
+/// `component_count` is the stack's components including its item's
+/// defaults; a hover's JSON carries only the ones it changes.
 fn item_tooltip_lines_with_bindings(
     value: &serde_json::Value,
     raw_components: Option<&NbtCompound>,
+    component_count: Option<usize>,
     advanced: bool,
     bindings: &KeyBindings,
 ) -> Vec<TooltipLine> {
@@ -1269,10 +1349,27 @@ fn item_tooltip_lines_with_bindings(
     let path = id.split(':').next_back().unwrap_or(id);
     let item_key = format!("item.minecraft.{path}");
     let block_key = format!("block.minecraft.{path}");
+    // A `profile` is a bare name, or `{name, id, properties}`.
+    let profile = component_value(components, "profile");
+    let profile_name = profile.and_then(|profile| {
+        profile
+            .as_str()
+            .or_else(|| profile.get("name").and_then(serde_json::Value::as_str))
+    });
     let default_name = crate::lang::translate(&item_key)
         .or_else(|| crate::lang::translate(&block_key))
         .map(str::to_owned)
         .unwrap_or_else(|| crate::lang::title_case_snake(path));
+    // `PlayerHeadItem.getName`: the head of the profile's name.
+    let default_name = match profile_name {
+        Some(name) if path == "player_head" => {
+            crate::lang::translate("block.minecraft.player_head.named").map_or_else(
+                || format!("{name}'s Head"),
+                |text| text.replacen("%s", name, 1),
+            )
+        }
+        _ => default_name,
+    };
 
     let custom_name = item_component(components, raw_components, "custom_name");
     let item_name = item_component(components, raw_components, "item_name");
@@ -1314,6 +1411,27 @@ fn item_tooltip_lines_with_bindings(
         }
     }
 
+    // `ResolvableProfile.Dynamic.addToTooltip`: a profile with a name or an
+    // id, not both, and no properties resolves when shown.
+    if tooltip_component_visible(tooltip_display, "profile")
+        && let Some(profile) = profile
+    {
+        let has = |field| profile.get(field).is_some();
+        let dynamic = profile.is_string()
+            || (has("name") != has("id")
+                && profile
+                    .get("properties")
+                    .is_none_or(|properties| properties.as_array().is_some_and(Vec::is_empty)));
+        if dynamic {
+            lines.push(TooltipLine::new(
+                crate::lang::translate("component.profile.dynamic")
+                    .unwrap_or("Dynamic")
+                    .to_owned(),
+                common::rgb(0xAAAAAA),
+            ));
+        }
+    }
+
     if tooltip_component_visible(tooltip_display, "lore") {
         let lore: Vec<Component> = match raw_component(raw_components, "lore") {
             Some(NbtTag::List(lore)) => list_elements(lore)
@@ -1331,6 +1449,23 @@ fn item_tooltip_lines_with_bindings(
         };
         for line in &lore {
             lines.extend(component_tooltip_lines_with_bindings(line, bindings));
+        }
+    }
+
+    if tooltip_component_visible(tooltip_display, "attribute_modifiers") {
+        let defaults;
+        let modifiers = match component_value(components, "attribute_modifiers") {
+            Some(modifiers) => modifiers,
+            None => {
+                defaults = kind
+                    .and_then(get_default_component::<AttributeModifiers>)
+                    .and_then(|modifiers| serde_json::to_value(modifiers).ok())
+                    .unwrap_or_default();
+                &defaults
+            }
+        };
+        if let Some(modifiers) = modifiers.as_array() {
+            lines.extend(attribute_tooltip_lines(modifiers, bindings));
         }
     }
 
@@ -1376,20 +1511,15 @@ fn item_tooltip_lines_with_bindings(
             }
         }
         lines.push(TooltipLine::new(id.to_owned(), common::rgb(0x555555)));
-        let component_count = components.map_or(0, serde_json::Map::len);
+        let component_count =
+            component_count.unwrap_or_else(|| components.map_or(0, serde_json::Map::len));
         if component_count > 0 {
             if crate::lang::translate("item.components").is_some() {
                 let component = Component::translate(
                     "item.components",
                     vec![Argument::Number(component_count.to_string())],
                 );
-                let mut tooltip = component_tooltip_lines_with_bindings(&component, bindings);
-                for line in &mut tooltip {
-                    for span in &mut line.spans {
-                        span.color = common::rgb(0x555555);
-                    }
-                }
-                lines.extend(tooltip);
+                lines.extend(colored_tooltip_lines(&component, 0x555555, bindings));
             } else {
                 lines.push(TooltipLine::new(
                     format!("{component_count} component(s)"),
@@ -1400,6 +1530,164 @@ fn item_tooltip_lines_with_bindings(
     }
 
     lines
+}
+
+/// `ItemStack.addAttributeTooltips` over an `attribute_modifiers` list, each
+/// slot group's modifiers under its header, as the local player reads them
+/// (`ItemAttributeModifiers.Display.Default`).
+// TODO: the modifiers enchantments add (`EnchantmentHelper.forEachModifier`),
+// which come from the enchantment registry's effects; and the player's own
+// base attack damage and speed, where a server changed them.
+fn attribute_tooltip_lines(
+    modifiers: &[serde_json::Value],
+    bindings: &KeyBindings,
+) -> Vec<TooltipLine> {
+    use crate::attribute::AttributeKind;
+
+    /// `EquipmentSlotGroup`, in order.
+    const SLOT_GROUPS: [&str; 11] = [
+        "any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body",
+        "saddle",
+    ];
+    let colored = |component: &Component, rgb| colored_tooltip_lines(component, rgb, bindings);
+    let path = |value: Option<&serde_json::Value>| {
+        let id = value
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        id.split(':').next_back().unwrap_or(id).to_owned()
+    };
+    let mut lines = Vec::new();
+    for group in SLOT_GROUPS {
+        let mut first = true;
+        for entry in modifiers {
+            if entry
+                .get("slot")
+                .and_then(serde_json::Value::as_str)
+                .map_or("any", |slot| slot)
+                != group
+            {
+                continue;
+            }
+            // `display` is the codec's `{type, value}`, azalea's
+            // `{"override": {text}}`, or a bare type name.
+            let (display_type, override_text) = match entry.get("display") {
+                Some(serde_json::Value::String(kind)) => (kind.as_str(), None),
+                Some(serde_json::Value::Object(display)) => {
+                    match display.get("type").and_then(serde_json::Value::as_str) {
+                        Some(kind) => (kind, display.get("value")),
+                        None => display
+                            .iter()
+                            .next()
+                            .map_or(("default", None), |(kind, value)| {
+                                (kind.as_str(), value.get("text"))
+                            }),
+                    }
+                }
+                _ => ("default", None),
+            };
+            if display_type == "hidden" {
+                continue;
+            }
+            if first {
+                lines.push(TooltipLine::new(String::new(), common::WHITE));
+                lines.extend(colored(
+                    &Component::translate(format!("item.modifiers.{group}"), Vec::new()),
+                    0xAAAAAA,
+                ));
+                first = false;
+            }
+            if display_type == "override" {
+                if let Some(text) =
+                    override_text.and_then(|value| Component::from_value(value).ok())
+                {
+                    lines.extend(component_tooltip_lines_with_bindings(&text, bindings));
+                }
+                continue;
+            }
+            let attribute = path(entry.get("type"));
+            let modifier_id = path(entry.get("id"));
+            let operation = match entry.get("operation").and_then(serde_json::Value::as_str) {
+                Some("add_multiplied_base") => 1,
+                Some("add_multiplied_total") => 2,
+                _ => 0,
+            };
+            let mut amount = entry
+                .get("amount")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let base = match modifier_id.as_str() {
+                "base_attack_damage" => AttributeKind::AttackDamage.player_base_value(),
+                "base_attack_speed" => AttributeKind::AttackSpeed.player_base_value(),
+                _ => None,
+            };
+            if let Some(base) = base {
+                amount += base;
+            }
+            let display_amount = if operation != 0 {
+                amount * 100.0
+            } else if attribute == "knockback_resistance" {
+                amount * 10.0
+            } else {
+                amount
+            };
+            let name = Argument::Component(Box::new(Component::translate(
+                format!("attribute.name.{attribute}"),
+                Vec::new(),
+            )));
+            let line = |kind: &str, value: f64| {
+                Component::translate(
+                    format!("attribute.modifier.{kind}.{operation}"),
+                    vec![Argument::String(modifier_amount(value)), name.clone()],
+                )
+            };
+            // `Attribute.Sentiment.getStyle`: the colours of an increase and
+            // a decrease.
+            let (increase, decrease) = match attribute.as_str() {
+                "burning_time" | "fall_damage_multiplier" => (0xFF5555, 0x5555FF),
+                "gravity" | "scale" | "waypoint_transmit_range" | "waypoint_receive_range" => {
+                    (0xAAAAAA, 0xAAAAAA)
+                }
+                _ => (0x5555FF, 0xFF5555),
+            };
+            if base.is_some() {
+                let mut spaced = colored(&line("equals", display_amount), 0x00AA00);
+                if let Some(first) = spaced.first_mut().and_then(|line| line.spans.first_mut()) {
+                    first.text.insert(0, ' ');
+                }
+                lines.extend(spaced);
+            } else if amount > 0.0 {
+                lines.extend(colored(&line("plus", display_amount), increase));
+            } else if amount < 0.0 {
+                lines.extend(colored(&line("take", -display_amount), decrease));
+            }
+        }
+    }
+    lines
+}
+
+/// `component`'s lines, all in one colour.
+fn colored_tooltip_lines(
+    component: &Component,
+    rgb: u32,
+    bindings: &KeyBindings,
+) -> Vec<TooltipLine> {
+    let mut lines = component_tooltip_lines_with_bindings(component, bindings);
+    for span in lines.iter_mut().flat_map(|line| &mut line.spans) {
+        span.color = common::rgb(rgb);
+    }
+    lines
+}
+
+/// `ItemAttributeModifiers.ATTRIBUTE_MODIFIER_FORMAT`: at most two decimals,
+/// without trailing zeros.
+fn modifier_amount(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".to_owned()
+    } else {
+        text.to_owned()
+    }
 }
 
 /// A component of the stack that is itself a text component, read from the

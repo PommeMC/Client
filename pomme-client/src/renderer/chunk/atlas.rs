@@ -33,7 +33,6 @@ pub struct AtlasRegion {
     pub translucent: bool,
 }
 
-#[cfg(test)]
 impl AtlasRegion {
     /// A one-texel, fully opaque sprite spanning the whole atlas.
     pub(crate) const UNIT: Self = Self {

@@ -22,6 +22,7 @@ pub struct CollisionWorld<'a> {
     /// Vanilla `PistonMovingBlockEntity.NOCLIP`: while a piston moves an
     /// entity, its own moving blocks heading that way don't collide.
     pub piston_noclip: Option<Direction>,
+    pub extra_boxes: &'a [Aabb],
 }
 
 impl<'a> CollisionWorld<'a> {
@@ -31,6 +32,7 @@ impl<'a> CollisionWorld<'a> {
             block_state_table,
             block_entity_anim: None,
             piston_noclip: None,
+            extra_boxes: &[],
         }
     }
 
@@ -44,6 +46,11 @@ impl<'a> CollisionWorld<'a> {
             block_entity_anim: Some(block_entity_anim),
             ..Self::new(chunks, block_state_table)
         }
+    }
+
+    pub fn with_extra_boxes(mut self, extra_boxes: &'a [Aabb]) -> Self {
+        self.extra_boxes = extra_boxes;
+        self
     }
 }
 
@@ -138,11 +145,12 @@ impl CollisionWorld<'_> {
         ctx: &CollisionContext,
         visit: impl FnMut(BlockPos, &[Aabb]),
     ) {
+        let reader = crate::world::chunk_reader::BlockReader::new(self.chunks);
         for_each_block_collision(
             self.block_state_table,
             region,
             ctx,
-            |x, y, z| self.chunks.get_block_state(x, y, z),
+            |x, y, z| reader.get_block_state(x, y, z),
             |state, pos, boxes| self.special_boxes(state, pos, boxes),
             visit,
         );
@@ -224,6 +232,11 @@ pub fn collect_block_aabbs(
 ) -> Vec<Aabb> {
     let mut aabbs = Vec::new();
     world.for_each_block_collision(region, ctx, |_, boxes| aabbs.extend_from_slice(boxes));
+    for &extra in world.extra_boxes {
+        if extra.intersects(region) {
+            aabbs.push(extra);
+        }
+    }
     aabbs
 }
 

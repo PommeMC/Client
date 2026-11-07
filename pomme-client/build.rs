@@ -29,6 +29,15 @@ fn main() {
         println!("cargo:rustc-cfg=mobile");
     }
 
+    // Where pyronyx's `loaded` feature is on (see Cargo.toml): Vulkan is
+    // loaded at runtime rather than linked.
+    println!("cargo::rustc-check-cfg=cfg(vulkan_loaded)");
+    if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android")
+    {
+        println!("cargo:rustc-cfg=vulkan_loaded");
+    }
+
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -48,6 +57,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     compress_block_data(Path::new(&out_dir));
+    embed_openal(Path::new(&out_dir));
 
     println!("cargo:rerun-if-changed=src/renderer/chunk/packing_consts.rs");
     fs::write(
@@ -183,6 +193,8 @@ fn main() {
         ("clouds.frag", shaderc::ShaderKind::Fragment),
         ("entity_shadow.vert", shaderc::ShaderKind::Vertex),
         ("entity_shadow.frag", shaderc::ShaderKind::Fragment),
+        ("world_text.vert", shaderc::ShaderKind::Vertex),
+        ("world_text.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {
@@ -269,4 +281,34 @@ fn compress_block_data(out_dir: &Path) {
         fs::write(&out_path, deflated)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", out_path.display()));
     }
+}
+
+/// Release builds carry OpenAL Soft inside the binary: `POMME_EMBED_OPENAL`
+/// names the folder `tools/fetch_openal.py` staged the library alone into.
+/// Other builds carry nothing and load the copy `just openal` stages beside
+/// them.
+fn embed_openal(out_dir: &Path) {
+    println!("cargo:rerun-if-env-changed=POMME_EMBED_OPENAL");
+    let (bytes, name) = match std::env::var_os("POMME_EMBED_OPENAL") {
+        Some(dir) => {
+            let mut files = fs::read_dir(&dir)
+                .expect("POMME_EMBED_OPENAL isn't a folder")
+                .map(|entry| entry.expect("POMME_EMBED_OPENAL unreadable").path());
+            let (Some(path), None) = (files.next(), files.next()) else {
+                panic!("POMME_EMBED_OPENAL should hold the library alone");
+            };
+            println!("cargo:rerun-if-changed={}", path.display());
+            let bytes = fs::read(&path).expect("POMME_EMBED_OPENAL library unreadable");
+            let name = path.file_name().and_then(|name| name.to_str());
+            (bytes, name.expect("non-UTF-8 library name").to_owned())
+        }
+        None => (Vec::new(), String::new()),
+    };
+    fs::write(out_dir.join("openal-embedded"), &bytes).expect("failed to write openal-embedded");
+    // FNV-1a, naming the folder each build of the library unpacks into.
+    let key = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    println!("cargo:rustc-env=POMME_OPENAL_NAME={name}");
+    println!("cargo:rustc-env=POMME_OPENAL_KEY={key:016x}");
 }

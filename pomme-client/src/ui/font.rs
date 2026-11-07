@@ -556,7 +556,6 @@ impl GlyphMap {
     }
 
     /// The glyph for `ch` in `font`.
-    #[cfg(test)]
     pub(crate) fn glyph(&self, ch: char, font: Option<&str>) -> &GlyphInfo {
         self.glyph_in(self.font_set(font), ch)
     }

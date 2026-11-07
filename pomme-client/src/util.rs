@@ -4,6 +4,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Vanilla `Mth.clampedLerp`.
+pub fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
+    if factor < 0.0 {
+        min
+    } else if factor > 1.0 {
+        max
+    } else {
+        min + factor * (max - min)
+    }
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///
@@ -228,6 +239,13 @@ fn open_url_android(url: &str) -> jni::errors::Result<()> {
         )?;
         Ok(())
     })
+}
+
+/// The mean of the largest `1/per` of `sorted` (ascending), at least one
+/// value: the "1% low" of frame times when `per` is 100.
+pub fn slowest_mean(sorted: &[f32], per: usize) -> f32 {
+    let slowest = &sorted[sorted.len() - sorted.len().div_ceil(per)..];
+    slowest.iter().sum::<f32>() / slowest.len() as f32
 }
 
 #[cfg(test)]

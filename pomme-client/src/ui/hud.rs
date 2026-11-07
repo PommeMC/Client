@@ -4,11 +4,13 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use crate::app::input::{Action, KeyBindings};
 use crate::entity::wrap_degrees;
 use crate::mob_effect::ActiveMobEffects;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
+use crate::ui::debug_entries::{DebugColumns, push_debug_columns};
 use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
@@ -60,6 +62,16 @@ pub enum CollisionRule {
     PushOwnTeam,
 }
 
+/// Vanilla `Team.Visibility`, a team's `nameTagVisibility`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NameTagVisibility {
+    #[default]
+    Always,
+    Never,
+    HideForOtherTeams,
+    HideForOwnTeam,
+}
+
 struct ScoreEntry {
     score: i32,
     display: Option<Vec<TextSpan>>,
@@ -91,6 +103,7 @@ pub(crate) struct ScoreboardTeam {
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
+    name_tag_visibility: NameTagVisibility,
     see_friendly_invisibles: bool,
     pub(crate) members: HashSet<String>,
 }
@@ -170,6 +183,7 @@ impl Scoreboard {
         color: [f32; 4],
         fill_color: Option<u32>,
         collision_rule: CollisionRule,
+        name_tag_visibility: NameTagVisibility,
         see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     ) {
@@ -188,6 +202,7 @@ impl Scoreboard {
             color,
             fill_color: None,
             collision_rule,
+            name_tag_visibility,
             see_friendly_invisibles,
             members: HashSet::new(),
         });
@@ -197,6 +212,7 @@ impl Scoreboard {
         team.color = color;
         team.fill_color = fill_color;
         team.collision_rule = collision_rule;
+        team.name_tag_visibility = name_tag_visibility;
         team.see_friendly_invisibles = see_friendly_invisibles;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
@@ -287,6 +303,26 @@ impl Scoreboard {
             .is_some_and(|(_, team)| team.see_friendly_invisibles && team.members.contains(viewer))
     }
 
+    /// `LivingEntityRenderer.shouldShowName`'s team rule for `target`'s name
+    /// tag as `viewer` sees it, `visible` being whether `viewer` can see
+    /// `target` at all; `None` when `target` is on no team.
+    pub fn name_tag_shown(&self, viewer: &str, target: &str, visible: bool) -> Option<bool> {
+        let (team_name, team) = self.team_of(target)?;
+        let allied = self.team_of(viewer).map(|(own, _)| own == team_name);
+        Some(match team.name_tag_visibility {
+            NameTagVisibility::Always => visible,
+            NameTagVisibility::Never => false,
+            NameTagVisibility::HideForOtherTeams => match allied {
+                None => visible,
+                Some(allied) => allied && (team.see_friendly_invisibles || visible),
+            },
+            NameTagVisibility::HideForOwnTeam => match allied {
+                None => visible,
+                Some(allied) => !allied && visible,
+            },
+        })
+    }
+
     pub fn member_team_color(&self, member: &str) -> Option<u32> {
         self.teams
             .values()
@@ -294,7 +330,9 @@ impl Scoreboard {
             .fill_color
     }
 
-    fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+    /// `PlayerTeam.formatNameForTeam`: `owner`'s name, or `display` in its
+    /// place, in its team's prefix, colour and suffix.
+    pub(crate) fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
         let team = self.team_of(owner).map(|(_, team)| team);
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
         line.extend(display.map_or_else(
@@ -372,7 +410,8 @@ impl Scoreboard {
 }
 
 pub struct DebugInfo<'a> {
-    pub fps: u32,
+    /// [`format_debug_keybind`] for the Debug Options key.
+    pub debug_options_key: String,
     pub position: DVec3,
     pub y_rot_deg: f32,
     pub x_rot_deg: f32,
@@ -635,7 +674,7 @@ pub fn build_hud(
     effects: &ActiveMobEffects,
     boss_bars: &BossBarState,
     first_person: bool,
-    debug: Option<&DebugInfo<'_>>,
+    debug: &DebugColumns,
     gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
@@ -648,9 +687,7 @@ pub fn build_hud(
         build_crosshair(elements, cx, cy, gs, attack);
     }
 
-    if let Some(info) = debug {
-        build_debug_overlay(elements, info, gs, text_width_fn);
-    }
+    push_debug_columns(elements, debug, screen_w, gs, text_width_fn);
 
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
@@ -1618,15 +1655,8 @@ fn build_vehicle_hearts(
     }
 }
 
-pub fn build_debug_overlay(
-    elements: &mut Vec<MenuElement>,
-    info: &DebugInfo<'_>,
-    gs: f32,
-    text_width_fn: TextWidthFn,
-) {
-    let fs = super::common::FONT_SIZE * gs;
-    let pad = 4.0 * gs;
-
+/// The F3 lines not yet on debug entries, after the entries' lines.
+pub fn build_debug_overlay(columns: &mut DebugColumns, info: &DebugInfo<'_>) {
     let pos = info.position;
     let bx = pos.x.floor() as i32;
     let by = pos.y.floor() as i32;
@@ -1635,7 +1665,7 @@ pub fn build_debug_overlay(
     let cz = bz.div_euclid(16);
 
     let mut left_lines: Vec<String> = vec![
-        format!("Pomme ({}fps)", info.fps),
+        "Pomme".to_owned(),
         String::new(),
         format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z),
         format!("Block: {} {} {}", bx, by, bz),
@@ -1674,7 +1704,7 @@ pub fn build_debug_overlay(
         left_lines.push(format!("Face: {:?}", face));
     }
 
-    push_debug_lines(elements, left_lines, pad, pad, fs, true, text_width_fn);
+    columns.left.extend(left_lines);
 
     let mut right_lines: Vec<String> = vec![
         info.vulkan_version.to_string(),
@@ -1699,47 +1729,23 @@ pub fn build_debug_overlay(
             right_lines.push(format!("  {name}: {ms:.2}ms"));
         }
     }
-    let right_x = info.screen_w as f32 - pad;
-    push_debug_lines(
-        elements,
-        right_lines,
-        right_x,
-        pad,
-        fs,
-        false,
-        text_width_fn,
-    );
+    columns.right.extend(right_lines);
+
+    // TODO: the "Debug charts" lines before it, once Pomme has the charts.
+    columns.left.push(String::new());
+    columns
+        .left
+        .push(format!("To edit: press {}", info.debug_options_key));
 }
 
-fn push_debug_lines(
-    elements: &mut Vec<MenuElement>,
-    lines: Vec<String>,
-    x: f32,
-    start_y: f32,
-    fs: f32,
-    left_align: bool,
-    text_width_fn: TextWidthFn,
-) {
-    let line_h = fs * 1.25;
-    for (i, line) in lines.into_iter().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let y = start_y + i as f32 * line_h;
-        let tx = if left_align {
-            x
-        } else {
-            x - text_width_fn(&line, fs)
-        };
-        elements.push(MenuElement::Text {
-            x: tx,
-            y,
-            text: line,
-            scale: fs,
-            color: WHITE,
-            centered: false,
-        });
-    }
+/// Vanilla `DebugScreenOverlay.formatKeybind`: `[F3+key]`, without the
+/// modifier when it's unbound.
+pub fn format_debug_keybind(bindings: &KeyBindings, action: Action) -> String {
+    let modifier = bindings
+        .inputs_for_action(Action::DebugModifier)
+        .next()
+        .map_or_else(String::new, |key| format!("{}+", key.display_name()));
+    format!("[{modifier}{}]", bindings.key_name(action))
 }
 
 /// Vanilla `DebugEntryPosition`: the direction, which way it points, and
@@ -1829,6 +1835,7 @@ mod tests {
             WHITE,
             None,
             rule,
+            NameTagVisibility::Always,
             true,
             Some(members.iter().map(|m| (*m).into()).collect()),
         );
@@ -1887,10 +1894,49 @@ mod tests {
             WHITE,
             None,
             CollisionRule::Always,
+            NameTagVisibility::Always,
             false,
             None,
         );
         assert!(!scoreboard.sees_friendly_invisible("viewer", "mate"));
+    }
+
+    #[test]
+    fn a_teams_name_tag_visibility_decides_who_sees_its_names() {
+        let shown = |visibility, viewer_team: Option<&str>, visible| {
+            let mut scoreboard = Scoreboard::default();
+            add_team(&mut scoreboard, "a", CollisionRule::Always, &["target"]);
+            scoreboard.teams.get_mut("a").unwrap().name_tag_visibility = visibility;
+            match viewer_team {
+                Some("a") => scoreboard
+                    .teams
+                    .get_mut("a")
+                    .unwrap()
+                    .members
+                    .insert("viewer".into()),
+                Some(team) => {
+                    add_team(&mut scoreboard, team, CollisionRule::Always, &["viewer"]);
+                    true
+                }
+                None => true,
+            };
+            scoreboard.name_tag_shown("viewer", "target", visible)
+        };
+        use NameTagVisibility::*;
+
+        assert_eq!(
+            Scoreboard::default().name_tag_shown("viewer", "target", true),
+            None
+        );
+        assert_eq!(shown(Always, Some("b"), true), Some(true));
+        assert_eq!(shown(Always, None, false), Some(false));
+        assert_eq!(shown(Never, Some("a"), true), Some(false));
+        assert_eq!(shown(HideForOtherTeams, Some("b"), true), Some(false));
+        assert_eq!(shown(HideForOtherTeams, None, true), Some(true));
+        // The team sees its own invisible members' names.
+        assert_eq!(shown(HideForOtherTeams, Some("a"), false), Some(true));
+        assert_eq!(shown(HideForOwnTeam, Some("a"), true), Some(false));
+        assert_eq!(shown(HideForOwnTeam, Some("b"), true), Some(true));
     }
 
     fn add_colored_team(scoreboard: &mut Scoreboard, name: &str, fill: Option<u32>) {
@@ -1902,6 +1948,7 @@ mod tests {
             WHITE,
             fill,
             CollisionRule::Always,
+            NameTagVisibility::Always,
             true,
             Some(vec!["Player".into()]),
         );

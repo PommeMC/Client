@@ -142,11 +142,6 @@ jobs:
         with:
           cache-key: release
 
-      - name: Build
-        env:
-          POMME_RELEASE: ${{ needs.check.outputs.tag }}
-        run: cargo build -p pomme-client --release --target ${{ matrix.target }}
-
       # The runner images disagree on whether `python` or `python3` is on PATH,
       # and the `--require` staging below fails the release rather than degrade.
       - uses: actions/setup-python@v7
@@ -155,13 +150,18 @@ jobs:
 
       # Version, jar member and checksum come from
       # pomme-client/third-party/openal-natives.txt, which `just openal` also
-      # reads, so a release and a dev build never diverge.
+      # reads, so a release and a dev build never diverge. The build embeds it.
       - name: Stage Minecraft's OpenAL Soft native
         shell: bash
         run: |
-          mkdir -p bundle
-          python tools/fetch_openal.py bundle \
+          python tools/fetch_openal.py openal \
             --classifier "${{ matrix.openal_classifier }}" --require
+
+      - name: Build
+        env:
+          POMME_RELEASE: ${{ needs.check.outputs.tag }}
+          POMME_EMBED_OPENAL: ${{ github.workspace }}/openal
+        run: cargo build -p pomme-client --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
@@ -169,8 +169,6 @@ jobs:
         run: |
           mkdir -p dist bundle
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
-          cp pomme-client/third-party/OpenAL-Soft-LICENSE.txt bundle/
-          cp pomme-client/third-party/OpenAL-Soft-NOTICE.txt bundle/
 
           # macOS has no system Vulkan, so ship the loader + MoltenVK + ICD next
           # to the binary (build.rs gives it an @executable_path rpath).
@@ -196,8 +194,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist, bundle | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
-          Copy-Item "pomme-client/third-party/OpenAL-Soft-LICENSE.txt" bundle/
-          Copy-Item "pomme-client/third-party/OpenAL-Soft-NOTICE.txt" bundle/
           Compress-Archive -Path "bundle/*" -DestinationPath "dist/${{ matrix.name }}.zip"
 
       # The installers wrap the same files the zip holds, which stays the

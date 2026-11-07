@@ -1,6 +1,7 @@
 mod account;
 mod bedrock_screen;
 mod credits;
+mod debug_options;
 mod friends_screen;
 pub(crate) mod helpers;
 mod main_screen;
@@ -322,6 +323,7 @@ enum Screen {
     OptionsTelemetry,
     OptionsCredits,
     CreditsRoll,
+    DebugOptions,
 }
 
 /// Returns true once `count` has held steady for 500ms since it last changed —
@@ -455,6 +457,7 @@ pub struct MainMenu {
     /// Server-announced view distance cap; 0 when unknown.
     pub server_render_distance: u32,
     /// The directory [`GameOptions::shader_pack`] names a pack in.
+    pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub shader_packs_dir: PathBuf,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
@@ -481,6 +484,7 @@ pub struct MainMenu {
     /// Set by a Font Settings toggle, applied by `AppCore::apply_font_options`.
     pub reload_fonts: bool,
     pack_search: TextFieldState,
+    debug_search: TextFieldState,
 }
 
 /// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
@@ -595,6 +599,7 @@ impl MainMenu {
             last_click_index: None,
             options: settings,
             server_render_distance: 0,
+            debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             shader_packs_dir: game_dir.join("shaderpacks"),
             slider_can_change_value: true,
             active_slider: None,
@@ -614,6 +619,7 @@ impl MainMenu {
             reload_assets: false,
             reload_fonts: false,
             pack_search: TextFieldState::new(MAX_SEARCH),
+            debug_search: TextFieldState::new(MAX_SEARCH),
         };
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
@@ -640,12 +646,7 @@ impl MainMenu {
     }
 
     fn set_screen(&mut self, screen: Screen, key_bindings: &KeyBindings) {
-        // Vanilla's options screens save as they're removed.
-        if self.is_options_screen() {
-            self.save_options(key_bindings);
-        } else {
-            self.flush_settings(key_bindings);
-        }
+        self.screen_removed(self.is_options_screen(), key_bindings);
         // Vanilla opens Key Binds with a fresh list and returns to Controls's
         // own; neither should inherit the other's offset.
         if matches!(screen, Screen::OptionsKeybinds)
@@ -774,6 +775,16 @@ impl MainMenu {
         self.options_saved = true;
     }
 
+    /// The closing screen's `removed()`: an options screen saves
+    /// ([`Self::save_options`]), any other writes what's pending.
+    pub fn screen_removed(&mut self, options_screen: bool, key_bindings: &KeyBindings) {
+        if options_screen {
+            self.save_options(key_bindings);
+        } else {
+            self.flush_settings(key_bindings);
+        }
+    }
+
     pub fn take_options_saved(&mut self) -> bool {
         std::mem::take(&mut self.options_saved)
     }
@@ -871,6 +882,7 @@ impl MainMenu {
                 | Screen::OptionsTelemetry
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
+                | Screen::DebugOptions
         )
     }
 
@@ -1193,6 +1205,9 @@ impl MainMenu {
             Screen::CreditsRoll => {
                 self.build_credits_roll(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::DebugOptions => {
+                self.build_debug_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
         }
     }
 
@@ -1244,6 +1259,10 @@ mod tests {
         assert!(!menu.take_options_saved(), "a change alone doesn't");
         menu.set_screen(Screen::Options, &key_bindings);
         assert!(menu.take_options_saved());
+        assert!(!menu.take_options_saved());
+        menu.screen_removed(true, &key_bindings);
+        assert!(menu.take_options_saved(), "a replaced options screen saves");
+        menu.screen_removed(false, &key_bindings);
         assert!(!menu.take_options_saved());
         std::fs::remove_dir_all(&dir).ok();
     }

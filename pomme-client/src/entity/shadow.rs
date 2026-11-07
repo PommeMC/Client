@@ -88,6 +88,7 @@ pub fn shadow(kind: EntityKind, entity: &ShadowInputs) -> (f32, f32) {
         K::Wither => mob(1.0),
         K::Panda | K::PolarBear | K::Warden => mob(0.9),
         K::Spider => mob(0.8),
+        _ if crate::entity::is_boat(kind) => 0.8,
         K::Horse | K::Donkey | K::Mule | K::SkeletonHorse | K::ZombieHorse | K::Phantom => {
             mob(0.75)
         }

@@ -103,6 +103,14 @@ impl KeyBindings {
             .chain(action.fixed_inputs())
     }
 
+    /// Vanilla `KeyMapping.getTranslatedKeyMessage`: the first assigned
+    /// input's name, or "Not Bound".
+    pub fn key_name(&self, action: Action) -> std::borrow::Cow<'static, str> {
+        self.inputs_for_action(action)
+            .next()
+            .map_or_else(|| super::NOT_BOUND.resolve(), InputKey::display_name)
+    }
+
     /// Whether a physical input is assigned to this action.
     pub fn matches(&self, action: Action, input: &InputKey) -> bool {
         self.inputs_for_action(action)

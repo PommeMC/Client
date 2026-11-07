@@ -86,6 +86,14 @@ impl Aabb {
         }
     }
 
+    /// Vanilla `AABB.inflate(x, y, z)`.
+    pub fn inflate(self, by: DVec3) -> Self {
+        Self {
+            min: self.min - by,
+            max: self.max + by,
+        }
+    }
+
     pub fn deflate(self, amount: f64) -> Self {
         Self {
             min: self.min + amount,

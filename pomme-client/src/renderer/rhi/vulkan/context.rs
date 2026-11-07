@@ -31,6 +31,10 @@ pub enum ContextError {
 
     #[error("surface error: {0}")]
     HandleError(#[from] raw_window_handle::HandleError),
+
+    #[cfg(vulkan_loaded)]
+    #[error("{0}")]
+    Loader(#[from] pyronyx::LoadError),
 }
 
 const VK_APP_NAME: &CStr = c"Pomme";
@@ -76,6 +80,9 @@ pub struct Context {
 
 impl Context {
     pub fn new(window: &Window) -> Result<Self, ContextError> {
+        #[cfg(vulkan_loaded)]
+        pyronyx::load()?;
+
         #[cfg(target_os = "android")]
         let required = [
             khr::surface::NAME.as_ptr(),

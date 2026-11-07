@@ -50,13 +50,17 @@ pub struct InputState {
     /// Shift held by harness `modifiers` until the next.
     #[cfg(feature = "test-harness")]
     harness_shift: bool,
-    /// A harness `press` waiting for the next frame.
+    /// A harness `press` waiting for the next frame: the key, Ctrl, and
+    /// whether a focused screen also takes it.
     #[cfg(feature = "test-harness")]
-    harness_press: Option<(KeyCode, bool)>,
+    harness_press: Option<(KeyCode, bool, bool)>,
     /// The key a harness `press` released last frame, for the in-game release
     /// handling.
     #[cfg(feature = "test-harness")]
     harness_released: Option<KeyCode>,
+    /// The key a harness `key_up` let go, for the same handling.
+    #[cfg(feature = "test-harness")]
+    harness_key_up: Option<KeyCode>,
     /// Harness `text` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_text: Option<String>,
@@ -191,6 +195,8 @@ impl InputState {
             #[cfg(feature = "test-harness")]
             harness_released: None,
             #[cfg(feature = "test-harness")]
+            harness_key_up: None,
+            #[cfg(feature = "test-harness")]
             harness_text: None,
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
@@ -293,6 +299,9 @@ impl InputState {
                     } else if game.game_mode_switcher.is_some() {
                         // Esc cancels the F3+F4 switcher without applying.
                         game.game_mode_switcher = None;
+                        should_apply_cursor_grab = true;
+                    } else if game.sign_editor.is_some() {
+                        game.close_sign_editor(&connection.packet_tx);
                         should_apply_cursor_grab = true;
                     } else if game.chunk_load_bench.is_some() {
                         // Cancel a running benchmark instead of opening the menu;
@@ -707,7 +716,7 @@ impl InputState {
         {
             self.harness_ctrl = false;
             self.harness_released = None;
-            if let Some((code, ctrl)) = self.harness_press.take() {
+            if let Some((code, ctrl, _)) = self.harness_press {
                 self.harness_ctrl = ctrl;
                 self.on_key(code, ElementState::Pressed, false);
                 self.on_key(code, ElementState::Released, false);
@@ -720,8 +729,13 @@ impl InputState {
         self.page_down_pressed = false;
         self.text_events.clear();
         #[cfg(feature = "test-harness")]
-        if let Some(text) = self.harness_text.take() {
-            self.on_menu_key_press(None, Some(&text));
+        {
+            if let Some((code, _, true)) = self.harness_press.take() {
+                self.on_menu_key_press(Some(code), None);
+            }
+            if let Some(text) = self.harness_text.take() {
+                self.on_menu_key_press(None, Some(&text));
+            }
         }
     }
 
@@ -745,11 +759,13 @@ impl InputState {
 
     /// Presses and releases `code` for the next frame, as a real key event
     /// arriving between frames would, with Ctrl held for that frame when
-    /// `ctrl` is set. The harness runs after the frame's update, so pressing
-    /// now would be cleared before anything read it.
+    /// `ctrl` is set; `to_screen` also hands it to the focused screen, as
+    /// `App::window_event` does while a text field has focus. The harness
+    /// runs after the frame's update, so pressing now would be cleared
+    /// before anything read it.
     #[cfg(feature = "test-harness")]
-    pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
-        self.harness_press = Some((code, ctrl));
+    pub fn press_key(&mut self, code: KeyCode, ctrl: bool, to_screen: bool) {
+        self.harness_press = Some((code, ctrl, to_screen));
     }
 
     /// Holds `code` down, or lets it go, as a real key event would.
@@ -761,6 +777,15 @@ impl InputState {
             ElementState::Released
         };
         self.on_key(code, state, false);
+        if !down {
+            self.harness_key_up = Some(code);
+        }
+    }
+
+    /// The key a harness `key_up` let go, once.
+    #[cfg(feature = "test-harness")]
+    pub fn take_harness_key_up(&mut self) -> Option<KeyCode> {
+        self.harness_key_up.take()
     }
 
     /// The key a harness `press` released, once.

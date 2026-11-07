@@ -30,6 +30,24 @@ pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
     })
 }
 
+/// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
+pub(crate) fn strip_formatting(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '§'
+            && chars.peek().is_some_and(
+                |code| matches!(code.to_ascii_lowercase(), '0'..='9' | 'a'..='f' | 'k'..='o' | 'r'),
+            )
+        {
+            chars.next();
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The spans as vanilla's `Font` draws them: legacy codes are decomposed in
 /// every string it renders, not only chat. Borrows when there are none.
 pub(crate) fn font_spans(spans: &[TextSpan]) -> Cow<'_, [TextSpan]> {

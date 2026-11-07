@@ -1,5 +1,6 @@
 //! Recipe grouping, search, and craftability matching.
 use super::*;
+use crate::ui::text::strip_formatting;
 pub(super) fn build_collections(
     book: &RecipeBookState,
     spec: RecipeBookScreenSpec,
@@ -113,24 +114,6 @@ pub(super) fn collection_search_text(
 
 pub(super) fn line_text(line: TooltipLine) -> String {
     line.spans.into_iter().map(|span| span.text).collect()
-}
-
-/// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
-pub(super) fn strip_formatting(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '§'
-            && chars.peek().is_some_and(
-                |code| matches!(code.to_ascii_lowercase(), '0'..='9' | 'a'..='f' | 'k'..='o' | 'r'),
-            )
-        {
-            chars.next();
-            continue;
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Vanilla `RecipeDisplayEntry.canCraft`: needs requirements, each taking one

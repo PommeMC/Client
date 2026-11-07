@@ -18,15 +18,24 @@ OutputDir={#OutDir}
 OutputBaseFilename={#OutName}
 SetupIconFile=..\..\pomme-client\assets\icon.ico
 UninstallDisplayIcon={app}\pomme-client.exe
+; The uninstaller's own name is fixed (unins000), so it gets its own folder.
+UninstallFilesDir={app}\uninstall
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
+
+; Installs from before UninstallFilesDir kept the uninstaller beside the game.
+[InstallDelete]
+Type: files; Name: "{app}\unins*.exe"
+Type: files; Name: "{app}\unins*.dat"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 Source: "{#Bundle}\*"; DestDir: "{app}"; Flags: ignoreversion
+; OpenAL Soft's licence and notice, out of the game's folder.
+Source: "..\..\pomme-client\third-party\OpenAL-Soft-*.txt"; DestDir: "{app}\uninstall"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Pomme"; Filename: "{app}\pomme-client.exe"
@@ -35,7 +44,11 @@ Name: "{autodesktop}\Pomme"; Filename: "{app}\pomme-client.exe"; Tasks: desktopi
 [Run]
 Filename: "{app}\pomme-client.exe"; Description: "{cm:LaunchProgram,Pomme}"; Flags: nowait postinstall skipifsilent
 
-; What the updater leaves behind; the data folder (%LOCALAPPDATA%\Pomme) stays.
+; What the updater, the unpacked natives and releases from before OpenAL was
+; embedded leave behind; the rest of the data folder (%LOCALAPPDATA%\Pomme)
+; stays.
 [UninstallDelete]
 Type: files; Name: "{app}\*.old"
+Type: files; Name: "{app}\OpenAL*"
 Type: filesandordirs; Name: "{app}\.pomme-update"
+Type: filesandordirs; Name: "{localappdata}\Pomme\natives"

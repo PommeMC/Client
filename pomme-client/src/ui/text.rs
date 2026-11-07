@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use azalea_chat::FormattedText;
 use azalea_chat::style::Style;
-pub(crate) use legacy::{PREFIX_CODE, font_spans, legacy_format_spans, legacy_rgb};
+pub(crate) use legacy::{
+    PREFIX_CODE, font_spans, legacy_format_spans, legacy_rgb, strip_formatting,
+};
 
 use super::common;
 use crate::app::input::KeyBindings;

@@ -622,7 +622,7 @@ fn hover_components_use_current_bindings_in_nested_runs() {
     let hovers = [
         HoverEvent::Text(Box::new(Component::from_value(&nested).unwrap())),
         HoverEvent::Item(serde_json::json!({
-            "id": "minecraft:diamond_sword",
+            "id": "minecraft:stick",
             "components": {"minecraft:custom_name": nested, "minecraft:lore": [nested]}
         })),
         HoverEvent::Entity(serde_json::json!({"name": nested})),
@@ -1512,6 +1512,130 @@ fn fully_filtered_signed_message_never_renders_and_acknowledges_hidden() {
             shown: false
         }]
     );
+}
+
+#[test]
+fn a_sword_lists_its_default_attack_attributes() {
+    // Unit tests load no language, so lines read as their keys.
+    let text = |lines: &[TooltipLine]| {
+        lines
+            .iter()
+            .map(|line| line_text(&line.spans))
+            .collect::<Vec<_>>()
+    };
+    let lines = item_tooltip_lines(
+        &serde_json::json!({"id": "minecraft:diamond_sword"}),
+        None,
+        false,
+    );
+    assert_eq!(
+        text(&lines)[1..],
+        [
+            "",
+            "item.modifiers.mainhand",
+            " attribute.modifier.equals.0",
+            " attribute.modifier.equals.0"
+        ]
+    );
+    assert_eq!(lines[3].spans[0].color, common::rgb(0x00AA00));
+    let hidden = serde_json::json!({
+        "id": "minecraft:diamond_sword",
+        "components": {"minecraft:tooltip_display": {"hidden_components": ["minecraft:attribute_modifiers"]}}
+    });
+    assert_eq!(item_tooltip_lines(&hidden, None, false).len(), 1);
+    let custom = serde_json::json!({
+        "id": "minecraft:stick",
+        "components": {"minecraft:attribute_modifiers": [
+            {"type": "minecraft:movement_speed", "id": "minecraft:a", "amount": 0.125, "operation": "add_multiplied_base", "slot": "feet"},
+            {"type": "minecraft:fall_damage_multiplier", "id": "minecraft:b", "amount": 0.5, "operation": "add_value", "slot": "feet"},
+            {"type": "minecraft:armor", "id": "minecraft:c", "amount": 1.0, "slot": "feet", "display": {"type": "hidden"}}
+        ]}
+    });
+    let lines = item_tooltip_lines(&custom, None, false);
+    assert_eq!(
+        text(&lines)[1..],
+        [
+            "",
+            "item.modifiers.feet",
+            "attribute.modifier.plus.1",
+            "attribute.modifier.plus.0"
+        ]
+    );
+    assert_eq!(lines[3].spans[0].color, common::rgb(0x5555FF));
+    assert_eq!(lines[4].spans[0].color, common::rgb(0xFF5555));
+}
+
+#[test]
+fn a_profiled_head_is_named_for_its_player_and_marks_a_lookup() {
+    let lines = |profile| {
+        item_tooltip_lines(
+            &serde_json::json!({
+                "id": "minecraft:player_head",
+                "components": {"minecraft:profile": profile}
+            }),
+            None,
+            false,
+        )
+        .iter()
+        .map(|line| line_text(&line.spans))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines(serde_json::json!("Notch")),
+        ["Notch's Head", "Dynamic"]
+    );
+    assert_eq!(
+        lines(serde_json::json!({"name": "Nobody", "id": [0, 0, 0, 1]})),
+        ["Nobody's Head"]
+    );
+}
+
+#[test]
+fn a_modifiers_override_text_replaces_its_line_in_either_shape() {
+    use azalea_inventory::components::{
+        AttributeModifier, AttributeModifierDisplay, AttributeModifiersEntry, EquipmentSlotGroup,
+    };
+    let entry = AttributeModifiersEntry {
+        kind: azalea_registry::builtin::Attribute::Armor,
+        modifier: AttributeModifier {
+            id: "minecraft:a".into(),
+            amount: 1.0,
+            operation:
+                azalea_core::attribute_modifier_operation::AttributeModifierOperation::AddValue,
+        },
+        slot: EquipmentSlotGroup::Chest,
+        display: AttributeModifierDisplay::Override {
+            text: "Sturdy".into(),
+        },
+    };
+    let azalea = serde_json::to_value(AttributeModifiers {
+        modifiers: vec![entry],
+    })
+    .unwrap();
+    let codec = serde_json::json!([{
+        "type": "minecraft:armor", "id": "minecraft:a", "amount": 1.0,
+        "operation": "add_value", "slot": "chest",
+        "display": {"type": "override", "value": "Sturdy"}
+    }]);
+    for modifiers in [azalea, codec] {
+        let lines = item_tooltip_lines(
+            &serde_json::json!({
+                "id": "minecraft:stick",
+                "components": {"minecraft:attribute_modifiers": modifiers}
+            }),
+            None,
+            false,
+        );
+        assert_eq!(line_text(&lines.last().unwrap().spans), "Sturdy");
+    }
+}
+
+#[test]
+fn modifier_amounts_keep_two_decimals_without_trailing_zeros() {
+    assert_eq!(modifier_amount(7.0), "7");
+    assert_eq!(modifier_amount(4.0 - 2.4), "1.6");
+    assert_eq!(modifier_amount(12.5), "12.5");
+    assert_eq!(modifier_amount(1.0 / 3.0), "0.33");
 }
 
 #[test]
