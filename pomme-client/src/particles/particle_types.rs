@@ -28,6 +28,9 @@ pub(crate) struct ParticleTypes {
     pub(crate) dripping_lava: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_lava: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) landing_lava: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dripping_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -98,6 +101,15 @@ impl ParticleTypes {
         let landing_lava = registry
             .register(resource_id!("minecraft:landing_lava"), false)
             .map_err(registration_error)?;
+        let dripping_obsidian_tear = registry
+            .register(resource_id!("minecraft:dripping_obsidian_tear"), false)
+            .map_err(registration_error)?;
+        let falling_obsidian_tear = registry
+            .register(resource_id!("minecraft:falling_obsidian_tear"), false)
+            .map_err(registration_error)?;
+        let landing_obsidian_tear = registry
+            .register(resource_id!("minecraft:landing_obsidian_tear"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -120,6 +132,9 @@ impl ParticleTypes {
             dripping_lava,
             falling_lava,
             landing_lava,
+            dripping_obsidian_tear,
+            falling_obsidian_tear,
+            landing_obsidian_tear,
         })
     }
 }
