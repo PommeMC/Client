@@ -162,6 +162,19 @@ struct FontAtlas {
     glyphs: HashMap<char, GlyphEntry>,
 }
 
+/// Both selected UI fonts, decoded and rasterized before live activation.
+pub(crate) struct PreparedFontAtlas {
+    atlas: FontAtlas,
+    image: AtlasImage,
+}
+
+impl PreparedFontAtlas {
+    pub(crate) fn prepare(resources: &dyn ResourceManager) -> Result<Self, String> {
+        let (atlas, image) = build_font_atlas(resources)?;
+        Ok(Self { atlas, image })
+    }
+}
+
 fn build_font_atlas(resources: &dyn ResourceManager) -> Result<(FontAtlas, AtlasImage), String> {
     let load_font = |id: &ResourceId| {
         let resource = resources
@@ -1905,17 +1918,17 @@ impl MenuOverlayPipeline {
         );
     }
 
-    /// Font preparation errors leave the previous UI atlases and bindings
-    /// intact.
-    ///
-    /// Missing content clears the logo; I/O/decode errors retain the last good
-    /// pixels and atlas without rolling back the already-active resource view.
-    pub fn reload_resource_images(
+    /// Consumes the fonts prepared before activation, without resolving them
+    /// again. Missing content clears the logo; I/O/decode errors retain the
+    /// last good pixels and atlas without rolling back the already-active
+    /// resource view.
+    pub(crate) fn reload_resource_images(
         &mut self,
         resources: &dyn ResourceManager,
         device: &rhi::backend::Device,
-    ) -> Result<(), String> {
-        let (atlas, font) = build_font_atlas(resources)?;
+        prepared: PreparedFontAtlas,
+    ) {
+        let PreparedFontAtlas { atlas, image: font } = prepared;
         device.wait_idle();
         let font_texture = util::create_sampled_texture(
             device,
@@ -1954,13 +1967,12 @@ impl MenuOverlayPipeline {
             Ok(logo) => logo,
             Err(error) => {
                 tracing::warn!(%error, id = %POMME_ICON, "Failed to load Pomme logo; retaining the last good image and atlas");
-                return Ok(());
+                return;
             }
         };
         let (atlas, sprites) = build_sprite_atlas(resources, pomme_logo.as_ref());
         self.publish_sprite_atlas(device, atlas, sprites);
         self.pomme_logo = pomme_logo;
-        Ok(())
     }
 
     fn publish_sprite_atlas(

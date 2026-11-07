@@ -1191,8 +1191,8 @@ impl MainMenu {
         }
     }
 
-    /// Picking a different theme starts the wipe; the swap itself lands in
-    /// `drive_theme_transition` once the strips have closed. Bedrock's files
+    /// Picking a different theme starts the wipe; `drive_theme_transition`
+    /// requests activation once the strips have closed. Bedrock's files
     /// download first, the row showing how far along they are.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_theme_dropdown(
@@ -1302,24 +1302,19 @@ impl MainMenu {
         }
     }
 
-    /// Advances the theme wipe, committing and persisting the new theme under
-    /// the closed strips. Returns the reload action on the frame it commits.
+    /// Advances the theme wipe, requesting activation under the closed strips.
     pub(super) fn drive_theme_transition(
         &mut self,
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         screen_h: f32,
-        key_bindings: &KeyBindings,
     ) -> Option<MenuAction> {
         self.finish_bedrock_download();
         let mut action = None;
-        let mut committed = false;
         if let Some(ref mut tr) = self.transition {
             let close_t = (tr.start.elapsed().as_secs_f32() / CLOSE_DURATION).min(1.0);
             if close_t >= 1.0 && !tr.reloaded {
                 tr.reloaded = true;
-                self.theme = tr.target;
-                committed = true;
                 action = Some(MenuAction::ChangeTheme(tr.target));
             }
             let open_t = tr
@@ -1330,9 +1325,6 @@ impl MainMenu {
             if open_t >= 1.0 {
                 self.transition = None;
             }
-        }
-        if committed {
-            self.save_settings(key_bindings);
         }
         action
     }

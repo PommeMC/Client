@@ -1323,21 +1323,30 @@ impl AppCore {
         renderer: &mut Renderer,
     ) -> std::io::Result<()> {
         self.set_resource_theme(theme);
-        self.reload_resources()?;
-        self.reload_pack_assets(renderer)
+        let prepared = match self.activate_resource_selection(None, Renderer::prepare_resources) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.set_resource_theme(self.menu.theme());
+                return Err(error);
+            }
+        };
+        self.reload_pack_assets(renderer, prepared)
     }
 
+    /// Bootstrap only: no live Renderer or world exists yet. Its new menu
+    /// overlay will construct fonts fallibly from this view.
     fn reload_resources(&mut self) -> std::io::Result<()> {
-        self.activate_resource_selection(None)
+        self.activate_resource_selection(None, |_| Ok(()))
     }
 
     /// Catalog/source changes are not rolled back. Manager preparation retains
     /// its old view on failure; a later renderer failure cannot undo
     /// activation.
-    fn activate_resource_selection(
+    fn activate_resource_selection<T>(
         &mut self,
         toggle: Option<(PackId, bool)>,
-    ) -> std::io::Result<()> {
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
         self.resource_repository.reload()?;
         self.resource_repository
             .set_enabled(&self.active_resource_ids);
@@ -1351,10 +1360,12 @@ impl AppCore {
         let opened = self.resource_repository.open_all_enabled()?;
         let menu = &mut self.menu;
         let audio = &mut self.audio;
-        self.resources.reload(opened, |resources| {
-            menu.load_splash(resources);
-            audio.reload_assets(resources);
-        })?;
+        let prepared = self
+            .resources
+            .reload_with_preparation(opened, prepare, |resources| {
+                menu.load_splash(resources);
+                audio.reload_assets(resources);
+            })?;
         self.asset_head_skins.clear();
         self.asset_head_skins_stale = true;
         self.head_skins_dirty = true;
@@ -1365,7 +1376,7 @@ impl AppCore {
             .filter(|pack| !pack.enablement_config().required)
             .map(|pack| pack.id().clone())
             .collect();
-        Ok(())
+        Ok(prepared)
     }
 
     pub(crate) fn resource_catalog(&self) -> &PackRepository {
@@ -1420,10 +1431,10 @@ impl AppCore {
         renderer: &mut Renderer,
         game: Option<&mut GameState>,
     ) -> std::io::Result<()> {
-        self.activate_resource_selection(toggle)?;
+        let prepared = self.activate_resource_selection(toggle, Renderer::prepare_resources)?;
         match game {
-            Some(game) => self.reload_live_resource_assets(game, renderer),
-            None => self.reload_pack_assets(renderer),
+            Some(game) => self.reload_live_resource_assets(game, renderer, prepared),
+            None => self.reload_pack_assets(renderer, prepared),
         }
     }
 
@@ -1553,9 +1564,10 @@ impl AppCore {
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
         self.menu.restore_bench_render_distance();
+        self.clear_server_resource_packs(&mut gfx.renderer);
+        // Leaving the world still retires it if resource preparation failed.
         gfx.renderer.clear_chunk_meshes();
         gfx.renderer.reset_distant();
-        self.clear_server_resource_packs(&mut gfx.renderer);
         if let Some(p) = &mut self.presence {
             p.set_in_menu(&self.version);
         }
@@ -2021,13 +2033,14 @@ impl AppCore {
         &mut self,
         game: &mut GameState,
         renderer: &mut Renderer,
+        prepared: crate::renderer::PreparedResources,
     ) -> std::io::Result<()> {
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
         // CPU mesher and particle atlas state from the same freshly-reloaded
         // registry/UV map, then let the normal rescan rebuild loaded columns.
         renderer.clear_chunk_meshes();
-        self.reload_pack_assets(renderer)?;
+        self.reload_pack_assets(renderer, prepared)?;
         game.block_registry
             .replace_render_assets(renderer.shared_render_assets());
 
@@ -2072,33 +2085,67 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        if self.unregister_server_resource_packs(None)
-            && let Err(error) = self
-                .reload_resources()
-                .and_then(|()| self.reload_pack_assets(renderer))
+        if let Err(error) = self
+            .remove_server_resource_packs(None, Renderer::prepare_resources)
+            .and_then(|prepared| {
+                if let Some(prepared) = prepared {
+                    renderer.clear_chunk_meshes();
+                    self.reload_pack_assets(renderer, prepared)?;
+                }
+                Ok(())
+            })
         {
             tracing::warn!(%error, "Failed to clear server resource assets");
         }
     }
 
-    fn unregister_server_resource_packs(&mut self, uuid: Option<uuid::Uuid>) -> bool {
+    fn remove_server_resource_packs<T>(
+        &mut self,
+        uuid: Option<uuid::Uuid>,
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<Option<T>> {
         let ids: Vec<_> = match uuid {
-            Some(uuid) => self.server_resource_ids.remove(&uuid).into_iter().collect(),
-            None => self.server_resource_ids.drain().map(|(_, id)| id).collect(),
+            Some(uuid) => self
+                .server_resource_ids
+                .remove(&uuid)
+                .map(|id| (uuid, id))
+                .into_iter()
+                .collect(),
+            None => self.server_resource_ids.drain().collect(),
         };
-        for id in &ids {
-            self.resource_repository.disable_pack(id);
-            self.registered_resources.unregister(id);
+        if ids.is_empty() {
+            return Ok(None);
         }
-        !ids.is_empty()
+        let removed: Vec<_> = ids
+            .into_iter()
+            .map(|(uuid, id)| {
+                let registration = self.registered_resources.take_registration(&id);
+                (uuid, id, registration)
+            })
+            .collect();
+        match self.activate_resource_selection(None, prepare) {
+            // Activation commits removals; later consumer errors must retain them.
+            Ok(prepared) => Ok(Some(prepared)),
+            Err(error) => {
+                // Positions were captured as each definition was removed.
+                for (uuid, id, registration) in removed.into_iter().rev() {
+                    if let Some(registration) = registration {
+                        self.registered_resources.restore_registration(registration);
+                    }
+                    self.server_resource_ids.insert(uuid, id);
+                }
+                Err(error)
+            }
+        }
     }
 
-    fn activate_server_resource_pack(
+    fn activate_server_resource_pack<T>(
         &mut self,
         uuid: uuid::Uuid,
         hash: &str,
         path: std::path::PathBuf,
-    ) -> std::io::Result<()> {
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
         let previous = self
             .server_resource_ids
             .get(&uuid)
@@ -2118,25 +2165,28 @@ impl AppCore {
             },
         );
         let previous_id = self.server_resource_ids.insert(uuid, id.clone());
-        if let Err(error) = self.activate_resource_selection(Some((id.clone(), true))) {
-            self.registered_resources.unregister(&id);
-            if let Some(previous) = previous {
-                self.registered_resources.restore_registration(previous);
-            }
-            if self.server_resource_ids.get(&uuid) == Some(&id) {
-                match previous_id {
-                    Some(previous_id) => {
-                        self.server_resource_ids.insert(uuid, previous_id);
-                    }
-                    None => {
-                        self.server_resource_ids.remove(&uuid);
+        let prepared = match self.activate_resource_selection(Some((id.clone(), true)), prepare) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.registered_resources.unregister(&id);
+                if let Some(previous) = previous {
+                    self.registered_resources.restore_registration(previous);
+                }
+                if self.server_resource_ids.get(&uuid) == Some(&id) {
+                    match previous_id {
+                        Some(previous_id) => {
+                            self.server_resource_ids.insert(uuid, previous_id);
+                        }
+                        None => {
+                            self.server_resource_ids.remove(&uuid);
+                        }
                     }
                 }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         // The candidate is active now; consumer refresh errors must retain it.
-        Ok(())
+        Ok(prepared)
     }
 
     pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
@@ -2147,7 +2197,8 @@ impl AppCore {
     }
 
     /// Rebuilds what was built from assets that didn't exist yet, once the
-    /// first-run download has put them on disk.
+    /// first-run download has put them on disk. Only the install boot screen
+    /// exists here; it is discarded before constructing the new Renderer.
     pub(crate) fn reload_installed_assets(&mut self) -> std::io::Result<()> {
         if !self.data_dirs.is_installed(&self.version) {
             return Err(std::io::Error::new(
@@ -2167,8 +2218,12 @@ impl AppCore {
         self.active_custom_resource_ids.is_empty()
     }
 
-    fn reload_pack_assets(&mut self, renderer: &mut Renderer) -> std::io::Result<()> {
-        renderer.reload_assets(self.font_sources())?;
+    fn reload_pack_assets(
+        &mut self,
+        renderer: &mut Renderer,
+        prepared: crate::renderer::PreparedResources,
+    ) -> std::io::Result<()> {
+        renderer.reload_assets(self.font_sources(), prepared)?;
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
@@ -3627,10 +3682,14 @@ impl AppCore {
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
-                    if self.unregister_server_resource_packs(id)
-                        && let Err(error) = self
-                            .reload_resources()
-                            .and_then(|()| self.reload_live_resource_assets(game, renderer))
+                    if let Err(error) = self
+                        .remove_server_resource_packs(id, Renderer::prepare_resources)
+                        .and_then(|prepared| match prepared {
+                            Some(prepared) => {
+                                self.reload_live_resource_assets(game, renderer, prepared)
+                            }
+                            None => Ok(()),
+                        })
                     {
                         tracing::warn!(%error, "Failed to pop server resource assets");
                     }
@@ -3718,11 +3777,15 @@ impl AppCore {
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
-                    let reload =
-                        match self.activate_server_resource_pack(pending.id, &pending.hash, path) {
-                            Ok(()) => self.reload_live_resource_assets(game, renderer),
-                            Err(error) => Err(error),
-                        };
+                    let reload = match self.activate_server_resource_pack(
+                        pending.id,
+                        &pending.hash,
+                        path,
+                        Renderer::prepare_resources,
+                    ) {
+                        Ok(prepared) => self.reload_live_resource_assets(game, renderer, prepared),
+                        Err(error) => Err(error),
+                    };
                     match reload {
                         Ok(()) => {
                             tracing::info!("Resource pack {} loaded successfully", pending.id);

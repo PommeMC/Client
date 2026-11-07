@@ -47,7 +47,7 @@ use pipelines::entity_renderer::{ArmorRenderInfo, EntityRenderInfo, EntityRender
 use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
 use pipelines::lightmap::{Lightmap, LightmapInfo};
-use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
+use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, PreparedFontAtlas, SpriteId};
 use pipelines::nameplate::NameplateRenderInfo;
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
@@ -74,6 +74,11 @@ use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::render_assets::{
     BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage,
 };
+
+/// CPU data prepared before a live resource view is published.
+pub(crate) struct PreparedResources {
+    menu_fonts: PreparedFontAtlas,
+}
 
 /// The live atlas's layout, so meshes bake in UVs that match it.
 impl MeshSource for Renderer {
@@ -1746,7 +1751,18 @@ impl Renderer {
         )
     }
 
-    pub fn reload_assets(&mut self, font_sources: FontSources<'_>) -> std::io::Result<()> {
+    pub(crate) fn prepare_resources(
+        resources: &dyn ResourceManager,
+    ) -> std::io::Result<PreparedResources> {
+        let menu_fonts = PreparedFontAtlas::prepare(resources).map_err(std::io::Error::other)?;
+        Ok(PreparedResources { menu_fonts })
+    }
+
+    pub(crate) fn reload_assets(
+        &mut self,
+        font_sources: FontSources<'_>,
+        prepared: PreparedResources,
+    ) -> std::io::Result<()> {
         let resources = font_sources.resources;
         let model_inputs = crate::world::block::model::ModelInputs::prepare(resources)
             .map_err(|error| std::io::Error::other(format!("prepare model resources: {error}")))?;
@@ -1786,7 +1802,7 @@ impl Renderer {
         self.entity_renderer
             .reload_armor_assets(&self.ctx.device, resources);
 
-        self.reload_fixed_assets(resources)?;
+        self.reload_fixed_assets(resources, prepared);
 
         self.reload_fonts(font_sources);
 
@@ -1806,7 +1822,11 @@ impl Renderer {
     }
 
     /// The caller has made the device idle and retired atlas-dependent draws.
-    fn reload_fixed_assets(&mut self, resources: &dyn ResourceManager) -> std::io::Result<()> {
+    fn reload_fixed_assets(
+        &mut self,
+        resources: &dyn ResourceManager,
+        prepared: PreparedResources,
+    ) {
         let device = &self.ctx.device;
         let targets = self.swapchain.targets();
         self.sky_pipeline.destroy(device);
@@ -1837,8 +1857,7 @@ impl Renderer {
             pipelines::panorama::resolve_panorama_faces(resources),
         );
         self.menu_pipeline
-            .reload_resource_images(resources, device)
-            .map_err(std::io::Error::other)
+            .reload_resource_images(resources, device, prepared.menu_fonts);
     }
 
     /// Vanilla `FontManager.updateOptions`: only the font sets change.

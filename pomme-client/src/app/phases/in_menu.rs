@@ -173,6 +173,8 @@ pub fn update_menu(
         MenuAction::ChangeTheme(theme) => {
             if let Err(error) = core.reload_resource_theme(theme, &mut gfx.renderer) {
                 tracing::warn!(%error, "Theme resource activation or asset refresh failed");
+            } else {
+                core.menu.commit_theme(theme, &core.input.key_bindings);
             }
             sync_resource_packs(core);
             core.menu.start_transition_open();

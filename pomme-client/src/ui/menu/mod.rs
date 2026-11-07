@@ -1326,6 +1326,11 @@ impl MainMenu {
         self.theme
     }
 
+    pub(crate) fn commit_theme(&mut self, theme: PanoramaTheme, key_bindings: &KeyBindings) {
+        self.theme = theme;
+        self.save_settings(key_bindings);
+    }
+
     /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
     /// have one; the vanilla title screen has no such thing.
     pub fn skin_preview(&self) -> Option<crate::renderer::MenuSkin> {
@@ -1516,12 +1521,9 @@ impl MainMenu {
             Screen::Main => {
                 let mut result =
                     self.build_main(screen_w, screen_h, input, text_width_fn, key_bindings);
-                if let Some(action) = self.drive_theme_transition(
-                    &mut result.elements,
-                    screen_w,
-                    screen_h,
-                    key_bindings,
-                ) {
+                if let Some(action) =
+                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
+                {
                     result.action = action;
                 }
                 result

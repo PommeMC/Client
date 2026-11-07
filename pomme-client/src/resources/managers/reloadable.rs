@@ -38,10 +38,23 @@ impl ReloadableResourceManager {
         packs: Vec<(ResourceOrigin, Rc<dyn PackResources>)>,
         rebuild: impl FnOnce(&Self),
     ) -> io::Result<()> {
+        self.reload_with_preparation(packs, |_| Ok(()), rebuild)
+    }
+
+    /// Prepare consumer-owned data against the candidate before publishing it.
+    /// On failure neither activation nor rebuild runs; dropping the candidate
+    /// does not explicitly close backends shared with retained views.
+    pub(crate) fn reload_with_preparation<T>(
+        &mut self,
+        packs: Vec<(ResourceOrigin, Rc<dyn PackResources>)>,
+        prepare: impl FnOnce(&dyn ResourceManager) -> io::Result<T>,
+        rebuild: impl FnOnce(&Self),
+    ) -> io::Result<T> {
         let candidate = MultiPackResourceManager::new(self.pack_type, packs)?;
+        let prepared = prepare(&candidate)?;
         self.active = candidate;
         rebuild(self);
-        Ok(())
+        Ok(prepared)
     }
 
     /// Caller-requested closure only; may invalidate old handles or shared
