@@ -6,11 +6,12 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 
 use super::blocks::{
-    BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, CampfireBlock, CandleBlock,
-    CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock, EndRodBlock,
-    EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, NetherPortalBlock, RedstoneTorchBlock,
-    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SmokerBlock,
-    SoulFireBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+    BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BubbleColumnBlock, CampfireBlock,
+    CandleBlock, CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock,
+    EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, NetherPortalBlock,
+    RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock,
+    RespawnAnchorBlock, SmokerBlock, SoulFireBlock, TorchBlock, WallTorchBlock, WetSpongeBlock,
+    WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -204,6 +205,11 @@ impl BlockFactory {
             "respawn_anchor" => Box::new(RespawnAnchorBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.reverse_portal)),
+            )),
+            "bubble_column" => Box::new(BubbleColumnBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.bubble_column_up)),
+                SimpleParticleType::new(Rc::clone(&types.current_down)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
