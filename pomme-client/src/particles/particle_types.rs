@@ -34,6 +34,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) dripping_honey: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_honey: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) landing_honey: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) portal: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -122,6 +123,9 @@ impl ParticleTypes {
         let landing_honey = registry
             .register(resource_id!("minecraft:landing_honey"), false)
             .map_err(registration_error)?;
+        let portal = registry
+            .register(resource_id!("minecraft:portal"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -150,6 +154,7 @@ impl ParticleTypes {
             dripping_honey,
             falling_honey,
             landing_honey,
+            portal,
         })
     }
 }

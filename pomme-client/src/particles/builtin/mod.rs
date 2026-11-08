@@ -11,6 +11,7 @@ mod dust;
 mod end_rod;
 mod flame;
 mod lava;
+mod portal;
 mod smoke;
 mod suspended;
 mod terrain;
@@ -26,6 +27,7 @@ pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
 use self::lava::LavaParticleRegistration;
+use self::portal::PortalParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
@@ -120,4 +122,5 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.landing_honey),
         &DripLandParticleRegistration::honey(),
     );
+    resources.register_sprite_provider(Rc::clone(&types.portal), &PortalParticleRegistration);
 }
