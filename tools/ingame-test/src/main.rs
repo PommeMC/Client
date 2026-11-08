@@ -32,6 +32,8 @@ const OUT_DIR: &str = "target/ingame";
 const SCRIPT_DIR: &str = "tests/ingame";
 /// Shader packs the scripts select, copied into each client's game dir.
 const SHADER_PACKS: &str = "fixtures/shaderpacks";
+/// Resource packs the scripts select, copied the same way.
+const RESOURCE_PACKS: &str = "fixtures/resourcepacks";
 const FIXTURE_DIR: &str = "pomme-client/src/net/wire-fixtures";
 /// Game packets kept per packet id in a fixture, so repeats (chunks above all)
 /// don't bloat it.
@@ -502,6 +504,10 @@ fn run_script(
     copy_dir(
         &Path::new(SCRIPT_DIR).join(SHADER_PACKS),
         &game_dir.join("shaderpacks"),
+    )?;
+    copy_dir(
+        &Path::new(SCRIPT_DIR).join(RESOURCE_PACKS),
+        &game_dir.join("resourcepacks"),
     )?;
     let log_path = out.join("client.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;

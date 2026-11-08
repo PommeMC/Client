@@ -31,7 +31,6 @@ use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
-use crate::resources::ResourceManager;
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
@@ -240,7 +239,6 @@ impl InteractionState {
         player_pos: DVec3,
         chunks: &ChunkStore,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -254,13 +252,7 @@ impl InteractionState {
         );
         mark_dirty(&pos, dirty_chunks);
         let table = block_registry.block_state_table();
-        play_break_sound_for_id(
-            audio,
-            resources,
-            table,
-            table.block_state_data(state).id(),
-            pos,
-        );
+        play_break_sound_for_id(audio, table, table.block_state_data(state).id(), pos);
         effects.particles.add_destroy_block_effect(
             pos,
             state,
@@ -438,7 +430,6 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         player_aabb: Aabb,
         eye_pos: DVec3,
@@ -479,7 +470,6 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
-                resources,
                 input,
                 player_pos,
                 on_ground,
@@ -509,7 +499,6 @@ impl InteractionState {
                 block_registry,
                 sender,
                 audio,
-                resources,
                 chunks,
                 player_pos,
                 player_aabb,
@@ -544,7 +533,6 @@ impl InteractionState {
                     chunks,
                     sender,
                     audio,
-                    resources,
                     player_pos,
                     on_ground,
                     creative,
@@ -645,7 +633,6 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         input: &InputState,
         player_pos: DVec3,
         on_ground: bool,
@@ -700,7 +687,6 @@ impl InteractionState {
             chunks,
             sender,
             audio,
-            resources,
             player_pos,
             on_ground,
             creative,
@@ -722,7 +708,6 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -757,7 +742,6 @@ impl InteractionState {
             chunks,
             sender,
             audio,
-            resources,
             player_pos,
             on_ground,
             creative,
@@ -781,7 +765,6 @@ impl InteractionState {
         block_registry: &BlockRegistry,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         chunks: &ChunkStore,
         player_pos: DVec3,
         player_aabb: Aabb,
@@ -824,7 +807,6 @@ impl InteractionState {
                     block_registry,
                     sender,
                     audio,
-                    resources,
                     chunks,
                     hit,
                     hand,
@@ -841,8 +823,8 @@ impl InteractionState {
             let result = match (result, held.stack) {
                 (UseResult::Fail, _) => return false,
                 (UseResult::Pass, Some(stack)) => self.use_item(
-                    sender, audio, resources, player_pos, eye_pos, look, hand, stack, held.worn,
-                    food, creative, effects,
+                    sender, audio, player_pos, eye_pos, look, hand, stack, held.worn, food,
+                    creative, effects,
                 ),
                 (result, _) => result,
             };
@@ -864,7 +846,6 @@ impl InteractionState {
         block_registry: &BlockRegistry,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         chunks: &ChunkStore,
         hit: BlockHitResult,
         hand: InteractionHand,
@@ -908,7 +889,6 @@ impl InteractionState {
         self.predict_place(
             block_registry.block_state_table(),
             audio,
-            resources,
             hit,
             place_block,
             chunks,
@@ -929,7 +909,6 @@ impl InteractionState {
         &mut self,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1002,7 +981,6 @@ impl InteractionState {
                 &active,
                 16,
                 audio,
-                resources,
                 effects.particles,
                 player_pos,
                 eye_pos,
@@ -1047,7 +1025,6 @@ impl InteractionState {
         hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1057,7 +1034,6 @@ impl InteractionState {
             hand_stacks,
             sender,
             audio,
-            resources,
             player_pos,
             eye_pos,
             look,
@@ -1092,7 +1068,6 @@ impl InteractionState {
         hand_stacks: [Option<&ItemStackData>; 2],
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         eye_pos: DVec3,
         look: LookDirection,
@@ -1126,7 +1101,7 @@ impl InteractionState {
                     dropped
                 });
             if dropped {
-                crate::ui::bundle::Sound::RemoveOne.play(audio, resources, player_pos.into());
+                crate::ui::bundle::Sound::RemoveOne.play(audio, player_pos.into());
                 self.swing(sender);
             }
         }
@@ -1144,7 +1119,6 @@ impl InteractionState {
                 active,
                 5,
                 audio,
-                resources,
                 effects.particles,
                 player_pos,
                 eye_pos,
@@ -1176,7 +1150,6 @@ impl InteractionState {
     pub fn complete_using(
         &mut self,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         particles: &mut ParticleStore,
         player_pos: DVec3,
         eye_pos: DVec3,
@@ -1189,9 +1162,7 @@ impl InteractionState {
         if active.bundle.is_some() {
             return;
         }
-        emit_consume_effects(
-            &active, 16, audio, resources, particles, player_pos, eye_pos, look,
-        );
+        emit_consume_effects(&active, 16, audio, particles, player_pos, eye_pos, look);
     }
 
     /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
@@ -1249,7 +1220,6 @@ impl InteractionState {
         &mut self,
         block_state_table: BlockStateTable,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         hit: BlockHitResult,
         place_block: Option<BlockState>,
         chunks: &ChunkStore,
@@ -1288,7 +1258,7 @@ impl InteractionState {
             block_state_table,
             block_state_table.block_state_data(state).id(),
         );
-        play_placed_or_broken(audio, resources, &sounds.place_event, sounds, pos);
+        play_placed_or_broken(audio, &sounds.place_event, sounds, pos);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1299,7 +1269,6 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -1375,7 +1344,6 @@ impl InteractionState {
                 player_pos,
                 chunks,
                 audio,
-                resources,
                 effects,
                 dirty_chunks,
             );
@@ -1421,7 +1389,6 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
-        resources: &dyn ResourceManager,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -1445,7 +1412,6 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
-                resources,
                 player_pos,
                 on_ground,
                 creative,
@@ -1481,7 +1447,6 @@ impl InteractionState {
         if self.destroy_ticks % 4.0 == 0.0 {
             play_hit_sound(
                 audio,
-                resources,
                 block_registry.block_state_table(),
                 block_state_data.id(),
                 hit.block_pos,
@@ -1506,7 +1471,6 @@ impl InteractionState {
                 player_pos,
                 chunks,
                 audio,
-                resources,
                 effects,
                 dirty_chunks,
             );
@@ -1807,17 +1771,10 @@ fn destroy_speed(
 /// Plays a block's mining hit sound, matching vanilla
 /// `MultiPlayerGameMode.continueDestroyBlock`: volume `(volume + 1) / 8`, pitch
 /// `pitch * 0.5`.
-fn play_hit_sound(
-    audio: &AudioEngine,
-    resources: &dyn ResourceManager,
-    table: BlockStateTable,
-    id: &str,
-    pos: BlockPos,
-) {
+fn play_hit_sound(audio: &AudioEngine, table: BlockStateTable, id: &str, pos: BlockPos) {
     let s = block_sounds_for_id(table, id);
     play_block_sound(
         audio,
-        resources,
         &s.hit_event,
         pos,
         (s.volume + 1.0) / 8.0,
@@ -1829,27 +1786,19 @@ fn play_hit_sound(
 /// 2001.
 pub(crate) fn play_break_sound_for_id(
     audio: &AudioEngine,
-    resources: &dyn ResourceManager,
     table: BlockStateTable,
     id: &str,
     pos: BlockPos,
 ) {
     let sounds = block_sounds_for_id(table, id);
-    play_placed_or_broken(audio, resources, &sounds.break_event, sounds, pos);
+    play_placed_or_broken(audio, &sounds.break_event, sounds, pos);
 }
 
 /// A block's place or break `event`, which vanilla plays at volume
 /// `(volume + 1) / 2` and pitch `pitch * 0.8`.
-fn play_placed_or_broken(
-    audio: &AudioEngine,
-    resources: &dyn ResourceManager,
-    event: &str,
-    sounds: &BlockSounds,
-    pos: BlockPos,
-) {
+fn play_placed_or_broken(audio: &AudioEngine, event: &str, sounds: &BlockSounds, pos: BlockPos) {
     play_block_sound(
         audio,
-        resources,
         event,
         pos,
         (sounds.volume + 1.0) / 2.0,
@@ -1912,12 +1861,10 @@ fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Op
 /// burst of item crumbs plus the consume sound. The sound plays locally here
 /// and again from the server's broadcast, doubling up for the eater exactly
 /// like vanilla (MC-98310).
-#[allow(clippy::too_many_arguments)]
 fn emit_consume_effects(
     active: &ActiveUse,
     particle_count: u32,
     audio: &AudioEngine,
-    resources: &dyn ResourceManager,
     particles: &mut ParticleStore,
     player_pos: DVec3,
     eye_pos: DVec3,
@@ -1941,7 +1888,6 @@ fn emit_consume_effects(
         )
     };
     audio.play_world_sound(
-        resources,
         &active.sound,
         CATEGORY_PLAYERS,
         Position::new(player_pos.x, player_pos.y, player_pos.z),
@@ -1953,19 +1899,11 @@ fn emit_consume_effects(
 
 /// Plays a block sound event at the block centre in the BLOCKS category with a
 /// random variant. No-op for an empty event (a silent `SoundType` slot).
-fn play_block_sound(
-    audio: &AudioEngine,
-    resources: &dyn ResourceManager,
-    event: &str,
-    pos: BlockPos,
-    volume: f32,
-    pitch: f32,
-) {
+fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32, pitch: f32) {
     if event.is_empty() {
         return;
     }
     audio.play_world_sound(
-        resources,
         &SoundRef::event(event),
         CATEGORY_BLOCKS,
         Position::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),

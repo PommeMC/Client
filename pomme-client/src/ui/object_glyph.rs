@@ -36,11 +36,19 @@ impl AssetLookup<'_> {
         self.resources.get_resource(id)
     }
 
-    fn texture_exists(&self, resource: &str) -> Option<bool> {
+    /// A lookup error counts as absent, so a later atlas source still gets
+    /// its turn at the sprite.
+    fn texture_exists(&self, resource: &str) -> bool {
         let Some(id) = texture_id(resource) else {
-            return Some(false);
+            return false;
         };
-        self.resolve(&id).ok().map(|resource| resource.is_some())
+        match self.resolve(&id) {
+            Ok(resource) => resource.is_some(),
+            Err(error) => {
+                tracing::warn!(%id, %error, "Failed to look up sprite texture");
+                false
+            }
+        }
     }
 
     fn load_texture(&self, id: &ResourceId) -> Option<(Vec<u8>, u32, u32)> {
@@ -375,7 +383,7 @@ fn apply_source(
             };
             let path = join_resource_path(source_path, rest);
             let resource = format!("{}:{path}", sprite.namespace);
-            if lookup.texture_exists(&resource)? {
+            if lookup.texture_exists(&resource) {
                 *candidate = Some(Recipe::Direct(resource));
             }
         }
@@ -387,7 +395,7 @@ fn apply_source(
                 .get("sprite")
                 .and_then(Value::as_str)
                 .unwrap_or(resource);
-            if AssetId::parse(target) == sprite && lookup.texture_exists(resource)? {
+            if AssetId::parse(target) == sprite && lookup.texture_exists(resource) {
                 *candidate = Some(Recipe::Direct(normalize_identifier(resource)));
             }
         }
@@ -411,7 +419,7 @@ fn apply_source(
             let Some(resource) = map.get("resource").and_then(Value::as_str) else {
                 return Some(());
             };
-            if !lookup.texture_exists(resource)? {
+            if !lookup.texture_exists(resource) {
                 return Some(());
             }
             let divisor_x = map.get("divisor_x").and_then(Value::as_f64).unwrap_or(1.0);
@@ -469,7 +477,7 @@ fn apply_source(
                         continue;
                     };
                     if sprite.path == format!("{}{separator}{suffix}", source.path)
-                        && lookup.texture_exists(texture)?
+                        && lookup.texture_exists(texture)
                     {
                         *candidate = Some(Recipe::Paletted {
                             texture: normalize_identifier(texture),

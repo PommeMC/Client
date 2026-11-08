@@ -266,6 +266,16 @@ impl ResourceContent {
         &self.id
     }
 
+    /// Empty content under `id`, for tests that only need a handle.
+    #[cfg(test)]
+    pub(crate) fn test(id: ResourceId) -> Self {
+        Self::from_supplier(
+            id,
+            ResourceOrigin::test("test"),
+            std::sync::Arc::new(|| Ok(Box::new(std::io::empty()) as ReadStream)),
+        )
+    }
+
     pub(crate) fn origin(&self) -> &ResourceOrigin {
         &self.origin
     }

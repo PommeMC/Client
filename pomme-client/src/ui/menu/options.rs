@@ -76,7 +76,7 @@ fn selected_resource_packs<'a>(
     selected_ids
         .iter()
         .filter_map(get_pack)
-        .filter(|pack| !pack.enablement_config().required)
+        .filter(|pack| !pack.enablement_config().required || is_server(pack.id()))
         .map(|pack| ResourcePackRow::new(pack, true, is_server(pack.id())))
         .collect()
 }
@@ -221,6 +221,13 @@ fn chat_delay_from_slider(slider: f32) -> f32 {
 }
 
 impl MainMenu {
+    /// Selects or deselects a pack as a click on its row does; the game or
+    /// menu loop applies it on its next frame.
+    pub(crate) fn toggle_resource_pack(&mut self, id: PackId, enable: bool) {
+        self.pack_toggle = Some((id, enable));
+        self.reload_assets = true;
+    }
+
     pub(super) fn build_options(
         &mut self,
         sw: f32,
@@ -1967,8 +1974,7 @@ impl MainMenu {
                 true,
             ) && clicked
             {
-                self.pack_toggle = Some((pack.id.clone(), true));
-                self.reload_assets = true;
+                self.toggle_resource_pack(pack.id.clone(), true);
             }
         }
 
@@ -2000,8 +2006,7 @@ impl MainMenu {
                 !is_server,
             ) && clicked
             {
-                self.pack_toggle = Some((pack.id.clone(), false));
-                self.reload_assets = true;
+                self.toggle_resource_pack(pack.id.clone(), false);
             }
         }
 

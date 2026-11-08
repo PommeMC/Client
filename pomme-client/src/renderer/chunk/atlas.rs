@@ -694,18 +694,7 @@ pub(crate) struct AtlasCpu {
 }
 
 impl TextureAtlas {
-    pub fn build(
-        device: &rhi::backend::Device,
-        resources: &dyn ResourceManager,
-        texture_names: &HashSet<&str>,
-        generated_item_textures: &HashSet<&str>,
-    ) -> Result<Self, String> {
-        let inputs = AtlasInputs::prepare(resources).map_err(|error| error.to_string())?;
-        let cpu = Self::build_cpu(&inputs, texture_names, generated_item_textures, None);
-        Self::upload(device, cpu)
-    }
-
-    /// The GPU half of [`Self::build`], from [`Self::build_cpu`]'s output.
+    /// Uploads [`Self::build_cpu`]'s output.
     pub fn upload(device: &rhi::backend::Device, cpu: AtlasCpu) -> Result<Self, String> {
         let AtlasCpu {
             uv_map,

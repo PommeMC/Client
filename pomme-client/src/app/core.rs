@@ -352,7 +352,6 @@ fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn play_entity_sound(
     audio: &mut crate::audio::AudioEngine,
-    resources: &dyn ResourceManager,
     game: &mut GameState,
     entity_id: i32,
     sound: &crate::audio::SoundRef,
@@ -368,7 +367,6 @@ pub(super) fn play_entity_sound(
         .then_some(game.player.position)
         .or_else(|| game.entity_positions.get(&entity_id).copied())?;
     audio.play_entity_sound(
-        resources,
         sound,
         category,
         crate::audio::EntitySoundTarget { id: entity_id, pos },
@@ -382,18 +380,13 @@ pub(super) fn play_entity_sound(
 /// pistons' pushes alike, where it stands: vanilla `LocalPlayer.playSound`,
 /// which plays them locally while the server sends them only to other
 /// players.
-pub(crate) fn play_movement_sounds(
-    audio: &crate::audio::AudioEngine,
-    resources: &dyn ResourceManager,
-    game: &mut GameState,
-) {
+pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut GameState) {
     let silent = game.silent_entities.contains(&game.player.entity_id);
     for queued in std::mem::take(&mut game.player.movement_sounds.pending) {
         if queued.unless_silent && silent {
             continue;
         }
         audio.play_world_sound(
-            resources,
             &crate::audio::SoundRef::event(queued.event),
             crate::audio::CATEGORY_PLAYERS,
             game.player.position,
@@ -408,7 +401,6 @@ pub(crate) fn play_movement_sounds(
 /// particles.
 fn block_break_effect(
     audio: &crate::audio::AudioEngine,
-    resources: &dyn ResourceManager,
     game: &mut GameState,
     pos: crate::position::BlockPos,
     state: azalea_block::BlockState,
@@ -417,7 +409,6 @@ fn block_break_effect(
     if !block_state_data.is_air() {
         crate::player::interaction::play_break_sound_for_id(
             audio,
-            resources,
             game.block_registry.block_state_table(),
             block_state_data.id(),
             pos,
@@ -1281,8 +1272,10 @@ impl AppCore {
     }
 
     fn set_resource_theme(&self, theme: PanoramaTheme) {
-        self.builtin_resources
-            .set_bedrock_ui(self.data_dirs.bedrock_ui_dir());
+        self.builtin_resources.set_bedrock_ui(
+            self.data_dirs.bedrock_ui_dir(),
+            crate::renderer::pipelines::menu_overlay::bedrock_ui_aliases(),
+        );
         self.builtin_resources.set_theme(match theme {
             PanoramaTheme::Java => None,
             PanoramaTheme::Pomme => Some(ThemeSpecification::Pomme {
@@ -1300,36 +1293,24 @@ impl AppCore {
     }
 
     pub(crate) fn update_menu_music(&mut self, dt: f32) {
-        self.audio.update_menu_music(&self.resources, dt);
+        self.audio.update_menu_music(dt);
     }
 
-    pub(crate) fn reload_resource_theme(
-        &mut self,
-        theme: PanoramaTheme,
-        renderer: &mut Renderer,
-    ) -> std::io::Result<()> {
+    pub(crate) fn reload_resource_theme(&mut self, theme: PanoramaTheme, renderer: &mut Renderer) {
         self.set_resource_theme(theme);
-        let prepared = match self.activate_resource_selection(None, Renderer::prepare_resources) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.set_resource_theme(self.menu.theme());
-                return Err(error);
-            }
-        };
-        self.reload_pack_assets(renderer, prepared)
+        self.reload_resources();
+        renderer.reload_theme_assets(&self.resources);
+        self.complete_resource_selection();
     }
 
-    /// Bootstrap only: no live Renderer or world exists yet. Its new menu
-    /// overlay will construct fonts fallibly from this view.
+    /// Activates the selection with nothing to prepare.
     fn reload_resources(&mut self) {
-        if let Err(error) = self.activate_resource_selection(None, |_| Ok(())) {
-            unreachable!("bootstrap activation has no preparation to fail: {error}");
-        }
+        self.activate_resource_selection(None, |_| Ok(()))
+            .expect("activation with nothing to prepare can't fail");
     }
 
     /// Catalog/source changes are not rolled back. Manager preparation retains
-    /// its old view on failure; a later renderer failure cannot undo
-    /// activation.
+    /// its old view on failure.
     fn activate_resource_selection<T>(
         &mut self,
         toggle: Option<(PackId, bool)>,
@@ -1340,7 +1321,7 @@ impl AppCore {
             .set_enabled(&self.active_resource_ids);
         if let Some((id, enable)) = toggle {
             if enable {
-                self.resource_repository.enable_pack(&id);
+                self.resource_repository.select_pack(&id);
             } else {
                 self.resource_repository.disable_pack(&id);
             }
@@ -1351,6 +1332,7 @@ impl AppCore {
         let prepared = self
             .resources
             .reload_with_preparation(opened, prepare, |resources| {
+                crate::lang::load(resources);
                 menu.load_splashes(resources);
                 audio.reload_assets(resources);
             })?;
@@ -1358,10 +1340,15 @@ impl AppCore {
         self.asset_head_skins_stale = true;
         self.head_skins_dirty = true;
         self.active_resource_ids = self.resource_repository.enabled_ids().to_vec();
+        // Server packs are required like vanilla's, but still not the stock
+        // assets the block cache was built from.
+        let server_ids = &self.server_resource_ids;
         self.active_custom_resource_ids = self
             .resource_repository
             .enabled_packs()
-            .filter(|pack| !pack.enablement_config().required)
+            .filter(|pack| {
+                !pack.enablement_config().required || server_ids.values().any(|id| id == pack.id())
+            })
             .map(|pack| pack.id().clone())
             .collect();
         Ok(prepared)
@@ -1424,6 +1411,7 @@ impl AppCore {
             Some(game) => self.reload_live_resource_assets(game, renderer, prepared),
             None => self.reload_pack_assets(renderer, prepared),
         }
+        Ok(())
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -2023,13 +2011,13 @@ impl AppCore {
         game: &mut GameState,
         renderer: &mut Renderer,
         prepared: crate::renderer::PreparedResources,
-    ) -> std::io::Result<()> {
+    ) {
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
         // CPU mesher and particle atlas state from the same freshly-reloaded
         // registry/UV map, then let the normal rescan rebuild loaded columns.
         renderer.clear_chunk_meshes();
-        self.reload_pack_assets(renderer, prepared)?;
+        self.reload_pack_assets(renderer, prepared);
         game.block_registry
             .replace_render_assets(renderer.shared_render_assets());
 
@@ -2050,7 +2038,6 @@ impl AppCore {
         );
 
         game.rebuild_meshes();
-        Ok(())
     }
 
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
@@ -2074,17 +2061,13 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        if let Err(error) = self
-            .remove_server_resource_packs(None, Renderer::prepare_resources)
-            .and_then(|prepared| {
-                if let Some(prepared) = prepared {
-                    renderer.clear_chunk_meshes();
-                    self.reload_pack_assets(renderer, prepared)?;
-                }
-                Ok(())
-            })
-        {
-            tracing::warn!(%error, "Failed to clear server resource assets");
+        match self.remove_server_resource_packs(None, Renderer::prepare_resources) {
+            Ok(Some(prepared)) => {
+                renderer.clear_chunk_meshes();
+                self.reload_pack_assets(renderer, prepared);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Failed to clear server resource assets"),
         }
     }
 
@@ -2113,7 +2096,6 @@ impl AppCore {
             })
             .collect();
         match self.activate_resource_selection(None, prepare) {
-            // Activation commits removals; later consumer errors must retain them.
             Ok(prepared) => Ok(Some(prepared)),
             Err(error) => {
                 // Positions were captured as each definition was removed.
@@ -2146,10 +2128,12 @@ impl AppCore {
                 known_pack_info: None,
             },
             PhysicalPack::Directory(path),
+            // Vanilla `DownloadedPackSource.DOWNLOADED_PACK_SELECTION`: pinned
+            // above the player's packs, so one enabled later can't cover it.
             PackEnablementConfig {
-                required: false,
+                required: true,
                 default_position: PackPosition::Top,
-                fixed_position: false,
+                fixed_position: true,
             },
         );
         let previous_id = self.server_resource_ids.insert(uuid, id.clone());
@@ -2173,7 +2157,6 @@ impl AppCore {
                 return Err(error);
             }
         };
-        // The candidate is active now; consumer refresh errors must retain it.
         Ok(prepared)
     }
 
@@ -2204,15 +2187,14 @@ impl AppCore {
         &mut self,
         renderer: &mut Renderer,
         prepared: crate::renderer::PreparedResources,
-    ) -> std::io::Result<()> {
-        renderer.reload_assets(self.font_sources(), prepared)?;
+    ) {
+        renderer.reload_assets(self.font_sources(), prepared);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.asset_reload_revision = self.asset_reload_revision.wrapping_add(1);
         self.complete_resource_selection();
-        Ok(())
     }
 
     /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
@@ -2987,7 +2969,7 @@ impl AppCore {
                             action_parameter,
                         );
                         for (pos, state) in std::mem::take(&mut level.destroyed) {
-                            block_break_effect(&self.audio, &self.resources, game, pos, state);
+                            block_break_effect(&self.audio, game, pos, state);
                         }
                     } else if action_id == 1 {
                         // Chest/shulker: the open-viewer count.
@@ -3002,15 +2984,8 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
-                    self.audio.play_world_sound(
-                        &self.resources,
-                        &sound,
-                        category,
-                        pos,
-                        volume,
-                        pitch,
-                        seed,
-                    );
+                    self.audio
+                        .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }
                 NetworkEvent::PlayEntitySound {
                     sound,
@@ -3022,7 +2997,6 @@ impl AppCore {
                 } => {
                     play_entity_sound(
                         &mut self.audio,
-                        &self.resources,
                         game,
                         entity_id,
                         &sound,
@@ -3300,7 +3274,7 @@ impl AppCore {
                     if event_type == 2001
                         && let Some(state) = game.block_registry.block_state_table().try_state(data)
                     {
-                        block_break_effect(&self.audio, &self.resources, game, pos, state);
+                        block_break_effect(&self.audio, game, pos, state);
                     }
                 }
                 NetworkEvent::LevelParticles {
@@ -3427,7 +3401,6 @@ impl AppCore {
                     if id == game.player.entity_id {
                         game.interaction.complete_using(
                             &self.audio,
-                            &self.resources,
                             &mut game.particle_store,
                             game.player.position.into(),
                             game.player.eye_pos().into(),
@@ -3445,7 +3418,7 @@ impl AppCore {
                     game.entity_store.start_rabbit_jump(id);
                 }
                 NetworkEvent::SnifferDigging { id } => {
-                    super::sniffer::start_digging_sound(&mut self.audio, &self.resources, game, id);
+                    super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
@@ -3463,7 +3436,6 @@ impl AppCore {
                 NetworkEvent::ArmadilloPeek { id } => {
                     if let Some(pos) = game.entity_store.armadillo_peek(id) {
                         self.audio.play_world_sound(
-                            &self.resources,
                             &crate::audio::SoundRef::event("entity.armadillo.peek"),
                             crate::audio::CATEGORY_NEUTRAL,
                             pos,
@@ -3509,7 +3481,6 @@ impl AppCore {
                     if id == game.player.entity_id {
                         let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
                         self.audio.play_world_sound(
-                            &self.resources,
                             &crate::audio::SoundRef::event("entity.player.death"),
                             crate::audio::CATEGORY_PLAYERS,
                             game.player.position,
@@ -3542,7 +3513,6 @@ impl AppCore {
                     {
                         // Vanilla plays this client-side in handleTakeItemEntity.
                         self.audio.play_world_sound(
-                            &self.resources,
                             &crate::audio::SoundRef::event("entity.item.pickup"),
                             crate::audio::CATEGORY_PLAYERS,
                             item_pos,
@@ -3664,16 +3634,14 @@ impl AppCore {
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
-                    if let Err(error) = self
-                        .remove_server_resource_packs(id, Renderer::prepare_resources)
-                        .and_then(|prepared| match prepared {
-                            Some(prepared) => {
-                                self.reload_live_resource_assets(game, renderer, prepared)
-                            }
-                            None => Ok(()),
-                        })
-                    {
-                        tracing::warn!(%error, "Failed to pop server resource assets");
+                    match self.remove_server_resource_packs(id, Renderer::prepare_resources) {
+                        Ok(Some(prepared)) => {
+                            self.reload_live_resource_assets(game, renderer, prepared);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "Failed to pop server resource assets");
+                        }
                     }
                 }
                 NetworkEvent::Reconfiguring => {
@@ -3759,15 +3727,18 @@ impl AppCore {
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
-                    let reload = match self.activate_server_resource_pack(
-                        pending.id,
-                        &pending.hash,
-                        path,
-                        Renderer::prepare_resources,
-                    ) {
-                        Ok(prepared) => self.reload_live_resource_assets(game, renderer, prepared),
-                        Err(error) => Err(error),
-                    };
+                    // A failed preflight leaves the pack unregistered and the
+                    // old view active, as vanilla's `onFailure` drops it.
+                    let reload = self
+                        .activate_server_resource_pack(
+                            pending.id,
+                            &pending.hash,
+                            path,
+                            Renderer::prepare_resources,
+                        )
+                        .map(|prepared| {
+                            self.reload_live_resource_assets(game, renderer, prepared);
+                        });
                     match reload {
                         Ok(()) => {
                             tracing::info!("Resource pack {} loaded successfully", pending.id);
@@ -3910,13 +3881,8 @@ impl AppCore {
             self.tick_remote_entities(game);
         }
         game.position_remote_riders();
-        super::sniffer::tick(
-            &mut self.audio,
-            &self.resources,
-            game,
-            renderer.camera_render_position(),
-        );
-        super::copper_golem::tick(&self.audio, &self.resources, game);
+        super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
+        super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
     }
 
@@ -4016,7 +3982,6 @@ impl AppCore {
                 hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
                 &self.audio,
-                &self.resources,
                 game.player.position.into(),
                 game.player.eye_pos().into(),
                 game.player.look_dir,
@@ -4244,7 +4209,6 @@ impl AppCore {
             &game.chunk_store,
             &connection.packet_tx,
             &self.audio,
-            &self.resources,
             game.player.position.into(),
             player_aabb,
             game.player.eye_pos().into(),
@@ -4264,7 +4228,6 @@ impl AppCore {
             hand_stacks,
             &connection.packet_tx,
             &self.audio,
-            &self.resources,
             game.player.position.into(),
             game.player.eye_pos().into(),
             game.player.look_dir,

@@ -56,7 +56,6 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
                     game,
                     connection,
                     &core.audio,
-                    core.resources(),
                     vec![click.operation()],
                 );
                 Ok(Value::Null)
@@ -85,7 +84,11 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             })
         }
         Command::Bind(bind) => bind_keys(core, bind),
-        Command::Option(options) => set_options(core, options),
+        Command::Option(options) => set_options(core, options).inspect(|_| {
+            if options.resource_pack.is_some() {
+                crate::ui::menu::apply_resource_pack_options(core, &mut gfx.renderer, Some(game));
+            }
+        }),
         Command::HoldPackets { hold } => {
             game.hold_packets = *hold;
             Ok(Value::Null)
@@ -262,6 +265,20 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     }
     if let Some(chunks) = options.distant_terrain {
         core.menu.set_distant_terrain(chunks);
+    }
+    if let Some(pack) = &options.resource_pack {
+        let (name, enable) = match pack.strip_prefix('-') {
+            Some(name) => (name, false),
+            None => (pack.as_str(), true),
+        };
+        let location = format!("file/{name}");
+        let id = core
+            .resource_catalog()
+            .available_packs()
+            .find(|pack| pack.location().id == location)
+            .map(|pack| pack.id().clone())
+            .ok_or_else(|| format!("no resource pack {name} in resourcepacks/"))?;
+        core.menu.toggle_resource_pack(id, enable);
     }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)

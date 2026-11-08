@@ -1,24 +1,46 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The pack's extracted directory under `cache_dir`, keyed by its content's
+/// SHA-1 so a server's hash never names a path. As in vanilla's
+/// `DownloadedPackSource.tryParseSha1Hash`, a hash that isn't 40 hex digits
+/// counts as none.
 pub(crate) fn download_server_pack(
     cache_dir: &Path,
     url: &str,
     hash: &str,
 ) -> Result<PathBuf, PackDownloadError> {
-    let dir = cache_dir.join(hash);
+    let hash = parse_sha1(hash);
+    if let Some(hash) = &hash {
+        let dir = cache_dir.join(hash);
+        if dir.is_dir() {
+            return Ok(dir);
+        }
+    }
+    let data = crate::net::http::blocking_builder()
+        .build()
+        .and_then(|client| client.get(url).send())
+        .map_err(|e| PackDownloadError::Download(e.to_string()))?
+        .bytes()
+        .map_err(|e| PackDownloadError::Download(e.to_string()))?;
+    tracing::info!("Downloaded {} bytes", data.len());
+    let actual = sha1_smol::Sha1::from(&data).digest().to_string();
+    if let Some(expected) = &hash
+        && actual != *expected
+    {
+        tracing::error!("Hash mismatch: expected {expected}, got {actual}");
+        return Err(PackDownloadError::HashMismatch);
+    }
+    let dir = cache_dir.join(&actual);
     if !dir.is_dir() {
-        let data = crate::net::http::blocking_builder()
-            .build()
-            .and_then(|client| client.get(url).send())
-            .map_err(|e| PackDownloadError::Download(e.to_string()))?
-            .bytes()
-            .map_err(|e| PackDownloadError::Download(e.to_string()))?;
-        tracing::info!("Downloaded {} bytes", data.len());
-        validate_hash(&data, hash)?;
         extract_zip(&data, &dir).map_err(|e| PackDownloadError::Extract(e.to_string()))?;
     }
     Ok(dir)
+}
+
+fn parse_sha1(hash: &str) -> Option<String> {
+    (hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| hash.to_ascii_lowercase())
 }
 
 #[derive(Debug)]
@@ -39,18 +61,6 @@ impl std::fmt::Display for PackDownloadError {
 }
 
 impl std::error::Error for PackDownloadError {}
-
-fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackDownloadError> {
-    if expected.is_empty() {
-        return Ok(());
-    }
-    let actual = sha1_smol::Sha1::from(data).digest().to_string();
-    if actual != expected {
-        tracing::error!("Hash mismatch: expected {expected}, got {actual}");
-        return Err(PackDownloadError::HashMismatch);
-    }
-    Ok(())
-}
 
 pub(crate) fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest)?;
@@ -74,4 +84,25 @@ pub(crate) fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
     }
     tracing::info!("Extracted resource pack to {}", dest.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_sha1;
+
+    #[test]
+    fn only_a_sha1_hash_is_used() {
+        let upper = "0123456789ABCDEF0123456789abcdef01234567";
+        assert_eq!(parse_sha1(upper), Some(upper.to_ascii_lowercase()));
+        for bad in [
+            "",
+            "..",
+            "../../etc",
+            "0123",
+            &format!("{upper}0"),
+            &upper.replace('A', "/"),
+        ] {
+            assert_eq!(parse_sha1(bad), None, "{bad}");
+        }
+    }
 }

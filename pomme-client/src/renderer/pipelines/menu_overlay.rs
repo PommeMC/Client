@@ -1654,7 +1654,6 @@ impl MenuOverlayPipeline {
             sampler: rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST),
         };
 
-        crate::lang::load(resources);
         let (mc_font, mc_font_color) = create_font_textures(device, atlases.glyphs.as_ref())?;
 
         let favicon = TextureResources {
@@ -1973,6 +1972,17 @@ impl MenuOverlayPipeline {
         let (atlas, sprites) = build_sprite_atlas(resources, pomme_logo.as_ref());
         self.publish_sprite_atlas(device, atlas, sprites);
         self.pomme_logo = pomme_logo;
+    }
+
+    /// Rebuilds the sprite atlas alone, keeping the current logo, for sprites
+    /// whose files a theme switch brought in.
+    pub(crate) fn reload_sprite_atlas(
+        &mut self,
+        resources: &dyn ResourceManager,
+        device: &rhi::backend::Device,
+    ) {
+        let (atlas, sprites) = build_sprite_atlas(resources, self.pomme_logo.as_ref());
+        self.publish_sprite_atlas(device, atlas, sprites);
     }
 
     fn publish_sprite_atlas(
@@ -2785,11 +2795,36 @@ const BEDROCK_SPRITES: [(SpriteId, &str); 17] = [
     (SpriteId::BedrockRadioOffHover, "radio_off_hover"),
 ];
 
+/// A Bedrock UI file's id: its name lowercased, since Bedrock's capitals
+/// (`Black.png`) aren't valid in an id.
+fn bedrock_ui_id(stem: &str, extension: &str) -> ResourceId {
+    ResourceId::from_parts(
+        "bedrock",
+        &format!("{}.{extension}", stem.to_ascii_lowercase()),
+    )
+    .expect("Bedrock sprite stems are valid once lowercased")
+}
+
+/// Aliases from each sprite's lowercase id to its file, and the `.json` with
+/// its nine-slice beside it, for the Bedrock UI mount.
+pub(crate) fn bedrock_ui_aliases() -> std::collections::BTreeMap<ResourceId, std::path::PathBuf> {
+    BEDROCK_SPRITES
+        .iter()
+        .flat_map(|(_, stem)| {
+            ["png", "json"].map(|extension| {
+                (
+                    bedrock_ui_id(stem, extension),
+                    std::path::PathBuf::from(format!("{stem}.{extension}")),
+                )
+            })
+        })
+        .collect()
+}
+
 /// The `nineslice_size` from the `.json` Bedrock keeps beside a texture, in
 /// texels. Only the single-number form is read; anything else is unsliced.
 fn bedrock_nine_slice(resources: &dyn ResourceManager, stem: &str) -> f32 {
-    let id = ResourceId::from_parts("bedrock", &format!("{stem}.json"))
-        .expect("valid Bedrock sprite resource ID");
+    let id = bedrock_ui_id(stem, "json");
     crate::assets::resource_content(resources, &id)
         .ok()
         .and_then(|content| content.open().ok())
@@ -4294,8 +4329,7 @@ fn build_sprite_atlas(
             Err(e) => tracing::debug!("No Bedrock title yet: {e}"),
         }
         for (id, stem) in BEDROCK_SPRITES {
-            let resource_id = ResourceId::from_parts("bedrock", &format!("{stem}.png"))
-                .expect("valid Bedrock sprite resource ID");
+            let resource_id = bedrock_ui_id(stem, "png");
             match load_resource_image(resources, &resource_id) {
                 Ok(img) => {
                     let rgba = img.to_rgba8();

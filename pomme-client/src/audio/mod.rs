@@ -13,7 +13,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use self::decoder::{StreamDecoder, decode_all};
 use self::openal::{Buffer, Context, Source, SourceState};
-use self::sounds::{SoundVariant, SoundsIndex};
+use self::sounds::SoundsIndex;
 use crate::entity::components::Position;
 use crate::resources::{ResourceContent, ResourceId, ResourceManager};
 
@@ -366,20 +366,14 @@ impl AudioEngine {
         )
     }
 
-    pub fn play_ui_click(&self, resources: &dyn ResourceManager) {
-        self.play_ui_sound(resources, UI_CLICK_EVENT, UI_CLICK_VOLUME, 1.0);
+    pub fn play_ui_click(&self) {
+        self.play_ui_sound(UI_CLICK_EVENT, UI_CLICK_VOLUME, 1.0);
     }
 
     /// Plays a non-positional UI sound using Vanilla's relative, no-attenuation
     /// `SimpleSoundInstance.forUI` semantics.
-    pub fn play_ui_sound(
-        &self,
-        resources: &dyn ResourceManager,
-        event: &str,
-        volume: f32,
-        pitch: f32,
-    ) {
-        let Some(sound) = self.resolve_event(resources, event, None) else {
+    pub fn play_ui_sound(&self, event: &str, volume: f32, pitch: f32) {
+        let Some(sound) = self.resolve_event(event, None) else {
             return;
         };
         #[cfg(feature = "test-harness")]
@@ -407,7 +401,6 @@ impl AudioEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn play_world_sound(
         &self,
-        resources: &dyn ResourceManager,
         sound_ref: &SoundRef,
         category: u8,
         pos: Position,
@@ -415,16 +408,13 @@ impl AudioEngine {
         pitch: f32,
         seed: u64,
     ) {
-        self.play_positioned_sound(
-            resources, sound_ref, category, pos, volume, pitch, seed, None,
-        );
+        self.play_positioned_sound(sound_ref, category, pos, volume, pitch, seed, None);
     }
 
     /// Returns the playing instance's id, for [`Self::stop`].
     #[allow(clippy::too_many_arguments)]
     pub fn play_entity_sound(
         &mut self,
-        resources: &dyn ResourceManager,
         sound_ref: &SoundRef,
         category: u8,
         target: EntitySoundTarget,
@@ -434,7 +424,6 @@ impl AudioEngine {
     ) -> Option<u64> {
         // Only a dispatched sound gets an end report to balance the count.
         let id = self.play_positioned_sound(
-            resources,
             sound_ref,
             category,
             target.pos,
@@ -451,7 +440,6 @@ impl AudioEngine {
     #[allow(clippy::too_many_arguments)]
     fn play_positioned_sound(
         &self,
-        resources: &dyn ResourceManager,
         sound_ref: &SoundRef,
         category: u8,
         pos: Position,
@@ -460,7 +448,7 @@ impl AudioEngine {
         seed: u64,
         entity_id: Option<i32>,
     ) -> Option<u64> {
-        let sound = self.resolve_sound(resources, sound_ref, Some(seed))?;
+        let sound = self.resolve_sound(sound_ref, Some(seed))?;
         let instance_volume = volume * sound.entry_volume;
         #[cfg(feature = "test-harness")]
         self.record(sound_ref.event_name());
@@ -604,7 +592,7 @@ impl AudioEngine {
         }
     }
 
-    pub fn update_menu_music(&mut self, resources: &dyn ResourceManager, dt: f32) {
+    pub fn update_menu_music(&mut self, dt: f32) {
         self.poll_events();
         if self.command_tx.is_none() || !self.menu_music_active {
             return;
@@ -616,14 +604,14 @@ impl AudioEngine {
             if self.music_id.is_none() {
                 self.next_song_delay_ticks -= 1;
                 if self.next_song_delay_ticks <= 0 {
-                    self.play_menu_track(resources);
+                    self.play_menu_track();
                 }
             }
         }
     }
 
-    fn play_menu_track(&mut self, resources: &dyn ResourceManager) {
-        let Some(sound) = self.resolve_event(resources, MENU_MUSIC_EVENT, None) else {
+    fn play_menu_track(&mut self) {
+        let Some(sound) = self.resolve_event(MENU_MUSIC_EVENT, None) else {
             self.next_song_delay_ticks = MENU_MUSIC_MIN_DELAY_TICKS;
             return;
         };
@@ -647,45 +635,15 @@ impl AudioEngine {
         self.next_song_delay_ticks = i32::MAX;
     }
 
-    fn resolve_sound(
-        &self,
-        resources: &dyn ResourceManager,
-        sound: &SoundRef,
-        seed: Option<u64>,
-    ) -> Option<ResolvedSound> {
-        self.resolve_event(resources, sound.event_name(), seed)
+    fn resolve_sound(&self, sound: &SoundRef, seed: Option<u64>) -> Option<ResolvedSound> {
+        self.resolve_event(sound.event_name(), seed)
     }
 
-    fn resolve_event(
-        &self,
-        resources: &dyn ResourceManager,
-        event: &str,
-        seed: Option<u64>,
-    ) -> Option<ResolvedSound> {
+    fn resolve_event(&self, event: &str, seed: Option<u64>) -> Option<ResolvedSound> {
         let variant = self.sounds.choose(event, seed)?;
-        self.resolve_variant(resources, event, variant)
-    }
-
-    fn resolve_variant(
-        &self,
-        resources: &dyn ResourceManager,
-        event: &str,
-        variant: SoundVariant,
-    ) -> Option<ResolvedSound> {
-        let resource = match resources.get_resource(&variant.location) {
-            Ok(Some(resource)) => resource,
-            Ok(None) => {
-                tracing::warn!("missing sound resource {}", variant.location);
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!("failed to look up sound {}: {error}", variant.location);
-                return None;
-            }
-        };
         Some(ResolvedSound {
             sound_id: canonical_sound_id(event),
-            content: resource.content().clone(),
+            content: variant.content,
             entry_volume: variant.volume,
             entry_pitch: variant.pitch,
             stream: variant.stream,
@@ -1360,18 +1318,9 @@ mod tests {
     fn stop_all_leaves_no_entity_counted() {
         let (mut engine, events, commands) = AudioEngine::for_test();
         engine.sounds = SoundsIndex::for_test_event("entity.test");
-        let mut repository = crate::resources::packs::PackRepository::new(vec![Box::new(
-            crate::resources::packs::BuiltinRepositorySource::new(None),
-        )]);
-        repository.reload();
-        let mut resources = crate::resources::managers::ReloadableResourceManager::new(
-            crate::resources::pack_resources::PackType::ClientResources,
-        );
-        resources.reload(repository.open_all_enabled(), |_| {});
 
         for _ in 0..3 {
             engine.play_entity_sound(
-                &resources,
                 &SoundRef::event("entity.test"),
                 CATEGORY_PLAYERS,
                 EntitySoundTarget {

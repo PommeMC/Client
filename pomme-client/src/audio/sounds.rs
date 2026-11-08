@@ -9,10 +9,10 @@ const DEFAULT_ATTENUATION_DISTANCE: i32 = 16;
 
 /// A single playable file variant from `sounds.json` after resolving any
 /// `type: "event"` indirection.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct SoundVariant {
-    /// Logical file location in the active resource view.
-    pub location: ResourceId,
+    /// Selected when the index loads, so playing it needs no lookup.
+    pub content: ResourceContent,
     pub weight: u32,
     /// Per-entry volume multiplier (defaults to 1.0 when unspecified).
     pub volume: f32,
@@ -24,7 +24,7 @@ pub struct SoundVariant {
     pub attenuation_distance: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum SoundEntry {
     File(SoundVariant),
     Event {
@@ -58,12 +58,21 @@ impl SoundsIndex {
             events: HashMap::new(),
         };
 
+        // Vanilla `SoundManager.validateSoundResource`: a missing file drops
+        // only itself from its event.
         let resolve_sound = |name: &str| {
             let location = sound_location(name)?;
-            resources
-                .get_resource(&location)
-                .map(|resource| resource.map(|_| location.clone()))
-                .map_err(|error| format!("failed to look up {location}: {error}"))
+            Ok(match resources.get_resource(&location) {
+                Ok(Some(resource)) => Some(resource.content().clone()),
+                Ok(None) => {
+                    tracing::warn!("File {location} does not exist, cannot add it to its event");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to look up sound {location}: {error}");
+                    None
+                }
+            })
         };
 
         let mut namespaces: Vec<_> = match resources.get_namespaces() {
@@ -110,7 +119,7 @@ impl SoundsIndex {
     #[cfg(test)]
     pub fn for_test_event(event: &str) -> Self {
         let variant = SoundVariant {
-            location: crate::resources::pack_resources::POMME_ICON,
+            content: ResourceContent::test(crate::resources::pack_resources::POMME_ICON),
             weight: 1,
             volume: 1.0,
             pitch: 1.0,
@@ -141,7 +150,7 @@ impl SoundsIndex {
         &mut self,
         namespace: &str,
         content: &ResourceContent,
-        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceId>, String>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) {
         let stream = match content.open() {
             Ok(stream) => stream,
@@ -174,7 +183,7 @@ impl SoundsIndex {
         &mut self,
         namespace: &str,
         json: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceId>, String>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<(), String> {
         let registrations = self.parse_value(namespace, json, resolve_sound)?;
         for (event_name, replace, event) in registrations {
@@ -193,7 +202,7 @@ impl SoundsIndex {
         &self,
         namespace: &str,
         json: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceId>, String>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<Vec<(String, bool, SoundEvent)>, String> {
         let obj = json
             .as_object()
@@ -248,16 +257,16 @@ impl SoundsIndex {
     fn parse_entry(
         &self,
         entry: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceId>, String>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<Option<SoundEntry>, String> {
         match entry {
             serde_json::Value::String(name) => {
                 validate_sound_name(name)?;
-                let Some(location) = resolve_sound(name)? else {
+                let Some(content) = resolve_sound(name)? else {
                     return Ok(None);
                 };
                 Ok(Some(SoundEntry::File(SoundVariant {
-                    location,
+                    content,
                     weight: 1,
                     volume: 1.0,
                     pitch: 1.0,
@@ -302,11 +311,11 @@ impl SoundsIndex {
                         stream,
                     })),
                     "file" => {
-                        let Some(location) = resolve_sound(name)? else {
+                        let Some(content) = resolve_sound(name)? else {
                             return Ok(None);
                         };
                         Ok(Some(SoundEntry::File(SoundVariant {
-                            location,
+                            content,
                             weight: weight as u32,
                             volume,
                             pitch,
@@ -517,7 +526,7 @@ mod tests {
 
     fn file(name: &str, weight: u32) -> SoundEntry {
         SoundEntry::File(SoundVariant {
-            location: ResourceId::new(name).unwrap(),
+            content: ResourceContent::test(ResourceId::new(name).unwrap()),
             weight,
             volume: 1.0,
             pitch: 1.0,
@@ -526,8 +535,9 @@ mod tests {
         })
     }
 
-    fn resolve_test_sound(name: &str) -> Result<Option<ResourceId>, String> {
-        Ok((!name.starts_with("missing")).then(|| ResourceId::new(name).unwrap()))
+    fn resolve_test_sound(name: &str) -> Result<Option<ResourceContent>, String> {
+        Ok((!name.starts_with("missing"))
+            .then(|| ResourceContent::test(ResourceId::new(name).unwrap())))
     }
 
     #[test]
@@ -618,7 +628,7 @@ mod tests {
         let event = index.events.get("test").unwrap();
         assert_eq!(event.entries.len(), 1);
         assert_eq!(
-            index.choose("test", Some(0)).unwrap().location,
+            index.choose("test", Some(0)).unwrap().content.id().clone(),
             ResourceId::new("present/file").unwrap()
         );
     }
@@ -716,7 +726,7 @@ mod tests {
         // LegacyRandomSource(1) draws 1 then 0 for nextInt(2). The first draw
         // selects the only redirect; the nested draw therefore selects `first`.
         let resolved = index.choose("parent", Some(1)).unwrap();
-        assert_eq!(resolved.location, ResourceId::new("first").unwrap());
+        assert_eq!(*resolved.content.id(), ResourceId::new("first").unwrap());
         assert_eq!(resolved.volume, 0.5);
         assert_eq!(resolved.pitch, 2.0);
         assert!(resolved.stream);
@@ -743,7 +753,12 @@ mod tests {
             )]),
         };
         assert_eq!(
-            index.choose("parent", Some(0)).unwrap().location,
+            index
+                .choose("parent", Some(0))
+                .unwrap()
+                .content
+                .id()
+                .clone(),
             ResourceId::new("fallback").unwrap()
         );
     }
@@ -779,5 +794,33 @@ mod tests {
             ]),
         };
         assert!(index.choose("a", Some(0)).is_none());
+    }
+
+    /// The highest pack's file is selected, and one no pack has drops only
+    /// itself.
+    #[test]
+    fn load_selects_files_and_skips_only_missing_ones() {
+        use crate::resources::test_dir::TempDir;
+        let [base, pack] = [(); 2].map(|()| TempDir::new().unwrap());
+        for (dir, bytes) in [(&base, b"base"), (&pack, b"pack")] {
+            let sounds = dir.0.join("assets/minecraft/sounds");
+            std::fs::create_dir_all(&sounds).unwrap();
+            std::fs::write(sounds.join("present.ogg"), bytes).unwrap();
+        }
+        std::fs::write(
+            base.0.join("assets/minecraft/sounds.json"),
+            r#"{"test": {"sounds": ["present", "absent"]}}"#,
+        )
+        .unwrap();
+        let roots = [&base, &pack].map(|dir| dir.0.clone());
+        let index = SoundsIndex::load(&crate::test_util::test_resources(&roots));
+        let chosen = index.choose("test", Some(0)).unwrap();
+        let bytes = chosen.content.read_all().unwrap();
+        assert_eq!(
+            *chosen.content.id(),
+            ResourceId::new("minecraft:sounds/present.ogg").unwrap()
+        );
+        assert_eq!(bytes, b"pack");
+        assert_eq!(index.events["test"].entries.len(), 1);
     }
 }

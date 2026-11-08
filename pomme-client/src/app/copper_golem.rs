@@ -6,11 +6,7 @@ use crate::app::phases::in_game::GameState;
 use crate::audio::{AudioEngine, CATEGORY_NEUTRAL, SoundRef};
 
 /// Runs after the entity tick, which flags each idle head spin.
-pub(super) fn tick(
-    audio: &AudioEngine,
-    resources: &dyn crate::resources::ResourceManager,
-    game: &mut GameState,
-) {
+pub(super) fn tick(audio: &AudioEngine, game: &mut GameState) {
     let spins: Vec<(i32, u32)> = game
         .entity_store
         .living
@@ -31,14 +27,6 @@ pub(super) fn tick(
             2 => "entity.copper_golem_weathered.spin",
             _ => "entity.copper_golem_oxidized.spin",
         });
-        audio.play_world_sound(
-            resources,
-            &sound,
-            CATEGORY_NEUTRAL,
-            pos,
-            1.0,
-            1.0,
-            fastrand::u64(..),
-        );
+        audio.play_world_sound(&sound, CATEGORY_NEUTRAL, pos, 1.0, 1.0, fastrand::u64(..));
     }
 }

@@ -23,6 +23,12 @@ use crate::resources::packs::{
 };
 use crate::resources::{ResourceError, ResourceId};
 
+#[derive(PartialEq, Eq)]
+struct BedrockUi {
+    root: PathBuf,
+    aliases: BTreeMap<ResourceId, PathBuf>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ThemeSpecification {
     Pomme { root: PathBuf },
@@ -92,7 +98,7 @@ struct BuiltinState {
     pomme_id: PackId,
     installation: Option<Installation>,
     theme: Option<(ThemeSpecification, PackId)>,
-    bedrock_ui: Option<(PathBuf, PackId)>,
+    bedrock_ui: Option<(BedrockUi, PackId)>,
     target: Option<PackFormat>,
 }
 
@@ -164,15 +170,17 @@ impl BuiltinRepositorySource {
     }
 
     /// The menu preloads these sprites regardless of the selected panorama.
-    /// A separate namespace keeps Bedrock's title out of Java's asset paths.
-    pub(crate) fn set_bedrock_ui(&self, root: PathBuf) {
+    /// A separate namespace keeps Bedrock's title out of Java's asset paths;
+    /// `aliases` name the files whose capitals no id can spell.
+    pub(crate) fn set_bedrock_ui(&self, root: PathBuf, aliases: BTreeMap<ResourceId, PathBuf>) {
         let mut state = self.state.borrow_mut();
+        let ui = BedrockUi { root, aliases };
         let id = state
             .bedrock_ui
             .as_ref()
-            .filter(|(old, _)| old == &root)
+            .filter(|(old, _)| old == &ui)
             .map_or_else(PackId::allocate, |(_, id)| id.clone());
-        state.bedrock_ui = Some((root, id));
+        state.bedrock_ui = Some((ui, id));
     }
 }
 
@@ -243,10 +251,10 @@ impl RepositorySource for BuiltinRepositorySource {
                 ),
             }
         }
-        if let Some((root, id)) = &state.bedrock_ui
+        if let Some((BedrockUi { root, aliases }, id)) = &state.bedrock_ui
             && root.is_dir()
         {
-            match MappedResourcesSupplier::new(root.clone(), "bedrock".to_owned(), BTreeMap::new())
+            match MappedResourcesSupplier::new(root.clone(), "bedrock".to_owned(), aliases.clone())
             {
                 Ok(resources) => packs.push(Pack::with_id(
                     id.clone(),
@@ -276,16 +284,21 @@ impl RepositorySource for BuiltinRepositorySource {
     }
 }
 
-/// `None` while the theme's assets aren't downloaded; the definition keeps its
+/// `None` until all six of the theme's faces are downloaded, so its panorama
+/// never mixes with the faces of the packs below; the definition keeps its
 /// ID, since later availability isn't a new theme.
 fn load_theme(theme: &ThemeSpecification, id: &PackId) -> io::Result<Option<Pack>> {
     let mount = theme
         .mount()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if !mount.root.is_dir() {
+    if !mount
+        .remappings
+        .values()
+        .all(|face| mount.root.join(face).is_file())
+    {
         return Ok(None);
     }
-    let resources = MappedResourcesSupplier::new(
+    let resources = MappedResourcesSupplier::aliases_only(
         mount.root.to_owned(),
         mount.namespace.to_owned(),
         mount.remappings,
@@ -492,5 +505,22 @@ mod repository_source_tests {
             )
             .unwrap_or_else(|error| panic!("{}: {error}", mount.id));
         }
+    }
+
+    #[test]
+    fn a_theme_loads_only_with_all_six_faces() {
+        let temp = crate::resources::test_dir::TempDir::new().unwrap();
+        let faces = temp.0.join("panoramas");
+        std::fs::create_dir_all(&faces).unwrap();
+        let theme = ThemeSpecification::Pomme {
+            root: temp.0.clone(),
+        };
+        let id = crate::resources::packs::PackId::allocate();
+        for face in 0..5 {
+            std::fs::write(faces.join(format!("panorama_{face}.png")), b"face").unwrap();
+        }
+        assert!(super::load_theme(&theme, &id).unwrap().is_none());
+        std::fs::write(faces.join("panorama_5.png"), b"face").unwrap();
+        assert!(super::load_theme(&theme, &id).unwrap().is_some());
     }
 }
