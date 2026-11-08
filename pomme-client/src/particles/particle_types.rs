@@ -37,6 +37,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) portal: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) enchant: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) reverse_portal: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) bubble_column_up: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) current_down: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -134,6 +136,12 @@ impl ParticleTypes {
         let reverse_portal = registry
             .register(resource_id!("minecraft:reverse_portal"), false)
             .map_err(registration_error)?;
+        let bubble_column_up = registry
+            .register(resource_id!("minecraft:bubble_column_up"), false)
+            .map_err(registration_error)?;
+        let current_down = registry
+            .register(resource_id!("minecraft:current_down"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -165,6 +173,8 @@ impl ParticleTypes {
             portal,
             enchant,
             reverse_portal,
+            bubble_column_up,
+            current_down,
         })
     }
 }

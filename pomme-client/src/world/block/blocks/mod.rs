@@ -1,5 +1,6 @@
 mod beehive_block;
 mod brewing_stand_block;
+mod bubble_column_block;
 mod campfire_block;
 mod candle_block;
 mod crying_obsidian_block;
@@ -19,6 +20,7 @@ mod wither_rose_block;
 
 pub(super) use beehive_block::BeehiveBlock;
 pub(super) use brewing_stand_block::BrewingStandBlock;
+pub(super) use bubble_column_block::BubbleColumnBlock;
 pub(super) use campfire_block::CampfireBlock;
 pub(crate) use campfire_block::tick_campfires;
 pub(super) use candle_block::{CandleBlock, CandleCakeBlock};

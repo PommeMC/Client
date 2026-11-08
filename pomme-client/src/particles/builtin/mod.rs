@@ -5,6 +5,7 @@ use std::rc::Rc;
 use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
+mod bubble_column;
 mod campfire_smoke;
 mod drip;
 mod dust;
@@ -19,6 +20,9 @@ mod suspended;
 mod terrain;
 mod water_drop;
 
+use self::bubble_column::{
+    BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
+};
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
 use self::drip::{
     DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
@@ -131,5 +135,13 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.reverse_portal),
         &ReversePortalParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.bubble_column_up),
+        &BubbleColumnUpParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.current_down),
+        &WaterCurrentDownParticleRegistration,
     );
 }
