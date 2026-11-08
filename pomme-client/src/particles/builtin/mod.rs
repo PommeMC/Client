@@ -17,6 +17,7 @@ mod portal;
 mod reverse_portal;
 mod smoke;
 mod suspended;
+mod suspended_town;
 mod terrain;
 mod water_drop;
 
@@ -40,6 +41,7 @@ use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
 use self::suspended::UnderwaterParticleRegistration;
+use self::suspended_town::SuspendedTownParticleRegistration;
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
 use self::water_drop::SplashParticleRegistration;
@@ -143,5 +145,9 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.current_down),
         &WaterCurrentDownParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.mycelium),
+        &SuspendedTownParticleRegistration,
     );
 }
