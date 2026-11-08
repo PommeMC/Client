@@ -53,7 +53,7 @@ use self::sulfur_bubble::SulfurBubbleParticleRegistration;
 use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
 use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
 pub(crate) use self::terrain::TerrainParticle;
-use self::terrain::TerrainProvider;
+use self::terrain::{DustPillarProvider, TerrainProvider};
 use self::water_drop::SplashParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
@@ -199,4 +199,5 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.electric_spark),
         &glow::ElectricSparkParticleRegistration,
     );
+    resources.register(Rc::clone(&types.dust_pillar), Rc::new(DustPillarProvider));
 }
