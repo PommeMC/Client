@@ -9,8 +9,8 @@ use super::blocks::{
     BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, CampfireBlock, CandleBlock,
     CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock, EndRodBlock,
     EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, NetherPortalBlock, RedstoneTorchBlock,
-    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, SmokerBlock, SoulFireBlock,
-    TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SmokerBlock,
+    SoulFireBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -200,6 +200,10 @@ impl BlockFactory {
             "enchanting_table" => Box::new(EnchantingTableBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.enchant)),
+            )),
+            "respawn_anchor" => Box::new(RespawnAnchorBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.reverse_portal)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }

@@ -12,6 +12,7 @@ mod lever_block;
 mod portal_block;
 mod redstone_wire_block;
 mod repeater_block;
+mod respawn_anchor_block;
 mod torch_block;
 mod wet_sponge_block;
 mod wither_rose_block;
@@ -31,6 +32,7 @@ pub(super) use lever_block::LeverBlock;
 pub(super) use portal_block::{EndPortalBlock, NetherPortalBlock};
 pub(super) use redstone_wire_block::RedstoneWireBlock;
 pub(super) use repeater_block::RepeaterBlock;
+pub(super) use respawn_anchor_block::RespawnAnchorBlock;
 pub(super) use torch_block::{
     RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock,
 };
