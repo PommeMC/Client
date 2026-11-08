@@ -6,7 +6,9 @@ mod crying_obsidian_block;
 mod end_rod_block;
 mod fire_block;
 mod furnace_block;
+mod lever_block;
 mod redstone_wire_block;
+mod repeater_block;
 mod torch_block;
 mod wet_sponge_block;
 mod wither_rose_block;
@@ -20,7 +22,9 @@ pub(super) use crying_obsidian_block::CryingObsidianBlock;
 pub(super) use end_rod_block::EndRodBlock;
 pub(super) use fire_block::{FireBlock, SoulFireBlock};
 pub(super) use furnace_block::{BlastFurnaceBlock, FurnaceBlock, SmokerBlock};
+pub(super) use lever_block::LeverBlock;
 pub(super) use redstone_wire_block::RedstoneWireBlock;
+pub(super) use repeater_block::RepeaterBlock;
 pub(super) use torch_block::{
     RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock,
 };
