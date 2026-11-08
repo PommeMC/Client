@@ -36,6 +36,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) landing_honey: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) portal: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) enchant: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) reverse_portal: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -130,6 +131,9 @@ impl ParticleTypes {
         let enchant = registry
             .register(resource_id!("minecraft:enchant"), false)
             .map_err(registration_error)?;
+        let reverse_portal = registry
+            .register(resource_id!("minecraft:reverse_portal"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -160,6 +164,7 @@ impl ParticleTypes {
             landing_honey,
             portal,
             enchant,
+            reverse_portal,
         })
     }
 }

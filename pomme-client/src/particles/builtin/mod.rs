@@ -13,6 +13,7 @@ mod flame;
 mod fly_towards_position;
 mod lava;
 mod portal;
+mod reverse_portal;
 mod smoke;
 mod suspended;
 mod terrain;
@@ -30,6 +31,7 @@ pub use self::flame::{FlameParticle, FlameProvider};
 use self::fly_towards_position::EnchantParticleRegistration;
 use self::lava::LavaParticleRegistration;
 use self::portal::PortalParticleRegistration;
+use self::reverse_portal::ReversePortalParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
@@ -126,4 +128,8 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(Rc::clone(&types.portal), &PortalParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.enchant), &EnchantParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.reverse_portal),
+        &ReversePortalParticleRegistration,
+    );
 }
