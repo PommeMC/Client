@@ -142,6 +142,7 @@ fn emit_digging_particles(
     let mut level = LevelContext::new(
         &game.chunk_store,
         &appearance,
+        game.block_registry.tags(),
         camera_pos,
         ParticleStatus::All,
         game.level_runtime.get_random(),
