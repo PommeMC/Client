@@ -138,3 +138,40 @@ pub(crate) fn composter_fill_particles(
         level.add_particle(composter, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
     }
 }
+
+pub(crate) fn spawn_particles_on_block_faces(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    particle: &SimpleParticleType,
+) {
+    let random = level.get_random().clone();
+    let center = DVec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    for direction in Direction::VALUES {
+        let count = random.next_int(3) + 3;
+        let step = direction.offset();
+        for _ in 0..count {
+            let speed = DVec3::new(
+                random.next_double() * (0.5 - (-0.5)) + (-0.5),
+                random.next_double() * (0.5 - (-0.5)) + (-0.5),
+                random.next_double() * (0.5 - (-0.5)) + (-0.5),
+            );
+            let mut position = center;
+            let mut velocity = speed;
+            for axis in 0..3 {
+                position[axis] += if step[axis] == 0 {
+                    random.next_double() * (0.5 - (-0.5)) + (-0.5)
+                } else {
+                    f64::from(step[axis]) * 0.55
+                };
+                if step[axis] != 0 {
+                    velocity[axis] = 0.0;
+                }
+            }
+            level.add_particle(particle, position, velocity);
+        }
+    }
+}

@@ -3409,6 +3409,9 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
                         || event_type == level_event::COMPOSTER_FILL
                         || event_type == level_event::PARTICLES_SHOOT_WHITE_SMOKE
+                        || event_type == level_event::PARTICLES_WAX_ON
+                        || event_type == level_event::PARTICLES_WAX_OFF
+                        || event_type == level_event::PARTICLES_SCRAPE
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3476,6 +3479,24 @@ impl AppCore {
                                 pos,
                                 data,
                                 &white_smoke,
+                            );
+                        } else if event_type == level_event::PARTICLES_WAX_ON {
+                            let wax_on =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.wax_on));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level, pos, &wax_on,
+                            );
+                        } else if event_type == level_event::PARTICLES_WAX_OFF {
+                            let wax_off =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.wax_off));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level, pos, &wax_off,
+                            );
+                        } else if event_type == level_event::PARTICLES_SCRAPE {
+                            let scrape =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.scrape));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level, pos, &scrape,
                             );
                         }
                     }

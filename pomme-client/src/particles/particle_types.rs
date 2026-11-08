@@ -49,6 +49,9 @@ pub(crate) struct ParticleTypes {
     pub(crate) sulfur_bubbles: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_dust: Rc<ParticleType<BlockParticleOption>>,
     pub(crate) composter: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) wax_on: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) wax_off: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) scrape: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -179,6 +182,15 @@ impl ParticleTypes {
         let composter = registry
             .register(resource_id!("minecraft:composter"), false)
             .map_err(registration_error)?;
+        let wax_on = registry
+            .register(resource_id!("minecraft:wax_on"), true)
+            .map_err(registration_error)?;
+        let wax_off = registry
+            .register(resource_id!("minecraft:wax_off"), true)
+            .map_err(registration_error)?;
+        let scrape = registry
+            .register(resource_id!("minecraft:scrape"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -221,6 +233,9 @@ impl ParticleTypes {
             sulfur_bubbles,
             falling_dust,
             composter,
+            wax_on,
+            wax_off,
+            scrape,
         })
     }
 }

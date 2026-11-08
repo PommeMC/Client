@@ -10,3 +10,6 @@ pub(crate) const PARTICLES_TURTLE_EGG_PLACEMENT: u32 = 2012;
 pub(crate) const COMPOSTER_FILL: u32 = 1500;
 pub(crate) const PARTICLES_SHOOT_WHITE_SMOKE: u32 = 2010;
 pub(crate) const PARTICLES_DESTROY_BLOCK: u32 = 2014;
+pub(crate) const PARTICLES_WAX_ON: u32 = 3003;
+pub(crate) const PARTICLES_WAX_OFF: u32 = 3004;
+pub(crate) const PARTICLES_SCRAPE: u32 = 3005;
