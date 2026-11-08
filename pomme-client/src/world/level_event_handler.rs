@@ -223,3 +223,48 @@ pub(crate) fn electric_spark_particles(
         level.add_particle(particle, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
     }
 }
+
+pub(crate) fn spawn_smash_attack_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    count: i32,
+    particle_type: &std::rc::Rc<
+        crate::particles::types::ParticleType<
+            crate::particles::block_particle_option::BlockParticleOption,
+        >,
+    >,
+) {
+    let center = DVec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5 + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    let state = level.get_block_state(pos);
+    let options = crate::particles::block_particle_option::BlockParticleOption::new(
+        std::rc::Rc::clone(particle_type),
+        state,
+    );
+    let random = level.get_random().clone();
+
+    let mut i = 0;
+    while (i as f32) < count as f32 / 3.0_f32 {
+        let x = center.x + next_gaussian(&random) / 2.0;
+        let z = center.z + next_gaussian(&random) / 2.0;
+        let vx = next_gaussian(&random) * f64::from(0.2_f32);
+        let vy = next_gaussian(&random) * f64::from(0.2_f32);
+        let vz = next_gaussian(&random) * f64::from(0.2_f32);
+        level.add_particle(&options, DVec3::new(x, center.y, z), DVec3::new(vx, vy, vz));
+        i += 1;
+    }
+
+    let mut i = 0;
+    while (i as f32) < count as f32 / 1.5_f32 {
+        let x = center.x + 3.5 * f64::from(i).cos() + next_gaussian(&random) / 2.0;
+        let z = center.z + 3.5 * f64::from(i).sin() + next_gaussian(&random) / 2.0;
+        let vx = next_gaussian(&random) * f64::from(0.05_f32);
+        let vy = next_gaussian(&random) * f64::from(0.05_f32);
+        let vz = next_gaussian(&random) * f64::from(0.05_f32);
+        level.add_particle(&options, DVec3::new(x, center.y, z), DVec3::new(vx, vy, vz));
+        i += 1;
+    }
+}

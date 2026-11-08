@@ -3413,6 +3413,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_WAX_OFF
                         || event_type == level_event::PARTICLES_SCRAPE
                         || event_type == level_event::PARTICLES_ELECTRIC_SPARK
+                        || event_type == level_event::PARTICLES_SMASH_ATTACK
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3508,6 +3509,13 @@ impl AppCore {
                                 pos,
                                 data,
                                 &electric_spark,
+                            );
+                        } else if event_type == level_event::PARTICLES_SMASH_ATTACK {
+                            crate::world::level_event_handler::spawn_smash_attack_particles(
+                                &mut level,
+                                pos,
+                                data as i32,
+                                &self.particle_types.dust_pillar,
                             );
                         }
                     }
