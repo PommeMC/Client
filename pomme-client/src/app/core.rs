@@ -3404,6 +3404,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_MOBBLOCK_SPAWN
                         || event_type == level_event::PARTICLES_BEE_GROWTH
                         || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
+                        || event_type == level_event::COMPOSTER_FILL
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3451,6 +3452,12 @@ impl AppCore {
                                 pos,
                                 data as i32,
                                 &happy_villager,
+                            );
+                        } else if event_type == level_event::COMPOSTER_FILL {
+                            let composter =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.composter));
+                            crate::world::level_event_handler::composter_fill_particles(
+                                &mut level, pos, &composter,
                             );
                         }
                     }

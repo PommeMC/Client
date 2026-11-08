@@ -48,6 +48,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) dust_color_transition: Rc<ParticleType<DustColorTransitionOptions>>,
     pub(crate) sulfur_bubbles: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_dust: Rc<ParticleType<BlockParticleOption>>,
+    pub(crate) composter: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -175,6 +176,9 @@ impl ParticleTypes {
         let falling_dust = registry
             .register(resource_id!("minecraft:falling_dust"), false)
             .map_err(registration_error)?;
+        let composter = registry
+            .register(resource_id!("minecraft:composter"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -216,6 +220,7 @@ impl ParticleTypes {
             dust_color_transition,
             sulfur_bubbles,
             falling_dust,
+            composter,
         })
     }
 }

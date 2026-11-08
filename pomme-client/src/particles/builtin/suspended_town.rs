@@ -289,3 +289,37 @@ impl SpriteParticleRegistration<SimpleParticleType> for HappyVillagerParticleReg
         })
     }
 }
+
+pub struct ComposterFillProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ComposterFillProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        particle.set_lifetime(3 + world.get_random().next_int(5) as u32);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ComposterFillParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for ComposterFillParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ComposterFillProvider {
+            sprites: sprite_set,
+        })
+    }
+}

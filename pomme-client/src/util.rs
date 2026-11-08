@@ -52,6 +52,10 @@ pub(crate) mod random_source {
             );
             self.random.borrow_mut().usize(..bound)
         }
+
+        pub fn next_long(&self) -> i64 {
+            self.random.borrow_mut().i64(..)
+        }
     }
 }
 

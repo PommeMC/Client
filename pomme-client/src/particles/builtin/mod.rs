@@ -184,4 +184,8 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.falling_dust),
         &FallingDustParticleRegistration,
     );
+    resources.register_sprite_provider(
+        Rc::clone(&types.composter),
+        &suspended_town::ComposterFillParticleRegistration,
+    );
 }

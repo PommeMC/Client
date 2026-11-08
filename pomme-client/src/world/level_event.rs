@@ -7,3 +7,4 @@ pub(crate) const PARTICLES_AND_SOUND_DESTROY_BLOCK: u32 = 2001;
 pub(crate) const PARTICLES_MOBBLOCK_SPAWN: u32 = 2004;
 pub(crate) const PARTICLES_BEE_GROWTH: u32 = 2011;
 pub(crate) const PARTICLES_TURTLE_EGG_PLACEMENT: u32 = 2012;
+pub(crate) const COMPOSTER_FILL: u32 = 1500;
