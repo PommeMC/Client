@@ -256,3 +256,36 @@ impl SpriteParticleRegistration<SimpleParticleType> for SuspendedTownParticleReg
         })
     }
 }
+
+pub struct HappyVillagerProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for HappyVillagerProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct HappyVillagerParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for HappyVillagerParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(HappyVillagerProvider {
+            sprites: sprite_set,
+        })
+    }
+}

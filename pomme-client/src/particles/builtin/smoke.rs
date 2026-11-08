@@ -388,3 +388,38 @@ impl SpriteParticleRegistration<SimpleParticleType> for LargeSmokeParticleRegist
         Rc::new(LargeSmokeProvider::new(sprite_set))
     }
 }
+
+pub struct WhiteSmokeProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for WhiteSmokeProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        _random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        // Vanilla WhiteSmoke shares Smoke's BaseAsh parameters, then overrides birth
+        // color.
+        let mut particle =
+            SmokeParticle::new(position, auxiliary, 1.0_f32, Rc::clone(&self.sprites));
+        particle.set_color([0.7294118_f32, 0.69411767_f32, 0.7607843_f32]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct WhiteSmokeParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for WhiteSmokeParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(WhiteSmokeProvider {
+            sprites: sprite_set,
+        })
+    }
+}

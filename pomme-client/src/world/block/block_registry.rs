@@ -7,11 +7,11 @@ use azalea_block::BlockState;
 
 use super::blocks::{
     BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BubbleColumnBlock, CampfireBlock,
-    CandleBlock, CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock,
-    EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, MyceliumBlock,
-    NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock,
-    RepeaterBlock, RespawnAnchorBlock, SmokerBlock, SoulFireBlock, SporeBlossomBlock, TorchBlock,
-    WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+    CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock, EnchantingTableBlock,
+    EndPortalBlock, EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock,
+    MyceliumBlock, NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
+    RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SmokerBlock, SoulFireBlock,
+    SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -219,6 +219,11 @@ impl BlockFactory {
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.falling_spore_blossom)),
                 SimpleParticleType::new(Rc::clone(&types.spore_blossom_air)),
+            )),
+            "dried_ghast" => Box::new(DriedGhastBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.white_smoke)),
+                SimpleParticleType::new(Rc::clone(&types.happy_villager)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
