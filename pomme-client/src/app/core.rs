@@ -3376,10 +3376,10 @@ impl AppCore {
                     pos,
                     data,
                 } => {
-                    // Vanilla `LevelEventHandler` case 2001 (block break).
+                    // Vanilla `LevelEventHandler` cases 2000/2001/2004.
                     // The server excludes the breaking player from the
                     // broadcast; the local break's effects come from
-                    // `predict_destroy`. TODO: the other level events.
+                    // `predict_destroy`. TODO: the remaining level events.
                     // 1010/1011 (jukebox start/stop) only notify nearby
                     // entities so far. TODO: the song itself and the
                     // now-playing HUD line.
@@ -3387,9 +3387,12 @@ impl AppCore {
                         game.entity_store
                             .set_record_playing_nearby(pos, event_type == 1010);
                     }
-                    if event_type == 2001
-                        && let Some(state) = game.block_registry.block_state_table().try_state(data)
-                    {
+                    let break_state = if event_type == 2001 {
+                        game.block_registry.block_state_table().try_state(data)
+                    } else {
+                        None
+                    };
+                    if break_state.is_some() || event_type == 2000 || event_type == 2004 {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
                         let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
@@ -3409,7 +3412,23 @@ impl AppCore {
                             &level_random,
                             engine_access.as_ref(),
                         );
-                        block_break_effect(&self.audio, &mut level, pos, state);
+                        if let Some(state) = break_state {
+                            block_break_effect(&self.audio, &mut level, pos, state);
+                        } else if event_type == 2000 {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            crate::world::level_event_handler::shoot_particles(
+                                &mut level, pos, data, &smoke,
+                            );
+                        } else if event_type == 2004 {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            let flame =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.flame));
+                            crate::world::level_event_handler::spawner_particles(
+                                &mut level, pos, &smoke, &flame,
+                            );
+                        }
                     }
                 }
                 // COMPAT: Vanilla expands particle packets in ClientPacketListener and
