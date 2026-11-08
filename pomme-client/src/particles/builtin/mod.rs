@@ -14,6 +14,7 @@ mod end_rod;
 mod falling_dust;
 mod flame;
 mod fly_towards_position;
+mod glow;
 mod lava;
 mod portal;
 mod reverse_portal;
@@ -39,6 +40,9 @@ pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
 use self::fly_towards_position::EnchantParticleRegistration;
+use self::glow::{
+    ScrapeParticleRegistration, WaxOffParticleRegistration, WaxOnParticleRegistration,
+};
 use self::lava::LavaParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::reverse_portal::ReversePortalParticleRegistration;
@@ -188,4 +192,7 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.composter),
         &suspended_town::ComposterFillParticleRegistration,
     );
+    resources.register_sprite_provider(Rc::clone(&types.wax_on), &WaxOnParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.wax_off), &WaxOffParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.scrape), &ScrapeParticleRegistration);
 }
