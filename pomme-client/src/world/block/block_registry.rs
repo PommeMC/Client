@@ -7,10 +7,10 @@ use azalea_block::BlockState;
 
 use super::blocks::{
     BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, CampfireBlock, CandleBlock,
-    CandleCakeBlock, CryingObsidianBlock, EndPortalBlock, EndRodBlock, EnderChestBlock, FireBlock,
-    FurnaceBlock, LeverBlock, NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
-    RedstoneWireBlock, RepeaterBlock, SmokerBlock, SoulFireBlock, TorchBlock, WallTorchBlock,
-    WetSpongeBlock, WitherRoseBlock,
+    CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock, EndRodBlock,
+    EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, NetherPortalBlock, RedstoneTorchBlock,
+    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, SmokerBlock, SoulFireBlock,
+    TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -196,6 +196,10 @@ impl BlockFactory {
             "ender_chest" => Box::new(EnderChestBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.portal)),
+            )),
+            "enchanting_table" => Box::new(EnchantingTableBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.enchant)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
