@@ -808,235 +808,23 @@ fn touches_source_fluid(
         && position.y < f64::from(pos.y) + context.get_fluid_height(pos)
 }
 
-pub struct WaterHangProvider {
+#[derive(Clone, Copy)]
+struct DripHangSettings {
+    fluid_kind: FluidKind,
+    color: [f32; 3],
+    cooling: bool,
+    gravity_multiplier: Option<f32>,
+    lifetime_override: Option<u32>,
+    is_glowing: bool,
+}
+
+pub struct DripHangProvider {
     sprites: Rc<dyn SpriteSet>,
-    falling_water: Rc<ParticleType<SimpleParticleType>>,
+    falling_particle: Rc<ParticleType<SimpleParticleType>>,
+    settings: DripHangSettings,
 }
 
-impl ParticleProvider<SimpleParticleType> for WaterHangProvider {
-    fn create_particle(
-        &self,
-        _options: &SimpleParticleType,
-        _world: &mut LevelContext<'_>,
-        position: DVec3,
-        _auxiliary: DVec3,
-        random: &RandomSource,
-    ) -> Option<ParticleRef> {
-        let sprite = self.sprites.get_random(random);
-        Some(Rc::new(RefCell::new(DripHangParticle::new(
-            position,
-            sprite,
-            SimpleParticleType::new(Rc::clone(&self.falling_water)),
-            FluidKind::Water,
-            [0.2, 0.3, 1.0],
-            false,
-        ))))
-    }
-}
-
-pub(in crate::particles) struct WaterHangParticleRegistration {
-    falling_water: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl WaterHangParticleRegistration {
-    pub(in crate::particles) fn new(falling_water: Rc<ParticleType<SimpleParticleType>>) -> Self {
-        Self { falling_water }
-    }
-}
-
-impl SpriteParticleRegistration<SimpleParticleType> for WaterHangParticleRegistration {
-    fn create(
-        &self,
-        sprite_set: Rc<dyn SpriteSet>,
-    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(WaterHangProvider {
-            sprites: sprite_set,
-            falling_water: Rc::clone(&self.falling_water),
-        })
-    }
-}
-
-pub struct WaterFallProvider {
-    sprites: Rc<dyn SpriteSet>,
-    splash: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl ParticleProvider<SimpleParticleType> for WaterFallProvider {
-    fn create_particle(
-        &self,
-        _options: &SimpleParticleType,
-        _world: &mut LevelContext<'_>,
-        position: DVec3,
-        _auxiliary: DVec3,
-        random: &RandomSource,
-    ) -> Option<ParticleRef> {
-        let sprite = self.sprites.get_random(random);
-        Some(Rc::new(RefCell::new(FallAndLandParticle::new(
-            position,
-            sprite,
-            SimpleParticleType::new(Rc::clone(&self.splash)),
-            FluidKind::Water,
-            [0.2, 0.3, 1.0],
-        ))))
-    }
-}
-
-pub(in crate::particles) struct WaterFallParticleRegistration {
-    splash: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl WaterFallParticleRegistration {
-    pub(in crate::particles) fn new(splash: Rc<ParticleType<SimpleParticleType>>) -> Self {
-        Self { splash }
-    }
-}
-
-impl SpriteParticleRegistration<SimpleParticleType> for WaterFallParticleRegistration {
-    fn create(
-        &self,
-        sprite_set: Rc<dyn SpriteSet>,
-    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(WaterFallProvider {
-            sprites: sprite_set,
-            splash: Rc::clone(&self.splash),
-        })
-    }
-}
-
-pub struct LavaHangProvider {
-    sprites: Rc<dyn SpriteSet>,
-    falling_lava: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl ParticleProvider<SimpleParticleType> for LavaHangProvider {
-    fn create_particle(
-        &self,
-        _options: &SimpleParticleType,
-        _world: &mut LevelContext<'_>,
-        position: DVec3,
-        _auxiliary: DVec3,
-        random: &RandomSource,
-    ) -> Option<ParticleRef> {
-        let sprite = self.sprites.get_random(random);
-        Some(Rc::new(RefCell::new(DripHangParticle::new(
-            position,
-            sprite,
-            SimpleParticleType::new(Rc::clone(&self.falling_lava)),
-            FluidKind::Lava,
-            [1.0, 1.0, 1.0],
-            true,
-        ))))
-    }
-}
-
-pub(in crate::particles) struct LavaHangParticleRegistration {
-    falling_lava: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl LavaHangParticleRegistration {
-    pub(in crate::particles) fn new(falling_lava: Rc<ParticleType<SimpleParticleType>>) -> Self {
-        Self { falling_lava }
-    }
-}
-
-impl SpriteParticleRegistration<SimpleParticleType> for LavaHangParticleRegistration {
-    fn create(
-        &self,
-        sprite_set: Rc<dyn SpriteSet>,
-    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(LavaHangProvider {
-            sprites: sprite_set,
-            falling_lava: Rc::clone(&self.falling_lava),
-        })
-    }
-}
-
-pub struct LavaFallProvider {
-    sprites: Rc<dyn SpriteSet>,
-    landing_lava: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl ParticleProvider<SimpleParticleType> for LavaFallProvider {
-    fn create_particle(
-        &self,
-        _options: &SimpleParticleType,
-        _world: &mut LevelContext<'_>,
-        position: DVec3,
-        _auxiliary: DVec3,
-        random: &RandomSource,
-    ) -> Option<ParticleRef> {
-        let sprite = self.sprites.get_random(random);
-        Some(Rc::new(RefCell::new(FallAndLandParticle::new(
-            position,
-            sprite,
-            SimpleParticleType::new(Rc::clone(&self.landing_lava)),
-            FluidKind::Lava,
-            [1.0, 0.2857143, 0.083333336],
-        ))))
-    }
-}
-
-pub(in crate::particles) struct LavaFallParticleRegistration {
-    landing_lava: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl LavaFallParticleRegistration {
-    pub(in crate::particles) fn new(landing_lava: Rc<ParticleType<SimpleParticleType>>) -> Self {
-        Self { landing_lava }
-    }
-}
-
-impl SpriteParticleRegistration<SimpleParticleType> for LavaFallParticleRegistration {
-    fn create(
-        &self,
-        sprite_set: Rc<dyn SpriteSet>,
-    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(LavaFallProvider {
-            sprites: sprite_set,
-            landing_lava: Rc::clone(&self.landing_lava),
-        })
-    }
-}
-
-pub struct LavaLandProvider {
-    sprites: Rc<dyn SpriteSet>,
-}
-
-impl ParticleProvider<SimpleParticleType> for LavaLandProvider {
-    fn create_particle(
-        &self,
-        _options: &SimpleParticleType,
-        _world: &mut LevelContext<'_>,
-        position: DVec3,
-        _auxiliary: DVec3,
-        random: &RandomSource,
-    ) -> Option<ParticleRef> {
-        let sprite = self.sprites.get_random(random);
-        Some(Rc::new(RefCell::new(DripLandParticle::new(
-            position, sprite,
-        ))))
-    }
-}
-
-pub(in crate::particles) struct LavaLandParticleRegistration;
-
-impl SpriteParticleRegistration<SimpleParticleType> for LavaLandParticleRegistration {
-    fn create(
-        &self,
-        sprite_set: Rc<dyn SpriteSet>,
-    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(LavaLandProvider {
-            sprites: sprite_set,
-        })
-    }
-}
-
-pub struct ObsidianTearHangProvider {
-    sprites: Rc<dyn SpriteSet>,
-    falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
-}
-
-impl ParticleProvider<SimpleParticleType> for ObsidianTearHangProvider {
+impl ParticleProvider<SimpleParticleType> for DripHangProvider {
     fn create_particle(
         &self,
         _options: &SimpleParticleType,
@@ -1049,50 +837,121 @@ impl ParticleProvider<SimpleParticleType> for ObsidianTearHangProvider {
         let mut particle = DripHangParticle::new(
             position,
             sprite,
-            SimpleParticleType::new(Rc::clone(&self.falling_obsidian_tear)),
-            FluidKind::Empty,
-            [0.51171875, 0.03125, 0.890625],
-            false,
+            SimpleParticleType::new(Rc::clone(&self.falling_particle)),
+            self.settings.fluid_kind,
+            self.settings.color,
+            self.settings.cooling,
         );
-        particle.is_glowing = true;
-        particle.gravity *= 0.01_f32;
-        particle.lifetime = 100;
+        particle.is_glowing = self.settings.is_glowing;
+        if let Some(multiplier) = self.settings.gravity_multiplier {
+            particle.gravity *= multiplier;
+        }
+        if let Some(lifetime) = self.settings.lifetime_override {
+            particle.lifetime = lifetime;
+        }
         Some(Rc::new(RefCell::new(particle)))
     }
 }
 
-pub(in crate::particles) struct ObsidianTearHangParticleRegistration {
-    falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+pub(in crate::particles) struct DripHangParticleRegistration {
+    falling_particle: Rc<ParticleType<SimpleParticleType>>,
+    settings: DripHangSettings,
 }
 
-impl ObsidianTearHangParticleRegistration {
-    pub(in crate::particles) fn new(
-        falling_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+impl DripHangParticleRegistration {
+    pub(in crate::particles) fn water(
+        falling_particle: Rc<ParticleType<SimpleParticleType>>,
     ) -> Self {
         Self {
-            falling_obsidian_tear,
+            falling_particle,
+            settings: DripHangSettings {
+                fluid_kind: FluidKind::Water,
+                color: [0.2, 0.3, 1.0],
+                cooling: false,
+                gravity_multiplier: None,
+                lifetime_override: None,
+                is_glowing: false,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn lava(
+        falling_particle: Rc<ParticleType<SimpleParticleType>>,
+    ) -> Self {
+        Self {
+            falling_particle,
+            settings: DripHangSettings {
+                fluid_kind: FluidKind::Lava,
+                color: [1.0, 1.0, 1.0],
+                cooling: true,
+                gravity_multiplier: None,
+                lifetime_override: None,
+                is_glowing: false,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn obsidian_tear(
+        falling_particle: Rc<ParticleType<SimpleParticleType>>,
+    ) -> Self {
+        Self {
+            falling_particle,
+            settings: DripHangSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.51171875, 0.03125, 0.890625],
+                cooling: false,
+                gravity_multiplier: Some(0.01_f32),
+                lifetime_override: Some(100),
+                is_glowing: true,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn honey(
+        falling_particle: Rc<ParticleType<SimpleParticleType>>,
+    ) -> Self {
+        Self {
+            falling_particle,
+            settings: DripHangSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.622, 0.508, 0.082],
+                cooling: false,
+                gravity_multiplier: Some(0.01_f32),
+                lifetime_override: Some(100),
+                is_glowing: false,
+            },
         }
     }
 }
 
-impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearHangParticleRegistration {
+impl SpriteParticleRegistration<SimpleParticleType> for DripHangParticleRegistration {
     fn create(
         &self,
         sprite_set: Rc<dyn SpriteSet>,
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(ObsidianTearHangProvider {
+        Rc::new(DripHangProvider {
             sprites: sprite_set,
-            falling_obsidian_tear: Rc::clone(&self.falling_obsidian_tear),
+            falling_particle: Rc::clone(&self.falling_particle),
+            settings: self.settings,
         })
     }
 }
 
-pub struct ObsidianTearFallProvider {
-    sprites: Rc<dyn SpriteSet>,
-    landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+#[derive(Clone, Copy)]
+struct DripFallSettings {
+    fluid_kind: FluidKind,
+    color: [f32; 3],
+    gravity_override: Option<f32>,
+    is_glowing: bool,
 }
 
-impl ParticleProvider<SimpleParticleType> for ObsidianTearFallProvider {
+pub struct DripFallProvider {
+    sprites: Rc<dyn SpriteSet>,
+    land_particle: Rc<ParticleType<SimpleParticleType>>,
+    settings: DripFallSettings,
+}
+
+impl ParticleProvider<SimpleParticleType> for DripFallProvider {
     fn create_particle(
         &self,
         _options: &SimpleParticleType,
@@ -1105,47 +964,104 @@ impl ParticleProvider<SimpleParticleType> for ObsidianTearFallProvider {
         let mut particle = FallAndLandParticle::new(
             position,
             sprite,
-            SimpleParticleType::new(Rc::clone(&self.landing_obsidian_tear)),
-            FluidKind::Empty,
-            [0.51171875, 0.03125, 0.890625],
+            SimpleParticleType::new(Rc::clone(&self.land_particle)),
+            self.settings.fluid_kind,
+            self.settings.color,
         );
-        particle.is_glowing = true;
-        particle.gravity = 0.01_f32;
+        particle.is_glowing = self.settings.is_glowing;
+        if let Some(gravity) = self.settings.gravity_override {
+            particle.gravity = gravity;
+        }
         Some(Rc::new(RefCell::new(particle)))
     }
 }
 
-pub(in crate::particles) struct ObsidianTearFallParticleRegistration {
-    landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+pub(in crate::particles) struct DripFallParticleRegistration {
+    land_particle: Rc<ParticleType<SimpleParticleType>>,
+    settings: DripFallSettings,
 }
 
-impl ObsidianTearFallParticleRegistration {
-    pub(in crate::particles) fn new(
-        landing_obsidian_tear: Rc<ParticleType<SimpleParticleType>>,
+impl DripFallParticleRegistration {
+    pub(in crate::particles) fn water(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
+        Self {
+            land_particle,
+            settings: DripFallSettings {
+                fluid_kind: FluidKind::Water,
+                color: [0.2, 0.3, 1.0],
+                gravity_override: None,
+                is_glowing: false,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn lava(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
+        Self {
+            land_particle,
+            settings: DripFallSettings {
+                fluid_kind: FluidKind::Lava,
+                color: [1.0, 0.2857143, 0.083333336],
+                gravity_override: None,
+                is_glowing: false,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn obsidian_tear(
+        land_particle: Rc<ParticleType<SimpleParticleType>>,
     ) -> Self {
         Self {
-            landing_obsidian_tear,
+            land_particle,
+            settings: DripFallSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.51171875, 0.03125, 0.890625],
+                gravity_override: Some(0.01_f32),
+                is_glowing: true,
+            },
+        }
+    }
+
+    // COMPAT: Vanilla HoneyFallAndLandParticle's landing sound is deferred;
+    // ordinary FallAndLandParticle provides particle-only, not audiovisual parity.
+    pub(in crate::particles) fn honey(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
+        Self {
+            land_particle,
+            settings: DripFallSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.582, 0.448, 0.082],
+                gravity_override: Some(0.01_f32),
+                is_glowing: false,
+            },
         }
     }
 }
 
-impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearFallParticleRegistration {
+impl SpriteParticleRegistration<SimpleParticleType> for DripFallParticleRegistration {
     fn create(
         &self,
         sprite_set: Rc<dyn SpriteSet>,
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(ObsidianTearFallProvider {
+        Rc::new(DripFallProvider {
             sprites: sprite_set,
-            landing_obsidian_tear: Rc::clone(&self.landing_obsidian_tear),
+            land_particle: Rc::clone(&self.land_particle),
+            settings: self.settings,
         })
     }
 }
 
-pub struct ObsidianTearLandProvider {
-    sprites: Rc<dyn SpriteSet>,
+#[derive(Clone, Copy)]
+struct DripLandSettings {
+    fluid_kind: FluidKind,
+    color: [f32; 3],
+    is_glowing: bool,
+    engine_lifetime_numerator: Option<f64>,
 }
 
-impl ParticleProvider<SimpleParticleType> for ObsidianTearLandProvider {
+pub struct DripLandProvider {
+    sprites: Rc<dyn SpriteSet>,
+    settings: DripLandSettings,
+}
+
+impl ParticleProvider<SimpleParticleType> for DripLandProvider {
     fn create_particle(
         &self,
         _options: &SimpleParticleType,
@@ -1156,24 +1072,64 @@ impl ParticleProvider<SimpleParticleType> for ObsidianTearLandProvider {
     ) -> Option<ParticleRef> {
         let sprite = self.sprites.get_random(random);
         let mut particle = DripLandParticle::new(position, sprite);
-        particle.fluid_kind = FluidKind::Empty;
-        particle.is_glowing = true;
-        particle.lifetime =
-            (28.0_f64 / (f64::from(random.next_float()) * 0.8_f64 + 0.2_f64)) as u32;
-        particle.color = [0.51171875, 0.03125, 0.890625];
+        particle.fluid_kind = self.settings.fluid_kind;
+        particle.is_glowing = self.settings.is_glowing;
+        if let Some(numerator) = self.settings.engine_lifetime_numerator {
+            particle.lifetime =
+                (numerator / (f64::from(random.next_float()) * 0.8_f64 + 0.2_f64)) as u32;
+        }
+        particle.color = self.settings.color;
         Some(Rc::new(RefCell::new(particle)))
     }
 }
 
-pub(in crate::particles) struct ObsidianTearLandParticleRegistration;
+pub(in crate::particles) struct DripLandParticleRegistration {
+    settings: DripLandSettings,
+}
 
-impl SpriteParticleRegistration<SimpleParticleType> for ObsidianTearLandParticleRegistration {
+impl DripLandParticleRegistration {
+    pub(in crate::particles) fn lava() -> Self {
+        Self {
+            settings: DripLandSettings {
+                fluid_kind: FluidKind::Lava,
+                color: [1.0, 0.2857143, 0.083333336],
+                is_glowing: false,
+                engine_lifetime_numerator: None,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn obsidian_tear() -> Self {
+        Self {
+            settings: DripLandSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.51171875, 0.03125, 0.890625],
+                is_glowing: true,
+                engine_lifetime_numerator: Some(28.0_f64),
+            },
+        }
+    }
+
+    pub(in crate::particles) fn honey() -> Self {
+        Self {
+            settings: DripLandSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.522, 0.408, 0.082],
+                is_glowing: false,
+                engine_lifetime_numerator: Some(128.0_f64),
+            },
+        }
+    }
+}
+
+impl SpriteParticleRegistration<SimpleParticleType> for DripLandParticleRegistration {
     fn create(
         &self,
         sprite_set: Rc<dyn SpriteSet>,
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
-        Rc::new(ObsidianTearLandProvider {
+        Rc::new(DripLandProvider {
             sprites: sprite_set,
+            settings: self.settings,
         })
     }
 }

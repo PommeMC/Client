@@ -2974,6 +2974,7 @@ fn run_ticks(
             let mut level = LevelContext::new(
                 &game.chunk_store,
                 &appearance,
+                game.block_registry.tags(),
                 gfx.renderer.camera_render_position(),
                 // The client currently advertises ParticleStatus::All; no quality setting exists.
                 ParticleStatus::All,
@@ -5422,6 +5423,7 @@ pub fn update_game(
             let level = LevelContext::new(
                 &game.chunk_store,
                 &appearance,
+                game.block_registry.tags(),
                 eye,
                 ParticleStatus::All,
                 &level_random,

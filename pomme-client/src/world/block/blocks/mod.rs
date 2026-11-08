@@ -1,3 +1,4 @@
+mod beehive_block;
 mod campfire_block;
 mod candle_block;
 mod crying_obsidian_block;
@@ -7,6 +8,7 @@ mod furnace_block;
 mod redstone_wire_block;
 mod torch_block;
 
+pub(super) use beehive_block::BeehiveBlock;
 pub(super) use campfire_block::CampfireBlock;
 pub(crate) use campfire_block::tick_campfires;
 pub(super) use candle_block::{CandleBlock, CandleCakeBlock};

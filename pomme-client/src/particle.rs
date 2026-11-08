@@ -477,6 +477,7 @@ mod tests {
         let mut level = LevelContext::new(
             &chunks,
             &appearance,
+            registry.tags(),
             DVec3::ZERO,
             ParticleStatus::All,
             &random,

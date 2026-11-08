@@ -10,7 +10,7 @@ use glam::DVec3;
 
 use super::block::block_registry::BlockRegistry;
 use super::block::particle_appearance::BlockParticleAppearance;
-use super::block::{BlockStateTable, FluidKind, model};
+use super::block::{BlockStateTable, BlockTags, FluidKind, model};
 use super::chunk::ChunkStore;
 use crate::particles::particle_engine_access::ParticleEngineAccess;
 use crate::particles::render::ParticleLight;
@@ -30,6 +30,7 @@ use crate::util::random_source::RandomSource;
 pub struct LevelContext<'a> {
     chunks: &'a ChunkStore,
     block_particle_appearance: &'a BlockParticleAppearance<'a>,
+    pub(crate) block_tags: &'a BlockTags,
     pub(crate) camera_render_position: DVec3,
     pub(crate) particle_status: ParticleStatus,
     pub(crate) random: &'a RandomSource,
@@ -40,6 +41,7 @@ impl<'a> LevelContext<'a> {
     pub(crate) fn new(
         chunks: &'a ChunkStore,
         block_particle_appearance: &'a BlockParticleAppearance<'a>,
+        block_tags: &'a BlockTags,
         camera_render_position: DVec3,
         particle_status: ParticleStatus,
         random: &'a RandomSource,
@@ -48,6 +50,7 @@ impl<'a> LevelContext<'a> {
         Self {
             chunks,
             block_particle_appearance,
+            block_tags,
             camera_render_position,
             particle_status,
             random,
@@ -61,6 +64,11 @@ impl<'a> LevelContext<'a> {
 
     pub(crate) fn block_state_table(&self) -> BlockStateTable {
         self.block_particle_appearance.block_state_table()
+    }
+
+    pub(crate) fn is_block_tag(&self, state: BlockState, tag: &str) -> bool {
+        self.block_tags
+            .contains(tag, self.block_state_table().block_state_data(state).id())
     }
 
     pub(crate) fn block_particle_appearance(&self) -> &'a BlockParticleAppearance<'a> {

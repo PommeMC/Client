@@ -3075,6 +3075,7 @@ impl AppCore {
                         let mut level = LevelContext::new(
                             &game.chunk_store,
                             &appearance,
+                            game.block_registry.tags(),
                             renderer.camera_render_position(),
                             ParticleStatus::All,
                             &level_random,
@@ -3402,6 +3403,7 @@ impl AppCore {
                         let mut level = LevelContext::new(
                             &game.chunk_store,
                             &appearance,
+                            game.block_registry.tags(),
                             renderer.camera_render_position(),
                             ParticleStatus::All,
                             &level_random,
@@ -3441,6 +3443,7 @@ impl AppCore {
                     let mut level = LevelContext::new(
                         &game.chunk_store,
                         &appearance,
+                        game.block_registry.tags(),
                         renderer.camera_render_position(),
                         ParticleStatus::All,
                         &level_random,
@@ -4210,6 +4213,7 @@ impl AppCore {
             let level = LevelContext::new(
                 &game.chunk_store,
                 &appearance,
+                game.block_registry.tags(),
                 renderer.camera_render_position(),
                 ParticleStatus::All,
                 &level_random,
@@ -4448,6 +4452,7 @@ impl AppCore {
         let level = LevelContext::new(
             &game.chunk_store,
             &appearance,
+            game.block_registry.tags(),
             renderer.camera_render_position(),
             ParticleStatus::All,
             &level_random,
