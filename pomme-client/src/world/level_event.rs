@@ -8,3 +8,5 @@ pub(crate) const PARTICLES_MOBBLOCK_SPAWN: u32 = 2004;
 pub(crate) const PARTICLES_BEE_GROWTH: u32 = 2011;
 pub(crate) const PARTICLES_TURTLE_EGG_PLACEMENT: u32 = 2012;
 pub(crate) const COMPOSTER_FILL: u32 = 1500;
+pub(crate) const PARTICLES_SHOOT_WHITE_SMOKE: u32 = 2010;
+pub(crate) const PARTICLES_DESTROY_BLOCK: u32 = 2014;
