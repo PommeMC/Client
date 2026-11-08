@@ -3376,23 +3376,35 @@ impl AppCore {
                     pos,
                     data,
                 } => {
-                    // Vanilla `LevelEventHandler` cases 2000/2001/2004.
+                    use crate::world::level_event;
+
+                    // Vanilla `LevelEventHandler` particle cases.
                     // The server excludes the breaking player from the
                     // broadcast; the local break's effects come from
                     // `predict_destroy`. TODO: the remaining level events.
-                    // 1010/1011 (jukebox start/stop) only notify nearby
+                    // Jukebox start/stop only notify nearby
                     // entities so far. TODO: the song itself and the
                     // now-playing HUD line.
-                    if event_type == 1010 || event_type == 1011 {
-                        game.entity_store
-                            .set_record_playing_nearby(pos, event_type == 1010);
+                    if event_type == level_event::SOUND_PLAY_JUKEBOX_SONG
+                        || event_type == level_event::SOUND_STOP_JUKEBOX_SONG
+                    {
+                        game.entity_store.set_record_playing_nearby(
+                            pos,
+                            event_type == level_event::SOUND_PLAY_JUKEBOX_SONG,
+                        );
                     }
-                    let break_state = if event_type == 2001 {
-                        game.block_registry.block_state_table().try_state(data)
-                    } else {
-                        None
-                    };
-                    if break_state.is_some() || event_type == 2000 || event_type == 2004 {
+                    let break_state =
+                        if event_type == level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK {
+                            game.block_registry.block_state_table().try_state(data)
+                        } else {
+                            None
+                        };
+                    if break_state.is_some()
+                        || event_type == level_event::PARTICLES_SHOOT_SMOKE
+                        || event_type == level_event::PARTICLES_MOBBLOCK_SPAWN
+                        || event_type == level_event::PARTICLES_BEE_GROWTH
+                        || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
+                    {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
                         let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
@@ -3414,19 +3426,31 @@ impl AppCore {
                         );
                         if let Some(state) = break_state {
                             block_break_effect(&self.audio, &mut level, pos, state);
-                        } else if event_type == 2000 {
+                        } else if event_type == level_event::PARTICLES_SHOOT_SMOKE {
                             let smoke =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
                             crate::world::level_event_handler::shoot_particles(
                                 &mut level, pos, data, &smoke,
                             );
-                        } else if event_type == 2004 {
+                        } else if event_type == level_event::PARTICLES_MOBBLOCK_SPAWN {
                             let smoke =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
                             let flame =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.flame));
                             crate::world::level_event_handler::spawner_particles(
                                 &mut level, pos, &smoke, &flame,
+                            );
+                        } else if event_type == level_event::PARTICLES_BEE_GROWTH
+                            || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
+                        {
+                            let happy_villager = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.happy_villager,
+                            ));
+                            crate::world::level_event_handler::spawn_particle_in_block(
+                                &mut level,
+                                pos,
+                                data as i32,
+                                &happy_villager,
                             );
                         }
                     }

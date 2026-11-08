@@ -68,3 +68,34 @@ fn next_gaussian(random: &RandomSource) -> f64 {
         }
     }
 }
+
+pub(crate) fn spawn_particle_in_block(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    count: i32,
+    particle: &SimpleParticleType,
+) {
+    let state = level.get_block_state(pos);
+    let data = level.block_state_table().block_state_data(state);
+    let spread_height = if data.is_air() {
+        1.0
+    } else {
+        let max_y = crate::physics::block_shape::outline_shape(data)
+            .iter()
+            .map(|bounds| bounds[4])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let delta_y = data.outline_shape_position(pos.x, 0, pos.z).y;
+        max_y + delta_y
+    };
+    let random = level.get_random().clone();
+
+    for _ in 0..count {
+        let vx = next_gaussian(&random) * 0.02;
+        let vy = next_gaussian(&random) * 0.02;
+        let vz = next_gaussian(&random) * 0.02;
+        let x = f64::from(pos.x) + 0.0 + random.next_double() * 0.5 * 2.0;
+        let y = f64::from(pos.y) + random.next_double() * spread_height;
+        let z = f64::from(pos.z) + 0.0 + random.next_double() * 0.5 * 2.0;
+        level.add_particle(particle, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
+    }
+}
