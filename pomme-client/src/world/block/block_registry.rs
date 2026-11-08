@@ -6,13 +6,13 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 
 use super::blocks::{
-    BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BubbleColumnBlock, CampfireBlock,
-    CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock, EnchantingTableBlock,
-    EndPortalBlock, EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock,
-    MyceliumBlock, NetherPortalBlock, PotentSulfurBlock, RedstoneTorchBlock,
-    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SculkSensorBlock,
-    SmokerBlock, SoulFireBlock, SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock,
-    WitherRoseBlock,
+    BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BrushableBlock, BubbleColumnBlock,
+    CampfireBlock, CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock,
+    EnchantingTableBlock, EndPortalBlock, EndRodBlock, EnderChestBlock, FallingBlock, FireBlock,
+    FurnaceBlock, LeverBlock, MyceliumBlock, NetherPortalBlock, PotentSulfurBlock,
+    RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock,
+    RespawnAnchorBlock, SculkSensorBlock, SmokerBlock, SoulFireBlock, SporeBlossomBlock,
+    TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -236,6 +236,37 @@ impl BlockFactory {
             "potent_sulfur" => Box::new(PotentSulfurBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.sulfur_bubbles)),
+            )),
+            "sand"
+            | "red_sand"
+            | "gravel"
+            | "dragon_egg"
+            | "anvil"
+            | "chipped_anvil"
+            | "damaged_anvil"
+            | "white_concrete_powder"
+            | "orange_concrete_powder"
+            | "magenta_concrete_powder"
+            | "light_blue_concrete_powder"
+            | "yellow_concrete_powder"
+            | "lime_concrete_powder"
+            | "pink_concrete_powder"
+            | "gray_concrete_powder"
+            | "light_gray_concrete_powder"
+            | "cyan_concrete_powder"
+            | "purple_concrete_powder"
+            | "blue_concrete_powder"
+            | "brown_concrete_powder"
+            | "green_concrete_powder"
+            | "red_concrete_powder"
+            | "black_concrete_powder" => Box::new(FallingBlock::new(
+                block_data,
+                Rc::clone(&types.falling_dust),
+                matches!(name, "sand" | "red_sand"),
+            )),
+            "suspicious_sand" | "suspicious_gravel" => Box::new(BrushableBlock::new(
+                block_data,
+                Rc::clone(&types.falling_dust),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }

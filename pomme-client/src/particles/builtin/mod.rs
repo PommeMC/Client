@@ -11,6 +11,7 @@ mod drip;
 mod dust;
 mod dust_color_transition;
 mod end_rod;
+mod falling_dust;
 mod flame;
 mod fly_towards_position;
 mod lava;
@@ -33,6 +34,7 @@ use self::drip::{
 use self::dust::DustParticleRegistration;
 use self::dust_color_transition::DustColorTransitionParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
+use self::falling_dust::FallingDustParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
@@ -177,5 +179,9 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.sulfur_bubbles),
         &SulfurBubbleParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_dust),
+        &FallingDustParticleRegistration,
     );
 }
