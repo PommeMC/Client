@@ -175,3 +175,51 @@ pub(crate) fn spawn_particles_on_block_faces(
         }
     }
 }
+
+pub(crate) fn electric_spark_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    data: u32,
+    particle: &SimpleParticleType,
+) {
+    let axis = data as i32;
+    if !(0..3).contains(&axis) {
+        spawn_particles_on_block_faces(level, pos, particle);
+        return;
+    }
+
+    let center = DVec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    let step_x = axis == 0;
+    let step_y = axis == 1;
+    let step_z = axis == 2;
+    let random = level.get_random().clone();
+    let count = random.next_int(10) + 10;
+    for _ in 0..count {
+        let x = center.x
+            + (random.next_double() * (1.0 - (-1.0)) + (-1.0)) * if step_x { 0.5 } else { 0.125 };
+        let y = center.y
+            + (random.next_double() * (1.0 - (-1.0)) + (-1.0)) * if step_y { 0.5 } else { 0.125 };
+        let z = center.z
+            + (random.next_double() * (1.0 - (-1.0)) + (-1.0)) * if step_z { 0.5 } else { 0.125 };
+        let vx = if step_x {
+            random.next_double() * (1.0 - (-1.0)) + (-1.0)
+        } else {
+            0.0
+        };
+        let vy = if step_y {
+            random.next_double() * (1.0 - (-1.0)) + (-1.0)
+        } else {
+            0.0
+        };
+        let vz = if step_z {
+            random.next_double() * (1.0 - (-1.0)) + (-1.0)
+        } else {
+            0.0
+        };
+        level.add_particle(particle, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
+    }
+}

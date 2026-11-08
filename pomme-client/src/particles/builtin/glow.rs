@@ -425,3 +425,41 @@ impl SpriteParticleRegistration<SimpleParticleType> for ScrapeParticleRegistrati
         })
     }
 }
+
+pub struct ElectricSparkProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ElectricSparkProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let mut particle = GlowParticle::new(position, DVec3::ZERO, Rc::clone(&self.sprites));
+        particle.set_color([1.0, 0.9, 1.0]);
+        particle.set_velocity(DVec3::new(
+            auxiliary.x * 0.25,
+            auxiliary.y * 0.25,
+            auxiliary.z * 0.25,
+        ));
+        particle.set_lifetime(random.next_int(2) as u32 + 2);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ElectricSparkParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for ElectricSparkParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ElectricSparkProvider {
+            sprites: sprite_set,
+        })
+    }
+}
