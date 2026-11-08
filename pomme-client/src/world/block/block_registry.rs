@@ -10,8 +10,8 @@ use super::blocks::{
     CandleBlock, CandleCakeBlock, CryingObsidianBlock, EnchantingTableBlock, EndPortalBlock,
     EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock, MyceliumBlock,
     NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock,
-    RepeaterBlock, RespawnAnchorBlock, SmokerBlock, SoulFireBlock, TorchBlock, WallTorchBlock,
-    WetSpongeBlock, WitherRoseBlock,
+    RepeaterBlock, RespawnAnchorBlock, SmokerBlock, SoulFireBlock, SporeBlossomBlock, TorchBlock,
+    WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -214,6 +214,11 @@ impl BlockFactory {
             "mycelium" => Box::new(MyceliumBlock::new(
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.mycelium)),
+            )),
+            "spore_blossom" => Box::new(SporeBlossomBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.falling_spore_blossom)),
+                SimpleParticleType::new(Rc::clone(&types.spore_blossom_air)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
