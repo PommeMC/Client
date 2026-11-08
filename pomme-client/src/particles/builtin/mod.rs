@@ -195,4 +195,8 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(Rc::clone(&types.wax_on), &WaxOnParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.wax_off), &WaxOffParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.scrape), &ScrapeParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.electric_spark),
+        &glow::ElectricSparkParticleRegistration,
+    );
 }

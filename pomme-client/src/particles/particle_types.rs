@@ -52,6 +52,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) wax_on: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) wax_off: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) scrape: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) electric_spark: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -191,6 +192,9 @@ impl ParticleTypes {
         let scrape = registry
             .register(resource_id!("minecraft:scrape"), true)
             .map_err(registration_error)?;
+        let electric_spark = registry
+            .register(resource_id!("minecraft:electric_spark"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -236,6 +240,7 @@ impl ParticleTypes {
             wax_on,
             wax_off,
             scrape,
+            electric_spark,
         })
     }
 }

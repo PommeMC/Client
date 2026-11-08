@@ -3412,6 +3412,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_WAX_ON
                         || event_type == level_event::PARTICLES_WAX_OFF
                         || event_type == level_event::PARTICLES_SCRAPE
+                        || event_type == level_event::PARTICLES_ELECTRIC_SPARK
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3497,6 +3498,16 @@ impl AppCore {
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.scrape));
                             crate::world::level_event_handler::spawn_particles_on_block_faces(
                                 &mut level, pos, &scrape,
+                            );
+                        } else if event_type == level_event::PARTICLES_ELECTRIC_SPARK {
+                            let electric_spark = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.electric_spark,
+                            ));
+                            crate::world::level_event_handler::electric_spark_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                &electric_spark,
                             );
                         }
                     }
