@@ -3393,18 +3393,22 @@ impl AppCore {
                             event_type == level_event::SOUND_PLAY_JUKEBOX_SONG,
                         );
                     }
-                    let break_state =
-                        if event_type == level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK {
-                            game.block_registry.block_state_table().try_state(data)
-                        } else {
-                            None
-                        };
+                    let break_state = if matches!(
+                        event_type,
+                        level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK
+                            | level_event::PARTICLES_DESTROY_BLOCK
+                    ) {
+                        game.block_registry.block_state_table().try_state(data)
+                    } else {
+                        None
+                    };
                     if break_state.is_some()
                         || event_type == level_event::PARTICLES_SHOOT_SMOKE
                         || event_type == level_event::PARTICLES_MOBBLOCK_SPAWN
                         || event_type == level_event::PARTICLES_BEE_GROWTH
                         || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
                         || event_type == level_event::COMPOSTER_FILL
+                        || event_type == level_event::PARTICLES_SHOOT_WHITE_SMOKE
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3426,7 +3430,11 @@ impl AppCore {
                             engine_access.as_ref(),
                         );
                         if let Some(state) = break_state {
-                            block_break_effect(&self.audio, &mut level, pos, state);
+                            if event_type == level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK {
+                                block_break_effect(&self.audio, &mut level, pos, state);
+                            } else {
+                                level.add_destroy_block_effect(pos, state);
+                            }
                         } else if event_type == level_event::PARTICLES_SHOOT_SMOKE {
                             let smoke =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
@@ -3458,6 +3466,16 @@ impl AppCore {
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.composter));
                             crate::world::level_event_handler::composter_fill_particles(
                                 &mut level, pos, &composter,
+                            );
+                        } else if event_type == level_event::PARTICLES_SHOOT_WHITE_SMOKE {
+                            let white_smoke = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.white_smoke,
+                            ));
+                            crate::world::level_event_handler::shoot_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                &white_smoke,
                             );
                         }
                     }
