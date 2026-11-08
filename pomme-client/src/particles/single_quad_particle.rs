@@ -18,6 +18,9 @@ pub trait SingleQuadParticle: Particle {
     fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet);
     fn get_uv(&self) -> [f32; 4];
     fn get_color(&self) -> [f32; 3];
+    fn get_render_color(&self, _partial_tick: f32) -> [f32; 3] {
+        self.get_color()
+    }
     fn set_color(&mut self, color: [f32; 3]);
     fn get_alpha(&self) -> f32;
     fn set_alpha(&mut self, alpha: f32);
@@ -65,7 +68,7 @@ pub(super) fn extract_camera_quad(
         size: particle.get_quad_size(view.partial_tick),
         uv: particle.get_uv(),
         color: {
-            let color = particle.get_color();
+            let color = particle.get_render_color(view.partial_tick);
             [color[0], color[1], color[2], particle.get_alpha()]
         },
         light: particle.get_light_coords(world, view.partial_tick),

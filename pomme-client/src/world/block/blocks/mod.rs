@@ -16,6 +16,7 @@ mod portal_block;
 mod redstone_wire_block;
 mod repeater_block;
 mod respawn_anchor_block;
+mod sculk_sensor_block;
 mod spore_blossom_block;
 mod torch_block;
 mod wet_sponge_block;
@@ -40,6 +41,7 @@ pub(super) use portal_block::{EndPortalBlock, NetherPortalBlock};
 pub(super) use redstone_wire_block::RedstoneWireBlock;
 pub(super) use repeater_block::RepeaterBlock;
 pub(super) use respawn_anchor_block::RespawnAnchorBlock;
+pub(super) use sculk_sensor_block::SculkSensorBlock;
 pub(super) use spore_blossom_block::SporeBlossomBlock;
 pub(super) use torch_block::{
     RedstoneTorchBlock, RedstoneWallTorchBlock, TorchBlock, WallTorchBlock,

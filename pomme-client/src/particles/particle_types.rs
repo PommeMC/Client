@@ -2,6 +2,7 @@ use std::io;
 use std::rc::Rc;
 
 use super::block_particle_option::BlockParticleOption;
+use super::dust_color_transition_options::DustColorTransitionOptions;
 use super::dust_particle_options::DustParticleOptions;
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::types::{ParticleType, SimpleParticleType};
@@ -44,6 +45,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) spore_blossom_air: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) white_smoke: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) happy_villager: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dust_color_transition: Rc<ParticleType<DustColorTransitionOptions>>,
 }
 
 impl ParticleTypes {
@@ -162,6 +164,9 @@ impl ParticleTypes {
         let happy_villager = registry
             .register(resource_id!("minecraft:happy_villager"), false)
             .map_err(registration_error)?;
+        let dust_color_transition = registry
+            .register(resource_id!("minecraft:dust_color_transition"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -200,6 +205,7 @@ impl ParticleTypes {
             spore_blossom_air,
             white_smoke,
             happy_villager,
+            dust_color_transition,
         })
     }
 }
