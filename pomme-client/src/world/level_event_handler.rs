@@ -99,3 +99,42 @@ pub(crate) fn spawn_particle_in_block(
         level.add_particle(particle, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
     }
 }
+
+pub(crate) fn composter_fill_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    composter: &SimpleParticleType,
+) {
+    let state = level.get_block_state(pos);
+    let random = level.get_random().clone();
+    // COMPAT: sound playback is deferred, but its LEVEL seed draw is unconditional,
+    // even when muted or distant. Success data only selects the omitted sound.
+    let _ = random.next_long();
+    let data = level.block_state_table().block_state_data(state);
+    let origin = DVec3::new(f64::from(pos.x), 0.0, f64::from(pos.z));
+    let delta = data.outline_shape_position(pos.x, 0, pos.z) - origin;
+    let center_height = crate::physics::block_shape::outline_shape(data)
+        .iter()
+        .filter(|bounds| {
+            bounds[0] + delta.x <= 0.5
+                && 0.5 < bounds[3] + delta.x
+                && bounds[2] + delta.z <= 0.5
+                && 0.5 < bounds[5] + delta.z
+        })
+        .map(|bounds| bounds[4])
+        .fold(f64::NEG_INFINITY, f64::max)
+        + delta.y
+        + 0.03125;
+
+    for _ in 0..10 {
+        let vx = next_gaussian(&random) * 0.02;
+        let vy = next_gaussian(&random) * 0.02;
+        let vz = next_gaussian(&random) * 0.02;
+        let x = f64::from(pos.x) + 0.1875 + 0.625 * f64::from(random.next_float());
+        let y = f64::from(pos.y)
+            + center_height
+            + f64::from(random.next_float()) * (1.0 - center_height);
+        let z = f64::from(pos.z) + 0.1875 + 0.625 * f64::from(random.next_float());
+        level.add_particle(composter, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
+    }
+}
