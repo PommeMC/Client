@@ -14,3 +14,4 @@ pub(crate) const PARTICLES_WAX_ON: u32 = 3003;
 pub(crate) const PARTICLES_WAX_OFF: u32 = 3004;
 pub(crate) const PARTICLES_SCRAPE: u32 = 3005;
 pub(crate) const PARTICLES_ELECTRIC_SPARK: u32 = 3002;
+pub(crate) const PARTICLES_SMASH_ATTACK: u32 = 2013;

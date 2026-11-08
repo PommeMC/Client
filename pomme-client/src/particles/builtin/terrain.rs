@@ -344,3 +344,46 @@ impl ParticleProvider<BlockParticleOption> for TerrainProvider {
         ))))
     }
 }
+
+pub(super) struct DustPillarProvider;
+
+impl ParticleProvider<BlockParticleOption> for DustPillarProvider {
+    fn create_particle(
+        &self,
+        options: &BlockParticleOption,
+        world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let state = options.get_state();
+        let data = world.block_state_table().block_state_data(state);
+        if data.is_air() || matches!(data.id(), "moving_piston" | "barrier" | "structure_void") {
+            return None;
+        }
+        let appearance = world.block_particle_appearance();
+        let sprite = appearance.sprite(state);
+        let tint = appearance.tint(state, BlockPos::containing(position), world.chunks());
+        let mut particle = TerrainParticle::new(position, auxiliary, sprite, tint);
+        particle.set_velocity(DVec3::new(
+            dust_pillar_gaussian(random) / 30.0,
+            auxiliary.y + dust_pillar_gaussian(random) / 2.0,
+            dust_pillar_gaussian(random) / 30.0,
+        ));
+        particle.set_lifetime((random.next_int(20) + 20) as u32);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+// COMPAT: uncached polar sampling on ENGINE preserves distribution and draw
+// purposes, not Java's Gaussian cache, raw uniform count or seeded sequence.
+fn dust_pillar_gaussian(random: &RandomSource) -> f64 {
+    loop {
+        let v1 = 2.0 * random.next_double() - 1.0;
+        let v2 = 2.0 * random.next_double() - 1.0;
+        let s = v1 * v1 + v2 * v2;
+        if s > 0.0 && s < 1.0 {
+            return v1 * (-2.0 * s.ln() / s).sqrt();
+        }
+    }
+}
