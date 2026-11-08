@@ -10,14 +10,15 @@ use super::blocks::{
     CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock, EnchantingTableBlock,
     EndPortalBlock, EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock,
     MyceliumBlock, NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
-    RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SmokerBlock, SoulFireBlock,
-    SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+    RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SculkSensorBlock, SmokerBlock,
+    SoulFireBlock, SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
 };
 use crate::particles::ParticleTypes;
+use crate::particles::dust_color_transition_options::DustColorTransitionOptions;
 use crate::particles::dust_particle_options::DustParticleOptions;
 use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
@@ -224,6 +225,12 @@ impl BlockFactory {
                 block_data,
                 SimpleParticleType::new(Rc::clone(&types.white_smoke)),
                 SimpleParticleType::new(Rc::clone(&types.happy_villager)),
+            )),
+            "sculk_sensor" | "calibrated_sculk_sensor" => Box::new(SculkSensorBlock::new(
+                block_data,
+                DustColorTransitionOptions::sculk_to_redstone(Rc::clone(
+                    &types.dust_color_transition,
+                )),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }

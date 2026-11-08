@@ -9,6 +9,7 @@ mod bubble_column;
 mod campfire_smoke;
 mod drip;
 mod dust;
+mod dust_color_transition;
 mod end_rod;
 mod flame;
 mod fly_towards_position;
@@ -29,6 +30,7 @@ use self::drip::{
     DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
 };
 use self::dust::DustParticleRegistration;
+use self::dust_color_transition::DustColorTransitionParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
@@ -165,5 +167,9 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.happy_villager),
         &HappyVillagerParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dust_color_transition),
+        &DustColorTransitionParticleRegistration,
     );
 }
