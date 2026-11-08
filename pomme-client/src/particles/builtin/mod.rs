@@ -37,11 +37,11 @@ use self::fly_towards_position::EnchantParticleRegistration;
 use self::lava::LavaParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::reverse_portal::ReversePortalParticleRegistration;
-use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
+use self::smoke::{LargeSmokeParticleRegistration, WhiteSmokeParticleRegistration};
 pub use self::smoke::{SmokeParticle, SmokeProvider};
 use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
-use self::suspended_town::SuspendedTownParticleRegistration;
+use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
 use self::water_drop::SplashParticleRegistration;
@@ -157,5 +157,13 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.spore_blossom_air),
         &SporeBlossomAirParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.white_smoke),
+        &WhiteSmokeParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.happy_villager),
+        &HappyVillagerParticleRegistration,
     );
 }
