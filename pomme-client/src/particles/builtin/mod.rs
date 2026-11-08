@@ -18,10 +18,7 @@ mod water_drop;
 
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
 use self::drip::{
-    LavaFallParticleRegistration, LavaHangParticleRegistration, LavaLandParticleRegistration,
-    ObsidianTearFallParticleRegistration, ObsidianTearHangParticleRegistration,
-    ObsidianTearLandParticleRegistration, WaterFallParticleRegistration,
-    WaterHangParticleRegistration,
+    DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
 };
 use self::dust::DustParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
@@ -80,35 +77,47 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(
         Rc::clone(&types.dripping_water),
-        &WaterHangParticleRegistration::new(Rc::clone(&types.falling_water)),
+        &DripHangParticleRegistration::water(Rc::clone(&types.falling_water)),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.falling_water),
-        &WaterFallParticleRegistration::new(Rc::clone(&types.splash)),
+        &DripFallParticleRegistration::water(Rc::clone(&types.splash)),
     );
     resources.register_sprite_provider(Rc::clone(&types.splash), &SplashParticleRegistration);
     resources.register_sprite_provider(
         Rc::clone(&types.dripping_lava),
-        &LavaHangParticleRegistration::new(Rc::clone(&types.falling_lava)),
+        &DripHangParticleRegistration::lava(Rc::clone(&types.falling_lava)),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.falling_lava),
-        &LavaFallParticleRegistration::new(Rc::clone(&types.landing_lava)),
+        &DripFallParticleRegistration::lava(Rc::clone(&types.landing_lava)),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.landing_lava),
-        &LavaLandParticleRegistration,
+        &DripLandParticleRegistration::lava(),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.dripping_obsidian_tear),
-        &ObsidianTearHangParticleRegistration::new(Rc::clone(&types.falling_obsidian_tear)),
+        &DripHangParticleRegistration::obsidian_tear(Rc::clone(&types.falling_obsidian_tear)),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.falling_obsidian_tear),
-        &ObsidianTearFallParticleRegistration::new(Rc::clone(&types.landing_obsidian_tear)),
+        &DripFallParticleRegistration::obsidian_tear(Rc::clone(&types.landing_obsidian_tear)),
     );
     resources.register_sprite_provider(
         Rc::clone(&types.landing_obsidian_tear),
-        &ObsidianTearLandParticleRegistration,
+        &DripLandParticleRegistration::obsidian_tear(),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_honey),
+        &DripHangParticleRegistration::honey(Rc::clone(&types.falling_honey)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_honey),
+        &DripFallParticleRegistration::honey(Rc::clone(&types.landing_honey)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.landing_honey),
+        &DripLandParticleRegistration::honey(),
     );
 }

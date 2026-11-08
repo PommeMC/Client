@@ -49,6 +49,7 @@ pub fn contract_exemplar<R: ParticleResources>(
     let mut level = LevelContext::new(
         world.chunks(),
         world.block_particle_appearance(),
+        world.block_tags,
         world.camera_render_position,
         world.particle_status,
         world.get_random(),
@@ -120,6 +121,7 @@ pub fn contract_exemplar_smoke<R: ParticleResources>(
     let mut level = LevelContext::new(
         world.chunks(),
         world.block_particle_appearance(),
+        world.block_tags,
         world.camera_render_position,
         world.particle_status,
         world.get_random(),
@@ -150,6 +152,7 @@ pub fn contract_exemplar_smoke<R: ParticleResources>(
     let mut replacement_level = LevelContext::new(
         replacement_world.chunks(),
         replacement_world.block_particle_appearance(),
+        replacement_world.block_tags,
         replacement_world.camera_render_position,
         replacement_world.particle_status,
         replacement_world.get_random(),
@@ -195,6 +198,7 @@ pub fn contract_exemplar_flame<R: ParticleResources>(
     let mut level = LevelContext::new(
         world.chunks(),
         world.block_particle_appearance(),
+        world.block_tags,
         world.camera_render_position,
         world.particle_status,
         world.get_random(),
