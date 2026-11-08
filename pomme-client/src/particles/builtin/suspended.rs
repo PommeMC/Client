@@ -5,7 +5,7 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, resized_bounds,
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
 };
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{
@@ -36,6 +36,8 @@ pub struct SuspendedParticle {
     has_physics: bool,
     age: u32,
     lifetime: u32,
+    gravity: f32,
+    limit: Option<ParticleLimit>,
     quad_size: f32,
     color: [f32; 3],
     alpha: f32,
@@ -46,18 +48,30 @@ pub struct SuspendedParticle {
 
 impl SuspendedParticle {
     fn new(position: DVec3, sprite: AtlasRegion) -> Self {
+        Self::with_auxiliary(position, sprite, None)
+    }
+
+    fn with_velocity(position: DVec3, sprite: AtlasRegion, auxiliary: DVec3) -> Self {
+        Self::with_auxiliary(position, sprite, Some(auxiliary))
+    }
+
+    fn with_auxiliary(position: DVec3, sprite: AtlasRegion, auxiliary: Option<DVec3>) -> Self {
         let position = position - DVec3::new(0.0, 0.125, 0.0);
         let mut random = fastrand::Rng::new();
-        // Preserve the overwritten base lifetime before the three quad/life draws.
+        // Preserve base lifetime before optional motion and the three quad/life draws.
         let _base_lifetime = (4.0_f32 / (random.f32() * 0.9_f32 + 0.1_f32)) as u32;
+        let (velocity, quad_offset) = match auxiliary {
+            Some(auxiliary) => (randomized_motion(&mut random, auxiliary), 0.6_f32),
+            None => (DVec3::ZERO, 0.2_f32),
+        };
         let mut quad_size = randomized_quad_size(&mut random);
         let bounds = resized_bounds(bounds_at(position, 0.2, 0.2), 0.01, 0.01);
-        quad_size *= random.f32() * 0.6_f32 + 0.2_f32;
+        quad_size *= random.f32() * 0.6_f32 + quad_offset;
         let lifetime = (16.0_f64 / (f64::from(random.f32()) * 0.8_f64 + 0.2_f64)) as u32;
         Self {
             position,
             previous_position: position,
-            velocity: DVec3::ZERO,
+            velocity,
             bounds,
             width: 0.01,
             height: 0.01,
@@ -67,6 +81,8 @@ impl SuspendedParticle {
             has_physics: false,
             age: 0,
             lifetime,
+            gravity: 0.0,
+            limit: None,
             quad_size,
             color: [1.0; 3],
             alpha: 1.0,
@@ -95,6 +111,7 @@ impl Particle for SuspendedParticle {
         if age >= self.lifetime {
             self.remove();
         } else {
+            self.velocity.y -= 0.04_f64 * f64::from(self.gravity);
             self.move_by(context, self.velocity);
             if self.on_ground {
                 self.velocity.x *= f64::from(0.7_f32);
@@ -141,7 +158,7 @@ impl Particle for SuspendedParticle {
         ParticleRenderType::SingleQuads
     }
     fn get_particle_limit(&self) -> Option<ParticleLimit> {
-        None
+        self.limit
     }
     fn get_pos(&self) -> DVec3 {
         self.position
@@ -281,6 +298,46 @@ impl SpriteParticleRegistration<SimpleParticleType> for UnderwaterParticleRegist
         sprite_set: Rc<dyn SpriteSet>,
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
         Rc::new(UnderwaterProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct SporeBlossomAirProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for SporeBlossomAirProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedParticle::with_velocity(
+            position,
+            sprite,
+            DVec3::new(0.0, f64::from(-0.8_f32), 0.0),
+        );
+        particle.lifetime = (random.next_int(501) + 500) as u32;
+        particle.gravity = 0.01_f32;
+        particle.set_color([0.32, 0.5, 0.22]);
+        particle.limit = Some(ParticleLimit { limit: 1000 });
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct SporeBlossomAirParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for SporeBlossomAirParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(SporeBlossomAirProvider {
             sprites: sprite_set,
         })
     }

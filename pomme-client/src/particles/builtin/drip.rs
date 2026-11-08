@@ -289,7 +289,10 @@ impl SingleQuadParticle for DripHangParticle {
     }
 }
 
-pub struct FallAndLandParticle {
+// COMPAT: Vanilla FallingParticle/FallAndLandParticle share this owned stage;
+// an optional landing child represents their difference without an inheritance
+// port.
+pub struct FallingParticle {
     position: DVec3,
     previous_position: DVec3,
     velocity: DVec3,
@@ -308,24 +311,32 @@ pub struct FallAndLandParticle {
     roll: f32,
     previous_roll: f32,
     sprite: AtlasRegion,
-    land_particle: SimpleParticleType,
+    land_particle: Option<SimpleParticleType>,
     fluid_kind: FluidKind,
     gravity: f32,
     is_glowing: bool,
 }
 
-impl FallAndLandParticle {
+impl FallingParticle {
     fn new(
         position: DVec3,
         sprite: AtlasRegion,
-        land_particle: SimpleParticleType,
+        land_particle: Option<SimpleParticleType>,
         fluid_kind: FluidKind,
         color: [f32; 3],
+        lifetime_recipe: LifetimeRecipe,
     ) -> Self {
         let mut random = fastrand::Rng::new();
         let _base_lifetime = (4.0_f32 / (random.f32() * 0.9_f32 + 0.1_f32)) as u32;
         let quad_size = randomized_quad_size(&mut random);
-        let lifetime = (64.0_f64 / (f64::from(random.f32()) * 0.8_f64 + 0.2_f64)) as u32;
+        let lifetime = match lifetime_recipe {
+            LifetimeRecipe::FallAndLand => {
+                (64.0_f64 / (f64::from(random.f32()) * 0.8_f64 + 0.2_f64)) as u32
+            }
+            LifetimeRecipe::SporeBlossom => {
+                (64.0_f32 / (0.1_f32 + random.f32() * (0.9_f32 - 0.1_f32))) as u32
+            }
+        };
         Self {
             position,
             previous_position: position,
@@ -353,7 +364,7 @@ impl FallAndLandParticle {
     }
 }
 
-impl Particle for FallAndLandParticle {
+impl Particle for FallingParticle {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -378,7 +389,9 @@ impl Particle for FallAndLandParticle {
         self.move_by(context, self.velocity);
         if self.on_ground {
             self.remove();
-            context.add_particle(&self.land_particle, self.position, DVec3::ZERO);
+            if let Some(land_particle) = &self.land_particle {
+                context.add_particle(land_particle, self.position, DVec3::ZERO);
+            }
             return;
         }
         self.velocity *= f64::from(0.98_f32);
@@ -491,7 +504,7 @@ impl Particle for FallAndLandParticle {
     }
 }
 
-impl SingleQuadParticle for FallAndLandParticle {
+impl SingleQuadParticle for FallingParticle {
     fn get_sprite(&self) -> AtlasRegion {
         self.sprite
     }
@@ -938,16 +951,23 @@ impl SpriteParticleRegistration<SimpleParticleType> for DripHangParticleRegistra
 }
 
 #[derive(Clone, Copy)]
+enum LifetimeRecipe {
+    FallAndLand,
+    SporeBlossom,
+}
+
+#[derive(Clone, Copy)]
 struct DripFallSettings {
     fluid_kind: FluidKind,
     color: [f32; 3],
     gravity_override: Option<f32>,
     is_glowing: bool,
+    lifetime_recipe: LifetimeRecipe,
 }
 
 pub struct DripFallProvider {
     sprites: Rc<dyn SpriteSet>,
-    land_particle: Rc<ParticleType<SimpleParticleType>>,
+    land_particle: Option<Rc<ParticleType<SimpleParticleType>>>,
     settings: DripFallSettings,
 }
 
@@ -961,12 +981,15 @@ impl ParticleProvider<SimpleParticleType> for DripFallProvider {
         random: &RandomSource,
     ) -> Option<ParticleRef> {
         let sprite = self.sprites.get_random(random);
-        let mut particle = FallAndLandParticle::new(
+        let mut particle = FallingParticle::new(
             position,
             sprite,
-            SimpleParticleType::new(Rc::clone(&self.land_particle)),
+            self.land_particle
+                .as_ref()
+                .map(|particle| SimpleParticleType::new(Rc::clone(particle))),
             self.settings.fluid_kind,
             self.settings.color,
+            self.settings.lifetime_recipe,
         );
         particle.is_glowing = self.settings.is_glowing;
         if let Some(gravity) = self.settings.gravity_override {
@@ -977,31 +1000,33 @@ impl ParticleProvider<SimpleParticleType> for DripFallProvider {
 }
 
 pub(in crate::particles) struct DripFallParticleRegistration {
-    land_particle: Rc<ParticleType<SimpleParticleType>>,
+    land_particle: Option<Rc<ParticleType<SimpleParticleType>>>,
     settings: DripFallSettings,
 }
 
 impl DripFallParticleRegistration {
     pub(in crate::particles) fn water(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
         Self {
-            land_particle,
+            land_particle: Some(land_particle),
             settings: DripFallSettings {
                 fluid_kind: FluidKind::Water,
                 color: [0.2, 0.3, 1.0],
                 gravity_override: None,
                 is_glowing: false,
+                lifetime_recipe: LifetimeRecipe::FallAndLand,
             },
         }
     }
 
     pub(in crate::particles) fn lava(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
         Self {
-            land_particle,
+            land_particle: Some(land_particle),
             settings: DripFallSettings {
                 fluid_kind: FluidKind::Lava,
                 color: [1.0, 0.2857143, 0.083333336],
                 gravity_override: None,
                 is_glowing: false,
+                lifetime_recipe: LifetimeRecipe::FallAndLand,
             },
         }
     }
@@ -1010,26 +1035,41 @@ impl DripFallParticleRegistration {
         land_particle: Rc<ParticleType<SimpleParticleType>>,
     ) -> Self {
         Self {
-            land_particle,
+            land_particle: Some(land_particle),
             settings: DripFallSettings {
                 fluid_kind: FluidKind::Empty,
                 color: [0.51171875, 0.03125, 0.890625],
                 gravity_override: Some(0.01_f32),
                 is_glowing: true,
+                lifetime_recipe: LifetimeRecipe::FallAndLand,
             },
         }
     }
 
     // COMPAT: Vanilla HoneyFallAndLandParticle's landing sound is deferred;
-    // ordinary FallAndLandParticle provides particle-only, not audiovisual parity.
+    // ordinary FallingParticle provides particle-only, not audiovisual parity.
     pub(in crate::particles) fn honey(land_particle: Rc<ParticleType<SimpleParticleType>>) -> Self {
         Self {
-            land_particle,
+            land_particle: Some(land_particle),
             settings: DripFallSettings {
                 fluid_kind: FluidKind::Empty,
                 color: [0.582, 0.448, 0.082],
                 gravity_override: Some(0.01_f32),
                 is_glowing: false,
+                lifetime_recipe: LifetimeRecipe::FallAndLand,
+            },
+        }
+    }
+
+    pub(in crate::particles) fn spore_blossom() -> Self {
+        Self {
+            land_particle: None,
+            settings: DripFallSettings {
+                fluid_kind: FluidKind::Empty,
+                color: [0.32, 0.5, 0.22],
+                gravity_override: Some(0.005_f32),
+                is_glowing: false,
+                lifetime_recipe: LifetimeRecipe::SporeBlossom,
             },
         }
     }
@@ -1042,7 +1082,7 @@ impl SpriteParticleRegistration<SimpleParticleType> for DripFallParticleRegistra
     ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
         Rc::new(DripFallProvider {
             sprites: sprite_set,
-            land_particle: Rc::clone(&self.land_particle),
+            land_particle: self.land_particle.as_ref().map(Rc::clone),
             settings: self.settings,
         })
     }
