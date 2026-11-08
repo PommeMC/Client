@@ -40,7 +40,7 @@ use self::reverse_portal::ReversePortalParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 pub use self::smoke::{SmokeParticle, SmokeProvider};
-use self::suspended::UnderwaterParticleRegistration;
+use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
 use self::suspended_town::SuspendedTownParticleRegistration;
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::TerrainProvider;
@@ -149,5 +149,13 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.mycelium),
         &SuspendedTownParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_spore_blossom),
+        &DripFallParticleRegistration::spore_blossom(),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.spore_blossom_air),
+        &SporeBlossomAirParticleRegistration,
     );
 }
