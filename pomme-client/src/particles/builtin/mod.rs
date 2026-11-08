@@ -17,6 +17,7 @@ mod lava;
 mod portal;
 mod reverse_portal;
 mod smoke;
+mod sulfur_bubble;
 mod suspended;
 mod suspended_town;
 mod terrain;
@@ -42,6 +43,7 @@ use self::reverse_portal::ReversePortalParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 use self::smoke::{LargeSmokeParticleRegistration, WhiteSmokeParticleRegistration};
 pub use self::smoke::{SmokeParticle, SmokeProvider};
+use self::sulfur_bubble::SulfurBubbleParticleRegistration;
 use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
 use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
 pub(crate) use self::terrain::TerrainParticle;
@@ -171,5 +173,9 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.dust_color_transition),
         &DustColorTransitionParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.sulfur_bubbles),
+        &SulfurBubbleParticleRegistration,
     );
 }
