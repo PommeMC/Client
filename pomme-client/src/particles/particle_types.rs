@@ -42,6 +42,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) mycelium: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_spore_blossom: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) spore_blossom_air: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) white_smoke: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) happy_villager: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -154,6 +156,12 @@ impl ParticleTypes {
         let spore_blossom_air = registry
             .register(resource_id!("minecraft:spore_blossom_air"), false)
             .map_err(registration_error)?;
+        let white_smoke = registry
+            .register(resource_id!("minecraft:white_smoke"), false)
+            .map_err(registration_error)?;
+        let happy_villager = registry
+            .register(resource_id!("minecraft:happy_villager"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -190,6 +198,8 @@ impl ParticleTypes {
             mycelium,
             falling_spore_blossom,
             spore_blossom_air,
+            white_smoke,
+            happy_villager,
         })
     }
 }
