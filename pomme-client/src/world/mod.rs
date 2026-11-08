@@ -7,6 +7,7 @@ pub mod clock;
 pub mod environment;
 mod fluid;
 pub mod level;
+pub(crate) mod level_event;
 pub(crate) mod level_event_handler;
 pub mod light;
 pub mod piston;
