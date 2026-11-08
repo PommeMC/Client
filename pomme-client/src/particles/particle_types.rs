@@ -39,6 +39,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) reverse_portal: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) bubble_column_up: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) current_down: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) mycelium: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -142,6 +143,9 @@ impl ParticleTypes {
         let current_down = registry
             .register(resource_id!("minecraft:current_down"), false)
             .map_err(registration_error)?;
+        let mycelium = registry
+            .register(resource_id!("minecraft:mycelium"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -175,6 +179,7 @@ impl ParticleTypes {
             reverse_portal,
             bubble_column_up,
             current_down,
+            mycelium,
         })
     }
 }
