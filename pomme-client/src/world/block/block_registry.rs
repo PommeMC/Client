@@ -9,9 +9,10 @@ use super::blocks::{
     BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BubbleColumnBlock, CampfireBlock,
     CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock, EnchantingTableBlock,
     EndPortalBlock, EndRodBlock, EnderChestBlock, FireBlock, FurnaceBlock, LeverBlock,
-    MyceliumBlock, NetherPortalBlock, RedstoneTorchBlock, RedstoneWallTorchBlock,
-    RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SculkSensorBlock, SmokerBlock,
-    SoulFireBlock, SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+    MyceliumBlock, NetherPortalBlock, PotentSulfurBlock, RedstoneTorchBlock,
+    RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock, RespawnAnchorBlock, SculkSensorBlock,
+    SmokerBlock, SoulFireBlock, SporeBlossomBlock, TorchBlock, WallTorchBlock, WetSpongeBlock,
+    WitherRoseBlock,
 };
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
@@ -231,6 +232,10 @@ impl BlockFactory {
                 DustColorTransitionOptions::sculk_to_redstone(Rc::clone(
                     &types.dust_color_transition,
                 )),
+            )),
+            "potent_sulfur" => Box::new(PotentSulfurBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.sulfur_bubbles)),
             )),
             _ => Box::new(DefaultBlock { block_data }),
         }
