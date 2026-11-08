@@ -10,6 +10,7 @@ mod drip;
 mod dust;
 mod end_rod;
 mod flame;
+mod fly_towards_position;
 mod lava;
 mod portal;
 mod smoke;
@@ -26,6 +27,7 @@ pub(super) use self::end_rod::EndRodParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
+use self::fly_towards_position::EnchantParticleRegistration;
 use self::lava::LavaParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::smoke::LargeSmokeParticleRegistration;
@@ -123,4 +125,5 @@ pub(crate) fn register_builtin_providers(
         &DripLandParticleRegistration::honey(),
     );
     resources.register_sprite_provider(Rc::clone(&types.portal), &PortalParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.enchant), &EnchantParticleRegistration);
 }
