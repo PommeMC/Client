@@ -83,7 +83,7 @@ impl AssetLookup<'_> {
     }
 
     fn animation_meta(&self, resource: &Resource) -> Option<AnimationMeta> {
-        let content = resource.metadata().ok()??;
+        let content = resource.metadata()?;
         let value = serde_json::from_reader::<_, Value>(content.open().ok()?).ok()?;
         AnimationMeta::parse(value.get("animation")?)
     }

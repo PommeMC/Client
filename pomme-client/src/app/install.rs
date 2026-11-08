@@ -18,7 +18,6 @@ enum State {
     Waiting,
     Running(pomme_install::Progress),
     Failed,
-    ActivationFailed(String),
     Done,
     /// The update is in; this binary hands over to it.
     Updated(PathBuf),
@@ -167,27 +166,14 @@ impl Install {
         }
     }
 
-    /// A click or tap retries a failed download or activation. Activation
-    /// retries don't download again or discard the boot screen.
+    /// A click or tap retries a failed download.
     pub fn retry(&self, core: &AppCore) {
-        let state = self
-            .state
-            .lock()
-            .expect("installation state mutex poisoned")
-            .clone();
-        match state {
-            State::Waiting | State::Failed => self.start(core),
-            State::ActivationFailed(_) => {
-                *self
-                    .state
-                    .lock()
-                    .expect("installation state mutex poisoned") = State::Done;
-            }
-            _ => {}
+        if matches!(*self.state.lock().unwrap(), State::Waiting | State::Failed) {
+            self.start(core);
         }
     }
 
-    pub fn frame(&mut self, core: &mut AppCore) -> Step {
+    pub fn frame(&mut self, core: &AppCore) -> Step {
         let state = self.state.lock().unwrap().clone();
         let (progress, status) = match state {
             State::Waiting => (0.0, String::new()),
@@ -202,7 +188,6 @@ impl Install {
                 0.0,
                 "Download failed. Check your connection, then tap or click to retry.".to_owned(),
             ),
-            State::ActivationFailed(status) => (0.0, status),
             State::Updated(exe) => match crate::update::relaunch(&exe) {
                 Ok(()) => return Step::Relaunched,
                 Err(e) => {
@@ -219,28 +204,12 @@ impl Install {
                 (0.0, String::new())
             }
             State::Done => {
-                if self.job == Job::Assets
-                    && let Err(error) = core.reload_installed_assets()
-                {
-                    tracing::warn!(%error, "Installed resource activation failed; retaining the boot screen and last good resource view");
-                    let status = format!(
-                        "Resource setup failed: {error}. Fix the resources, then tap or click to retry."
-                    );
-                    *self
-                        .state
-                        .lock()
-                        .expect("installation state mutex poisoned") =
-                        State::ActivationFailed(status.clone());
-                    (0.0, status)
-                } else {
-                    // New assets activate before handing off the window. An update-only
-                    // job keeps AppCore's startup view, including its logged fallback.
-                    self.screen = None;
-                    if let Some(window) = self.window.take() {
-                        return Step::Done(window);
-                    }
-                    return Step::Running;
+                // The full renderer makes its own surface on this window.
+                self.screen = None;
+                if let Some(window) = self.window.take() {
+                    return Step::Done(window);
                 }
+                return Step::Running;
             }
         };
         if let Some(screen) = &mut self.screen

@@ -3,36 +3,19 @@ pub(crate) use self::format::PackFormat;
 use self::format::PackFormatRange;
 
 mod download;
-#[allow(
-    dead_code,
-    reason = "Complete feature contract beyond current client configuration"
-)]
 mod features;
 mod filter;
 mod format;
 mod id;
-#[allow(
-    dead_code,
-    reason = "Rich-text pack presentation API beyond current menu rows"
-)]
 mod location;
 mod metadata;
-#[allow(
-    dead_code,
-    reason = "Complete logical pack API beyond current application activation"
-)]
 mod pack;
-#[allow(
-    dead_code,
-    reason = "Complete repository API includes explicit reorder and feature queries"
-)]
 mod repository;
 mod sources;
 
 pub(crate) use download::{PackDownloadError, download_server_pack};
-pub(crate) use features::FeatureFlagSet;
 pub(crate) use id::PackId;
-pub(crate) use location::{PackLocationInfo, PackSource};
+pub(crate) use location::PackLocationInfo;
 pub(crate) use pack::{Pack, PackEnablementConfig, PackMetadata, PackPosition, ResourcesSupplier};
 pub(crate) use repository::PackRepository;
 pub(crate) use sources::{

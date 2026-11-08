@@ -816,8 +816,9 @@ pub struct MainMenu {
     /// The options were saved, so the game should broadcast them.
     options_saved: bool,
     bench_render_distance: crate::benchmark::BenchRenderDistance,
-    /// The title screen's splash line, rolled at launch and on every return
-    /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
+    /// `SplashManager`'s list, replaced on every resource reload.
+    splashes: Vec<String>,
+    /// The title screen's splash line. `None` renders nothing.
     pub splash: Option<String>,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
@@ -980,6 +981,7 @@ impl MainMenu {
             settings_dirty: false,
             options_saved: false,
             bench_render_distance: Default::default(),
+            splashes: Vec::new(),
             splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
@@ -1347,23 +1349,23 @@ impl MainMenu {
         }
     }
 
-    /// Picks from the active resource view. Absence clears the splash;
-    /// read/decode failure retains the last good line without rolling back
-    /// resource activation.
-    pub fn load_splash(&mut self, resources: &dyn ResourceManager) {
-        let now =
-            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let picked = splash::pick(
-            resources,
-            &self.username,
-            now.month() as u32,
-            u32::from(now.day()),
-        );
-        match picked {
-            Ok(splash) => self.splash = splash,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to load minecraft:texts/splashes.txt; retaining the last good splash");
-            }
+    /// `SplashManager.apply`: a reload swaps the list, not the line showing.
+    pub fn load_splashes(&mut self, resources: &dyn ResourceManager) {
+        self.splashes = splash::load(resources);
+    }
+
+    /// `TitleScreen.init`: a splash is picked only while there is none, so a
+    /// fresh title screen clears it first.
+    pub fn pick_splash(&mut self) {
+        if self.splash.is_none() {
+            let now = time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+            self.splash = splash::pick(
+                &self.splashes,
+                &self.username,
+                now.month() as u32,
+                u32::from(now.day()),
+            );
         }
     }
 

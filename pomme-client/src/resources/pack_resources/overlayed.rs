@@ -31,6 +31,16 @@ impl OverlayedPackResources {
     }
 }
 
+/// Vanilla's layers catch their own errors, so one that fails is logged and
+/// counts as empty; the rest of the stack still answers.
+fn logged<T>(pack: &dyn PackResources, operation: &str, result: io::Result<T>) -> Option<T> {
+    result
+        .inspect_err(|error| {
+            tracing::warn!(pack = %pack.location().id, operation, %error, "Pack layer failed");
+        })
+        .ok()
+}
+
 impl PackMetadataResources for OverlayedPackResources {
     fn location(&self) -> &PackLocationInfo {
         self.primary.location()
@@ -61,12 +71,14 @@ impl PackResources for OverlayedPackResources {
         pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        for pack in self.stack() {
-            if let Some(supplier) = pack.get_resource(pack_type, id)? {
-                return Ok(Some(supplier));
-            }
-        }
-        Ok(None)
+        Ok(self.stack().find_map(|pack| {
+            logged(
+                pack.as_ref(),
+                "get resource",
+                pack.get_resource(pack_type, id),
+            )
+            .flatten()
+        }))
     }
 
     fn list_resources(
@@ -78,11 +90,12 @@ impl PackResources for OverlayedPackResources {
     ) -> io::Result<()> {
         let mut resources = HashMap::new();
         for pack in self.stack() {
-            pack.list_resources(pack_type, namespace, directory, &mut |id, supplier| {
-                resources.entry(id).or_insert(supplier);
-            })?;
+            let result =
+                pack.list_resources(pack_type, namespace, directory, &mut |id, supplier| {
+                    resources.entry(id).or_insert(supplier);
+                });
+            logged(pack.as_ref(), "list resources", result);
         }
-        // Delay output until all layers succeed, retaining the first supplier.
         for (id, supplier) in resources {
             output(id, supplier);
         }
@@ -90,59 +103,34 @@ impl PackResources for OverlayedPackResources {
     }
 
     fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        let mut namespaces = HashSet::new();
-        for pack in self.stack() {
-            namespaces.extend(pack.get_namespaces(pack_type)?);
-        }
-        Ok(namespaces)
+        Ok(self
+            .stack()
+            .filter_map(|pack| {
+                logged(
+                    pack.as_ref(),
+                    "list namespaces",
+                    pack.get_namespaces(pack_type),
+                )
+            })
+            .flatten()
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod test_fixture {
-    use std::path::PathBuf;
+
+    use std::fs;
     use std::rc::Rc;
-    use std::{fs, io};
 
     use super::OverlayedPackResources;
     use crate::chat_component::Component;
     use crate::resources::pack_resources::PathPackResources;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
-
-    pub(super) struct TempDir(pub(super) PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-overlayed-api-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::test_dir::TempDir;
 
     pub(super) fn default_location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "overlayed-api".into(),
-            title: Component::text("Overlayed API fixture"),
-            source: PackSource::built_in(),
-            known_pack_info: None,
-        }
+        PackLocationInfo::test("overlayed-api")
     }
 
     pub(super) fn fixture(location: PackLocationInfo) -> (TempDir, OverlayedPackResources) {
@@ -183,7 +171,6 @@ mod test_fixture {
         let overlay_location = PackLocationInfo {
             id: "overlay-location".into(),
             title: Component::translate("location.overlay.title", Vec::new()),
-            source: PackSource::built_in(),
             known_pack_info: None,
         };
         let pack = OverlayedPackResources::new(
@@ -199,13 +186,12 @@ mod test_fixture {
 
 #[cfg(test)]
 mod pack_metadata_resources_tests {
-    use pomme_protocol::KnownPack;
     use serde_json::json;
 
     use super::test_fixture::{default_location, fixture};
     use crate::chat_component::Component;
     use crate::resources::pack_resources::tests;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
+    use crate::resources::packs::PackLocationInfo;
 
     #[test]
     fn test_get_root_resource() {
@@ -242,8 +228,7 @@ mod pack_metadata_resources_tests {
         let expected = PackLocationInfo {
             id: "overlayed-primary-location".into(),
             title: Component::translate("location.overlayed.primary.title", Vec::new()),
-            source: PackSource::feature(),
-            known_pack_info: Some(KnownPack {
+            known_pack_info: Some(pomme_protocol::KnownPack {
                 namespace: "location_test".into(),
                 id: "overlayed_primary_known".into(),
                 version: "test-1".into(),
@@ -255,70 +240,11 @@ mod pack_metadata_resources_tests {
 }
 
 #[cfg(test)]
-mod pack_metadata_resources_ext_tests {
-    use std::{fs, io};
-
-    use serde_json::json;
-
-    use super::test_fixture::{default_location, fixture};
-    use crate::resources::pack_resources::{MetadataSectionType, tests};
-
-    #[test]
-    fn test_get_metadata_section() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |value| {
-                value
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "expected string"))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section(&pack, &section, Some("primary".into()));
-    }
-
-    #[test]
-    fn test_get_metadata_section_missing() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_metadata_section_missing(&pack, "missing");
-    }
-
-    #[test]
-    fn test_get_metadata_section_null() {
-        let (temp, pack) = fixture(default_location());
-        fs::write(temp.0.join("primary/pack.mcmeta"), br#"{"null":null}"#).unwrap();
-        tests::test_get_metadata_section_null(&pack, "null");
-    }
-
-    #[test]
-    fn test_get_metadata_section_decode_error() {
-        let (_temp, pack) = fixture(default_location());
-        let section = MetadataSectionType::<String> {
-            name: "test".into(),
-            decode: |_| {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "decoder sentinel",
-                ))
-            },
-            encode: |value| Ok(json!({"value": value})),
-        };
-        tests::test_get_metadata_section_decode_error(&pack, &section, io::ErrorKind::Unsupported);
-    }
-}
-
-#[cfg(test)]
 mod pack_resources_tests {
     use std::collections::HashSet;
 
-    use pomme_protocol::KnownPack;
-
     use super::test_fixture::{default_location, fixture};
     use crate::resources::pack_resources::{PackType, tests};
-    use crate::resources::packs::PackLocationInfo;
     use crate::resources::resource_id;
 
     #[test]
@@ -333,33 +259,12 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_resource_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_data:test/server.txt"),
-            b"server data",
-        );
-    }
-
-    #[test]
     fn test_get_resource_missing() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_resource_missing(
             &pack,
             PackType::ClientResources,
             &resource_id!("api_test:test/missing.txt"),
-        );
-    }
-
-    #[test]
-    fn test_get_resource_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_resource_missing(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("api_test:test/one.txt"),
         );
     }
 
@@ -385,39 +290,9 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ServerData,
-            "api_data",
-            "test",
-            &[(
-                resource_id!("api_data:test/server.txt"),
-                b"server data".to_vec(),
-            )],
-        );
-    }
-
-    #[test]
     fn test_list_resources_empty_directory() {
         let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ClientResources,
-            "api_test",
-            "",
-            &[
-                (
-                    resource_id!("api_test:test/one.txt"),
-                    b"client one".to_vec(),
-                ),
-                (
-                    resource_id!("api_test:test/nested/two.txt"),
-                    b"client two".to_vec(),
-                ),
-            ],
-        );
+        tests::test_list_resources(&pack, PackType::ClientResources, "api_test", "", &[]);
     }
 
     #[test]
@@ -433,12 +308,6 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_wrong_domain() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_list_resources(&pack, PackType::ServerData, "api_test", "test", &[]);
-    }
-
-    #[test]
     fn test_get_namespaces_client() {
         let (_temp, pack) = fixture(default_location());
         tests::test_get_namespaces(
@@ -449,39 +318,48 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_namespaces_server() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_get_namespaces(
-            &pack,
-            PackType::ServerData,
-            &HashSet::from(["api_data".into()]),
-        );
-    }
-
-    #[test]
     fn test_pack_id() {
         let (_temp, pack) = fixture(default_location());
         tests::test_pack_id(&pack, "overlayed-api");
     }
+}
+
+#[cfg(test)]
+mod failing_layer_tests {
+    use std::rc::Rc;
+
+    use super::OverlayedPackResources;
+    use super::test_fixture::{default_location, fixture};
+    use crate::resources::pack_resources::test_pack::TestPack;
+    use crate::resources::pack_resources::{PackResources, PackType};
+    use crate::resources::resource_id;
 
     #[test]
-    fn test_known_pack_info_none() {
-        let (_temp, pack) = fixture(default_location());
-        tests::test_known_pack_info(&pack, None);
-    }
-
-    #[test]
-    fn test_known_pack_info_some() {
-        let expected = KnownPack {
-            namespace: "api_identity".into(),
-            id: "overlayed_known".into(),
-            version: "api-2".into(),
-        };
-        let location = PackLocationInfo {
-            known_pack_info: Some(expected.clone()),
-            ..default_location()
-        };
-        let (_temp, pack) = fixture(location);
-        tests::test_known_pack_info(&pack, Some(&expected));
+    fn a_failing_overlay_leaves_the_primary_answering() {
+        let (_temp, overlayed) = fixture(default_location());
+        let pack = OverlayedPackResources::new(
+            Rc::new(overlayed),
+            vec![Rc::new(TestPack::new("broken", &[]).broken())],
+        );
+        let id = resource_id!("api_test:test/one.txt");
+        assert!(
+            pack.get_resource(PackType::ClientResources, &id)
+                .unwrap()
+                .is_some()
+        );
+        let mut listed = Vec::new();
+        pack.list_resources(
+            PackType::ClientResources,
+            "api_test",
+            "test",
+            &mut |id, _| listed.push(id),
+        )
+        .unwrap();
+        assert!(listed.contains(&id));
+        assert!(
+            pack.get_namespaces(PackType::ClientResources)
+                .unwrap()
+                .contains("api_test")
+        );
     }
 }

@@ -1363,13 +1363,11 @@ mod tests {
         let mut repository = crate::resources::packs::PackRepository::new(vec![Box::new(
             crate::resources::packs::BuiltinRepositorySource::new(None),
         )]);
-        repository.reload().unwrap();
+        repository.reload();
         let mut resources = crate::resources::managers::ReloadableResourceManager::new(
             crate::resources::pack_resources::PackType::ClientResources,
         );
-        resources
-            .reload(repository.open_all_enabled().unwrap(), |_| {})
-            .unwrap();
+        resources.reload(repository.open_all_enabled(), |_| {});
 
         for _ in 0..3 {
             engine.play_entity_sound(

@@ -6,35 +6,33 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::symlinks::prepare_pack_path;
-use super::{RepositorySource, SymlinkPolicy, path_error};
-use crate::resources::pack_resources::{FileResourcesSupplier, PackType, PathResourcesSupplier};
+use super::{RepositorySource, SymlinkPolicy};
+use crate::resources::pack_resources::{PackType, PathResourcesSupplier};
 use crate::resources::packs::{
     Pack, PackEnablementConfig, PackFormat, PackId, PackLocationInfo, ResourcesSupplier,
 };
 
 pub(crate) enum PhysicalPack {
     Directory(PathBuf),
-    Zip(PathBuf),
 }
 
 impl PhysicalPack {
     fn path(&self) -> &Path {
         match self {
-            Self::Directory(path) | Self::Zip(path) => path,
+            Self::Directory(path) => path,
         }
     }
 
     fn prepare(&self, policy: &SymlinkPolicy) -> io::Result<Rc<dyn ResourcesSupplier>> {
         let kind = std::fs::symlink_metadata(self.path())?.file_type();
         let (path, kind) = prepare_pack_path(self.path(), kind, policy)?;
-        match self {
-            Self::Directory(_) if kind.is_dir() => Ok(Rc::new(PathResourcesSupplier::new(path))),
-            Self::Zip(_) if kind.is_file() => Ok(Rc::new(FileResourcesSupplier::new(path))),
-            _ => Err(io::Error::new(
+        if !kind.is_dir() {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "pack root does not match its declared storage type",
-            )),
+                "pack root is not a directory",
+            ));
         }
+        Ok(Rc::new(PathResourcesSupplier::new(path)))
     }
 }
 
@@ -132,12 +130,14 @@ impl RegisteredRepositorySource {
 }
 
 impl RepositorySource for RegisteredRepositorySource {
+    /// A definition that fails to load is logged and left out, as vanilla's
+    /// `Pack.readMetaAndCreate` returns null for a pack it can't read.
     fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
         let state = self.state.borrow();
-        state
+        Ok(state
             .definitions
             .iter()
-            .map(|definition| {
+            .filter_map(|definition| {
                 let load = || -> io::Result<Pack> {
                     let resources = definition.physical.prepare(&state.allowed_symlinks)?;
                     let metadata = Pack::read_metadata(
@@ -157,67 +157,33 @@ impl RepositorySource for RegisteredRepositorySource {
                         resources,
                     ))
                 };
-                // Explicit definitions are all-or-error, never silently dropped.
-                load().map_err(|error| {
-                    path_error(
-                        &format!(
-                            "load registered pack {:?} ({:?})",
-                            definition.id, definition.location.id
-                        ),
-                        definition.physical.path(),
-                        error,
-                    )
-                })
+                load()
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            pack = %definition.location.id,
+                            path = %definition.physical.path().display(),
+                            %error,
+                            "Failed to load registered pack; skipping"
+                        );
+                    })
+                    .ok()
             })
-            .collect()
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod repository_source_tests {
-    use std::fs::{self, File};
-    use std::io::{self, Write};
-    use std::path::PathBuf;
 
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
+    use std::fs;
 
     use super::super::tests;
     use super::{PhysicalPack, RegisteredRepositorySource};
-    use crate::chat_component::Component;
     use crate::resources::pack_resources::PackType;
-    use crate::resources::packs::{
-        PackEnablementConfig, PackLocationInfo, PackPosition, PackSource,
-    };
+    use crate::resources::packs::{PackEnablementConfig, PackLocationInfo};
+    use crate::resources::test_dir::TempDir;
 
     const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-registered-source-api-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
 
     fn fixture() -> (TempDir, RegisteredRepositorySource) {
         let temp = TempDir::new().unwrap();
@@ -238,47 +204,11 @@ mod repository_source_tests {
         fs::create_dir(&path).unwrap();
         fs::write(path.join("pack.mcmeta"), METADATA).unwrap();
         source.register(
-            PackLocationInfo {
-                id: "registered-directory".to_owned(),
-                title: Component::text("fixture"),
-                source: PackSource::default(),
-                known_pack_info: None,
-            },
+            PackLocationInfo::test("registered-directory"),
             PhysicalPack::Directory(path),
-            PackEnablementConfig {
-                required: false,
-                default_position: PackPosition::Top,
-                fixed_position: false,
-            },
+            PackEnablementConfig::DISCOVERED,
         );
         tests::test_load_packs(&mut source, &["registered-directory"]);
-    }
-
-    #[test]
-    fn test_load_packs_zip() {
-        let (temp, mut source) = fixture();
-        let path = temp.0.join("pack.zip");
-        let mut archive = ZipWriter::new(File::create(&path).unwrap());
-        archive
-            .start_file("pack.mcmeta", SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(METADATA).unwrap();
-        drop(archive.finish().unwrap());
-        source.register(
-            PackLocationInfo {
-                id: "registered-zip".to_owned(),
-                title: Component::text("fixture"),
-                source: PackSource::default(),
-                known_pack_info: None,
-            },
-            PhysicalPack::Zip(path),
-            PackEnablementConfig {
-                required: false,
-                default_position: PackPosition::Top,
-                fixed_position: false,
-            },
-        );
-        tests::test_load_packs(&mut source, &["registered-zip"]);
     }
 }
 
@@ -286,68 +216,30 @@ mod repository_source_tests {
 // environment.
 #[cfg(all(test, unix))]
 mod path_validation {
+    use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
-    use std::{fs, io};
 
-    use super::super::path_validation::assert_load_packs_permission_denied;
-    use super::{PhysicalPack, RegisteredRepositorySource};
-    use crate::chat_component::Component;
+    use super::super::path_validation::assert_load_packs_catalog;
+    use super::{PhysicalPack, RegisteredRepositorySource, RepositorySource};
     use crate::resources::pack_resources::PackType;
-    use crate::resources::packs::{
-        PackEnablementConfig, PackLocationInfo, PackPosition, PackSource,
-    };
+    use crate::resources::packs::{PackEnablementConfig, PackLocationInfo};
+    use crate::resources::test_dir::TempDir;
 
     const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir().join(format!(
-                    "pomme-registered-validation-{}-{attempt}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
 
     fn source(path: PathBuf, id: &str) -> RegisteredRepositorySource {
         let source = RegisteredRepositorySource::new(PackType::ClientResources, None);
         source.register(
-            PackLocationInfo {
-                id: id.into(),
-                title: Component::text("fixture"),
-                source: PackSource::default(),
-                known_pack_info: None,
-            },
+            PackLocationInfo::test(id),
             PhysicalPack::Directory(path),
-            PackEnablementConfig {
-                required: false,
-                default_position: PackPosition::Top,
-                fixed_position: false,
-            },
+            PackEnablementConfig::DISCOVERED,
         );
         source
     }
 
     #[test]
-    fn load_packs_rejects_forbidden_root_symlink() {
+    fn load_packs_skips_forbidden_root_symlink() {
         let temp = TempDir::new().unwrap();
         let good = temp.0.join("pack");
         let outside = temp.0.join("outside");
@@ -360,7 +252,8 @@ mod path_validation {
         symlink(outside, &link).unwrap();
         assert_eq!(fs::read(link.join("pack.mcmeta")).unwrap(), METADATA);
         let mut forbidden = source(link, "forbidden");
+        assert!(forbidden.load_packs().unwrap().is_empty());
         let mut clean = source(good, "good");
-        assert_load_packs_permission_denied(&mut forbidden, &mut clean, &["good"]);
+        assert_load_packs_catalog(&mut clean, &["good"]);
     }
 }

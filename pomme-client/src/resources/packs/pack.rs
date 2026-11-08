@@ -5,7 +5,7 @@
 use std::io;
 use std::rc::Rc;
 
-use super::features::{FEATURES_SECTION, FeatureFlagSet};
+use super::features::{self, FEATURES_SECTION};
 use super::metadata::{self, OVERLAYS_SECTION, PACK_SECTION};
 use super::{PackCompat, PackFormat, PackId, PackLocationInfo};
 use crate::chat_component::Component;
@@ -14,13 +14,22 @@ use crate::resources::pack_resources::{PackMetadataResources, PackResources, Pac
 
 /// Computed metadata for one target format, not the raw pack.mcmeta parser.
 /// Applicable overlay directories are already validated, in declaration order.
-/// Requested flags use the fixed Minecraft 26.3 main feature universe.
 #[derive(Clone)]
 pub(crate) struct PackMetadata {
     pub(crate) description: Component,
     pub(crate) compatibility: PackCompat,
-    pub(crate) requested_features: FeatureFlagSet,
     pub(crate) overlays: Vec<String>,
+}
+
+#[cfg(test)]
+impl PackMetadata {
+    pub(crate) fn test() -> Self {
+        Self {
+            description: Component::text("test"),
+            compatibility: PackCompat::Compatible,
+            overlays: Vec::new(),
+        }
+    }
 }
 
 /// Default insertion edge in a low-to-high priority list.
@@ -79,6 +88,15 @@ pub(crate) struct PackEnablementConfig {
     pub(crate) default_position: PackPosition,
     /// Participate in the contiguous fixed-position block at the default edge.
     pub(crate) fixed_position: bool,
+}
+
+impl PackEnablementConfig {
+    /// Vanilla `FolderRepositorySource.DISCOVERED_PACK_SELECTION_CONFIG`.
+    pub(crate) const DISCOVERED: Self = Self {
+        required: false,
+        default_position: PackPosition::Top,
+        fixed_position: false,
+    };
 }
 
 /// Object-safe, application-thread factory retaining the state needed to
@@ -143,19 +161,6 @@ impl Pack {
         }
     }
 
-    /// Allocate registration identity only after metadata and close succeed.
-    /// Refreshing sources can instead use read_metadata followed by with_id.
-    pub(crate) fn read_meta_and_create(
-        location: PackLocationInfo,
-        resources: Rc<dyn ResourcesSupplier>,
-        pack_type: PackType,
-        target: Option<PackFormat>,
-        enablement_config: PackEnablementConfig,
-    ) -> io::Result<Option<Self>> {
-        let metadata = Self::read_metadata(&location, resources.as_ref(), pack_type, target)?;
-        Ok(metadata.map(|metadata| Self::new(location, metadata, enablement_config, resources)))
-    }
-
     /// Allocate a new opaque registration once, independently of textual ID.
     pub(crate) fn new(
         location: PackLocationInfo,
@@ -203,28 +208,14 @@ impl Pack {
         &self.metadata
     }
 
-    pub(crate) fn requested_features(&self) -> FeatureFlagSet {
-        self.metadata.requested_features
-    }
-
-    pub(crate) fn chat_link(&self, enabled: bool) -> Component {
-        self.location
-            .create_chat_link(enabled, &self.metadata.description)
-    }
-
     pub(crate) fn enablement_config(&self) -> PackEnablementConfig {
         self.enablement_config
     }
 
     pub(crate) fn origin(&self) -> ResourceOrigin {
         ResourceOrigin {
-            pack_id: self.id.clone(),
-            name: self.location.title.plain_text(),
+            name: self.location.id.clone(),
         }
-    }
-
-    pub(crate) fn open_metadata(&self) -> io::Result<Rc<dyn PackMetadataResources>> {
-        self.resources.open_metadata(&self.location)
     }
 
     pub(crate) fn open_resources(&self) -> io::Result<Vec<Rc<dyn PackResources>>> {
@@ -253,11 +244,10 @@ fn compute_metadata(
     let features = resources
         .metadata_section_json(FEATURES_SECTION)
         .map_err(|error| metadata_error(location, "read features section", error))?;
-    let requested_features = match features {
-        Some(section) => FeatureFlagSet::decode(&section)
-            .map_err(|error| metadata_error(location, "decode features section", error))?,
-        None => FeatureFlagSet::empty(),
-    };
+    if let Some(section) = features {
+        features::validate(&section)
+            .map_err(|error| metadata_error(location, "decode features section", error))?;
+    }
     let overlays = resources
         .metadata_section_json(OVERLAYS_SECTION)
         .map_err(|error| metadata_error(location, "read overlays section", error))?;
@@ -267,7 +257,6 @@ fn compute_metadata(
     Ok(Some(PackMetadata {
         description,
         compatibility,
-        requested_features,
         overlays,
     }))
 }
@@ -281,42 +270,28 @@ fn metadata_error(location: &PackLocationInfo, phase: &str, error: io::Error) ->
 
 #[cfg(test)]
 impl dyn ResourcesSupplier {
-    #![allow(
-        dead_code,
-        reason = "Generic API assertions pending user review before fixtures"
-    )]
-
-    pub(crate) fn test_open_metadata<S: ResourcesSupplier + ?Sized>(
-        supplier: &S,
-        location: &PackLocationInfo,
-        expected_location_id: &str,
-    ) {
-        let actual = supplier
-            .open_metadata(location)
+    /// Opens `supplier`'s metadata and resources, expecting `layers` resource
+    /// views that all carry the requested location.
+    pub(crate) fn test_open<S: ResourcesSupplier + ?Sized>(supplier: &S, layers: usize) {
+        let location = PackLocationInfo::test("supplier-api");
+        let metadata = supplier
+            .open_metadata(&location)
             .expect("open_metadata should succeed");
         assert_eq!(
-            actual.location().id,
-            expected_location_id,
+            metadata.location().id,
+            location.id,
             "open_metadata location ID"
         );
-    }
-
-    pub(crate) fn test_open_resources<S: ResourcesSupplier + ?Sized>(
-        supplier: &S,
-        location: &PackLocationInfo,
-        metadata: &PackMetadata,
-        expected_location_ids: &[&str],
-    ) {
-        let actual = supplier
-            .open_resources(location, metadata)
-            .expect("open_resources should succeed");
-        let ids: Vec<_> = actual
+        let ids: Vec<_> = supplier
+            .open_resources(&location, &PackMetadata::test())
+            .expect("open_resources should succeed")
             .iter()
-            .map(|pack| pack.location().id.as_str())
+            .map(|pack| pack.location().id.clone())
             .collect();
         assert_eq!(
-            ids, expected_location_ids,
-            "open_resources layer location IDs in order"
+            ids,
+            vec![location.id; layers],
+            "open_resources layer location IDs"
         );
     }
 }
@@ -324,8 +299,8 @@ impl dyn ResourcesSupplier {
 #[cfg(test)]
 mod pack_api_tests {
     use super::{
-        Component, FeatureFlagSet, Pack, PackEnablementConfig, PackFormat, PackLocationInfo,
-        PackMetadata, PackType, Rc, ResourcesSupplier,
+        Component, Pack, PackEnablementConfig, PackFormat, PackLocationInfo, PackMetadata,
+        PackType, Rc, ResourcesSupplier,
     };
 
     pub(super) fn test_read_metadata(
@@ -341,25 +316,6 @@ mod pack_api_tests {
         assert_eq!(
             &actual.description, expected_description,
             "read_metadata description"
-        );
-    }
-
-    pub(super) fn test_read_meta_and_create(
-        location: PackLocationInfo,
-        resources: Rc<dyn ResourcesSupplier>,
-        pack_type: PackType,
-        target: PackFormat,
-        enablement: PackEnablementConfig,
-        expected_location_id: &str,
-    ) {
-        let actual =
-            Pack::read_meta_and_create(location, resources, pack_type, Some(target), enablement)
-                .expect("read_meta_and_create should succeed")
-                .expect("read_meta_and_create should return a pack");
-        assert_eq!(
-            actual.location().id,
-            expected_location_id,
-            "read_meta_and_create location ID"
         );
     }
 
@@ -382,25 +338,8 @@ mod pack_api_tests {
         assert_eq!(pack.location().id, expected_location_id, "location ID");
     }
 
-    pub(super) fn test_requested_features(pack: &Pack, expected: FeatureFlagSet) {
-        assert_eq!(pack.requested_features(), expected, "requested_features");
-    }
-
-    pub(super) fn test_chat_link(pack: &Pack, enabled: bool, expected: &Component) {
-        assert_eq!(&pack.chat_link(enabled), expected, "chat_link component");
-    }
-
     pub(super) fn test_enablement_config(pack: &Pack, expected: PackEnablementConfig) {
         assert_eq!(pack.enablement_config(), expected, "enablement_config");
-    }
-
-    pub(super) fn test_open_metadata(pack: &Pack, expected_location_id: &str) {
-        let actual = pack.open_metadata().expect("open_metadata should succeed");
-        assert_eq!(
-            actual.location().id,
-            expected_location_id,
-            "open_metadata location ID"
-        );
     }
 
     pub(super) fn test_open_resources(pack: &Pack, expected_location_ids: &[&str]) {
@@ -418,72 +357,27 @@ mod pack_api_tests {
 #[cfg(test)]
 mod pack_tests {
     use std::fs;
-    use std::path::PathBuf;
 
     use super::{
-        Component, FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackFormat,
-        PackLocationInfo, PackMetadata, PackPosition, PackType, Rc, io, pack_api_tests,
+        Component, Pack, PackEnablementConfig, PackFormat, PackLocationInfo, PackMetadata,
+        PackType, Rc, pack_api_tests,
     };
-    use crate::chat_component::{Argument, HoverEvent};
     use crate::resources::pack_resources::{EmbeddedResourcesSupplier, PathResourcesSupplier};
-    use crate::resources::packs::PackSource;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> io::Result<Self> {
-            for attempt in 0.. {
-                let path = std::env::temp_dir()
-                    .join(format!("pomme-pack-api-{}-{attempt}", std::process::id()));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Ok(Self(path)),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            unreachable!()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            if let Err(error) = fs::remove_dir_all(&self.0) {
-                tracing::warn!(path = %self.0.display(), %error, "Failed to remove test temporary directory");
-            }
-        }
-    }
+    use crate::resources::test_dir::TempDir;
 
     fn location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "api-pack".to_owned(),
-            title: Component::text("API pack"),
-            source: PackSource::default(),
-            known_pack_info: None,
-        }
+        PackLocationInfo::test("api-pack")
     }
 
     fn metadata() -> PackMetadata {
-        PackMetadata {
-            description: Component::text("API pack description"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::VANILLA,
-            overlays: Vec::new(),
-        }
-    }
-
-    fn enablement() -> PackEnablementConfig {
-        PackEnablementConfig {
-            required: false,
-            default_position: PackPosition::Top,
-            fixed_position: false,
-        }
+        PackMetadata::test()
     }
 
     fn fixture() -> Pack {
         Pack::new(
             location(),
             metadata(),
-            enablement(),
+            PackEnablementConfig::DISCOVERED,
             Rc::new(EmbeddedResourcesSupplier::new()),
         )
     }
@@ -493,7 +387,7 @@ mod pack_tests {
         pack_api_tests::test_new(
             location(),
             metadata(),
-            enablement(),
+            PackEnablementConfig::DISCOVERED,
             Rc::new(EmbeddedResourcesSupplier::new()),
             "api-pack",
         );
@@ -518,66 +412,13 @@ mod pack_tests {
     }
 
     #[test]
-    fn test_read_meta_and_create() {
-        let temp = TempDir::new().unwrap();
-        fs::write(
-            temp.0.join("pack.mcmeta"),
-            br#"{"pack":{"pack_format":47,"description":"API pack description"}}"#,
-        )
-        .unwrap();
-        pack_api_tests::test_read_meta_and_create(
-            location(),
-            Rc::new(PathResourcesSupplier::new(temp.0.clone())),
-            PackType::ClientResources,
-            PackFormat::new(47, 0).unwrap(),
-            enablement(),
-            "api-pack",
-        );
-    }
-
-    #[test]
     fn test_location() {
         pack_api_tests::test_location(&fixture(), "api-pack");
     }
 
     #[test]
-    fn test_requested_features() {
-        pack_api_tests::test_requested_features(&fixture(), FeatureFlagSet::VANILLA);
-    }
-
-    #[test]
-    fn test_chat_link() {
-        let mut expected = Component::translate(
-            "chat.square_brackets",
-            vec![Argument::Component(Box::new(Component::text("api-pack")))],
-        );
-        expected.style.color = Some(0x55ff55);
-        expected.style.insertion = Some("api-pack".to_owned());
-        let mut hover = Component::text("");
-        hover.siblings = vec![
-            Component::text("API pack"),
-            Component::text("\n"),
-            Component::text("API pack description"),
-        ];
-        expected.style.hover_event = Some(HoverEvent::Text(Box::new(hover)));
-        pack_api_tests::test_chat_link(&fixture(), true, &expected);
-    }
-
-    #[test]
     fn test_enablement_config() {
-        pack_api_tests::test_enablement_config(
-            &fixture(),
-            PackEnablementConfig {
-                required: false,
-                default_position: PackPosition::Top,
-                fixed_position: false,
-            },
-        );
-    }
-
-    #[test]
-    fn test_open_metadata() {
-        pack_api_tests::test_open_metadata(&fixture(), "api-pack");
+        pack_api_tests::test_enablement_config(&fixture(), PackEnablementConfig::DISCOVERED);
     }
 
     #[test]

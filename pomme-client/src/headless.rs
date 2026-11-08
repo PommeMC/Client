@@ -25,8 +25,7 @@ use crate::renderer::chunk::mesh_source::CpuMeshAssets;
 use crate::resources::managers::{MultiPackResourceManager, ResourceManager};
 use crate::resources::pack_resources::{PackType, VanillaResourcesSupplier};
 use crate::resources::packs::{
-    FeatureFlagSet, Pack, PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata,
-    PackPosition, PackSource,
+    Pack, PackCompat, PackEnablementConfig, PackLocationInfo, PackMetadata, PackPosition,
 };
 use crate::singleplayer::World;
 use crate::ui::chat::ChatOptions;
@@ -47,18 +46,16 @@ pub(crate) fn vanilla_resources(
         index_file,
         objects_dir,
         serde_json::Map::new(),
-    )?;
+    );
     let pack = Pack::new(
         PackLocationInfo {
             id: "vanilla".to_owned(),
             title: Component::text("Vanilla"),
-            source: PackSource::built_in(),
             known_pack_info: None,
         },
         PackMetadata {
             description: Component::text("Vanilla"),
             compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
             overlays: Vec::new(),
         },
         PackEnablementConfig {
@@ -73,7 +70,10 @@ pub(crate) fn vanilla_resources(
         .into_iter()
         .map(|resources| (pack.origin(), resources))
         .collect();
-    MultiPackResourceManager::new(PackType::ClientResources, entries)
+    Ok(MultiPackResourceManager::new(
+        PackType::ClientResources,
+        entries,
+    ))
 }
 
 /// For a server with no `--username`, the stored sign-in, which an online

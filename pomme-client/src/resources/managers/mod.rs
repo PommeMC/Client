@@ -5,70 +5,23 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io;
 
-use super::pack_resources::PackResources;
-use super::{Resource, ResourceError, ResourceId, ResourceOrigin};
+use super::{Resource, ResourceId};
 
 mod fallback;
 mod multi_pack;
 mod reloadable;
 
-// Consumer-facing APIs remain available for the subsequent asset migration.
-#[allow(unused_imports)]
-pub(crate) use fallback::FallbackResourceManager;
-#[allow(unused_imports)]
 pub(crate) use multi_pack::MultiPackResourceManager;
 pub(crate) use reloadable::ReloadableResourceManager;
 
 /// Returns true when the resource identifier is included in an enumeration.
 pub(crate) type Selector<'a> = dyn Fn(&ResourceId) -> bool + 'a;
 
-fn io_error(
-    operation: &'static str,
-    origin: &ResourceOrigin,
-    id: Option<&ResourceId>,
-    source: io::Error,
-) -> io::Error {
-    io::Error::new(
-        source.kind(),
-        ResourceError::Io {
-            operation,
-            id: id.cloned(),
-            origin: origin.clone(),
-            source,
-        },
-    )
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("namespace {namespace:?}, directory {directory:?}: {source}")]
-struct ListingError {
-    namespace: String,
-    directory: String,
-    #[source]
-    source: io::Error,
-}
-
-fn listing_error(
-    operation: &'static str,
-    origin: &ResourceOrigin,
-    namespace: &str,
-    directory: &str,
-    source: io::Error,
-) -> io::Error {
-    io::Error::new(
-        source.kind(),
-        ListingError {
-            namespace: namespace.to_owned(),
-            directory: directory.to_owned(),
-            source: io_error(operation, origin, None, source),
-        },
-    )
-}
-
 /// Object-safe resource view matching Vanilla's manager operations.
 /// ResourceProvider's core lookup is folded into this trait; convenience
 /// opening helpers are not part of this contract.
-/// I/O failures propagate rather than becoming absence or empty results.
+/// A pack that fails a lookup or listing is logged and skipped, as vanilla's
+/// packs never throw from these paths; only a malformed query is an error.
 /// Returned resources reuse the existing handle and metadata ownership model.
 pub(crate) trait ResourceManager {
     /// Resolves the highest-priority resource, or None when absent.
@@ -91,23 +44,126 @@ pub(crate) trait ResourceManager {
         directory: &str,
         selector: &Selector<'_>,
     ) -> io::Result<BTreeMap<ResourceId, Vec<Resource>>>;
-
-    /// Borrows the configured packs without opening resource content.
-    fn list_packs(&self) -> Box<dyn Iterator<Item = &dyn PackResources> + '_>;
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        dead_code,
-        reason = "Generic API assertions pending user review before fixtures"
-    )]
-
     use std::collections::{BTreeMap, HashSet};
     use std::io::Read;
+    use std::rc::Rc;
 
     use super::{ResourceManager, Selector};
-    use crate::resources::ResourceId;
+    use crate::resources::pack_resources::{EmbeddedPackResources, PackResources};
+    use crate::resources::packs::PackLocationInfo;
+    use crate::resources::{Resource, ResourceId, ResourceOrigin};
+
+    pub(super) fn embedded_pack() -> (ResourceOrigin, Rc<dyn PackResources>) {
+        let location = PackLocationInfo::test("resource-manager-api");
+        let origin = ResourceOrigin {
+            name: location.id.clone(),
+        };
+        (origin, Rc::new(EmbeddedPackResources::new(location)))
+    }
+
+    /// The `ResourceManager` contract over `embedded_pack`, for the manager
+    /// that `$fixture()` builds around it.
+    macro_rules! embedded_pack_tests {
+        ($fixture:ident) => {
+            use std::collections::{BTreeMap, HashSet};
+
+            use crate::resources::pack_resources::{POMME_ICON, POMME_ICONS_FONT, POMME_UI_FONT};
+            use crate::resources::resource_id;
+
+            const ICON: &[u8] = include_bytes!("../../../assets/icon.png");
+            const UI_FONT: &[u8] = include_bytes!("../../renderer/fonts/Montserrat-Medium.ttf");
+            const ICONS_FONT: &[u8] = include_bytes!("../../renderer/fonts/fa-solid-900.ttf");
+
+            #[test]
+            fn test_get_resource() {
+                tests::test_get_resource(&$fixture(), &POMME_ICON, ICON);
+            }
+
+            #[test]
+            fn test_get_resource_missing() {
+                tests::test_get_resource_missing(
+                    &$fixture(),
+                    &resource_id!("pomme:textures/missing.png"),
+                );
+            }
+
+            #[test]
+            fn test_get_resource_stack() {
+                tests::test_get_resource_stack(&$fixture(), &POMME_ICON, &[ICON.to_vec()]);
+            }
+
+            #[test]
+            fn test_get_resource_stack_missing() {
+                tests::test_get_resource_stack(
+                    &$fixture(),
+                    &resource_id!("pomme:textures/missing.png"),
+                    &[],
+                );
+            }
+
+            #[test]
+            fn test_list_resources() {
+                tests::test_list_resources(
+                    &$fixture(),
+                    "font",
+                    &|_| true,
+                    &BTreeMap::from([
+                        (POMME_UI_FONT, UI_FONT.to_vec()),
+                        (POMME_ICONS_FONT, ICONS_FONT.to_vec()),
+                    ]),
+                );
+            }
+
+            #[test]
+            fn test_list_resources_missing_directory() {
+                tests::test_list_resources(&$fixture(), "missing", &|_| true, &BTreeMap::new());
+            }
+
+            #[test]
+            fn test_list_resource_stacks() {
+                tests::test_list_resource_stacks(
+                    &$fixture(),
+                    "font",
+                    &|_| true,
+                    &BTreeMap::from([
+                        (POMME_UI_FONT, vec![UI_FONT.to_vec()]),
+                        (POMME_ICONS_FONT, vec![ICONS_FONT.to_vec()]),
+                    ]),
+                );
+            }
+
+            #[test]
+            fn test_list_resource_stacks_missing_directory() {
+                tests::test_list_resource_stacks(
+                    &$fixture(),
+                    "missing",
+                    &|_| true,
+                    &BTreeMap::new(),
+                );
+            }
+
+            #[test]
+            fn test_get_namespaces() {
+                tests::test_get_namespaces(&$fixture(), &HashSet::from(["pomme".to_owned()]));
+            }
+        };
+    }
+    pub(super) use embedded_pack_tests;
+
+    fn read(resource: &Resource) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        resource
+            .content()
+            .open()
+            .expect("resource content should open")
+            .read_to_end(&mut bytes)
+            .expect("resource content should read");
+        bytes
+    }
 
     pub(super) fn test_get_resource<M: ResourceManager + ?Sized>(
         manager: &M,
@@ -118,14 +174,7 @@ mod tests {
             .get_resource(id)
             .expect("get_resource should succeed")
             .expect("get_resource should return a resource");
-        let mut actual = Vec::new();
-        resource
-            .content()
-            .open()
-            .expect("get_resource content should open")
-            .read_to_end(&mut actual)
-            .expect("get_resource content should read");
-        assert_eq!(actual, expected, "get_resource bytes for {id:?}");
+        assert_eq!(read(&resource), expected, "get_resource bytes for {id:?}");
     }
 
     pub(super) fn test_get_resource_missing<M: ResourceManager + ?Sized>(
@@ -146,20 +195,12 @@ mod tests {
         id: &ResourceId,
         expected: &[Vec<u8>],
     ) {
-        let resources = manager
+        let actual: Vec<_> = manager
             .get_resource_stack(id)
-            .expect("get_resource_stack should succeed");
-        let mut actual = Vec::new();
-        for resource in resources {
-            let mut bytes = Vec::new();
-            resource
-                .content()
-                .open()
-                .expect("get_resource_stack content should open")
-                .read_to_end(&mut bytes)
-                .expect("get_resource_stack content should read");
-            actual.push(bytes);
-        }
+            .expect("get_resource_stack should succeed")
+            .iter()
+            .map(read)
+            .collect();
         assert_eq!(
             actual, expected,
             "get_resource_stack bytes in order for {id:?}"
@@ -172,20 +213,12 @@ mod tests {
         selector: &Selector<'_>,
         expected: &BTreeMap<ResourceId, Vec<u8>>,
     ) {
-        let resources = manager
+        let actual: BTreeMap<_, _> = manager
             .list_resources(directory, selector)
-            .expect("list_resources should succeed");
-        let mut actual = BTreeMap::new();
-        for (id, resource) in resources {
-            let mut bytes = Vec::new();
-            resource
-                .content()
-                .open()
-                .expect("list_resources content should open")
-                .read_to_end(&mut bytes)
-                .expect("list_resources content should read");
-            actual.insert(id, bytes);
-        }
+            .expect("list_resources should succeed")
+            .into_iter()
+            .map(|(id, resource)| (id, read(&resource)))
+            .collect();
         assert_eq!(
             &actual, expected,
             "list_resources IDs and bytes under {directory:?}"
@@ -198,24 +231,12 @@ mod tests {
         selector: &Selector<'_>,
         expected: &BTreeMap<ResourceId, Vec<Vec<u8>>>,
     ) {
-        let resources = manager
+        let actual: BTreeMap<_, _> = manager
             .list_resource_stacks(directory, selector)
-            .expect("list_resource_stacks should succeed");
-        let mut actual = BTreeMap::new();
-        for (id, resources) in resources {
-            let mut stack = Vec::new();
-            for resource in resources {
-                let mut bytes = Vec::new();
-                resource
-                    .content()
-                    .open()
-                    .expect("list_resource_stacks content should open")
-                    .read_to_end(&mut bytes)
-                    .expect("list_resource_stacks content should read");
-                stack.push(bytes);
-            }
-            actual.insert(id, stack);
-        }
+            .expect("list_resource_stacks should succeed")
+            .into_iter()
+            .map(|(id, stack)| (id, stack.iter().map(read).collect::<Vec<_>>()))
+            .collect();
         assert_eq!(
             &actual, expected,
             "list_resource_stacks IDs and ordered bytes under {directory:?}"
@@ -230,19 +251,5 @@ mod tests {
             .get_namespaces()
             .expect("get_namespaces should succeed");
         assert_eq!(&actual, expected, "get_namespaces result");
-    }
-
-    pub(super) fn test_list_packs<M: ResourceManager + ?Sized>(
-        manager: &M,
-        expected_location_ids: &[&str],
-    ) {
-        let actual: Vec<_> = manager
-            .list_packs()
-            .map(|pack| pack.location().id.as_str())
-            .collect();
-        assert_eq!(
-            actual, expected_location_ids,
-            "list_packs location IDs in order"
-        );
     }
 }

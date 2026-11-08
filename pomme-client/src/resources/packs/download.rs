@@ -52,7 +52,7 @@ fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackDownloadError> {
     Ok(())
 }
 
-fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
+pub(crate) fn extract_zip(data: &[u8], dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest)?;
     let cursor = io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)?;

@@ -418,7 +418,7 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
 }
 
 fn read_texture_metadata(resource: &SpriteInput) -> Option<TextureMetadataFile> {
-    let Some(metadata) = resource.metadata.as_ref()? else {
+    let Some(metadata) = resource.metadata.as_ref() else {
         return Some(TextureMetadataFile::default());
     };
     serde_json::from_reader(metadata.open().ok()?).ok()
@@ -595,8 +595,7 @@ pub(crate) struct AtlasInputs {
 
 struct SpriteInput {
     content: ResourceContent,
-    // An outer None retains a metadata selection error, not missing metadata.
-    metadata: Option<Option<ResourceContent>>,
+    metadata: Option<ResourceContent>,
 }
 
 impl AtlasInputs {
@@ -607,7 +606,7 @@ impl AtlasInputs {
             .map(|(id, resource)| {
                 let selected = SpriteInput {
                     content: resource.content().clone(),
-                    metadata: resource.metadata().ok(),
+                    metadata: resource.metadata(),
                 };
                 (id, selected)
             })

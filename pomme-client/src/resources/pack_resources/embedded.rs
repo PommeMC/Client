@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::path::{validate_namespace, validate_path, validate_segment};
+use super::path::{validate_namespace, validate_path, validate_root_path};
 use super::{IoSupplier, PackMetadataResources, PackResources, PackType, ResourceOutput};
 use crate::resources::packs::{PackLocationInfo, PackMetadata, ResourcesSupplier};
 use crate::resources::resource::{ReadStream, ResourceId};
@@ -85,15 +85,7 @@ impl PackMetadataResources for EmbeddedPackResources {
     }
 
     fn get_root_resource(&self, path: &[&str]) -> io::Result<Option<IoSupplier<ReadStream>>> {
-        if path.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty root resource path",
-            ));
-        }
-        for segment in path {
-            validate_segment(segment)?;
-        }
+        validate_root_path(path)?;
         // The static table represents assets/<namespace>/<path>, and no
         // other root files. In particular it contains no pack.mcmeta.
         let ["assets", namespace, resource_path @ ..] = path else {
@@ -120,54 +112,39 @@ impl PackMetadataResources for EmbeddedPackResources {
 impl PackResources for EmbeddedPackResources {
     fn get_resource(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         id: &ResourceId,
     ) -> io::Result<Option<IoSupplier<ReadStream>>> {
         validate_namespace(id.namespace())?;
         validate_path(id.path())?;
-        if pack_type != PackType::ClientResources {
-            return Ok(None);
-        }
         Ok(bytes(id).map(static_supplier))
     }
 
     fn list_resources(
         &self,
-        pack_type: PackType,
+        _pack_type: PackType,
         namespace: &str,
         directory: &str,
         output: &mut ResourceOutput<'_>,
     ) -> io::Result<()> {
         validate_namespace(namespace)?;
-        if !directory.is_empty() {
-            validate_path(directory)?;
+        if directory.is_empty() {
+            return Ok(());
         }
-        if pack_type == PackType::ClientResources {
-            for (id, bytes) in ENTRIES {
-                if id.namespace() == namespace
-                    && (directory.is_empty()
-                        || id.path() == directory
-                        || id
-                            .path()
-                            .strip_prefix(directory)
-                            .is_some_and(|tail| tail.starts_with('/')))
-                {
-                    output(id.clone(), static_supplier(bytes));
-                }
+        validate_path(directory)?;
+        for (id, bytes) in ENTRIES {
+            if id.namespace() == namespace && id.is_under(directory) {
+                output(id.clone(), static_supplier(bytes));
             }
         }
         Ok(())
     }
 
-    fn get_namespaces(&self, pack_type: PackType) -> io::Result<HashSet<String>> {
-        Ok(if pack_type == PackType::ClientResources {
-            ENTRIES
-                .iter()
-                .map(|(id, _)| id.namespace().to_owned())
-                .collect()
-        } else {
-            HashSet::new()
-        })
+    fn get_namespaces(&self, _pack_type: PackType) -> io::Result<HashSet<String>> {
+        Ok(ENTRIES
+            .iter()
+            .map(|(id, _)| id.namespace().to_owned())
+            .collect())
     }
 }
 
@@ -178,16 +155,10 @@ fn static_supplier(bytes: &'static [u8]) -> IoSupplier<ReadStream> {
 #[cfg(test)]
 mod test_fixture {
     use super::EmbeddedPackResources;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
+    use crate::resources::packs::PackLocationInfo;
 
     pub(super) fn default_location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "embedded-api".into(),
-            title: Component::text("Embedded API fixture"),
-            source: PackSource::built_in(),
-            known_pack_info: None,
-        }
+        PackLocationInfo::test("embedded-api")
     }
 
     pub(super) fn fixture(location: PackLocationInfo) -> EmbeddedPackResources {
@@ -197,12 +168,11 @@ mod test_fixture {
 
 #[cfg(test)]
 mod pack_metadata_resources_tests {
-    use pomme_protocol::KnownPack;
 
     use super::test_fixture::{default_location, fixture};
     use crate::chat_component::Component;
     use crate::resources::pack_resources::tests;
-    use crate::resources::packs::{PackLocationInfo, PackSource};
+    use crate::resources::packs::PackLocationInfo;
 
     #[test]
     fn test_get_root_resource() {
@@ -237,8 +207,7 @@ mod pack_metadata_resources_tests {
         let expected = PackLocationInfo {
             id: "embedded-location".into(),
             title: Component::translate("location.embedded.title", Vec::new()),
-            source: PackSource::feature(),
-            known_pack_info: Some(KnownPack {
+            known_pack_info: Some(pomme_protocol::KnownPack {
                 namespace: "location_test".into(),
                 id: "embedded_known".into(),
                 version: "test-1".into(),
@@ -250,26 +219,11 @@ mod pack_metadata_resources_tests {
 }
 
 #[cfg(test)]
-mod pack_metadata_resources_ext_tests {
-    use super::test_fixture::{default_location, fixture};
-    use crate::resources::pack_resources::tests;
-
-    #[test]
-    fn test_get_metadata_section_missing() {
-        let pack = fixture(default_location());
-        tests::test_get_metadata_section_missing(&pack, "missing");
-    }
-}
-
-#[cfg(test)]
 mod pack_resources_tests {
     use std::collections::HashSet;
 
-    use pomme_protocol::KnownPack;
-
     use super::test_fixture::{default_location, fixture};
     use crate::resources::pack_resources::{PackType, tests};
-    use crate::resources::packs::PackLocationInfo;
     use crate::resources::resource_id;
 
     #[test]
@@ -290,16 +244,6 @@ mod pack_resources_tests {
             &pack,
             PackType::ClientResources,
             &resource_id!("pomme:textures/missing.png"),
-        );
-    }
-
-    #[test]
-    fn test_get_resource_wrong_domain() {
-        let pack = fixture(default_location());
-        tests::test_get_resource_missing(
-            &pack,
-            PackType::ServerData,
-            &resource_id!("pomme:textures/icon.png"),
         );
     }
 
@@ -342,30 +286,7 @@ mod pack_resources_tests {
     #[test]
     fn test_list_resources_empty_directory() {
         let pack = fixture(default_location());
-        tests::test_list_resources(
-            &pack,
-            PackType::ClientResources,
-            "pomme",
-            "",
-            &[
-                (
-                    resource_id!("pomme:font/ui.ttf"),
-                    include_bytes!("../../renderer/fonts/Montserrat-Medium.ttf").to_vec(),
-                ),
-                (
-                    resource_id!("pomme:font/icons.ttf"),
-                    include_bytes!("../../renderer/fonts/fa-solid-900.ttf").to_vec(),
-                ),
-                (
-                    resource_id!("pomme:textures/icon.png"),
-                    include_bytes!("../../../assets/icon.png").to_vec(),
-                ),
-                (
-                    resource_id!("pomme:gui/title/edition.png"),
-                    include_bytes!("../../../assets/gui/title/edition.png").to_vec(),
-                ),
-            ],
-        );
+        tests::test_list_resources(&pack, PackType::ClientResources, "pomme", "", &[]);
     }
 
     #[test]
@@ -381,12 +302,6 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_list_resources_wrong_domain() {
-        let pack = fixture(default_location());
-        tests::test_list_resources(&pack, PackType::ServerData, "pomme", "font", &[]);
-    }
-
-    #[test]
     fn test_get_namespaces_client() {
         let pack = fixture(default_location());
         tests::test_get_namespaces(
@@ -397,78 +312,20 @@ mod pack_resources_tests {
     }
 
     #[test]
-    fn test_get_namespaces_server() {
-        let pack = fixture(default_location());
-        tests::test_get_namespaces(&pack, PackType::ServerData, &HashSet::new());
-    }
-
-    #[test]
     fn test_pack_id() {
         let pack = fixture(default_location());
         tests::test_pack_id(&pack, "embedded-api");
-    }
-
-    #[test]
-    fn test_known_pack_info_none() {
-        let pack = fixture(default_location());
-        tests::test_known_pack_info(&pack, None);
-    }
-
-    #[test]
-    fn test_known_pack_info_some() {
-        let expected = KnownPack {
-            namespace: "api_identity".into(),
-            id: "embedded_known".into(),
-            version: "api-2".into(),
-        };
-        let location = PackLocationInfo {
-            known_pack_info: Some(expected.clone()),
-            ..default_location()
-        };
-        let pack = fixture(location);
-        tests::test_known_pack_info(&pack, Some(&expected));
     }
 }
 
 #[cfg(test)]
 mod resources_supplier_tests {
     use super::EmbeddedResourcesSupplier;
-    use crate::chat_component::Component;
-    use crate::resources::packs::{
-        FeatureFlagSet, PackCompat, PackLocationInfo, PackMetadata, PackSource, ResourcesSupplier,
-    };
-
-    fn location() -> PackLocationInfo {
-        PackLocationInfo {
-            id: "embedded-supplier-api".into(),
-            title: Component::text("Supplier API test"),
-            source: PackSource::default(),
-            known_pack_info: None,
-        }
-    }
+    use crate::resources::packs::ResourcesSupplier;
 
     #[test]
-    fn test_open_metadata() {
+    fn test_open() {
         let supplier = EmbeddedResourcesSupplier::new();
-        let location = location();
-        <dyn ResourcesSupplier>::test_open_metadata(&supplier, &location, "embedded-supplier-api");
-    }
-
-    #[test]
-    fn test_open_resources() {
-        let supplier = EmbeddedResourcesSupplier::new();
-        let location = location();
-        let metadata = PackMetadata {
-            description: Component::text("Supplier API test"),
-            compatibility: PackCompat::Compatible,
-            requested_features: FeatureFlagSet::empty(),
-            overlays: Vec::new(),
-        };
-        <dyn ResourcesSupplier>::test_open_resources(
-            &supplier,
-            &location,
-            &metadata,
-            &["embedded-supplier-api"],
-        );
+        <dyn ResourcesSupplier>::test_open(&supplier, 1);
     }
 }

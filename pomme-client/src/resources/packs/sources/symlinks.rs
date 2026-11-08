@@ -9,12 +9,12 @@ const SYMLINK_RULE_PREFIX: &str = "prefix";
 const SYMLINK_RULE_GLOB: &str = "glob";
 const SYMLINK_RULE_REGEX: &str = "regex";
 
-/// COMPAT: Native Rust matching, NOT Java PathMatcher/Pattern parity. Accepted
-/// syntax, Unicode classes, case and platform separators can differ.
+/// Vanilla `PathAllowList`: a prefix test on the target's string, or a
+/// `FileSystem.getPathMatcher` glob or regex. Both matcher kinds compile to one
+/// whole-string regex, case-insensitive on Windows as the JDK's are.
 enum SymlinkRule {
     Prefix(String),
-    Glob(glob::Pattern),
-    Regex(regex::Regex),
+    Matcher(regex::Regex),
 }
 
 /// Immutable setup snapshot shared by discovery and explicit registrations.
@@ -25,11 +25,12 @@ pub(crate) struct SymlinkPolicy {
 }
 
 impl SymlinkPolicy {
-    /// Read once now; any load/parse error discards the entire rule list.
-    pub(crate) fn load(path: Option<&Path>) -> Self {
-        let Some(path) = path else {
+    /// Vanilla `LevelStorageSource.parseValidator`: no file denies every
+    /// symlink quietly, and any read or parse error discards the whole list.
+    pub(crate) fn load(path: &Path) -> Self {
+        if !path.exists() {
             return Self::default();
-        };
+        }
         match std::fs::read_to_string(path).and_then(|text| parse_symlinks(&text)) {
             Ok(rules) => Self {
                 rules: rules.into(),
@@ -48,54 +49,159 @@ fn parse_symlinks(text: &str) -> io::Result<Vec<SymlinkRule>> {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
+        let invalid = |message: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("line {}: {message}", index + 1),
+            )
+        };
         let (tag, pattern) = if let Some(tagged) = line.strip_prefix('[') {
-            tagged.split_once(']').ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("line {}: unterminated rule type", index + 1),
-                )
-            })?
+            tagged
+                .split_once(']')
+                .ok_or_else(|| invalid("unterminated rule type".to_owned()))?
         } else {
             (SYMLINK_RULE_PREFIX, line)
         };
         let rule = match tag {
             SYMLINK_RULE_PREFIX => SymlinkRule::Prefix(pattern.to_owned()),
-            SYMLINK_RULE_GLOB => {
-                SymlinkRule::Glob(glob::Pattern::new(pattern).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("line {}: {error}", index + 1),
-                    )
-                })?)
+            SYMLINK_RULE_GLOB | SYMLINK_RULE_REGEX => {
+                let regex = if tag == SYMLINK_RULE_GLOB {
+                    glob_to_regex(pattern, cfg!(windows)).map_err(invalid)?
+                } else {
+                    // TODO: Java `Pattern` syntax, not Rust `regex`: lookaround
+                    // and backreferences fail to parse, which denies all.
+                    pattern.to_owned()
+                };
+                let flags = if cfg!(windows) { "(?i)" } else { "" };
+                let compiled = regex::Regex::new(&format!(r"{flags}\A(?:{regex})\z"))
+                    .map_err(|error| invalid(error.to_string()))?;
+                SymlinkRule::Matcher(compiled)
             }
-            SYMLINK_RULE_REGEX => {
-                // Validate raw syntax first: it must not escape the whole-match
-                // wrapper. Group alternatives and flags inside absolute anchors.
-                regex::Regex::new(pattern).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("line {}: {error}", index + 1),
-                    )
-                })?;
-                SymlinkRule::Regex(regex::Regex::new(&format!(r"\A(?:{pattern})\z")).map_err(
-                    |error| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("line {}: {error}", index + 1),
-                        )
-                    },
-                )?)
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("line {}: unknown rule type {tag:?}", index + 1),
-                ));
-            }
+            _ => return Err(invalid(format!("unknown rule type {tag:?}"))),
         };
         rules.push(rule);
     }
     Ok(rules)
+}
+
+/// The JDK's `sun.nio.fs.Globs.toRegexPattern`: `*` and `?` stay within one
+/// name, `**` crosses separators, `[...]` never matches a separator, and
+/// `{a,b}` alternates. `dos` is the Windows variant, where `\` separates.
+fn glob_to_regex(glob: &str, dos: bool) -> Result<String, String> {
+    const REGEX_META: &str = ".^$+{[]|()";
+    const GLOB_META: &str = "\\*?[{";
+    let one_char = if dos { r"[^\\]" } else { "[^/]" };
+    let chars: Vec<char> = glob.chars().collect();
+    let next = |i: usize| chars.get(i).copied();
+    let mut regex = String::new();
+    let mut in_group = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        match c {
+            '\\' => {
+                let escaped = next(i).ok_or("no character to escape")?;
+                if GLOB_META.contains(escaped) || REGEX_META.contains(escaped) {
+                    regex.push('\\');
+                }
+                regex.push(escaped);
+                i += 1;
+            }
+            '/' if dos => regex.push_str(r"\\"),
+            '[' => {
+                regex.push('[');
+                regex.push_str(one_char);
+                regex.push_str("&&[");
+                if next(i) == Some('^') {
+                    regex.push_str(r"\^");
+                    i += 1;
+                } else {
+                    if next(i) == Some('!') {
+                        regex.push('^');
+                        i += 1;
+                    }
+                    if next(i) == Some('-') {
+                        regex.push('-');
+                        i += 1;
+                    }
+                }
+                let mut has_range_start = false;
+                let mut last = '\0';
+                let mut closed = false;
+                while i < chars.len() {
+                    let c = chars[i];
+                    i += 1;
+                    if c == ']' {
+                        closed = true;
+                        break;
+                    }
+                    if c == '/' || (dos && c == '\\') {
+                        return Err("explicit name separator in class".to_owned());
+                    }
+                    if c == '\\' || c == '[' || (c == '&' && next(i) == Some('&')) {
+                        regex.push('\\');
+                    }
+                    regex.push(c);
+                    if c == '-' {
+                        if !has_range_start {
+                            return Err("invalid range".to_owned());
+                        }
+                        let end = next(i);
+                        i += 1;
+                        match end {
+                            None => break,
+                            Some(']') => {
+                                closed = true;
+                                break;
+                            }
+                            Some(end) if end < last => return Err("invalid range".to_owned()),
+                            Some(end) => regex.push(end),
+                        }
+                        has_range_start = false;
+                    } else {
+                        has_range_start = true;
+                        last = c;
+                    }
+                }
+                if !closed {
+                    return Err("missing ']'".to_owned());
+                }
+                regex.push_str("]]");
+            }
+            '{' => {
+                if in_group {
+                    return Err("cannot nest groups".to_owned());
+                }
+                regex.push_str("(?:(?:");
+                in_group = true;
+            }
+            '}' if in_group => {
+                regex.push_str("))");
+                in_group = false;
+            }
+            ',' if in_group => regex.push_str(")|(?:"),
+            '*' if next(i) == Some('*') => {
+                regex.push_str(".*");
+                i += 1;
+            }
+            '*' => {
+                regex.push_str(one_char);
+                regex.push('*');
+            }
+            '?' => regex.push_str(one_char),
+            c => {
+                if REGEX_META.contains(c) {
+                    regex.push('\\');
+                }
+                regex.push(c);
+            }
+        }
+    }
+    if in_group {
+        return Err("missing '}'".to_owned());
+    }
+    Ok(regex)
 }
 
 fn validate_symlink(path: &Path, rules: &[SymlinkRule]) -> io::Result<PathBuf> {
@@ -104,15 +210,7 @@ fn validate_symlink(path: &Path, rules: &[SymlinkRule]) -> io::Result<PathBuf> {
     let allowed = target.to_str().is_some_and(|target| {
         rules.iter().any(|rule| match rule {
             SymlinkRule::Prefix(prefix) => target.starts_with(prefix),
-            SymlinkRule::Glob(pattern) => pattern.matches_with(
-                target,
-                glob::MatchOptions {
-                    case_sensitive: true,
-                    require_literal_separator: true,
-                    require_literal_leading_dot: false,
-                },
-            ),
-            SymlinkRule::Regex(pattern) => pattern.is_match(target),
+            SymlinkRule::Matcher(pattern) => pattern.is_match(target),
         })
     });
     if !allowed {
@@ -139,6 +237,9 @@ pub(super) fn prepare_pack_path(
 ) -> io::Result<(PathBuf, FileType)> {
     let rules = &policy.rules;
     let mut effective = path.to_owned();
+    // TODO: on Windows, Rust counts a directory junction as a symlink and the
+    // JDK doesn't (`IO_REPARSE_TAG_SYMLINK` only), so a junctioned pack that
+    // loads in vanilla is checked against the allow list here.
     if kind.is_symlink() {
         // Java PackDetector follows one stored target, relative to CWD, not
         // the link parent. Open this effective path, never the original alias.
@@ -170,4 +271,76 @@ fn validate_pack_tree(root: &Path, rules: &[SymlinkRule]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SymlinkRule, glob_to_regex, parse_symlinks};
+
+    fn glob_matches(glob: &str, dos: bool, path: &str) -> bool {
+        let regex = glob_to_regex(glob, dos).unwrap();
+        regex::Regex::new(&format!(r"\A(?:{regex})\z"))
+            .unwrap()
+            .is_match(path)
+    }
+
+    #[test]
+    fn globs_match_like_path_matcher() {
+        assert!(glob_matches("/srv/packs/*", false, "/srv/packs/a"));
+        assert!(!glob_matches("/srv/packs/*", false, "/srv/packs/a/b"));
+        assert!(glob_matches("/srv/packs/**", false, "/srv/packs/a/b"));
+        assert!(glob_matches("/home/me/packs**", false, "/home/me/packs2/x"));
+        assert!(glob_matches("/srv/{packs,maps}/*", false, "/srv/maps/x"));
+        assert!(!glob_matches("/srv/{packs,maps}/*", false, "/srv/other/x"));
+        assert!(glob_matches("/srv/pack?", false, "/srv/pack1"));
+        assert!(glob_matches("/srv/[a-c]x", false, "/srv/bx"));
+        assert!(!glob_matches("/srv/[!a-c]x", false, "/srv/bx"));
+        assert!(glob_matches("/srv/a.b+c", false, "/srv/a.b+c"));
+        assert!(!glob_matches("/srv/a.b", false, "/srv/axb"));
+        assert!(glob_to_regex("/srv/{a,{b}}", false).is_err());
+        assert!(glob_to_regex("/srv/[a/b]", false).is_err());
+        assert!(glob_to_regex("/srv/[ab", false).is_err());
+    }
+
+    #[test]
+    fn dos_globs_use_backslash_separators() {
+        assert!(glob_matches("C:/packs/*", true, r"C:\packs\a"));
+        assert!(!glob_matches("C:/packs/*", true, r"C:\packs\a\b"));
+    }
+
+    #[test]
+    fn parses_rule_lines() {
+        let rules =
+            parse_symlinks("# comment\n\n/srv\n[glob]/a/*\n[regex]/b/.*\n[prefix]/c\n").unwrap();
+        assert!(matches!(
+            rules.as_slice(),
+            [
+                SymlinkRule::Prefix(_),
+                SymlinkRule::Matcher(_),
+                SymlinkRule::Matcher(_),
+                SymlinkRule::Prefix(_)
+            ]
+        ));
+        assert!(parse_symlinks("[glob/a").is_err());
+        assert!(parse_symlinks("[other]/a").is_err());
+    }
+
+    /// `parseValidator`: no file, or any bad line, denies every symlink.
+    #[test]
+    fn load_denies_all_unless_the_whole_file_parses() {
+        use std::fs;
+
+        use super::SymlinkPolicy;
+        use crate::resources::test_dir::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.0.join("allowed_symlinks.txt");
+        assert!(SymlinkPolicy::load(&path).rules.is_empty());
+        fs::write(&path, "# comment\n[prefix]/srv/packs\n").unwrap();
+        assert_eq!(SymlinkPolicy::load(&path).rules.len(), 1);
+        for bad in ["[prefix]/srv/packs\n[nope]x\n", "[regex](\n", "[glob][ab\n"] {
+            fs::write(&path, bad).unwrap();
+            assert!(SymlinkPolicy::load(&path).rules.is_empty(), "{bad:?}");
+        }
+    }
 }

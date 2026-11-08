@@ -112,16 +112,12 @@ pub(crate) fn apply_resource_pack_options(
     game: Option<&mut GameState>,
 ) {
     if std::mem::take(&mut core.menu.rescan_packs) {
-        match core.rescan_resource_packs() {
-            Ok(()) => {
-                core.menu.available_packs = available_resource_packs(
-                    core.resource_catalog().available_packs(),
-                    core.completed_resource_ids(),
-                    |id| core.is_server_resource_pack(id),
-                );
-            }
-            Err(error) => tracing::warn!(%error, "Resource pack scan failed"),
-        }
+        core.rescan_resource_packs();
+        core.menu.available_packs = available_resource_packs(
+            core.resource_catalog().available_packs(),
+            core.completed_resource_ids(),
+            |id| core.is_server_resource_pack(id),
+        );
     }
     let toggle = core.menu.pack_toggle.take();
     if std::mem::take(&mut core.menu.reload_assets) || toggle.is_some() {

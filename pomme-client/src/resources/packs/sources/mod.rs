@@ -6,20 +6,8 @@ use std::path::Path;
 
 use crate::resources::packs::Pack;
 
-#[allow(
-    dead_code,
-    reason = "Built-in source API beyond initial application activation"
-)]
 mod builtin;
-#[allow(
-    dead_code,
-    reason = "Folder source API beyond initial application activation"
-)]
 mod folder;
-#[allow(
-    dead_code,
-    reason = "Registration API; server asset consumers are not yet migrated"
-)]
 mod registered;
 mod symlinks;
 
@@ -45,8 +33,6 @@ fn path_error(operation: &str, path: &Path, error: io::Error) -> io::Error {
 
 #[cfg(all(test, unix))]
 mod path_validation {
-    use std::io::ErrorKind;
-
     use super::{RepositorySource, tests};
 
     // Fixtures supply otherwise-valid packs under trusted discovery roots,
@@ -61,33 +47,10 @@ mod path_validation {
         );
         tests::test_load_packs(source, expected_location_ids);
     }
-
-    pub(super) fn assert_load_packs_permission_denied(
-        source: &mut dyn RepositorySource,
-        clean_source: &mut dyn RepositorySource,
-        clean_location_ids: &[&str],
-    ) {
-        assert_load_packs_catalog(clean_source, clean_location_ids);
-        match source.load_packs() {
-            Err(error) => assert_eq!(
-                error.kind(),
-                ErrorKind::PermissionDenied,
-                "load_packs must reject the forbidden registered pack"
-            ),
-            Ok(_) => panic!(
-                "load_packs must fail rather than admit or skip the forbidden registered pack"
-            ),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        dead_code,
-        reason = "Generic API assertions pending user review before fixtures"
-    )]
-
     use super::RepositorySource;
 
     pub(super) fn test_load_packs_empty<S: RepositorySource + ?Sized>(source: &mut S) {

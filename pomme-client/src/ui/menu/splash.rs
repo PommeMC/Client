@@ -1,8 +1,8 @@
 //! Vanilla `SplashManager`: the yellow line that hangs off the title logo.
 
-use std::io::{self, Read};
+use std::io;
 
-use crate::resources::{ResourceError, ResourceManager, resource_id};
+use crate::resources::{ResourceManager, resource_id};
 
 /// The one line `SplashManager.prepare` drops from the pool, by hash.
 const FILTERED_HASH: i32 = 125_780_783;
@@ -23,61 +23,62 @@ fn dated_splash(month: u32, day: u32) -> Option<&'static str> {
     }
 }
 
-/// Reads `texts/splashes.txt` and picks this session's line, per
-/// `SplashManager.getSplash`. `None` when the resource is missing, filtered or
-/// empty, which vanilla renders as no splash at all. Read/decode errors
-/// propagate.
-pub(super) fn pick(
-    resources: &dyn ResourceManager,
-    username: &str,
-    month: u32,
-    day: u32,
-) -> io::Result<Option<String>> {
-    if let Some(fixed) = dated_splash(month, day) {
-        return Ok(Some(fixed.to_owned()));
-    }
-
+/// `SplashManager.prepare`: the lines of `texts/splashes.txt`, trimmed and
+/// filtered. A missing or unreadable file gives none; malformed UTF-8 is
+/// replaced, as `InputStreamReader` does.
+pub(super) fn load(resources: &dyn ResourceManager) -> Vec<String> {
     let id = resource_id!("minecraft:texts/splashes.txt");
-    let Some(resource) = resources.get_resource(&id)? else {
-        return Ok(None);
-    };
-    let content = resource.content();
-    let mut stream = content.open().map_err(|error| {
-        let kind = match &error {
-            ResourceError::Io { source, .. } => source.kind(),
-            _ => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, error)
-    })?;
-    let mut text = String::new();
-    stream.read_to_string(&mut text).map_err(|source| {
-        io::Error::new(
-            source.kind(),
-            ResourceError::Io {
-                operation: "read splash text",
-                id: Some(content.id().clone()),
-                origin: content.origin().clone(),
-                source,
-            },
-        )
-    })?;
-    let splashes: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| java_hash(line) != FILTERED_HASH)
-        .collect();
-    if splashes.is_empty() {
-        return Ok(None);
+    let bytes = resources.get_resource(&id).and_then(|resource| {
+        resource
+            .map(|resource| resource.content().read_all().map_err(io::Error::from))
+            .transpose()
+    });
+    match bytes {
+        Ok(bytes) => java_lines(&String::from_utf8_lossy(&bytes.unwrap_or_default()))
+            .into_iter()
+            .map(|line| line.trim_matches(|c: char| c <= ' '))
+            .filter(|line| java_hash(line) != FILTERED_HASH)
+            .map(str::to_owned)
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load {id}");
+            Vec::new()
+        }
     }
+}
 
+/// `BufferedReader.lines`: `\n`, `\r` and `\r\n` each end a line, and a final
+/// terminator doesn't start an empty one.
+fn java_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+        lines.push(&rest[..end]);
+        rest = &rest[end..];
+        rest = rest
+            .strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix(['\n', '\r']))
+            .unwrap_or(rest);
+    }
+    lines
+}
+
+/// `SplashManager.getSplash`. `None` when there are no splashes, which vanilla
+/// renders as no splash at all.
+pub(super) fn pick(splashes: &[String], username: &str, month: u32, day: u32) -> Option<String> {
+    if let Some(fixed) = dated_splash(month, day) {
+        return Some(fixed.to_owned());
+    }
+    if splashes.is_empty() {
+        return None;
+    }
     // Vanilla rolls once against the pool size and takes 42 as the cue for the
     // player's own name, so the odds shift with how many splashes are loaded.
     if fastrand::usize(0..splashes.len()) == 42 {
-        return Ok(Some(format!("{} IS YOU", username.to_uppercase())));
+        return Some(format!("{} IS YOU", username.to_uppercase()));
     }
-    Ok(Some(
-        splashes[fastrand::usize(0..splashes.len())].to_string(),
-    ))
+    Some(splashes[fastrand::usize(0..splashes.len())].clone())
 }
 
 #[cfg(test)]
@@ -99,5 +100,12 @@ mod tests {
         assert_eq!(dated_splash(1, 1), Some("Happy new year!"));
         assert_eq!(dated_splash(10, 31), Some("OOoooOOOoooo! Spooky!"));
         assert_eq!(dated_splash(6, 15), None);
+    }
+
+    #[test]
+    fn lines_split_like_buffered_reader() {
+        assert_eq!(java_lines("a\nb\r\nc\rd\n"), ["a", "b", "c", "d"]);
+        assert_eq!(java_lines("a\n\nb"), ["a", "", "b"]);
+        assert!(java_lines("").is_empty());
     }
 }

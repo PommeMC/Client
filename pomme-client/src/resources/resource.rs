@@ -1,35 +1,41 @@
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::io::Read;
 use std::rc::Rc;
 use std::{fmt, io};
 
 use super::pack_resources::{IoSupplier, METADATA_EXTENSION};
-use super::packs::PackId;
 
 /// Owned, transferable byte stream; dropping it releases its backing state.
 pub(crate) type ReadStream = Box<dyn Read + Send + 'static>;
 
-/// Logical pack provenance and diagnostic display metadata, not source
-/// identity. Compare pack_id for identity; names can change and layers can
-/// share a pack. Metadata carries its own origin, which may belong to a
-/// different pack.
+/// The pack a resource came from, by ID, as vanilla's `Resource.sourcePackId`.
+/// Metadata carries its own origin, which may belong to a different pack.
 #[derive(Clone, Debug)]
 pub(crate) struct ResourceOrigin {
-    pub(super) pack_id: PackId,
     pub(super) name: String,
 }
 
-/// Logical name with nonempty namespace and path, checked only for
-/// namespace characters and case-preserving ASCII path characters. Storage
-/// resolution belongs to the source adapter.
-/// Deterministic namespace-then-path ordering does not imply pack priority.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(test)]
+impl ResourceOrigin {
+    pub(crate) fn test(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+        }
+    }
+}
+
+/// Vanilla `Identifier`: the same namespace and path characters, and the same
+/// path-then-namespace order (`Identifier.compareTo`), so listings iterate as
+/// vanilla's `TreeMap`s do. Storage resolution belongs to the source adapter.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResourceId {
     namespace: Cow<'static, str>,
     path: Cow<'static, str>,
 }
 
 impl ResourceId {
+    #[cfg(test)]
     pub(crate) fn new(value: &str) -> Result<Self, ResourceError> {
         let (namespace, path) = Self::parse_parts(value)?;
         Ok(Self::from_validated_parts(namespace, path))
@@ -52,6 +58,7 @@ impl ResourceId {
 
     /// Validates an identifier, borrowing its parts without allocation on
     /// success.
+    #[cfg(test)]
     fn parse_parts(value: &str) -> Result<(&str, &str), ResourceError> {
         let (namespace, path) = resource_id_parts(value);
         if !valid_resource_id_parts(namespace, path) {
@@ -82,12 +89,29 @@ impl ResourceId {
         &self.path
     }
 
+    /// The path is `directory` or lies inside it. Nothing lies inside the
+    /// empty directory, as `FileUtil.decomposePath` refuses it.
+    pub(crate) fn is_under(&self, directory: &str) -> bool {
+        self.path
+            .strip_prefix(directory)
+            .is_some_and(|tail| !directory.is_empty() && (tail.is_empty() || tail.starts_with('/')))
+    }
+
     /// Appending the metadata suffix preserves the already validated ID.
     pub(super) fn sidecar(&self) -> Self {
         Self {
             namespace: self.namespace.clone(),
             path: Cow::Owned(format!("{}{METADATA_EXTENSION}", self.path)),
         }
+    }
+
+    /// The resource a `.mcmeta` sidecar describes, which is always a valid ID.
+    pub(super) fn sidecar_base(&self) -> Option<Self> {
+        let path = self.path.strip_suffix(METADATA_EXTENSION)?;
+        Some(Self {
+            namespace: self.namespace.clone(),
+            path: Cow::Owned(path.to_owned()),
+        })
     }
 
     /// Omits only the default `minecraft` namespace.
@@ -100,13 +124,30 @@ impl ResourceId {
     }
 }
 
+impl Ord for ResourceId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path
+            .cmp(&other.path)
+            .then_with(|| self.namespace.cmp(&other.namespace))
+    }
+}
+
+impl PartialOrd for ResourceId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Vanilla `Identifier.bySeparator`: no separator, or one at the start, means
+/// the `minecraft` namespace.
 const fn resource_id_parts(value: &str) -> (&str, &str) {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b':' {
             let (namespace, rest) = value.split_at(index);
-            return (namespace, rest.split_at(1).1);
+            let path = rest.split_at(1).1;
+            return (if index == 0 { "minecraft" } else { namespace }, path);
         }
         index += 1;
     }
@@ -114,14 +155,15 @@ const fn resource_id_parts(value: &str) -> (&str, &str) {
 }
 
 const fn valid_resource_id_parts(namespace: &str, path: &str) -> bool {
-    !namespace.is_empty()
-        && !path.is_empty()
-        && resource_namespace_chars(namespace)
-        && resource_path_chars(path)
+    resource_namespace_chars(namespace) && resource_path_chars(path)
 }
 
+/// Vanilla `Identifier.isValidNamespace`, which also refuses `..`.
 pub(super) const fn resource_namespace_chars(namespace: &str) -> bool {
     let bytes = namespace.as_bytes();
+    if bytes.len() == 2 && bytes[0] == b'.' && bytes[1] == b'.' {
+        return false;
+    }
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -136,12 +178,16 @@ pub(super) const fn resource_namespace_chars(namespace: &str) -> bool {
     true
 }
 
+/// Vanilla `Identifier.validPathChar`: lowercase only.
 pub(super) const fn resource_path_chars(path: &str) -> bool {
     let bytes = path.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'-')) {
+        if !(byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'.' | b'/' | b'-'))
+        {
             return false;
         }
         index += 1;
@@ -166,12 +212,8 @@ impl fmt::Debug for ResourceId {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResourceError {
-    #[error("missing resource: {0}")]
-    Missing(ResourceId),
     #[error("invalid resource identifier: {0}")]
     InvalidId(String),
-    #[error("invalid resource enumeration namespace/prefix: {namespace:?}/{prefix:?}")]
-    InvalidQuery { namespace: String, prefix: String },
     /// Source construction, enumeration and root pack.mcmeta have no ID.
     #[error("{operation} failed for {id:?} in {origin:?}: {source}")]
     Io {
@@ -181,6 +223,16 @@ pub(crate) enum ResourceError {
         #[source]
         source: io::Error,
     },
+}
+
+impl From<ResourceError> for io::Error {
+    fn from(error: ResourceError) -> Self {
+        let kind = match &error {
+            ResourceError::Io { source, .. } => source.kind(),
+            ResourceError::InvalidId(_) => io::ErrorKind::InvalidInput,
+        };
+        io::Error::new(kind, error)
+    }
 }
 
 /// Reopenable resource or sidecar, independent of the manager's lifetime.
@@ -234,6 +286,10 @@ impl ResourceContent {
     pub(crate) fn read_bytes(&self, limit: usize) -> Result<Vec<u8>, ResourceError> {
         read_bounded(self.open()?, limit, &self.id, &self.origin)
     }
+
+    pub(crate) fn read_all(&self) -> Result<Vec<u8>, ResourceError> {
+        self.read_bytes(usize::MAX)
+    }
 }
 
 fn read_bounded(
@@ -271,25 +327,32 @@ fn read_bounded(
 #[derive(Clone)]
 pub(crate) struct Resource {
     content: ResourceContent,
-    metadata: Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>,
+    metadata: Rc<dyn Fn() -> Option<ResourceContent>>,
+    cached_metadata: Rc<OnceCell<Option<ResourceContent>>>,
 }
 
 impl Resource {
     pub(super) fn new(
         content: ResourceContent,
-        metadata: Rc<dyn Fn() -> Result<Option<ResourceContent>, ResourceError>>,
+        metadata: Rc<dyn Fn() -> Option<ResourceContent>>,
     ) -> Self {
-        Self { content, metadata }
+        Self {
+            content,
+            metadata,
+            cached_metadata: Rc::default(),
+        }
     }
 
     pub(crate) fn content(&self) -> &ResourceContent {
         &self.content
     }
 
-    /// Uncached sidecar lookup; access errors are not absence. Calls and clones
-    /// share a fixed source view but can observe filesystem changes.
-    pub(crate) fn metadata(&self) -> Result<Option<ResourceContent>, ResourceError> {
-        (self.metadata)()
+    /// Vanilla `Resource.metadata`: the sidecar is looked up on the first call
+    /// and kept, for this resource and its clones.
+    pub(crate) fn metadata(&self) -> Option<ResourceContent> {
+        self.cached_metadata
+            .get_or_init(|| (self.metadata)())
+            .clone()
     }
 }
 
@@ -303,17 +366,41 @@ mod path_validation {
             ("test", "C:/outside/sentinel.txt"),
             ("test", "outside:sentinel.txt"),
             ("test", r"outside\sentinel.txt"),
+            ("test", "textures/block/Dirt.png"),
             ("bad/namespace", "sentinel.txt"),
+            ("..", "x"),
         ] {
             assert!(matches!(
                 ResourceId::from_parts(namespace, path),
                 Err(ResourceError::InvalidId(_))
             ));
         }
-        for (namespace, path) in [("test", "../x"), ("test", "/x"), ("..", "x")] {
+        for (namespace, path) in [("test", "../x"), ("test", "/x"), ("test", ""), (".", "x")] {
             let id = ResourceId::from_parts(namespace, path).unwrap();
             assert_eq!(id.namespace(), namespace);
             assert_eq!(id.path(), path);
         }
+    }
+
+    #[test]
+    fn parses_like_identifier() {
+        let id = ResourceId::new(":foo").unwrap();
+        assert_eq!((id.namespace(), id.path()), ("minecraft", "foo"));
+        let id = ResourceId::new("foo").unwrap();
+        assert_eq!((id.namespace(), id.path()), ("minecraft", "foo"));
+        let id = ResourceId::new("pomme:a:b").unwrap_err();
+        assert!(matches!(id, ResourceError::InvalidId(_)));
+    }
+
+    #[test]
+    fn orders_by_path_then_namespace() {
+        let mut ids = [
+            ResourceId::new("minecraft:b/x.png").unwrap(),
+            ResourceId::new("pomme:a/y.png").unwrap(),
+            ResourceId::new("aaa:b/x.png").unwrap(),
+        ];
+        ids.sort();
+        let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["pomme:a/y.png", "aaa:b/x.png", "minecraft:b/x.png"]);
     }
 }

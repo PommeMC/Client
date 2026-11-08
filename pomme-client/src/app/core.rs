@@ -34,9 +34,9 @@ use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
 use crate::resources::pack_resources::PackType;
 use crate::resources::packs::{
-    BuiltinRepositorySource, FolderRepositorySource, InstallationLocation, PackEnablementConfig,
-    PackId, PackLocationInfo, PackPosition, PackRepository, PackSource, PhysicalPack,
-    RegisteredRepositorySource, SymlinkPolicy, ThemeSpecification, download_server_pack,
+    BuiltinRepositorySource, FolderRepositorySource, PackEnablementConfig, PackId,
+    PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
+    SymlinkPolicy, ThemeSpecification, download_server_pack,
 };
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
@@ -1166,24 +1166,12 @@ impl AppCore {
         let builtin_resources = BuiltinRepositorySource::new(None);
         let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
         let registered_resources = RegisteredRepositorySource::new(pack_type, None);
-        let mut resource_repository = PackRepository::new(vec![
+        let resource_repository = PackRepository::new(vec![
             Box::new(builtin_resources.clone()),
             Box::new(folder_resources.clone()),
             Box::new(registered_resources.clone()),
         ]);
-        let mut resources = ReloadableResourceManager::new(pack_type);
-        // Establish an embedded-only view before any external discovery can fail.
-        resource_repository
-            .reload()
-            .expect("embedded Pomme resource catalog must load without filesystem access");
-        let opened = resource_repository
-            .open_all_enabled()
-            .expect("embedded Pomme resources must open without filesystem access");
-        resources
-            .reload(opened, |_| {
-                // The menu has not been constructed yet.
-            })
-            .expect("embedded Pomme resource view must initialize");
+        let resources = ReloadableResourceManager::new(pack_type);
 
         let mut input = InputState::new();
         let menu = MainMenu::new(
@@ -1255,14 +1243,13 @@ impl AppCore {
             player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
         };
-        core.menu.load_splash(&core.resources);
         core.configure_resources();
         core
     }
 
     fn configure_resources(&mut self) {
         let policy_path = self.data_dirs.game_dir.join("allowed_symlinks.txt");
-        let policy = SymlinkPolicy::load(Some(&policy_path));
+        let policy = SymlinkPolicy::load(&policy_path);
         self.folder_resources.set_symlink_policy(policy.clone());
         self.registered_resources.set_symlink_policy(policy);
 
@@ -1275,19 +1262,18 @@ impl AppCore {
         let cache = root.join(".server_cache");
         self.folder_resources.set_paths(vec![root], Some(cache));
         self.set_resource_theme(self.menu.theme());
+        self.set_resource_installation();
+        self.reload_resources();
+        self.complete_resource_selection();
+        self.menu.pick_splash();
+    }
+
+    /// Points the vanilla pack at the version's install, once it's complete.
+    fn set_resource_installation(&self) {
         let installation = self
             .data_dirs
             .is_installed(&self.version)
             .then(|| self.data_dirs.installation_location(&self.version));
-        self.set_resource_installation(installation);
-        if let Err(error) = self.reload_resources() {
-            tracing::warn!(%error, "Resource setup failed; retaining the embedded Pomme view");
-        } else {
-            self.complete_resource_selection();
-        }
-    }
-
-    fn set_resource_installation(&self, installation: Option<InstallationLocation>) {
         self.builtin_resources.set_installation(installation);
         let target = self.builtin_resources.target_format();
         self.folder_resources.set_target_format(target);
@@ -1335,8 +1321,10 @@ impl AppCore {
 
     /// Bootstrap only: no live Renderer or world exists yet. Its new menu
     /// overlay will construct fonts fallibly from this view.
-    fn reload_resources(&mut self) -> std::io::Result<()> {
-        self.activate_resource_selection(None, |_| Ok(()))
+    fn reload_resources(&mut self) {
+        if let Err(error) = self.activate_resource_selection(None, |_| Ok(())) {
+            unreachable!("bootstrap activation has no preparation to fail: {error}");
+        }
     }
 
     /// Catalog/source changes are not rolled back. Manager preparation retains
@@ -1347,7 +1335,7 @@ impl AppCore {
         toggle: Option<(PackId, bool)>,
         prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
-        self.resource_repository.reload()?;
+        self.resource_repository.reload();
         self.resource_repository
             .set_enabled(&self.active_resource_ids);
         if let Some((id, enable)) = toggle {
@@ -1357,13 +1345,13 @@ impl AppCore {
                 self.resource_repository.disable_pack(&id);
             }
         }
-        let opened = self.resource_repository.open_all_enabled()?;
+        let opened = self.resource_repository.open_all_enabled();
         let menu = &mut self.menu;
         let audio = &mut self.audio;
         let prepared = self
             .resources
             .reload_with_preparation(opened, prepare, |resources| {
-                menu.load_splash(resources);
+                menu.load_splashes(resources);
                 audio.reload_assets(resources);
             })?;
         self.asset_head_skins.clear();
@@ -1407,8 +1395,8 @@ impl AppCore {
         self.asset_reload_revision
     }
 
-    pub(crate) fn rescan_resource_packs(&mut self) -> std::io::Result<()> {
-        self.resource_repository.reload()
+    pub(crate) fn rescan_resource_packs(&mut self) {
+        self.resource_repository.reload();
     }
 
     fn complete_resource_selection(&mut self) {
@@ -1572,7 +1560,8 @@ impl AppCore {
             p.set_in_menu(&self.version);
         }
         self.apply_cursor_grab(&gfx.window, None);
-        self.menu.load_splash(&self.resources);
+        self.menu.splash = None;
+        self.menu.pick_splash();
     }
 
     /// Releases the cursor, warping it to the window center only when it was
@@ -2154,7 +2143,6 @@ impl AppCore {
             PackLocationInfo {
                 id: uuid.to_string(),
                 title: crate::chat_component::Component::text(hash),
-                source: PackSource::server(),
                 known_pack_info: None,
             },
             PhysicalPack::Directory(path),
@@ -2199,19 +2187,13 @@ impl AppCore {
     /// Rebuilds what was built from assets that didn't exist yet, once the
     /// first-run download has put them on disk. Only the install boot screen
     /// exists here; it is discarded before constructing the new Renderer.
-    pub(crate) fn reload_installed_assets(&mut self) -> std::io::Result<()> {
-        if !self.data_dirs.is_installed(&self.version) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Minecraft {} installation is not ready", self.version),
-            ));
-        }
-        self.set_resource_installation(Some(self.data_dirs.installation_location(&self.version)));
+    pub(crate) fn reload_installed_assets(&mut self) {
+        self.set_resource_installation();
         self.set_resource_theme(self.menu.theme());
-        self.reload_resources()?;
+        self.reload_resources();
+        self.menu.pick_splash();
         self.audio = crate::audio::AudioEngine::new(&self.resources, self.menu.category_volumes());
         self.complete_resource_selection();
-        Ok(())
     }
 
     pub(crate) fn use_vanilla_block_cache(&self) -> bool {

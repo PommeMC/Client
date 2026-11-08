@@ -8,7 +8,7 @@ static NEXT_PACK_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct PackId(u64);
 
 impl PackId {
-    pub(super) fn allocate() -> Self {
+    pub(in crate::resources) fn allocate() -> Self {
         Self(NEXT_PACK_ID.fetch_add(1, Ordering::Relaxed))
     }
 }
