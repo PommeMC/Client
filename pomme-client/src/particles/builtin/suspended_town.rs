@@ -323,3 +323,36 @@ impl SpriteParticleRegistration<SimpleParticleType> for ComposterFillParticleReg
         })
     }
 }
+
+pub struct EggCrackProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for EggCrackProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct EggCrackParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for EggCrackParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(EggCrackProvider {
+            sprites: sprite_set,
+        })
+    }
+}
