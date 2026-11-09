@@ -14,47 +14,32 @@ use crate::renderer::entity_model::{PartAnim, cube_face_positions, cube_face_uvs
 
 #[derive(Deserialize)]
 struct BlockstateFile {
-    variants: Option<HashMap<String, VariantEntry>>,
+    variants: Option<HashMap<String, ModelRefs>>,
     multipart: Option<Vec<MultipartCase>>,
 }
 
+/// A variant's or multipart case's model: one, or a weighted list.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum VariantEntry {
+enum ModelRefs {
     Single(ModelRef),
     Array(Vec<ModelRef>),
 }
 
-impl VariantEntry {
-    fn first(&self) -> Option<&ModelRef> {
+impl ModelRefs {
+    fn refs(&self) -> &[ModelRef] {
         match self {
-            VariantEntry::Single(r) => Some(r),
-            VariantEntry::Array(arr) => arr.first(),
+            ModelRefs::Single(r) => std::slice::from_ref(r),
+            ModelRefs::Array(arr) => arr,
         }
     }
 }
 
 #[derive(Deserialize)]
 struct MultipartCase {
-    apply: MultipartApply,
+    apply: ModelRefs,
     #[allow(dead_code)]
     when: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MultipartApply {
-    Single(ModelRef),
-    Array(Vec<ModelRef>),
-}
-
-impl MultipartApply {
-    fn first(&self) -> Option<&ModelRef> {
-        match self {
-            MultipartApply::Single(r) => Some(r),
-            MultipartApply::Array(arr) => arr.first(),
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -66,6 +51,12 @@ struct ModelRef {
     y: i32,
     #[serde(default)]
     uvlock: bool,
+    #[serde(default = "default_weight")]
+    weight: u32,
+}
+
+fn default_weight() -> u32 {
+    1
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -527,10 +518,56 @@ pub struct BakedModel {
     pub is_full_cube: bool,
 }
 
-#[derive(Clone)]
+/// Vanilla `WeightedVariants`: a state's models, one picked per block by
+/// weight (a single model is vanilla's `SingleVariant`).
+pub struct WeightedModels {
+    entries: Vec<(Arc<BakedModel>, u32)>,
+    total_weight: u32,
+}
+
+impl WeightedModels {
+    /// `None` for an empty list, as vanilla's codec refuses one.
+    fn new(entries: Vec<(Arc<BakedModel>, u32)>) -> Option<Self> {
+        let total_weight = entries.iter().map(|(_, weight)| weight).sum();
+        (!entries.is_empty()).then_some(Self {
+            entries,
+            total_weight,
+        })
+    }
+
+    /// The first model: vanilla's particle source, and what a caller with no
+    /// block position draws.
+    pub fn first(&self) -> &BakedModel {
+        &self.entries[0].0
+    }
+
+    /// Whether there's a choice, so a caller needs a random at all.
+    pub fn is_weighted(&self) -> bool {
+        self.entries.len() > 1
+    }
+
+    /// `WeightedList.getRandomOrThrow` (its `Compact` selector; `Flat` picks
+    /// the same entry).
+    #[inline]
+    pub fn pick(&self, random: &mut crate::util::JavaRandom) -> &BakedModel {
+        let mut selection = random.next_int(self.total_weight as i32) as u32;
+        for (model, weight) in &self.entries {
+            if selection < *weight {
+                return model;
+            }
+            selection -= weight;
+        }
+        unreachable!("selection is below the total weight")
+    }
+
+    pub fn models(&self) -> impl Iterator<Item = &BakedModel> {
+        self.entries.iter().map(|(model, _)| &**model)
+    }
+}
+
 pub struct MultipartEntry {
     pub when: super::condition::Condition,
-    pub model: Arc<BakedModel>,
+    pub models: WeightedModels,
 }
 
 pub fn load_all_block_textures(
@@ -569,7 +606,7 @@ pub fn load_all_block_textures(
     results
 }
 
-type BakedModelMap = HashMap<String, HashMap<String, Arc<BakedModel>>>;
+type BakedModelMap = HashMap<String, HashMap<String, Arc<WeightedModels>>>;
 type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
 
 pub fn bake_all_models(
@@ -592,7 +629,7 @@ pub fn bake_all_models(
         |block_name, blockstate| {
             total += 1;
             LoadProgress::step(progress);
-            let mut variants_map: HashMap<String, Arc<BakedModel>> = HashMap::new();
+            let mut variants_map: HashMap<String, Arc<WeightedModels>> = HashMap::new();
             // Variants (and multipart cases) naming the same model, rotation
             // and uvlock share one bake. Per block, since tints are.
             let mut shared: HashMap<(String, i32, i32, bool), Arc<BakedModel>> = HashMap::new();
@@ -621,18 +658,26 @@ pub fn bake_all_models(
                 Some(baked)
             };
 
+            let mut bake_weighted = |refs: &ModelRefs| {
+                WeightedModels::new(
+                    refs.refs()
+                        .iter()
+                        .filter_map(|model_ref| Some((bake(model_ref)?, model_ref.weight)))
+                        .collect(),
+                )
+            };
             if let Some(variants) = &blockstate.variants {
                 for (variant_key, variant_entry) in variants {
-                    if let Some(baked) = bake(variant_entry.first()?) {
-                        variants_map.insert(variant_key.clone(), baked);
+                    if let Some(models) = bake_weighted(variant_entry) {
+                        variants_map.insert(variant_key.clone(), Arc::new(models));
                     }
                 }
             } else if let Some(multipart) = &blockstate.multipart {
                 let mut entries = Vec::new();
                 for case in multipart {
-                    if let Some(baked) = bake(case.apply.first()?) {
+                    if let Some(models) = bake_weighted(&case.apply) {
                         match super::condition::Condition::parse(case.when.as_ref()) {
-                            Ok(when) => entries.push(MultipartEntry { when, model: baked }),
+                            Ok(when) => entries.push(MultipartEntry { when, models }),
                             Err(error) => {
                                 tracing::warn!(block_name, %error, "Invalid multipart selector")
                             }
@@ -1767,27 +1812,13 @@ pub(super) fn resolve_blockstates_dir(
     None
 }
 
-fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
-    if let Some(variants) = &blockstate.variants {
-        let entry = variants.get("").or_else(|| variants.values().next())?;
-        let r = entry.first()?;
-        Some(ModelRef {
-            model: r.model.clone(),
-            x: r.x,
-            y: r.y,
-            uvlock: r.uvlock,
-        })
-    } else if let Some(multipart) = &blockstate.multipart {
-        let r = multipart.first()?.apply.first()?;
-        Some(ModelRef {
-            model: r.model.clone(),
-            x: r.x,
-            y: r.y,
-            uvlock: r.uvlock,
-        })
+fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<&ModelRef> {
+    let refs = if let Some(variants) = &blockstate.variants {
+        variants.get("").or_else(|| variants.values().next())?
     } else {
-        None
-    }
+        &blockstate.multipart.as_ref()?.first()?.apply
+    };
+    refs.refs().first()
 }
 
 struct ResolvedModel {
@@ -2423,6 +2454,48 @@ fn determine_tint(block_name: &str, tint_index: u32) -> Tint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn weighted(weights: &[u32]) -> WeightedModels {
+        let model = || {
+            Arc::new(BakedModel {
+                quads: Vec::new(),
+                is_full_cube: true,
+            })
+        };
+        WeightedModels::new(weights.iter().map(|&weight| (model(), weight)).collect()).unwrap()
+    }
+
+    fn picked_index(models: &WeightedModels, random: &mut crate::util::JavaRandom) -> usize {
+        let picked = models.pick(random);
+        models
+            .models()
+            .position(|model| std::ptr::eq(model, picked))
+            .unwrap()
+    }
+
+    #[test]
+    fn weighted_models_pick_as_java_random_does() {
+        // Seeds and draws from `java.util.Random` on the JVM.
+        let four = weighted(&[1, 1, 1, 1]);
+        assert_eq!(
+            picked_index(&four, &mut crate::util::JavaRandom::new(2_402_721)),
+            3
+        );
+        assert_eq!(
+            picked_index(
+                &four,
+                &mut crate::util::JavaRandom::new(133_226_188_124_491)
+            ),
+            1
+        );
+        // nextLong reseeds each multipart case: nextInt(7) = 6 lands in the
+        // last entry of 1 + 4 + 2.
+        let mut random = crate::util::JavaRandom::new(132_190_812_565_532);
+        let seed = random.next_long();
+        assert_eq!(seed, -8_168_169_770_280_528_905);
+        random.set_seed(seed);
+        assert_eq!(picked_index(&weighted(&[1, 4, 2]), &mut random), 2);
+    }
 
     fn parse_tints(values: &[serde_json::Value]) -> Result<Vec<ItemTintSource>, String> {
         parse_item_tint_sources(values, &Colormap::fallback())

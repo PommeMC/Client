@@ -1,0 +1,43 @@
+# Blocks with weighted models pick one per position as vanilla does: grass
+# and stone tops seen from above show the same rotations and mirrors.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 0 -61 -8 7 -61 7 minecraft:stone"
+
+[[step]]
+chat = "/fill -8 -61 -8 -1 -61 7 minecraft:grass_block"
+
+[[step]]
+expect = { block = "stone", at = [7, -61, 7] }
+
+[[step]]
+chat = "/tp @s 0.0 -52 0.0 0 90"
+
+[[step]]
+expect = { player = { position = [0.0, -52.0, 0.0] } }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "above"
+
+[[step]]
+chat = "/fill 0 -61 -8 7 -61 7 minecraft:grass_block"

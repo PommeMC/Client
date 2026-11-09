@@ -383,9 +383,9 @@ impl Bakery {
                 add(quad, fluid == FluidKind::Water, true);
             }
         } else {
-            let quads: Vec<&BakedQuad> = match view.get_baked_model(state) {
+            let quads: Vec<&BakedQuad> = match view.get_baked_model(state, None) {
                 Some(model) => model.quads.iter().collect(),
-                None => view.get_multipart_quads(state).unwrap_or_default(),
+                None => view.get_multipart_quads(state, None).unwrap_or_default(),
             };
             for quad in quads {
                 let name = quad.texture.name();
