@@ -15,286 +15,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
 use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
-use crate::renderer::CloudMode;
+pub use crate::options::{
+    CHUNK_DETAIL_OFF, DEFAULT_MENU_BACKGROUND_BLURRINESS, MAX_FRAMERATE_UNLIMITED,
+};
+use crate::options::{
+    GameOptions, MAX_MENU_BACKGROUND_BLURRINESS, distant_terrain_chunks, distant_terrain_step,
+};
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_DOWNLOAD, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE,
     ICON_LINK, ICON_PAINTBRUSH, ICON_RETRY, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS,
     MenuElement, SpriteId, TooltipLine,
 };
+#[cfg(test)]
 use crate::ui::chat::ChatOptions;
 use crate::ui::font::FontOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
-#[derive(Serialize, Deserialize)]
-struct Settings {
-    #[serde(default)]
-    key_bindings: KeyBindings,
-    gui_scale: u32,
-    render_distance: u32,
-    // Renamed when the default became Off, so saves holding the old default
-    // of 8 move to Off too.
-    #[serde(rename = "chunk_detail_v2", default = "default_chunk_detail")]
-    chunk_detail: u32,
-    #[serde(default)]
-    distant_terrain: u32,
-    simulation_distance: u32,
-    #[serde(default = "default_fov")]
-    fov: u32,
-    #[serde(default = "default_fov_effect_scale")]
-    fov_effect_scale: f32,
-    #[serde(default = "default_damage_tilt_strength")]
-    damage_tilt_strength: f32,
-    #[serde(default = "default_brightness")]
-    brightness: f32,
-    #[serde(default = "default_sensitivity")]
-    sensitivity: f32,
-    #[serde(default)]
-    invert_mouse_x: bool,
-    #[serde(default)]
-    invert_mouse_y: bool,
-    #[serde(default = "default_true")]
-    view_bobbing: bool,
-    #[serde(default = "default_menu_background_blurriness")]
-    menu_background_blurriness: u8,
-    #[serde(default)]
-    show_subtitles: bool,
-    #[serde(default = "default_true")]
-    vignette: bool,
-    #[serde(default = "default_true")]
-    entity_shadows: bool,
-    #[serde(default = "default_true")]
-    show_autosave_indicator: bool,
-    #[serde(default = "default_true")]
-    vsync: bool,
-    #[serde(default = "default_max_framerate")]
-    max_framerate: u32,
-    #[serde(default = "default_true")]
-    show_online_status: bool,
-    #[serde(default = "default_true")]
-    show_current_server: bool,
-    #[serde(default = "default_true")]
-    skin_cape: bool,
-    #[serde(default = "default_true")]
-    skin_jacket: bool,
-    #[serde(default = "default_true")]
-    skin_left_sleeve: bool,
-    #[serde(default = "default_true")]
-    skin_right_sleeve: bool,
-    #[serde(default = "default_true")]
-    skin_left_pants: bool,
-    #[serde(default = "default_true")]
-    skin_right_pants: bool,
-    #[serde(default = "default_true")]
-    skin_hat: bool,
-    #[serde(default = "default_true")]
-    skin_main_hand_right: bool,
-    #[serde(default = "default_volume")]
-    master_volume: f32,
-    #[serde(default = "default_volume")]
-    music_volume: f32,
-    #[serde(default = "default_volume")]
-    jukebox_volume: f32,
-    #[serde(default = "default_volume")]
-    weather_volume: f32,
-    #[serde(default = "default_volume")]
-    blocks_volume: f32,
-    #[serde(default = "default_volume")]
-    hostile_volume: f32,
-    #[serde(default = "default_volume")]
-    friendly_volume: f32,
-    #[serde(default = "default_volume")]
-    players_volume: f32,
-    #[serde(default = "default_volume")]
-    ambient_volume: f32,
-    #[serde(default = "default_volume")]
-    voice_volume: f32,
-    #[serde(default = "default_volume")]
-    ui_volume: f32,
-    #[serde(default = "default_cloud_mode")]
-    cloud_mode: u8,
-    /// The selected shader pack's file or folder name in `shaderpacks/`.
-    #[serde(default)]
-    shader_pack: Option<String>,
-    #[serde(default = "default_attack_indicator")]
-    attack_indicator: u8,
-    #[serde(default)]
-    display_mode: u8,
-    #[serde(default)]
-    theme: u8,
-    #[serde(default)]
-    chat: ChatOptions,
-    #[serde(default)]
-    force_unicode_font: bool,
-    #[serde(default = "default_japanese_glyph_variants")]
-    japanese_glyph_variants: bool,
-}
-
-fn default_fov() -> u32 {
-    70
-}
-
-fn default_max_framerate() -> u32 {
-    120
-}
-
-/// Top of the Max Framerate slider, where the cap is disabled (matching
-/// vanilla, which treats the slider's max as unlimited).
-pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
-
-const CHUNK_DETAIL_MIN: u32 = 8;
-/// Top of the Chunk Detail slider, where every column meshes at full detail.
-pub const CHUNK_DETAIL_OFF: u32 = 49;
-const CHUNK_DETAIL_SPAN: f32 = (CHUNK_DETAIL_OFF - CHUNK_DETAIL_MIN) as f32;
-
-/// The Distant Terrain slider's steps past Off: 32 to 256 chunks, 16 apart.
-const DISTANT_TERRAIN_STEPS: u32 = 15;
-const DISTANT_TERRAIN_STEP: u32 = 16;
-
-/// The Distant Terrain slider step nearest `chunks`: 0 for off, else
-/// `1..=DISTANT_TERRAIN_STEPS`.
-fn distant_terrain_step(chunks: u32) -> u32 {
-    if chunks == 0 {
-        return 0;
-    }
-    ((chunks + DISTANT_TERRAIN_STEP / 2) / DISTANT_TERRAIN_STEP)
-        .saturating_sub(1)
-        .clamp(1, DISTANT_TERRAIN_STEPS)
-}
-
-/// The chunks Distant Terrain slider step `step` draws out to.
-fn distant_terrain_chunks(step: u32) -> u32 {
-    if step == 0 {
-        0
-    } else {
-        DISTANT_TERRAIN_STEP * (step + 1)
-    }
-}
-
-fn default_fov_effect_scale() -> f32 {
-    1.0
-}
-
-fn default_damage_tilt_strength() -> f32 {
-    1.0
-}
-
-/// Vanilla `gamma`.
-fn default_brightness() -> f32 {
-    0.5
-}
-
-/// Vanilla `menuBackgroundBlurriness`: 0 (off) to 10, default 5.
-const MAX_MENU_BACKGROUND_BLURRINESS: u8 = 10;
-pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
-
-fn default_menu_background_blurriness() -> u8 {
-    DEFAULT_MENU_BACKGROUND_BLURRINESS
-}
-
-/// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
-/// options.json would otherwise feed straight into a render or input curve.
+/// Clamps persisted unit sliders before feeding render and input curves.
 fn unit_range(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
-}
-
-fn default_sensitivity() -> f32 {
-    0.5
-}
-
-fn default_cloud_mode() -> u8 {
-    2
-}
-
-fn default_attack_indicator() -> u8 {
-    1
-}
-
-fn default_true() -> bool {
-    true
-}
-
-// TODO: vanilla reads `Locale.getDefault()`, which follows the OS locale;
-// these variables are usually unset on Windows.
-fn default_japanese_glyph_variants() -> bool {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .is_some_and(|locale| {
-            locale.eq_ignore_ascii_case("ja")
-                || locale.starts_with("ja_")
-                || locale.starts_with("ja-")
-        })
-}
-
-fn default_chunk_detail() -> u32 {
-    CHUNK_DETAIL_OFF
-}
-
-fn default_volume() -> f32 {
-    1.0
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            key_bindings: KeyBindings::default(),
-            gui_scale: 0,
-            render_distance: 12,
-            chunk_detail: CHUNK_DETAIL_OFF,
-            distant_terrain: 0,
-            simulation_distance: 12,
-            fov: 70,
-            fov_effect_scale: 1.0,
-            damage_tilt_strength: 1.0,
-            brightness: default_brightness(),
-            sensitivity: 0.5,
-            invert_mouse_x: false,
-            invert_mouse_y: false,
-            view_bobbing: true,
-            menu_background_blurriness: default_menu_background_blurriness(),
-            show_subtitles: false,
-            show_autosave_indicator: true,
-            vignette: true,
-            entity_shadows: true,
-            vsync: true,
-            max_framerate: 120,
-            show_online_status: true,
-            show_current_server: true,
-            skin_cape: true,
-            skin_jacket: true,
-            skin_left_sleeve: true,
-            skin_right_sleeve: true,
-            skin_left_pants: true,
-            skin_right_pants: true,
-            skin_hat: true,
-            skin_main_hand_right: true,
-            master_volume: 1.0,
-            music_volume: 1.0,
-            jukebox_volume: 1.0,
-            weather_volume: 1.0,
-            blocks_volume: 1.0,
-            hostile_volume: 1.0,
-            friendly_volume: 1.0,
-            players_volume: 1.0,
-            ambient_volume: 1.0,
-            voice_volume: 1.0,
-            ui_volume: 1.0,
-            cloud_mode: 2,
-            shader_pack: None,
-            attack_indicator: 1,
-            display_mode: 0,
-            theme: PanoramaTheme::Java.to_u8(),
-            chat: ChatOptions::default(),
-            force_unicode_font: false,
-            japanese_glyph_variants: default_japanese_glyph_variants(),
-        }
-    }
 }
 
 /// The chunk detail the options hold, which a headless run meshes with as the
@@ -303,7 +47,7 @@ pub(crate) fn saved_chunk_detail(game_dir: &Path) -> u32 {
     load_settings(game_dir).chunk_detail
 }
 
-fn load_settings(game_dir: &Path) -> Settings {
+fn load_settings(game_dir: &Path) -> GameOptions {
     let path = game_dir.join("options.json");
     std::fs::read_to_string(&path)
         .ok()
@@ -311,7 +55,7 @@ fn load_settings(game_dir: &Path) -> Settings {
         .unwrap_or_default()
 }
 
-fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
+fn save_settings(game_dir: &Path, settings: &GameOptions) -> std::io::Result<()> {
     let path = game_dir.join("options.json");
     let result = serde_json::to_string_pretty(settings)
         .map_err(std::io::Error::other)
@@ -547,6 +291,7 @@ const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
+#[derive(Clone)]
 enum Screen {
     Main,
     Account,
@@ -578,43 +323,6 @@ enum Screen {
     OptionsCredits,
     CreditsRoll,
     DebugOptions,
-}
-
-impl Screen {
-    fn clone_screen(&self) -> Self {
-        match self {
-            Self::Main => Self::Main,
-            Self::Friends => Self::Friends,
-            Self::Account => Self::Account,
-            Self::Options => Self::Options,
-            Self::OptionsOnline => Self::OptionsOnline,
-            Self::OptionsVideo => Self::OptionsVideo,
-            Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
-            Self::OptionsMusicSounds => Self::OptionsMusicSounds,
-            Self::OptionsControls => Self::OptionsControls,
-            Self::OptionsMouse => Self::OptionsMouse,
-            Self::OptionsKeybinds => Self::OptionsKeybinds,
-            Self::OptionsLanguage => Self::OptionsLanguage,
-            Self::OptionsFontSettings => Self::OptionsFontSettings,
-            Self::OptionsChatSettings => Self::OptionsChatSettings,
-            Self::OptionsResourcePacks => Self::OptionsResourcePacks,
-            Self::OptionsAccessibility => Self::OptionsAccessibility,
-            Self::OptionsTelemetry => Self::OptionsTelemetry,
-            Self::OptionsCredits => Self::OptionsCredits,
-            Self::CreditsRoll => Self::CreditsRoll,
-            Self::DebugOptions => Self::DebugOptions,
-            Self::ServerList => Self::ServerList,
-            Self::WorldList => Self::WorldList,
-            Self::CreateWorld => Self::CreateWorld,
-            Self::EditWorld(f) => Self::EditWorld(f.clone()),
-            Self::ConfirmDeleteWorld(f) => Self::ConfirmDeleteWorld(f.clone()),
-            Self::DirectConnect => Self::DirectConnect,
-            Self::AddServer => Self::AddServer,
-            Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
-            Self::EditServer(i) => Self::EditServer(*i),
-            Self::Disconnected(s) => Self::Disconnected(s.clone()),
-        }
-    }
 }
 
 /// Returns true once `count` has held steady for 500ms since it last changed —
@@ -707,7 +415,6 @@ pub struct MainMenu {
     /// title-screen icon row and the Options grid, and for Chat Settings,
     /// which also open from chat.
     settings_back: Screen,
-    theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
     /// Where `pomme_install::bedrock` installs the Bedrock theme's files.
     bedrock_dir: PathBuf,
@@ -743,71 +450,17 @@ pub struct MainMenu {
     credits_scroll: f32,
     credits_keys: u8,
     last_click_index: Option<usize>,
-    pub gui_scale_setting: u32,
-    pub render_distance: u32,
-    /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
-    /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
-    /// within a VRAM budget.
-    pub chunk_detail: u32,
-    /// How far distant terrain draws, in chunks, 0 for off. Pomme-custom:
-    /// the chunks the server forgets, drawn coarsely past the loaded ones.
-    pub distant_terrain: u32,
-    pub simulation_distance: u32,
-    /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
+    /// The options saved to `options.json`.
+    pub options: GameOptions,
+    /// Server-announced view distance cap; 0 when unknown.
     pub server_render_distance: u32,
-    pub fov: u32,
-    /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
-    pub fov_effect_scale: f32,
-    pub damage_tilt_strength: f32,
-    /// The Brightness option (vanilla `gamma`), 0..1.
-    pub brightness: f32,
-    pub sensitivity: f32,
-    pub invert_mouse_x: bool,
-    pub invert_mouse_y: bool,
-    pub view_bobbing: bool,
-    /// The Menu Background Blur radius (vanilla `MenuBlurRadius`), 0 for off.
-    pub menu_background_blurriness: u8,
-    pub show_subtitles: bool,
-    pub show_autosave_indicator: bool,
-    pub vignette: bool,
-    pub entity_shadows: bool,
-    pub vsync: bool,
-    pub max_framerate: u32,
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
-    pub show_online_status: bool,
-    pub show_current_server: bool,
-    pub master_volume: f32,
-    pub music_volume: f32,
-    pub jukebox_volume: f32,
-    pub weather_volume: f32,
-    pub blocks_volume: f32,
-    pub hostile_volume: f32,
-    pub friendly_volume: f32,
-    pub players_volume: f32,
-    pub ambient_volume: f32,
-    pub voice_volume: f32,
-    pub ui_volume: f32,
-    skin_cape: bool,
-    skin_jacket: bool,
-    skin_left_sleeve: bool,
-    skin_right_sleeve: bool,
-    skin_left_pants: bool,
-    skin_right_pants: bool,
-    skin_hat: bool,
-    skin_main_hand_right: bool,
-    pub display_mode: DisplayMode,
-    pub cloud_mode: CloudMode,
-    /// The selected shader pack, by its name in [`Self::shader_packs_dir`].
-    pub shader_pack: Option<String>,
+    /// The directory [`GameOptions::shader_pack`] names a pack in.
     pub shader_packs_dir: PathBuf,
-    pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
-    pub chat_options: ChatOptions,
-    pub force_unicode_font: bool,
-    pub japanese_glyph_variants: bool,
-    active_slider: Option<&'static str>,
+    active_slider: Option<crate::options::OptionId>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
@@ -855,8 +508,21 @@ impl MainMenu {
         let saves_dir = crate::ui::world_list::saves_dir(game_dir);
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
-        let settings = load_settings(game_dir);
-        *key_bindings = settings.key_bindings;
+        let mut settings = load_settings(game_dir);
+        *key_bindings = settings.key_bindings.clone();
+        for value in [
+            &mut settings.damage_tilt_strength,
+            &mut settings.brightness,
+            &mut settings.sensitivity,
+        ] {
+            *value = unit_range(*value);
+        }
+        settings.menu_background_blurriness = settings
+            .menu_background_blurriness
+            .min(MAX_MENU_BACKGROUND_BLURRINESS);
+        settings.chat_options = settings.chat_options.sanitized();
+        settings.distant_terrain =
+            distant_terrain_chunks(distant_terrain_step(settings.distant_terrain));
         let mut menu = Self {
             action_binding: None,
             username,
@@ -893,7 +559,6 @@ impl MainMenu {
             links_open: false,
             theme_open: false,
             settings_back: Screen::Options,
-            theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
             bedrock_dir,
             bedrock: Arc::new(parking_lot::Mutex::new(BedrockDownload::Idle)),
@@ -913,64 +578,11 @@ impl MainMenu {
             credits_scroll: 0.0,
             credits_keys: 0,
             last_click_index: None,
-            gui_scale_setting: settings.gui_scale,
-            render_distance: settings.render_distance,
-            chunk_detail: settings.chunk_detail,
-            distant_terrain: distant_terrain_chunks(distant_terrain_step(settings.distant_terrain)),
-            simulation_distance: settings.simulation_distance,
+            options: settings,
             server_render_distance: 0,
-            fov: settings.fov,
-            fov_effect_scale: settings.fov_effect_scale,
-            damage_tilt_strength: unit_range(settings.damage_tilt_strength),
-            brightness: unit_range(settings.brightness),
-            // Cubed by the look curve, so an out-of-range value reaches
-            // infinity and leaves the look direction NaN for good.
-            sensitivity: unit_range(settings.sensitivity),
-            invert_mouse_x: settings.invert_mouse_x,
-            invert_mouse_y: settings.invert_mouse_y,
-            view_bobbing: settings.view_bobbing,
-            menu_background_blurriness: settings
-                .menu_background_blurriness
-                .min(MAX_MENU_BACKGROUND_BLURRINESS),
-            show_subtitles: settings.show_subtitles,
-            show_autosave_indicator: settings.show_autosave_indicator,
-            vignette: settings.vignette,
-            entity_shadows: settings.entity_shadows,
-            vsync: settings.vsync,
-            max_framerate: settings.max_framerate,
             debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
-            show_online_status: settings.show_online_status,
-            show_current_server: settings.show_current_server,
-            master_volume: settings.master_volume,
-            music_volume: settings.music_volume,
-            jukebox_volume: settings.jukebox_volume,
-            weather_volume: settings.weather_volume,
-            blocks_volume: settings.blocks_volume,
-            hostile_volume: settings.hostile_volume,
-            friendly_volume: settings.friendly_volume,
-            players_volume: settings.players_volume,
-            ambient_volume: settings.ambient_volume,
-            voice_volume: settings.voice_volume,
-            ui_volume: settings.ui_volume,
-            skin_cape: settings.skin_cape,
-            skin_jacket: settings.skin_jacket,
-            skin_left_sleeve: settings.skin_left_sleeve,
-            skin_right_sleeve: settings.skin_right_sleeve,
-            skin_left_pants: settings.skin_left_pants,
-            skin_right_pants: settings.skin_right_pants,
-            skin_hat: settings.skin_hat,
-            skin_main_hand_right: settings.skin_main_hand_right,
-            display_mode: DisplayMode::from_u8(settings.display_mode),
-            cloud_mode: CloudMode::from_u8(settings.cloud_mode),
-            shader_pack: settings.shader_pack.clone(),
             shader_packs_dir: game_dir.join("shaderpacks"),
-            attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
-                settings.attack_indicator,
-            ),
             slider_can_change_value: true,
-            chat_options: settings.chat.sanitized(),
-            force_unicode_font: settings.force_unicode_font,
-            japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -992,8 +604,8 @@ impl MainMenu {
         };
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
-        if menu.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
-            menu.theme = PanoramaTheme::Java;
+        if menu.options.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
+            menu.options.theme = PanoramaTheme::Java;
             menu.pick_theme(PanoramaTheme::Bedrock);
         }
         menu
@@ -1045,7 +657,7 @@ impl MainMenu {
     /// (vanilla `fovEffectScale` xmaps the slider position through
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
-        self.fov_effect_scale * self.fov_effect_scale
+        self.options.fov_effect_scale * self.options.fov_effect_scale
     }
 
     /// The player whose skin the title screen shows, `None` without a
@@ -1095,15 +707,15 @@ impl MainMenu {
         crate::ui::hud::gui_scale(
             screen_w,
             screen_h,
-            self.gui_scale_setting,
-            self.force_unicode_font,
+            self.options.gui_scale_setting,
+            self.options.force_unicode_font,
         )
     }
 
     pub(crate) fn font_options(&self) -> FontOptions {
         FontOptions {
-            uniform: self.force_unicode_font,
-            japanese_variants: self.japanese_glyph_variants,
+            uniform: self.options.force_unicode_font,
+            japanese_variants: self.options.japanese_glyph_variants,
         }
     }
 
@@ -1112,28 +724,28 @@ impl MainMenu {
     /// slider.
     pub fn category_volumes(&self) -> [f32; SoundCategory::COUNT] {
         std::array::from_fn(|index| match SoundCategory::from_index(index as u8) {
-            SoundCategory::Master => self.master_volume,
-            SoundCategory::Music => self.music_volume,
-            SoundCategory::Records => self.jukebox_volume,
-            SoundCategory::Weather => self.weather_volume,
-            SoundCategory::Blocks => self.blocks_volume,
-            SoundCategory::Hostile => self.hostile_volume,
-            SoundCategory::Neutral => self.friendly_volume,
-            SoundCategory::Players => self.players_volume,
-            SoundCategory::Ambient => self.ambient_volume,
-            SoundCategory::Voice => self.voice_volume,
-            SoundCategory::Ui => self.ui_volume,
+            SoundCategory::Master => self.options.master_volume,
+            SoundCategory::Music => self.options.music_volume,
+            SoundCategory::Records => self.options.jukebox_volume,
+            SoundCategory::Weather => self.options.weather_volume,
+            SoundCategory::Blocks => self.options.blocks_volume,
+            SoundCategory::Hostile => self.options.hostile_volume,
+            SoundCategory::Neutral => self.options.friendly_volume,
+            SoundCategory::Players => self.options.players_volume,
+            SoundCategory::Ambient => self.options.ambient_volume,
+            SoundCategory::Voice => self.options.voice_volume,
+            SoundCategory::Ui => self.options.ui_volume,
         })
     }
 
     pub fn set_bench_render_distance(&mut self, rd: u32) {
         self.bench_render_distance
-            .set(&mut self.render_distance, rd);
+            .set(&mut self.options.render_distance, rd);
     }
 
     pub fn restore_bench_render_distance(&mut self) -> Option<u32> {
         self.bench_render_distance
-            .restore(&mut self.render_distance)
+            .restore(&mut self.options.render_distance)
     }
 
     /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
@@ -1166,86 +778,34 @@ impl MainMenu {
 
     fn save_settings(&mut self, key_bindings: &KeyBindings) {
         // A failed write stays dirty so the next screen change retries it.
-        self.settings_dirty = save_settings(
-            &self.settings_dir,
-            &Settings {
-                key_bindings: key_bindings.clone(),
-                gui_scale: self.gui_scale_setting,
-                render_distance: self
-                    .bench_render_distance
-                    .saved()
-                    .unwrap_or(self.render_distance),
-                chunk_detail: self.chunk_detail,
-                distant_terrain: self.distant_terrain,
-                simulation_distance: self.simulation_distance,
-                fov: self.fov,
-                fov_effect_scale: self.fov_effect_scale,
-                damage_tilt_strength: self.damage_tilt_strength,
-                brightness: self.brightness,
-                sensitivity: self.sensitivity,
-                invert_mouse_x: self.invert_mouse_x,
-                invert_mouse_y: self.invert_mouse_y,
-                view_bobbing: self.view_bobbing,
-                menu_background_blurriness: self.menu_background_blurriness,
-                show_subtitles: self.show_subtitles,
-                show_autosave_indicator: self.show_autosave_indicator,
-                vignette: self.vignette,
-                entity_shadows: self.entity_shadows,
-                vsync: self.vsync,
-                max_framerate: self.max_framerate,
-                show_online_status: self.show_online_status,
-                show_current_server: self.show_current_server,
-                master_volume: self.master_volume,
-                music_volume: self.music_volume,
-                jukebox_volume: self.jukebox_volume,
-                weather_volume: self.weather_volume,
-                blocks_volume: self.blocks_volume,
-                hostile_volume: self.hostile_volume,
-                friendly_volume: self.friendly_volume,
-                players_volume: self.players_volume,
-                ambient_volume: self.ambient_volume,
-                voice_volume: self.voice_volume,
-                ui_volume: self.ui_volume,
-                skin_cape: self.skin_cape,
-                skin_jacket: self.skin_jacket,
-                skin_left_sleeve: self.skin_left_sleeve,
-                skin_right_sleeve: self.skin_right_sleeve,
-                skin_left_pants: self.skin_left_pants,
-                skin_right_pants: self.skin_right_pants,
-                skin_hat: self.skin_hat,
-                skin_main_hand_right: self.skin_main_hand_right,
-                cloud_mode: self.cloud_mode.to_u8(),
-                shader_pack: self.shader_pack.clone(),
-                attack_indicator: self.attack_indicator.to_u8(),
-                display_mode: self.display_mode.to_u8(),
-                theme: self.theme.to_u8(),
-                chat: self.chat_options,
-                force_unicode_font: self.force_unicode_font,
-                japanese_glyph_variants: self.japanese_glyph_variants,
-            },
-        )
-        .is_err();
+        let mut options = self.options.clone();
+        options.key_bindings = key_bindings.clone();
+        options.render_distance = self
+            .bench_render_distance
+            .saved()
+            .unwrap_or(options.render_distance);
+        self.settings_dirty = save_settings(&self.settings_dir, &options).is_err();
     }
 
     pub fn set_display_mode(&mut self, display_mode: DisplayMode, key_bindings: &KeyBindings) {
-        self.display_mode = display_mode;
+        self.options.display_mode = display_mode;
         self.save_settings(key_bindings);
     }
 
     pub fn main_hand_right(&self) -> bool {
-        self.skin_main_hand_right
+        self.options.skin_main_hand_right
     }
 
     pub fn skin_options(&self) -> SkinOptions {
         SkinOptions {
-            cape: self.skin_cape,
-            jacket: self.skin_jacket,
-            left_sleeve: self.skin_left_sleeve,
-            right_sleeve: self.skin_right_sleeve,
-            left_pants: self.skin_left_pants,
-            right_pants: self.skin_right_pants,
-            hat: self.skin_hat,
-            main_hand_right: self.skin_main_hand_right,
+            cape: self.options.skin_cape,
+            jacket: self.options.skin_jacket,
+            left_sleeve: self.options.skin_left_sleeve,
+            right_sleeve: self.options.skin_right_sleeve,
+            left_pants: self.options.skin_left_pants,
+            right_pants: self.options.skin_right_pants,
+            hat: self.options.skin_hat,
+            main_hand_right: self.options.skin_main_hand_right,
         }
     }
 
@@ -1253,16 +813,16 @@ impl MainMenu {
     /// slider's steps, as a script asks.
     #[cfg(feature = "test-harness")]
     pub(crate) fn set_distant_terrain(&mut self, chunks: u32) {
-        self.distant_terrain = distant_terrain_chunks(distant_terrain_step(chunks));
+        self.options.distant_terrain = distant_terrain_chunks(distant_terrain_step(chunks));
     }
 
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
-        self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
+        self.options.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
         self.settings_dirty = true;
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
-        self.skin_main_hand_right = right;
+        self.options.skin_main_hand_right = right;
         self.save_settings(key_bindings);
     }
 
@@ -1317,7 +877,7 @@ impl MainMenu {
     }
 
     pub fn theme(&self) -> PanoramaTheme {
-        self.theme
+        self.options.theme
     }
 
     /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
@@ -1326,7 +886,7 @@ impl MainMenu {
         if !self.is_main_screen() {
             return None;
         }
-        match self.theme {
+        match self.options.theme {
             PanoramaTheme::Pomme => Some(crate::renderer::MenuSkin {
                 at: (0.7, 0.5),
                 scale: 1.0,
@@ -1365,7 +925,7 @@ impl MainMenu {
     /// The favicons and faces the current screen draws, once either changed
     /// (`set_screen` marks both changed).
     pub fn menu_atlas_images(&mut self) -> Option<Vec<(String, Vec<u8>, u32)>> {
-        let bedrock_main = self.is_main_screen() && self.theme == PanoramaTheme::Bedrock;
+        let bedrock_main = self.is_main_screen() && self.options.theme == PanoramaTheme::Bedrock;
         let favicons = bedrock_main || self.is_server_list_screen();
         let faces = bedrock_main || self.is_friends_screen();
         let favicons_changed = favicons && self.favicons_changed();
@@ -1579,7 +1139,7 @@ impl MainMenu {
                 self.build_options_keybinds(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
             Screen::OptionsLanguage => {
-                let back = self.settings_back.clone_screen();
+                let back = self.settings_back.clone();
                 self.build_options_stub(
                     screen_w,
                     screen_h,
@@ -1658,13 +1218,14 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
         None,
         key_bindings,
     );
-    menu.gui_scale_setting = 1;
+    menu.options.gui_scale_setting = 1;
     menu
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::DISTANT_TERRAIN_STEPS;
 
     #[test]
     fn options_save_as_their_screen_closes() {
@@ -1690,7 +1251,7 @@ mod tests {
     fn the_bedrock_title_screen_uploads_faces_and_favicons_together() {
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-menu-atlas-test", &mut key_bindings);
-        menu.theme = PanoramaTheme::Bedrock;
+        menu.options.theme = PanoramaTheme::Bedrock;
         menu.face_cache
             .write()
             .insert("face".into(), vec![0; 8 * 8 * 4]);
@@ -1743,11 +1304,11 @@ mod tests {
 
     #[test]
     fn saves_from_before_chunk_detail_off_load_as_off() {
-        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        let mut json = serde_json::to_value(GameOptions::default()).unwrap();
         let fields = json.as_object_mut().unwrap();
         fields.remove("chunk_detail_v2");
         fields.insert("chunk_detail".into(), 8.into());
-        let settings: Settings = serde_json::from_value(json).unwrap();
+        let settings: GameOptions = serde_json::from_value(json).unwrap();
         assert_eq!(settings.chunk_detail, CHUNK_DETAIL_OFF);
     }
 
@@ -1757,45 +1318,45 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
-        menu.render_distance = 12;
+        menu.options.render_distance = 12;
         menu.set_bench_render_distance(2);
-        menu.chunk_detail = 4;
+        menu.options.chunk_detail = 4;
         menu.save_settings(&key_bindings);
         let saved = load_settings(&dir).render_distance;
         let chunk_detail = saved_chunk_detail(&dir);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(saved, 12);
-        assert_eq!(menu.render_distance, 2);
+        assert_eq!(menu.options.render_distance, 2);
         assert_eq!(chunk_detail, 4);
     }
 
     #[test]
     fn menu_background_blur_defaults_to_five_and_clamps_to_ten() {
-        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        let mut legacy = serde_json::to_value(GameOptions::default()).unwrap();
         legacy
             .as_object_mut()
             .unwrap()
             .remove("menu_background_blurriness");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        let legacy: GameOptions = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.menu_background_blurriness, 5);
 
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("menu-blur-clamp", &mut key_bindings);
         menu.set_menu_background_blurriness(42);
         assert_eq!(
-            menu.menu_background_blurriness,
+            menu.options.menu_background_blurriness,
             MAX_MENU_BACKGROUND_BLURRINESS
         );
     }
 
     #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
-        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        let mut legacy = serde_json::to_value(GameOptions::default()).unwrap();
         legacy
             .as_object_mut()
             .unwrap()
             .remove("damage_tilt_strength");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        let legacy: GameOptions = serde_json::from_value(legacy).unwrap();
         assert_eq!(
             legacy.damage_tilt_strength, 1.0,
             "legacy settings should default Damage Tilt to vanilla's 100%"
@@ -1812,16 +1373,16 @@ mod tests {
 
     #[test]
     fn partial_chat_settings_keep_the_rest() {
-        let mut json = serde_json::to_value(Settings {
+        let mut json = serde_json::to_value(GameOptions {
             fov: 90,
-            ..Settings::default()
+            ..GameOptions::default()
         })
         .unwrap();
         json["chat"] = serde_json::json!({ "opacity": 0.3 });
-        let loaded: Settings = serde_json::from_value(json).unwrap();
+        let loaded: GameOptions = serde_json::from_value(json).unwrap();
         assert_eq!(loaded.fov, 90);
         assert_eq!(
-            loaded.chat,
+            loaded.chat_options,
             ChatOptions {
                 opacity: 0.3,
                 ..ChatOptions::default()
@@ -1860,71 +1421,71 @@ mod tests {
 
     #[test]
     fn mouse_settings_round_trip() {
-        let settings = Settings {
+        let settings = GameOptions {
             invert_mouse_x: true,
             invert_mouse_y: true,
-            ..Settings::default()
+            ..GameOptions::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
-        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        let loaded: GameOptions = serde_json::from_str(&json).unwrap();
         assert!(loaded.invert_mouse_x);
         assert!(loaded.invert_mouse_y);
     }
 
     #[test]
     fn font_variant_settings_round_trip() {
-        let settings = Settings {
+        let settings = GameOptions {
             force_unicode_font: true,
             japanese_glyph_variants: false,
-            ..Settings::default()
+            ..GameOptions::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
-        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        let loaded: GameOptions = serde_json::from_str(&json).unwrap();
         assert!(loaded.force_unicode_font);
         assert!(!loaded.japanese_glyph_variants);
     }
 
     #[test]
     fn display_mode_settings_are_backward_compatible_and_round_trip() {
-        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        let mut legacy = serde_json::to_value(GameOptions::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("display_mode");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy.display_mode, 0);
+        let legacy: GameOptions = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.display_mode, DisplayMode::Windowed);
 
         for mode in [
             DisplayMode::Windowed,
             DisplayMode::Borderless,
             DisplayMode::Fullscreen,
         ] {
-            let settings = Settings {
-                display_mode: mode.to_u8(),
-                ..Settings::default()
+            let settings = GameOptions {
+                display_mode: mode,
+                ..GameOptions::default()
             };
             let json = serde_json::to_string(&settings).unwrap();
-            let loaded: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(DisplayMode::from_u8(loaded.display_mode), mode);
+            let loaded: GameOptions = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.display_mode, mode);
         }
     }
 
     #[test]
     fn theme_settings_are_backward_compatible_and_round_trip() {
-        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        let mut legacy = serde_json::to_value(GameOptions::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("theme");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(PanoramaTheme::from_u8(legacy.theme), PanoramaTheme::Pomme);
+        let legacy: GameOptions = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.theme, PanoramaTheme::Pomme);
 
         for theme in [
             PanoramaTheme::Pomme,
             PanoramaTheme::Java,
             PanoramaTheme::Bedrock,
         ] {
-            let settings = Settings {
-                theme: theme.to_u8(),
-                ..Settings::default()
+            let settings = GameOptions {
+                theme,
+                ..GameOptions::default()
             };
             let json = serde_json::to_string(&settings).unwrap();
-            let loaded: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(PanoramaTheme::from_u8(loaded.theme), theme);
+            let loaded: GameOptions = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.theme, theme);
         }
     }
 }

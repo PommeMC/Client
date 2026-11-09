@@ -160,7 +160,7 @@ impl MainMenu {
         input: &MenuInput,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let back = self.settings_back.clone_screen();
+        let back = self.settings_back.clone();
         if input.escape {
             self.set_screen(back, key_bindings);
             return empty_result();

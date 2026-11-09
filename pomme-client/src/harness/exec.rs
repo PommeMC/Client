@@ -251,13 +251,13 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
         core.menu.set_menu_background_blurriness(radius);
     }
     if let Some(brightness) = options.brightness {
-        core.menu.brightness = brightness.clamp(0.0, 1.0);
+        core.menu.options.brightness = brightness.clamp(0.0, 1.0);
     }
     if let Some(pack) = &options.shader_pack {
-        core.menu.shader_pack = (!pack.is_empty()).then(|| pack.clone());
+        core.menu.options.shader_pack = (!pack.is_empty()).then(|| pack.clone());
     }
     if let Some(chunks) = options.render_distance {
-        core.menu.render_distance = chunks.clamp(2, core.menu.render_distance_max());
+        core.menu.options.render_distance = chunks.clamp(2, core.menu.render_distance_max());
     }
     if let Some(chunks) = options.distant_terrain {
         core.menu.set_distant_terrain(chunks);

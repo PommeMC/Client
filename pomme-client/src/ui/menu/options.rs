@@ -1,5 +1,8 @@
 use super::*;
 use crate::app::input::{InputKey, NOT_BOUND};
+use crate::options::{
+    DISTANT_TERRAIN_STEPS, OptionId, OptionKind, distant_terrain_chunks, distant_terrain_step,
+};
 use crate::resource_pack::PackCompat;
 use crate::ui::common::BTN_H;
 use crate::ui::text::TextSpan;
@@ -9,25 +12,32 @@ const COLLISION_STRIPE: [f32; 4] = common::rgb(0xffff00);
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
 /// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
+#[derive(Clone, Copy)]
+pub(super) struct OptWidget<'a> {
+    id: OptionId,
+    label: &'a str,
+}
+impl<'a> OptWidget<'a> {
+    fn new(id: OptionId, label: &'a str) -> Self {
+        Self { id, label }
+    }
+}
 pub(super) enum OptRow<'a> {
     Header(&'a str),
-    Big(&'a str),
-    Pair(&'a str, &'a str),
-    PairLeft(&'a str),
+    Big(OptWidget<'a>),
+    Pair(OptWidget<'a>, OptWidget<'a>),
+    PairLeft(OptWidget<'a>),
+}
+fn option_enabled(id: OptionId, disabled: &[OptionId]) -> bool {
+    !disabled.contains(&id)
 }
 
-fn option_enabled(label: &str, disabled: &[&str]) -> bool {
-    !disabled.iter().any(|prefix| label.starts_with(prefix))
-}
-
-/// Widget labels a row builds; `Header` rows are text, not widgets. Only the
-/// disable-list guard needs this, so it is debug-only.
-#[cfg(debug_assertions)]
-fn row_labels<'a>(row: &OptRow<'a>) -> Vec<&'a str> {
+/// The controls a row builds; `Header` rows are text, not controls.
+fn row_ids(row: &OptRow) -> Vec<OptionId> {
     match row {
         OptRow::Header(_) => Vec::new(),
-        OptRow::Big(a) | OptRow::PairLeft(a) => vec![*a],
-        OptRow::Pair(a, b) => vec![*a, *b],
+        OptRow::Big(a) | OptRow::PairLeft(a) => vec![a.id],
+        OptRow::Pair(a, b) => vec![a.id, b.id],
     }
 }
 
@@ -39,7 +49,7 @@ fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
     }
 }
 
-// Chat option label prefixes, shared by the labels and their handlers.
+// Display copy; behavior is selected by OptionId.
 const CHAT_VISIBILITY: &str = "Chat:";
 const CHAT_COLORS: &str = "Colors:";
 const CHAT_LINKS: &str = "Web Links:";
@@ -143,43 +153,65 @@ impl MainMenu {
         // Sub-screens reached from here (Language/Accessibility/Chat) return
         // to Options.
         self.settings_back = Screen::Options;
-        let fov_label = if self.fov == 70 {
+        let fov_label = if self.options.fov == 70 {
             "FOV: Normal".to_string()
-        } else if self.fov >= 110 {
+        } else if self.options.fov >= 110 {
             "FOV: Quake Pro".to_string()
         } else {
-            format!("FOV: {}", self.fov)
+            format!("FOV: {}", self.options.fov)
         };
         // FOV slider + Online lead the grid, above the categories (vanilla header
         // sub-row).
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&fov_label, "Online..."),
-            OptRow::Pair("Skin Customization...", "Music & Sounds..."),
-            OptRow::Pair("Video Settings...", "Controls..."),
-            OptRow::Pair("Language...", "Chat Settings..."),
-            OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
-            OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Fov, &fov_label),
+                OptWidget::new(OptionId::Online, "Online..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::SkinCustomization, "Skin Customization..."),
+                OptWidget::new(OptionId::MusicSounds, "Music & Sounds..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::VideoSettings, "Video Settings..."),
+                OptWidget::new(OptionId::Controls, "Controls..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Language, "Language..."),
+                OptWidget::new(OptionId::ChatSettings, "Chat Settings..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ResourcePacks, "Resource Packs..."),
+                OptWidget::new(OptionId::AccessibilitySettings, "Accessibility Settings..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::TelemetryData, "Telemetry Data..."),
+                OptWidget::new(OptionId::CreditsAttribution, "Credits & Attribution..."),
+            ),
         ];
 
-        let nav: &[(&str, Screen)] = &[
-            ("Online...", Screen::OptionsOnline),
-            ("Skin Customization...", Screen::OptionsSkinCustomization),
-            ("Music & Sounds...", Screen::OptionsMusicSounds),
-            ("Video Settings...", Screen::OptionsVideo),
-            ("Controls...", Screen::OptionsControls),
-            ("Language...", Screen::OptionsLanguage),
-            ("Chat Settings...", Screen::OptionsChatSettings),
-            ("Resource Packs...", Screen::OptionsResourcePacks),
-            ("Accessibility Settings...", Screen::OptionsAccessibility),
-            ("Telemetry Data...", Screen::OptionsTelemetry),
-            ("Credits & Attribution...", Screen::OptionsCredits),
+        let nav: &[(OptionId, Screen)] = &[
+            (OptionId::Online, Screen::OptionsOnline),
+            (
+                OptionId::SkinCustomization,
+                Screen::OptionsSkinCustomization,
+            ),
+            (OptionId::MusicSounds, Screen::OptionsMusicSounds),
+            (OptionId::VideoSettings, Screen::OptionsVideo),
+            (OptionId::Controls, Screen::OptionsControls),
+            (OptionId::Language, Screen::OptionsLanguage),
+            (OptionId::ChatSettings, Screen::OptionsChatSettings),
+            (OptionId::ResourcePacks, Screen::OptionsResourcePacks),
+            (
+                OptionId::AccessibilitySettings,
+                Screen::OptionsAccessibility,
+            ),
+            (OptionId::TelemetryData, Screen::OptionsTelemetry),
+            (OptionId::CreditsAttribution, Screen::OptionsCredits),
         ];
 
-        let fov_frac = (self.fov as f32 - 30.0) / 80.0;
-        let sliders: &[(&str, f32)] = &[("FOV:", fov_frac)];
         // Nav rows are disabled only where the target is a `build_options_stub`
         // page; screens with real (if inert) controls stay reachable.
-        let disabled = &["Language...", "Telemetry Data..."];
+        let disabled = &[OptionId::Language, OptionId::TelemetryData];
         self.build_options_grid(
             sw,
             sh,
@@ -188,7 +220,6 @@ impl MainMenu {
             Screen::Main,
             &rows,
             nav,
-            sliders,
             disabled,
             false,
             &[],
@@ -198,24 +229,15 @@ impl MainMenu {
     }
 
     fn view_bobbing_label(&self) -> &'static str {
-        if self.view_bobbing {
+        if self.options.view_bobbing {
             "View Bobbing: ON"
         } else {
             "View Bobbing: OFF"
         }
     }
 
-    /// The Menu Background Blur slider's label and position.
-    fn menu_background_blur_slider(&self) -> (String, f32) {
-        let radius = self.menu_background_blurriness;
-        (
-            menu_background_blur_label(radius),
-            f32::from(radius) / f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
-        )
-    }
-
     fn show_subtitles_label(&self) -> &'static str {
-        if self.show_subtitles {
+        if self.options.show_subtitles {
             "Show Subtitles: ON"
         } else {
             "Show Subtitles: OFF"
@@ -225,22 +247,69 @@ impl MainMenu {
     /// Value count minus one for the discrete sliders, which Left/Right step
     /// one value at a time; `None` for the unit sliders, which nudge by
     /// `1 / (width - 8)` (`OptionInstanceSliderButton.keyPressed`).
-    fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
-        Some(match prefix {
-            "Render Distance:" => self.render_distance_max() as f32 - 2.0,
-            "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
-            DISTANT_TERRAIN => super::DISTANT_TERRAIN_STEPS as f32,
-            "Simulation Distance:" => 27.0,
-            "Max Framerate:" => 25.0,
-            "FOV:" => 80.0,
-            CHAT_DELAY => CHAT_DELAY_MAX_TENTHS as f32,
-            MENU_BACKGROUND_BLUR => f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
-            _ => return None,
+    fn discrete_slider_span(&self, id: OptionId) -> Option<f32> {
+        match id {
+            OptionId::DistantTerrain => Some(DISTANT_TERRAIN_STEPS as f32),
+            OptionId::ChatDelay => Some(CHAT_DELAY_MAX_TENTHS as f32),
+            _ => {
+                let (min, max, step) = self.slider_range(id)?;
+                (step > 0.0).then(|| (max - min) / step)
+            }
+        }
+    }
+
+    /// `id`'s slider range from [`OptionId::kind`], the render distance's
+    /// max set by the server.
+    fn slider_range(&self, id: OptionId) -> Option<(f32, f32, f32)> {
+        let OptionKind::Slider { min, max, step } = id.kind() else {
+            return None;
+        };
+        let max = if id == OptionId::RenderDistance {
+            self.render_distance_max() as f32
+        } else {
+            max
+        };
+        Some((min, max, step))
+    }
+
+    /// Where `id`'s value sits along its slider, from 0 to 1.
+    fn slider_frac(&self, id: OptionId) -> f32 {
+        match id {
+            OptionId::DistantTerrain => {
+                distant_terrain_step(self.options.distant_terrain) as f32
+                    / DISTANT_TERRAIN_STEPS as f32
+            }
+            OptionId::ChatDelay => chat_delay_slider(self.options.chat_options.delay_secs),
+            _ => {
+                let value = id.get(&self.options).unwrap_or(0.0);
+                self.slider_range(id).map_or(value, |(min, max, _)| {
+                    ((value - min) / (max - min)).clamp(0.0, 1.0)
+                })
+            }
+        }
+    }
+
+    /// The value `id`'s slider sets at `frac`, snapped to its steps.
+    fn slider_value(&self, id: OptionId, frac: f32) -> Option<f32> {
+        Some(match id {
+            OptionId::DistantTerrain => {
+                distant_terrain_chunks((frac * DISTANT_TERRAIN_STEPS as f32).round() as u32) as f32
+            }
+            OptionId::ChatDelay => chat_delay_from_slider(frac),
+            _ => {
+                let (min, max, step) = self.slider_range(id)?;
+                let raw = frac * (max - min);
+                if step > 0.0 {
+                    min + (raw / step).round() * step
+                } else {
+                    min + raw
+                }
+            }
         })
     }
 
-    fn slider_key_step(&self, prefix: &str, w: f32, gs: f32) -> f32 {
-        self.discrete_slider_span(prefix)
+    fn slider_key_step(&self, id: OptionId, w: f32, gs: f32) -> f32 {
+        self.discrete_slider_span(id)
             .map_or(gs / (w - 8.0 * gs), |span| 1.0 / span)
     }
 
@@ -259,124 +328,168 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let fullscreen_label = match self.display_mode {
+        let fullscreen_label = match self.options.display_mode {
             DisplayMode::Windowed => "Fullscreen: Windowed",
             DisplayMode::Borderless => "Fullscreen: Borderless",
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
-        let rd = format!("Render Distance: {} chunks", self.render_distance);
-        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
+        let rd = format!("Render Distance: {} chunks", self.options.render_distance);
+        let cd = if self.options.chunk_detail >= super::CHUNK_DETAIL_OFF {
             "Chunk Detail: Off".to_string()
         } else {
-            format!("Chunk Detail: {} chunks", self.chunk_detail)
+            format!("Chunk Detail: {} chunks", self.options.chunk_detail)
         };
-        let dt = if self.distant_terrain == 0 {
+        let dt = if self.options.distant_terrain == 0 {
             format!("{DISTANT_TERRAIN} OFF")
         } else {
-            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
+            format!("{DISTANT_TERRAIN} {} chunks", self.options.distant_terrain)
         };
-        let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
-        let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
+        let sd = format!(
+            "Simulation Distance: {} chunks",
+            self.options.simulation_distance
+        );
+        let mf = if self.options.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
         } else {
-            format!("Max Framerate: {} fps", self.max_framerate)
+            format!("Max Framerate: {} fps", self.options.max_framerate)
         };
-        let gui_label = if self.gui_scale_setting == 0 {
+        let gui_label = if self.options.gui_scale_setting == 0 {
             "GUI Scale: Auto".to_string()
         } else {
-            format!("GUI Scale: {}", self.gui_scale_setting)
+            format!("GUI Scale: {}", self.options.gui_scale_setting)
         };
-        let vsync_label = if self.vsync {
+        let vsync_label = if self.options.vsync {
             "VSync: ON"
         } else {
             "VSync: OFF"
         };
-        let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
+        let clouds_label = format!("Clouds: {}", self.options.cloud_mode.label());
         let shader_label = format!(
             "Shader Pack: {}",
-            self.shader_pack.as_deref().unwrap_or("OFF")
+            self.options.shader_pack.as_deref().unwrap_or("OFF")
         );
-        let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
-        let vignette_label = if self.vignette {
+        let attack_label = format!(
+            "Attack Indicator: {}",
+            self.options.attack_indicator.label()
+        );
+        let vignette_label = if self.options.vignette {
             "Vignette: ON"
         } else {
             "Vignette: OFF"
         };
-        let autosave_label = if self.show_autosave_indicator {
+        let autosave_label = if self.options.show_autosave_indicator {
             "Show Autosave Indicator: ON"
         } else {
             "Show Autosave Indicator: OFF"
         };
-        let entity_shadows_label = if self.entity_shadows {
+        let entity_shadows_label = if self.options.entity_shadows {
             "Entity Shadows: ON"
         } else {
             "Entity Shadows: OFF"
         };
-        let (blur_label, blur_frac) = self.menu_background_blur_slider();
-        let brightness = brightness_label(self.brightness);
+        let blur_label = menu_background_blur_label(self.options.menu_background_blurriness);
+        let brightness = brightness_label(self.options.brightness);
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
-            OptRow::Big("Fullscreen Resolution: Current"),
-            OptRow::Pair(&mf, vsync_label),
-            OptRow::Pair("Inactivity FPS Limit: 1 minute", &gui_label),
-            OptRow::Pair(fullscreen_label, "Exclusive Fullscreen: OFF"),
-            OptRow::Pair(&brightness, "Graphics Backend: Default"),
+            OptRow::Big(OptWidget::new(
+                OptionId::FullscreenResolution,
+                "Fullscreen Resolution: Current",
+            )),
+            OptRow::Pair(
+                OptWidget::new(OptionId::MaxFramerate, &mf),
+                OptWidget::new(OptionId::VSync, vsync_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(
+                    OptionId::InactivityFpsLimit,
+                    "Inactivity FPS Limit: 1 minute",
+                ),
+                OptWidget::new(OptionId::GuiScale, &gui_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Fullscreen, fullscreen_label),
+                OptWidget::new(OptionId::ExclusiveFullscreen, "Exclusive Fullscreen: OFF"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Brightness, &brightness),
+                OptWidget::new(OptionId::GraphicsBackend, "Graphics Backend: Default"),
+            ),
             OptRow::Header("Quality"),
-            OptRow::Big("Graphics: Fancy"),
-            OptRow::Pair("Biome Blend: 5x5", &rd),
+            OptRow::Big(OptWidget::new(OptionId::Graphics, "Graphics: Fancy")),
+            OptRow::Pair(
+                OptWidget::new(OptionId::BiomeBlend, "Biome Blend: 5x5"),
+                OptWidget::new(OptionId::RenderDistance, &rd),
+            ),
             // TODO: static stub, not wired (see mesher::enqueue).
-            OptRow::Pair("Prioritize Chunk Updates: None", &sd),
-            OptRow::Pair("Smooth Lighting: ON", &clouds_label),
-            OptRow::Pair(&cd, &dt),
-            OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
-            OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
-            OptRow::Pair(&blur_label, "Cloud Range: 128"),
-            OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
-            OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::Pair("Weather Radius: 10", &shader_label),
+            OptRow::Pair(
+                OptWidget::new(
+                    OptionId::PrioritizeChunkUpdates,
+                    "Prioritize Chunk Updates: None",
+                ),
+                OptWidget::new(OptionId::SimulationDistance, &sd),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::SmoothLighting, "Smooth Lighting: ON"),
+                OptWidget::new(OptionId::Clouds, &clouds_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChunkDetail, &cd),
+                OptWidget::new(OptionId::DistantTerrain, &dt),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Particles, "Particles: All"),
+                OptWidget::new(OptionId::MipmapLevels, "Mipmap Levels: 4"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::EntityShadows, entity_shadows_label),
+                OptWidget::new(OptionId::EntityDistance, "Entity Distance: 100%"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::MenuBackgroundBlur, &blur_label),
+                OptWidget::new(OptionId::CloudRange, "Cloud Range: 128"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::CutoutLeaves, "Cutout Leaves: Fancy"),
+                OptWidget::new(OptionId::ImprovedTransparency, "Improved Transparency: OFF"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::TextureFiltering, "Texture Filtering: None"),
+                OptWidget::new(OptionId::MaxAnisotropy, "Max Anisotropy: 1"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::WeatherRadius, "Weather Radius: 10"),
+                OptWidget::new(OptionId::ShaderPack, &shader_label),
+            ),
             OptRow::Header("Preferences"),
-            OptRow::Pair(autosave_label, vignette_label),
-            OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
-        ];
-        let rd_frac = ((self.render_distance as f32 - 2.0)
-            / (self.render_distance_max() as f32 - 2.0))
-            .clamp(0.0, 1.0);
-        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
-            / super::CHUNK_DETAIL_SPAN)
-            .clamp(0.0, 1.0);
-        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
-            / super::DISTANT_TERRAIN_STEPS as f32;
-        let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
-        let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
-        let sliders: &[(&str, f32)] = &[
-            ("Render Distance:", rd_frac),
-            ("Chunk Detail:", cd_frac),
-            (DISTANT_TERRAIN, dt_frac),
-            ("Simulation Distance:", sd_frac),
-            ("Max Framerate:", mf_frac),
-            (BRIGHTNESS, self.brightness),
-            (MENU_BACKGROUND_BLUR, blur_frac),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ShowAutosaveIndicator, autosave_label),
+                OptWidget::new(OptionId::Vignette, vignette_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::AttackIndicator, &attack_label),
+                OptWidget::new(OptionId::ChunkFadeIn, "Chunk Fade-in: 1.0s"),
+            ),
         ];
         let disabled = &[
-            "Fullscreen Resolution:",
-            "Inactivity FPS Limit:",
-            "Exclusive Fullscreen:",
-            "Graphics Backend:",
-            "Graphics:",
-            "Biome Blend:",
-            "Prioritize Chunk Updates:",
-            "Simulation Distance:",
-            "Smooth Lighting:",
-            "Particles:",
-            "Mipmap Levels:",
-            "Entity Distance:",
-            "Cloud Range:",
-            "Cutout Leaves:",
-            "Improved Transparency:",
-            "Texture Filtering:",
-            "Max Anisotropy:",
-            "Weather Radius:",
-            "Chunk Fade-in:",
+            OptionId::FullscreenResolution,
+            OptionId::InactivityFpsLimit,
+            OptionId::ExclusiveFullscreen,
+            OptionId::GraphicsBackend,
+            OptionId::Graphics,
+            OptionId::BiomeBlend,
+            OptionId::PrioritizeChunkUpdates,
+            OptionId::SimulationDistance,
+            OptionId::SmoothLighting,
+            OptionId::Particles,
+            OptionId::MipmapLevels,
+            OptionId::EntityDistance,
+            OptionId::CloudRange,
+            OptionId::CutoutLeaves,
+            OptionId::ImprovedTransparency,
+            OptionId::TextureFiltering,
+            OptionId::MaxAnisotropy,
+            OptionId::WeatherRadius,
+            OptionId::ChunkFadeIn,
         ];
         self.build_options_grid(
             sw,
@@ -386,7 +499,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -404,24 +516,39 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Mouse Settings...", "Key Binds..."),
-            OptRow::Pair("Sneak: Hold", "Sprint: Hold"),
-            OptRow::Pair("Attack/Destroy: Hold", "Use Item/Place Block: Hold"),
-            OptRow::Pair("Auto-Jump: OFF", "Sprint Window: 7"),
-            OptRow::PairLeft("Operator Items Tab: OFF"),
+            OptRow::Pair(
+                OptWidget::new(OptionId::MouseSettings, "Mouse Settings..."),
+                OptWidget::new(OptionId::KeyBinds, "Key Binds..."),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Sneak, "Sneak: Hold"),
+                OptWidget::new(OptionId::Sprint, "Sprint: Hold"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::AttackDestroy, "Attack/Destroy: Hold"),
+                OptWidget::new(OptionId::UseItemPlaceBlock, "Use Item/Place Block: Hold"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::AutoJump, "Auto-Jump: OFF"),
+                OptWidget::new(OptionId::SprintWindow, "Sprint Window: 7"),
+            ),
+            OptRow::PairLeft(OptWidget::new(
+                OptionId::OperatorItemsTab,
+                "Operator Items Tab: OFF",
+            )),
         ];
-        let nav: &[(&str, Screen)] = &[
-            ("Mouse Settings...", Screen::OptionsMouse),
-            ("Key Binds...", Screen::OptionsKeybinds),
+        let nav: &[(OptionId, Screen)] = &[
+            (OptionId::MouseSettings, Screen::OptionsMouse),
+            (OptionId::KeyBinds, Screen::OptionsKeybinds),
         ];
         let disabled = &[
-            "Sneak:",
-            "Sprint:",
-            "Attack/Destroy:",
-            "Use Item/Place Block:",
-            "Auto-Jump:",
-            "Sprint Window:",
-            "Operator Items Tab:",
+            OptionId::Sneak,
+            OptionId::Sprint,
+            OptionId::AttackDestroy,
+            OptionId::UseItemPlaceBlock,
+            OptionId::AutoJump,
+            OptionId::SprintWindow,
+            OptionId::OperatorItemsTab,
         ];
         self.build_options_grid(
             sw,
@@ -431,7 +558,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             nav,
-            &[],
             disabled,
             true,
             &[],
@@ -448,27 +574,38 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let sensitivity_label = if self.sensitivity <= 0.0 {
+        let sensitivity_label = if self.options.sensitivity <= 0.0 {
             "Sensitivity: *yawn*".to_string()
-        } else if self.sensitivity >= 1.0 {
+        } else if self.options.sensitivity >= 1.0 {
             "Sensitivity: HYPERSPEED!!!".to_string()
         } else {
-            format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
+            format!(
+                "Sensitivity: {}%",
+                (self.options.sensitivity * 200.0) as u32
+            )
         };
-        let invert_x_label = format!("{INVERT_MOUSE_X} {}", on_off(self.invert_mouse_x));
-        let invert_y_label = format!("{INVERT_MOUSE_Y} {}", on_off(self.invert_mouse_y));
+        let invert_x_label = format!("{INVERT_MOUSE_X} {}", on_off(self.options.invert_mouse_x));
+        let invert_y_label = format!("{INVERT_MOUSE_Y} {}", on_off(self.options.invert_mouse_y));
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&sensitivity_label, "Scroll Sensitivity: 1.00"),
-            OptRow::Pair("Discrete Scrolling: OFF", &invert_x_label),
-            OptRow::Pair(&invert_y_label, "Allow Cursor Changes: ON"),
-            OptRow::PairLeft("Raw Input: ON"),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Sensitivity, &sensitivity_label),
+                OptWidget::new(OptionId::ScrollSensitivity, "Scroll Sensitivity: 1.00"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::DiscreteScrolling, "Discrete Scrolling: OFF"),
+                OptWidget::new(OptionId::InvertMouseX, &invert_x_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::InvertMouseY, &invert_y_label),
+                OptWidget::new(OptionId::AllowCursorChanges, "Allow Cursor Changes: ON"),
+            ),
+            OptRow::PairLeft(OptWidget::new(OptionId::RawInput, "Raw Input: ON")),
         ];
-        let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
         let disabled = &[
-            "Scroll Sensitivity:",
-            "Discrete Scrolling:",
-            "Allow Cursor Changes:",
-            "Raw Input:",
+            OptionId::ScrollSensitivity,
+            OptionId::DiscreteScrolling,
+            OptionId::AllowCursorChanges,
+            OptionId::RawInput,
         ];
         self.build_options_grid(
             sw,
@@ -478,7 +615,6 @@ impl MainMenu {
             Screen::OptionsControls,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -773,7 +909,7 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let o = self.chat_options;
+        let o = self.options.chat_options;
         let chat = format!("{CHAT_VISIBILITY} {}", o.visibility.label());
         let colors = format!("{CHAT_COLORS} {}", on_off(o.colors));
         let links = format!("{CHAT_LINKS} {}", on_off(o.links));
@@ -791,52 +927,72 @@ impl MainMenu {
         let secure = format!("{ONLY_SHOW_SECURE_CHAT} {}", on_off(o.only_secure));
         let drafts = format!("{SAVE_CHAT_DRAFTS} {}", on_off(o.save_drafts));
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&chat, &colors),
-            OptRow::Pair(&links, &prompt),
-            OptRow::Pair(&opacity, &bg_opacity),
-            OptRow::Pair(&scale, &spacing),
-            OptRow::Pair(&delay, &width),
-            OptRow::Pair(&focused, &unfocused),
-            OptRow::Pair("Narrator: OFF", &suggestions),
-            OptRow::Pair(&hide_matched, "Reduced Debug Info: OFF"),
-            OptRow::Pair(&secure, &drafts),
-        ];
-        let sliders: &[(&str, f32)] = &[
-            (CHAT_OPACITY, o.opacity),
-            (TEXT_BACKGROUND_OPACITY, o.text_background_opacity),
-            (CHAT_SCALE, o.scale),
-            (CHAT_LINE_SPACING, o.line_spacing),
-            (CHAT_DELAY, chat_delay_slider(o.delay_secs)),
-            (CHAT_WIDTH, o.width),
-            (CHAT_HEIGHT_FOCUSED, o.height_focused),
-            (CHAT_HEIGHT_UNFOCUSED, o.height_unfocused),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Chat, &chat),
+                OptWidget::new(OptionId::Colors, &colors),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::WebLinks, &links),
+                OptWidget::new(OptionId::PromptOnLinks, &prompt),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChatTextOpacity, &opacity),
+                OptWidget::new(OptionId::TextBackgroundOpacity, &bg_opacity),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChatTextSize, &scale),
+                OptWidget::new(OptionId::LineSpacing, &spacing),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChatDelay, &delay),
+                OptWidget::new(OptionId::Width, &width),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::FocusedHeight, &focused),
+                OptWidget::new(OptionId::UnfocusedHeight, &unfocused),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Narrator, "Narrator: OFF"),
+                OptWidget::new(OptionId::CommandSuggestions, &suggestions),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::HideMatchedNames, &hide_matched),
+                OptWidget::new(OptionId::ReducedDebugInfo, "Reduced Debug Info: OFF"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::OnlyShowSecureChat, &secure),
+                OptWidget::new(OptionId::SaveUnsentChats, &drafts),
+            ),
         ];
         // TODO: the menu tooltip wraps at 40% of the screen width and drops
         // `\n`; vanilla `Tooltip.create` splits lines and wraps at 170px.
-        let tooltips: &[(&str, &str)] = &[
+        let tooltips: &[(OptionId, &str)] = &[
             (
-                HIDE_MATCHED_NAMES,
+                OptionId::HideMatchedNames,
                 "3rd-party Servers may send chat messages in non-standard formats.\nWith this option on, hidden players will be matched based on chat sender names.",
             ),
             (
-                ONLY_SHOW_SECURE_CHAT,
+                OptionId::OnlyShowSecureChat,
                 "Only display messages from other players that can be verified to have been sent by that player, and have not been modified.",
             ),
             (
-                SAVE_CHAT_DRAFTS,
+                OptionId::SaveUnsentChats,
                 "Unsent messages will be saved and can be sent the next time chat is opened.",
             ),
         ];
-        let disabled = &["Narrator:", HIDE_MATCHED_NAMES, "Reduced Debug Info:"];
+        let disabled = &[
+            OptionId::Narrator,
+            OptionId::HideMatchedNames,
+            OptionId::ReducedDebugInfo,
+        ];
         self.build_options_grid(
             sw,
             sh,
             input,
             "Chat Settings",
-            self.settings_back.clone_screen(),
+            self.settings_back.clone(),
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             tooltips,
@@ -854,14 +1010,20 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let force_unicode = format!("{FORCE_UNICODE_FONT} {}", on_off(self.force_unicode_font));
+        let force_unicode = format!(
+            "{FORCE_UNICODE_FONT} {}",
+            on_off(self.options.force_unicode_font)
+        );
         let japanese_variants = format!(
             "{JAPANESE_GLYPH_VARIANTS} {}",
-            on_off(self.japanese_glyph_variants)
+            on_off(self.options.japanese_glyph_variants)
         );
-        let rows = [OptRow::Pair(&force_unicode, &japanese_variants)];
-        let tooltips: &[(&str, &str)] = &[(
-            JAPANESE_GLYPH_VARIANTS,
+        let rows = [OptRow::Pair(
+            OptWidget::new(OptionId::ForceUnicodeFont, &force_unicode),
+            OptWidget::new(OptionId::JapaneseGlyphVariants, &japanese_variants),
+        )];
+        let tooltips: &[(OptionId, &str)] = &[(
+            OptionId::JapaneseGlyphVariants,
             "Uses Japanese variants of CJK characters in the default font.",
         )];
         self.build_options_grid(
@@ -871,7 +1033,6 @@ impl MainMenu {
             "Font Settings",
             Screen::OptionsLanguage,
             &rows,
-            &[],
             &[],
             &[],
             true,
@@ -889,65 +1050,101 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let fov_effect_label = if self.fov_effect_scale <= 0.0 {
+        let fov_effect_label = if self.options.fov_effect_scale <= 0.0 {
             "FOV Effects: OFF".to_string()
         } else {
             format!("FOV Effects: {}%", (self.fov_effect() * 100.0).round())
         };
-        let damage_tilt_label = if self.damage_tilt_strength <= 0.0 {
+        let damage_tilt_label = if self.options.damage_tilt_strength <= 0.0 {
             "Damage Tilt: OFF".to_string()
         } else {
             format!(
                 "Damage Tilt: {}%",
-                (self.damage_tilt_strength * 100.0).round()
+                (self.options.damage_tilt_strength * 100.0).round()
             )
         };
-        let o = self.chat_options;
+        let o = self.options.chat_options;
         let bg_opacity = percent_label(TEXT_BACKGROUND_OPACITY, o.text_background_opacity.into());
         let chat_opacity = chat_opacity_label(o.opacity);
         let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
         let delay = chat_delay_label(o.delay_secs);
-        let (blur_label, blur_frac) = self.menu_background_blur_slider();
+        let blur_label = menu_background_blur_label(self.options.menu_background_blurriness);
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
-            OptRow::Pair("High Contrast: OFF", &blur_label),
-            OptRow::Pair(&bg_opacity, "Background for Chat Only: OFF"),
-            OptRow::Pair(&chat_opacity, &spacing),
-            OptRow::Pair(&delay, "Notification Time: 10.0s"),
-            OptRow::Pair(self.view_bobbing_label(), "Distortion Effects: 100%"),
-            OptRow::Pair(&fov_effect_label, "Darkness Pulsing: 100%"),
-            OptRow::Pair(&damage_tilt_label, "Glint Speed: 100%"),
-            OptRow::Pair("Glint Strength: 100%", "Hide Lightning Flashes: OFF"),
-            OptRow::Pair("Dark Loading Screen: OFF", "Panorama Scroll Speed: 100%"),
-            OptRow::Pair("Hide Splash Texts: OFF", "Narrator Hotkey: ON"),
-            OptRow::Pair("Rotate with Minecart: OFF", "High Contrast Outlines: OFF"),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Narrator, "Narrator: OFF"),
+                OptWidget::new(OptionId::ShowSubtitles, self.show_subtitles_label()),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::HighContrast, "High Contrast: OFF"),
+                OptWidget::new(OptionId::MenuBackgroundBlur, &blur_label),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::TextBackgroundOpacity, &bg_opacity),
+                OptWidget::new(
+                    OptionId::BackgroundForChatOnly,
+                    "Background for Chat Only: OFF",
+                ),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChatTextOpacity, &chat_opacity),
+                OptWidget::new(OptionId::LineSpacing, &spacing),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ChatDelay, &delay),
+                OptWidget::new(OptionId::NotificationTime, "Notification Time: 10.0s"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ViewBobbing, self.view_bobbing_label()),
+                OptWidget::new(OptionId::DistortionEffects, "Distortion Effects: 100%"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::FovEffects, &fov_effect_label),
+                OptWidget::new(OptionId::DarknessPulsing, "Darkness Pulsing: 100%"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::DamageTilt, &damage_tilt_label),
+                OptWidget::new(OptionId::GlintSpeed, "Glint Speed: 100%"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::GlintStrength, "Glint Strength: 100%"),
+                OptWidget::new(
+                    OptionId::HideLightningFlashes,
+                    "Hide Lightning Flashes: OFF",
+                ),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::DarkLoadingScreen, "Dark Loading Screen: OFF"),
+                OptWidget::new(OptionId::PanoramaScrollSpeed, "Panorama Scroll Speed: 100%"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::HideSplashTexts, "Hide Splash Texts: OFF"),
+                OptWidget::new(OptionId::NarratorHotkey, "Narrator Hotkey: ON"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::RotateWithMinecart, "Rotate with Minecart: OFF"),
+                OptWidget::new(
+                    OptionId::HighContrastOutlines,
+                    "High Contrast Outlines: OFF",
+                ),
+            ),
         ];
-        let back = self.settings_back.clone_screen();
-        let sliders: &[(&str, f32)] = &[
-            (TEXT_BACKGROUND_OPACITY, o.text_background_opacity),
-            (CHAT_OPACITY, o.opacity),
-            (CHAT_LINE_SPACING, o.line_spacing),
-            (CHAT_DELAY, chat_delay_slider(o.delay_secs)),
-            ("FOV Effects:", self.fov_effect_scale),
-            ("Damage Tilt:", self.damage_tilt_strength),
-            (MENU_BACKGROUND_BLUR, blur_frac),
-        ];
+        let back = self.settings_back.clone();
         let disabled = &[
-            "Narrator:",
-            "High Contrast:",
-            "Background for Chat Only:",
-            "Notification Time:",
-            "Distortion Effects:",
-            "Darkness Pulsing:",
-            "Glint Speed:",
-            "Glint Strength:",
-            "Hide Lightning Flashes:",
-            "Dark Loading Screen:",
-            "Panorama Scroll Speed:",
-            "Hide Splash Texts:",
-            "Narrator Hotkey:",
-            "Rotate with Minecart:",
-            "High Contrast Outlines:",
+            OptionId::Narrator,
+            OptionId::HighContrast,
+            OptionId::BackgroundForChatOnly,
+            OptionId::NotificationTime,
+            OptionId::DistortionEffects,
+            OptionId::DarknessPulsing,
+            OptionId::GlintSpeed,
+            OptionId::GlintStrength,
+            OptionId::HideLightningFlashes,
+            OptionId::DarkLoadingScreen,
+            OptionId::PanoramaScrollSpeed,
+            OptionId::HideSplashTexts,
+            OptionId::NarratorHotkey,
+            OptionId::RotateWithMinecart,
+            OptionId::HighContrastOutlines,
         ];
         self.build_options_grid(
             sw,
@@ -957,7 +1154,6 @@ impl MainMenu {
             back,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -982,46 +1178,54 @@ impl MainMenu {
                 format!("{p}%")
             }
         };
-        let master = format!("Master Volume: {}", pct(self.master_volume));
-        let music = format!("Music: {}", pct(self.music_volume));
-        let jukebox = format!("Jukebox/Note Blocks: {}", pct(self.jukebox_volume));
-        let weather = format!("Weather: {}", pct(self.weather_volume));
-        let blocks = format!("Blocks: {}", pct(self.blocks_volume));
-        let hostile = format!("Hostile Creatures: {}", pct(self.hostile_volume));
-        let friendly = format!("Friendly Creatures: {}", pct(self.friendly_volume));
-        let players = format!("Players: {}", pct(self.players_volume));
-        let ambient = format!("Ambient/Environment: {}", pct(self.ambient_volume));
-        let voice = format!("Voice/Speech: {}", pct(self.voice_volume));
-        let ui = format!("UI: {}", pct(self.ui_volume));
+        let master = format!("Master Volume: {}", pct(self.options.master_volume));
+        let music = format!("Music: {}", pct(self.options.music_volume));
+        let jukebox = format!("Jukebox/Note Blocks: {}", pct(self.options.jukebox_volume));
+        let weather = format!("Weather: {}", pct(self.options.weather_volume));
+        let blocks = format!("Blocks: {}", pct(self.options.blocks_volume));
+        let hostile = format!("Hostile Creatures: {}", pct(self.options.hostile_volume));
+        let friendly = format!("Friendly Creatures: {}", pct(self.options.friendly_volume));
+        let players = format!("Players: {}", pct(self.options.players_volume));
+        let ambient = format!("Ambient/Environment: {}", pct(self.options.ambient_volume));
+        let voice = format!("Voice/Speech: {}", pct(self.options.voice_volume));
+        let ui = format!("UI: {}", pct(self.options.ui_volume));
         let rows: Vec<OptRow> = vec![
-            OptRow::Big(&master),
-            OptRow::Pair(&music, &jukebox),
-            OptRow::Pair(&weather, &blocks),
-            OptRow::Pair(&hostile, &friendly),
-            OptRow::Pair(&players, &ambient),
-            OptRow::Pair(&voice, &ui),
-            OptRow::Big("Device: Default"),
-            OptRow::Pair(self.show_subtitles_label(), "Directional Audio: OFF"),
-            OptRow::Pair("Music Frequency: Normal", "Music Toast: ON"),
-        ];
-        let sliders: &[(&str, f32)] = &[
-            ("Master Volume:", self.master_volume),
-            ("Music:", self.music_volume),
-            ("Jukebox/Note Blocks:", self.jukebox_volume),
-            ("Weather:", self.weather_volume),
-            ("Blocks:", self.blocks_volume),
-            ("Hostile Creatures:", self.hostile_volume),
-            ("Friendly Creatures:", self.friendly_volume),
-            ("Players:", self.players_volume),
-            ("Ambient/Environment:", self.ambient_volume),
-            ("Voice/Speech:", self.voice_volume),
-            ("UI:", self.ui_volume),
+            OptRow::Big(OptWidget::new(OptionId::MasterVolume, &master)),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Music, &music),
+                OptWidget::new(OptionId::JukeboxNoteBlocks, &jukebox),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Weather, &weather),
+                OptWidget::new(OptionId::Blocks, &blocks),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::HostileCreatures, &hostile),
+                OptWidget::new(OptionId::FriendlyCreatures, &friendly),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Players, &players),
+                OptWidget::new(OptionId::AmbientEnvironment, &ambient),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::VoiceSpeech, &voice),
+                OptWidget::new(OptionId::Ui, &ui),
+            ),
+            OptRow::Big(OptWidget::new(OptionId::Device, "Device: Default")),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ShowSubtitles, self.show_subtitles_label()),
+                OptWidget::new(OptionId::DirectionalAudio, "Directional Audio: OFF"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::MusicFrequency, "Music Frequency: Normal"),
+                OptWidget::new(OptionId::MusicToast, "Music Toast: ON"),
+            ),
         ];
         let disabled = &[
-            "Device:",
-            "Directional Audio:",
-            "Music Frequency:",
-            "Music Toast:",
+            OptionId::Device,
+            OptionId::DirectionalAudio,
+            OptionId::MusicFrequency,
+            OptionId::MusicToast,
         ];
         self.build_options_grid(
             sw,
@@ -1031,7 +1235,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -1048,58 +1251,74 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let cape = if self.skin_cape {
+        let cape = if self.options.skin_cape {
             "Cape: ON"
         } else {
             "Cape: OFF"
         };
-        let jacket = if self.skin_jacket {
+        let jacket = if self.options.skin_jacket {
             "Jacket: ON"
         } else {
             "Jacket: OFF"
         };
-        let left_sleeve = if self.skin_left_sleeve {
+        let left_sleeve = if self.options.skin_left_sleeve {
             "Left Sleeve: ON"
         } else {
             "Left Sleeve: OFF"
         };
-        let right_sleeve = if self.skin_right_sleeve {
+        let right_sleeve = if self.options.skin_right_sleeve {
             "Right Sleeve: ON"
         } else {
             "Right Sleeve: OFF"
         };
-        let left_pants = if self.skin_left_pants {
+        let left_pants = if self.options.skin_left_pants {
             "Left Pants Leg: ON"
         } else {
             "Left Pants Leg: OFF"
         };
-        let right_pants = if self.skin_right_pants {
+        let right_pants = if self.options.skin_right_pants {
             "Right Pants Leg: ON"
         } else {
             "Right Pants Leg: OFF"
         };
-        let hat = if self.skin_hat { "Hat: ON" } else { "Hat: OFF" };
-        let main_hand = if self.skin_main_hand_right {
+        let hat = if self.options.skin_hat {
+            "Hat: ON"
+        } else {
+            "Hat: OFF"
+        };
+        let main_hand = if self.options.skin_main_hand_right {
             "Main Hand: Right"
         } else {
             "Main Hand: Left"
         };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(cape, jacket),
-            OptRow::Pair(left_sleeve, right_sleeve),
-            OptRow::Pair(left_pants, right_pants),
-            OptRow::Pair(hat, main_hand),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Cape, cape),
+                OptWidget::new(OptionId::Jacket, jacket),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::LeftSleeve, left_sleeve),
+                OptWidget::new(OptionId::RightSleeve, right_sleeve),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::LeftPantsLeg, left_pants),
+                OptWidget::new(OptionId::RightPantsLeg, right_pants),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::Hat, hat),
+                OptWidget::new(OptionId::MainHand, main_hand),
+            ),
         ];
         // "Main Hand:" stays enabled: it moves the attack indicator client-side.
         // The model toggles do nothing; `client_information` hardcodes them.
         let disabled = &[
-            "Cape:",
-            "Jacket:",
-            "Left Sleeve:",
-            "Right Sleeve:",
-            "Left Pants Leg:",
-            "Right Pants Leg:",
-            "Hat:",
+            OptionId::Cape,
+            OptionId::Jacket,
+            OptionId::LeftSleeve,
+            OptionId::RightSleeve,
+            OptionId::LeftPantsLeg,
+            OptionId::RightPantsLeg,
+            OptionId::Hat,
         ];
         self.build_options_grid(
             sw,
@@ -1108,7 +1327,6 @@ impl MainMenu {
             "Skin Customization",
             Screen::Options,
             &rows,
-            &[],
             &[],
             disabled,
             true,
@@ -1126,43 +1344,49 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let online_status_label = if self.show_online_status {
+        let online_status_label = if self.options.show_online_status {
             "Show Online Status: ON"
         } else {
             "Show Online Status: OFF"
         };
-        let current_server_label = if self.show_current_server {
+        let current_server_label = if self.options.show_current_server {
             "Show Current Server: ON"
         } else {
             "Show Current Server: OFF"
         };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Realms Notifications: ON", "Allow Server Listings: ON"),
-            OptRow::Pair(online_status_label, current_server_label),
+            OptRow::Pair(
+                OptWidget::new(OptionId::RealmsNotifications, "Realms Notifications: ON"),
+                OptWidget::new(OptionId::AllowServerListings, "Allow Server Listings: ON"),
+            ),
+            OptRow::Pair(
+                OptWidget::new(OptionId::ShowOnlineStatus, online_status_label),
+                OptWidget::new(OptionId::ShowCurrentServer, current_server_label),
+            ),
         ];
-        let tooltips: &[(&str, &str)] = &[
+        let tooltips: &[(OptionId, &str)] = &[
             (
-                "Realms Notifications:",
+                OptionId::RealmsNotifications,
                 "Receive notifications about Realms updates",
             ),
             (
-                "Allow Server Listings:",
+                OptionId::AllowServerListings,
                 "Allow servers to list your name in their player list",
             ),
             (
-                "Show Online Status:",
+                OptionId::ShowOnlineStatus,
                 "Allow friends to see when you're online",
             ),
             (
-                "Show Current Server:",
+                OptionId::ShowCurrentServer,
                 "Allow friends to see which server you're on",
             ),
         ];
         let disabled = &[
-            "Realms Notifications:",
-            "Allow Server Listings:",
-            "Show Online Status:",
-            "Show Current Server:",
+            OptionId::RealmsNotifications,
+            OptionId::AllowServerListings,
+            OptionId::ShowOnlineStatus,
+            OptionId::ShowCurrentServer,
         ];
         self.build_options_grid(
             sw,
@@ -1171,7 +1395,6 @@ impl MainMenu {
             "Online Options...",
             Screen::Options,
             &rows,
-            &[],
             &[],
             disabled,
             true,
@@ -1190,16 +1413,15 @@ impl MainMenu {
         title: &str,
         back: Screen,
         rows: &[OptRow],
-        nav: &[(&str, Screen)],
-        sliders: &[(&'static str, f32)],
-        disabled: &[&str],
+        nav: &[(OptionId, Screen)],
+        disabled: &[OptionId],
         header_footer: bool,
-        tooltips: &[(&str, &str)],
+        tooltips: &[(OptionId, &str)],
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         if input.escape {
-            self.set_screen(back.clone_screen(), key_bindings);
+            self.set_screen(back.clone(), key_bindings);
             return empty_result();
         }
 
@@ -1279,7 +1501,7 @@ impl MainMenu {
         } else {
             content_top + (content_h - grid_h) / 2.0
         };
-        let mut slider_results: Vec<(&str, f32)> = Vec::new();
+        let mut slider_results: Vec<(OptionId, f32)> = Vec::new();
         let label_scroll = common::LabelScroll {
             text_width_fn,
             time_secs: self.created.elapsed().as_secs_f64(),
@@ -1294,16 +1516,11 @@ impl MainMenu {
             });
         }
 
-        // Rewording a label would silently re-enable its control, so catch a
-        // prefix that no longer matches anything.
-        #[cfg(debug_assertions)]
-        {
-            for p in disabled {
-                debug_assert!(
-                    rows.iter().flat_map(row_labels).any(|l| l.starts_with(p)),
-                    "{title}: disabled prefix {p:?} matches no row",
-                );
-            }
+        for id in disabled {
+            debug_assert!(
+                rows.iter().flat_map(row_ids).any(|row_id| row_id == *id),
+                "{title}: disabled {id:?} matches no row",
+            );
         }
 
         self.focus_advance(input);
@@ -1312,7 +1529,7 @@ impl MainMenu {
         let mut y_cursor = top_y;
         for (i, row) in rows.iter().enumerate() {
             let by = y_cursor + btn_dy;
-            let mut widgets: Vec<(&str, f32, f32)> = Vec::new();
+            let mut widgets: Vec<(OptWidget<'_>, f32, f32)> = Vec::new();
             match row {
                 OptRow::Header(title) => {
                     let pad_top = header_pad_top(i);
@@ -1332,11 +1549,13 @@ impl MainMenu {
                 }
                 OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
             }
-            for (label, bx, bw) in widgets {
-                let enabled = option_enabled(label, disabled);
+            for (widget, bx, bw) in widgets {
+                let OptWidget { id, label } = widget;
+                let enabled = option_enabled(id, disabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let hovered = enabled && hit;
-                if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
+                if matches!(id.kind(), OptionKind::Slider { .. }) {
+                    let value = self.slider_frac(id);
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
                     // `setFocused` only re-arms editing when focus moves, so
@@ -1347,7 +1566,7 @@ impl MainMenu {
                     if focused && ctx.activate {
                         self.slider_can_change_value = !self.slider_can_change_value;
                     }
-                    let is_active = self.active_slider == Some(*prefix);
+                    let is_active = self.active_slider == Some(id);
                     let result = common::push_slider(
                         &mut elements,
                         cursor,
@@ -1360,7 +1579,7 @@ impl MainMenu {
                         gs,
                         fs,
                         label,
-                        *value,
+                        value,
                         enabled,
                         focused,
                         self.slider_can_change_value,
@@ -1369,16 +1588,15 @@ impl MainMenu {
                     );
                     any_hovered |= result.hovered;
                     if result.dragging {
-                        self.active_slider = Some(*prefix);
+                        self.active_slider = Some(id);
                     }
                     if let Some(v) = result.new_value {
-                        slider_results.push((prefix, v));
+                        slider_results.push((id, v));
                     }
                     let steps = input.arrow_steps();
                     if focused && self.slider_can_change_value && steps != 0 {
-                        let step = self.slider_key_step(prefix, bw, gs);
-                        slider_results
-                            .push((prefix, (*value + steps as f32 * step).clamp(0.0, 1.0)));
+                        let step = self.slider_key_step(id, bw, gs);
+                        slider_results.push((id, (value + steps as f32 * step).clamp(0.0, 1.0)));
                     }
                     // `onRelease`: the click sound the press skipped. Also
                     // covers a press and release inside one frame.
@@ -1408,203 +1626,87 @@ impl MainMenu {
                 any_hovered |= hovered;
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
-                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
+                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| id == *p) {
                     common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
                 }
                 if (clicked && hovered) || (focused && ctx.activate) {
                     any_clicked = true;
-                    if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {
+                    if let Some((_, target)) = nav.iter().find(|(l, _)| *l == id) {
                         if matches!(target, Screen::OptionsResourcePacks) {
                             self.rescan_packs = true;
                         }
-                        self.set_screen(target.clone_screen(), key_bindings);
+                        self.set_screen(target.clone(), key_bindings);
                         if matches!(self.screen, Screen::OptionsResourcePacks) {
                             self.focused_field = Some(0);
                             self.pack_search.set_focused(true);
                         }
                     }
-                    if label.starts_with("GUI Scale:") {
-                        // Capped at what Auto resolves to, as vanilla's range is.
-                        let max =
-                            crate::ui::hud::gui_scale(sw, sh, 0, self.force_unicode_font) as u32;
-                        self.gui_scale_setting = (self.gui_scale_setting + 1) % (max + 1);
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Fullscreen:") {
-                        self.set_display_mode(self.display_mode.cycle(), key_bindings);
-                    }
-                    if label.starts_with("Clouds:") {
-                        self.cloud_mode = self.cloud_mode.cycle();
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Shader Pack:") {
-                        self.shader_pack =
-                            next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Attack Indicator:") {
-                        self.attack_indicator = self.attack_indicator.cycle();
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("View Bobbing:") {
-                        self.view_bobbing = !self.view_bobbing;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Show Autosave Indicator:") {
-                        self.show_autosave_indicator = !self.show_autosave_indicator;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("VSync:") {
-                        self.vsync = !self.vsync;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Show Subtitles:") {
-                        self.show_subtitles = !self.show_subtitles;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(FORCE_UNICODE_FONT) {
-                        self.force_unicode_font = !self.force_unicode_font;
-                        self.reload_fonts = true;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(JAPANESE_GLYPH_VARIANTS) {
-                        self.japanese_glyph_variants = !self.japanese_glyph_variants;
-                        self.reload_fonts = true;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(INVERT_MOUSE_X) {
-                        self.invert_mouse_x = !self.invert_mouse_x;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(INVERT_MOUSE_Y) {
-                        self.invert_mouse_y = !self.invert_mouse_y;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Vignette:") {
-                        self.vignette = !self.vignette;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Entity Shadows:") {
-                        self.entity_shadows = !self.entity_shadows;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Show Online Status:") {
-                        self.show_online_status = !self.show_online_status;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Show Current Server:") {
-                        self.show_current_server = !self.show_current_server;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(CHAT_VISIBILITY) {
-                        self.chat_options.visibility = self.chat_options.visibility.cycle();
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(CHAT_COLORS) {
-                        self.chat_options.colors = !self.chat_options.colors;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(CHAT_LINKS) {
-                        self.chat_options.links = !self.chat_options.links;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(CHAT_LINKS_PROMPT) {
-                        self.chat_options.links_prompt = !self.chat_options.links_prompt;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(AUTO_SUGGESTIONS) {
-                        self.chat_options.auto_suggestions = !self.chat_options.auto_suggestions;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(ONLY_SHOW_SECURE_CHAT) {
-                        self.chat_options.only_secure = !self.chat_options.only_secure;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with(SAVE_CHAT_DRAFTS) {
-                        self.chat_options.save_drafts = !self.chat_options.save_drafts;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Cape:") {
-                        self.skin_cape = !self.skin_cape;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Jacket:") {
-                        self.skin_jacket = !self.skin_jacket;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Left Sleeve:") {
-                        self.skin_left_sleeve = !self.skin_left_sleeve;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Right Sleeve:") {
-                        self.skin_right_sleeve = !self.skin_right_sleeve;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Left Pants Leg:") {
-                        self.skin_left_pants = !self.skin_left_pants;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Right Pants Leg:") {
-                        self.skin_right_pants = !self.skin_right_pants;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Hat:") {
-                        self.skin_hat = !self.skin_hat;
-                        self.save_settings(key_bindings);
-                    }
-                    if label.starts_with("Main Hand:") {
-                        self.set_main_hand_right(!self.skin_main_hand_right, key_bindings);
+                    match id {
+                        OptionId::GuiScale => {
+                            let max = crate::ui::hud::gui_scale(
+                                sw,
+                                sh,
+                                0,
+                                self.options.force_unicode_font,
+                            ) as u32;
+                            self.options.gui_scale_setting =
+                                (self.options.gui_scale_setting + 1) % (max + 1);
+                            self.save_settings(key_bindings);
+                        }
+                        OptionId::Fullscreen => {
+                            self.set_display_mode(self.options.display_mode.cycle(), key_bindings)
+                        }
+                        OptionId::Clouds => {
+                            self.options.cloud_mode = self.options.cloud_mode.cycle();
+                            self.save_settings(key_bindings);
+                        }
+                        OptionId::ShaderPack => {
+                            self.options.shader_pack = next_shader_pack(
+                                &self.shader_packs_dir,
+                                self.options.shader_pack.as_deref(),
+                            );
+                            self.save_settings(key_bindings);
+                        }
+                        OptionId::AttackIndicator => {
+                            self.options.attack_indicator = self.options.attack_indicator.cycle();
+                            self.save_settings(key_bindings);
+                        }
+                        OptionId::Chat => {
+                            self.options.chat_options.visibility =
+                                self.options.chat_options.visibility.cycle();
+                            self.save_settings(key_bindings);
+                        }
+                        OptionId::MainHand => self
+                            .set_main_hand_right(!self.options.skin_main_hand_right, key_bindings),
+                        _ if id.kind() == OptionKind::Toggle => {
+                            if let Some(value) = id.get(&self.options)
+                                && id.set(&mut self.options, 1.0 - value)
+                            {
+                                if matches!(
+                                    id,
+                                    OptionId::ForceUnicodeFont | OptionId::JapaneseGlyphVariants
+                                ) {
+                                    self.reload_fonts = true;
+                                }
+                                self.save_settings(key_bindings);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             y_cursor += row_advance(i, row);
         }
 
-        for (prefix, value) in &slider_results {
-            let v = *value;
-            let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
-            match *prefix {
-                "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
-                "Chunk Detail:" => {
-                    self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
-                }
-                DISTANT_TERRAIN => {
-                    self.distant_terrain = super::distant_terrain_chunks((v * span).round() as u32)
-                }
-                "Simulation Distance:" => {
-                    self.simulation_distance = (5.0 + v * span).round() as u32
-                }
-                "Max Framerate:" => self.max_framerate = 10 + 10 * (v * span).round() as u32,
-                "FOV:" => self.fov = (30.0 + v * span).round() as u32,
-                MENU_BACKGROUND_BLUR => {
-                    self.set_menu_background_blurriness((v * span).round() as u8)
-                }
-                "FOV Effects:" => self.fov_effect_scale = v,
-                "Damage Tilt:" => self.damage_tilt_strength = v,
-                BRIGHTNESS => self.brightness = v,
-                "Sensitivity:" => self.sensitivity = v,
-                "Master Volume:" => self.master_volume = v,
-                "Music:" => self.music_volume = v,
-                "Jukebox/Note Blocks:" => self.jukebox_volume = v,
-                "Weather:" => self.weather_volume = v,
-                "Blocks:" => self.blocks_volume = v,
-                "Hostile Creatures:" => self.hostile_volume = v,
-                "Friendly Creatures:" => self.friendly_volume = v,
-                "Players:" => self.players_volume = v,
-                "Ambient/Environment:" => self.ambient_volume = v,
-                "Voice/Speech:" => self.voice_volume = v,
-                "UI:" => self.ui_volume = v,
-                CHAT_OPACITY => self.chat_options.opacity = v,
-                TEXT_BACKGROUND_OPACITY => self.chat_options.text_background_opacity = v,
-                CHAT_SCALE => self.chat_options.scale = v,
-                CHAT_LINE_SPACING => self.chat_options.line_spacing = v,
-                CHAT_DELAY => self.chat_options.delay_secs = chat_delay_from_slider(v),
-                CHAT_WIDTH => self.chat_options.width = v,
-                CHAT_HEIGHT_FOCUSED => self.chat_options.height_focused = v,
-                CHAT_HEIGHT_UNFOCUSED => self.chat_options.height_unfocused = v,
-                _ => continue,
+        for &(id, frac) in &slider_results {
+            let Some(value) = self.slider_value(id, frac) else {
+                continue;
+            };
+            if id == OptionId::MenuBackgroundBlur {
+                self.set_menu_background_blurriness(value as u8);
+            } else {
+                self.settings_dirty |= id.set(&mut self.options, value);
             }
-            self.settings_dirty = true;
         }
 
         if header_footer {
@@ -1988,7 +2090,7 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         if input.escape {
-            self.set_screen(back.clone_screen(), key_bindings);
+            self.set_screen(back.clone(), key_bindings);
             return empty_result();
         }
 
@@ -2088,14 +2190,80 @@ mod tests {
     use super::*;
     use crate::ui::text_edit::KeyMods;
 
+    /// Preserves the persisted JSON format and every options screen's visible
+    /// copy.
     #[test]
-    fn disabled_prefixes_match_dynamic_option_labels() {
-        let disabled = &["Simulation Distance:", "Graphics:"];
+    fn options_screen_labels_and_json_fixture() {
+        let mut snapshot = String::new();
+        for screen in [
+            Screen::Options,
+            Screen::OptionsVideo,
+            Screen::OptionsControls,
+            Screen::OptionsMouse,
+            Screen::OptionsKeybinds,
+            Screen::OptionsChatSettings,
+            Screen::OptionsFontSettings,
+            Screen::OptionsAccessibility,
+            Screen::OptionsMusicSounds,
+            Screen::OptionsSkinCustomization,
+            Screen::OptionsOnline,
+            Screen::OptionsLanguage,
+            Screen::OptionsTelemetry,
+            Screen::OptionsResourcePacks,
+            Screen::OptionsCredits,
+        ] {
+            let mut bindings = KeyBindings::default();
+            let mut menu = test_menu("pomme-options-snapshot", &mut bindings);
+            menu.options.japanese_glyph_variants = false;
+            menu.screen = screen;
+            let frame = menu.build(
+                1000.0,
+                2000.0,
+                &MenuInput::default(),
+                &mut bindings,
+                |s, fs| s.len() as f32 * fs,
+            );
+            snapshot.push_str("---\n");
+            for element in frame.elements {
+                if let MenuElement::Text { text, .. } = element {
+                    snapshot.push_str(&text);
+                    snapshot.push('\n');
+                }
+            }
+        }
+        let settings = GameOptions {
+            japanese_glyph_variants: false,
+            ..GameOptions::default()
+        };
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/menu/fixtures");
+        if std::env::var_os("POMME_UPDATE_OPTIONS_FIXTURES").is_some() {
+            std::fs::create_dir_all(&fixtures).unwrap();
+            std::fs::write(fixtures.join("options-labels.txt"), &snapshot).unwrap();
+            std::fs::write(fixtures.join("options.json"), &json).unwrap();
+        }
+        // A Windows checkout may hold the fixtures with CRLF line endings.
+        let read = |name| {
+            std::fs::read_to_string(fixtures.join(name))
+                .unwrap()
+                .replace("\r\n", "\n")
+        };
+        assert_eq!(snapshot, read("options-labels.txt"));
+        let fixture = read("options.json");
+        let loaded: GameOptions = serde_json::from_str(&fixture).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&loaded).unwrap(), fixture);
+        assert_eq!(json, fixture);
+    }
 
-        assert!(!option_enabled("Simulation Distance: 12 chunks", disabled));
-        assert!(!option_enabled("Graphics: Fancy", disabled));
-        assert!(option_enabled("Render Distance: 12 chunks", disabled));
-        assert!(option_enabled("Graphics Backend: Default", disabled));
+    /// Disabled state follows identity even when presentation copy changes.
+    #[test]
+    fn disabled_ids_match_dynamic_option_labels() {
+        let disabled = &[OptionId::SimulationDistance, OptionId::Graphics];
+        assert!(!option_enabled(OptionId::SimulationDistance, disabled));
+        assert!(!option_enabled(OptionId::Graphics, disabled));
+        assert!(option_enabled(OptionId::RenderDistance, disabled));
+        assert!(option_enabled(OptionId::GraphicsBackend, disabled));
     }
 
     #[test]
@@ -2138,6 +2306,34 @@ mod tests {
         assert_eq!(chat_delay_label(o.delay_secs), "Chat Delay: None");
         assert_eq!(chat_delay_label(0.5), "Chat Delay: 0.5 second(s)");
         assert_eq!(chat_delay_label(6.0), "Chat Delay: 6.0 second(s)");
+    }
+
+    /// Every step of a discrete slider sets a value that reads back at the
+    /// same position.
+    #[test]
+    fn discrete_sliders_round_trip() {
+        let mut bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-slider-round-trip", &mut bindings);
+        for id in [
+            OptionId::RenderDistance,
+            OptionId::ChunkDetail,
+            OptionId::DistantTerrain,
+            OptionId::SimulationDistance,
+            OptionId::MaxFramerate,
+            OptionId::Fov,
+            OptionId::MenuBackgroundBlur,
+        ] {
+            let span = menu.discrete_slider_span(id).unwrap();
+            for i in 0..=span as u32 {
+                let frac = i as f32 / span;
+                let value = menu.slider_value(id, frac).unwrap();
+                id.set(&mut menu.options, value);
+                assert!(
+                    (menu.slider_frac(id) - frac).abs() < 1e-4,
+                    "{id:?} step {i}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2407,9 +2603,21 @@ mod tests {
         menu: MainMenu,
         key_bindings: KeyBindings,
         rows: [OptRow<'static>; 1],
-        nav: Vec<(&'static str, Screen)>,
-        sliders: Vec<(&'static str, f32)>,
-        disabled: Vec<&'static str>,
+        nav: Vec<(OptionId, Screen)>,
+        disabled: Vec<OptionId>,
+    }
+
+    /// Assigns stable identities to the existing interaction fixtures.
+    fn test_widget(label: &str) -> OptWidget<'_> {
+        let id = match label {
+            "Sensitivity: 50%" => OptionId::Sensitivity,
+            "FOV: 70" => OptionId::Fov,
+            "Entity Shadows: ON" => OptionId::EntityShadows,
+            "First" => OptionId::Online,
+            "Second" => OptionId::Language,
+            _ => OptionId::TelemetryData,
+        };
+        OptWidget::new(id, label)
     }
 
     impl Grid {
@@ -2418,17 +2626,10 @@ mod tests {
             Self {
                 menu: test_menu("pomme-options-focus-test", &mut key_bindings),
                 key_bindings,
-                rows: [OptRow::Pair(left, right)],
+                rows: [OptRow::Pair(test_widget(left), test_widget(right))],
                 nav: Vec::new(),
-                sliders: Vec::new(),
                 disabled: Vec::new(),
             }
-        }
-
-        fn with_slider(left: &'static str, right: &'static str, prefix: &'static str) -> Self {
-            let mut grid = Self::new(left, right);
-            grid.sliders.push((prefix, 0.5));
-            grid
         }
 
         fn frame(&mut self, input: &MenuInput) -> MainMenuResult {
@@ -2441,7 +2642,6 @@ mod tests {
                 Screen::Main,
                 &self.rows,
                 &self.nav,
-                &self.sliders,
                 &self.disabled,
                 false,
                 &[],
@@ -2496,15 +2696,15 @@ mod tests {
         });
         let mut grid = Grid::new("Entity Shadows: ON", "Other");
         grid.menu.settings_dir = dir.clone();
-        grid.menu.entity_shadows = true;
+        grid.menu.options.entity_shadows = true;
         grid.key_bindings
             .set(Action::Jump, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
         grid.key_bindings.set(Action::DropItem, Vec::new());
 
         for enabled in [false, true] {
             assert!(grid.frame(&click(300.0)).clicked_button);
-            assert_eq!(grid.menu.entity_shadows, enabled);
-            let saved: Settings =
+            assert_eq!(grid.menu.options.entity_shadows, enabled);
+            let saved: GameOptions =
                 serde_json::from_str(&std::fs::read_to_string(dir.join("options.json")).unwrap())
                     .unwrap();
             assert_eq!(saved.entity_shadows, enabled);
@@ -2534,7 +2734,7 @@ mod tests {
             .count();
         assert_eq!(hover_count, 2);
 
-        grid.disabled = vec!["Second"];
+        grid.disabled = vec![OptionId::Language];
         grid.frame(&click(450.0));
         assert_eq!(grid.menu.focus, Some(0));
 
@@ -2545,7 +2745,7 @@ mod tests {
 
     #[test]
     fn tab_reaches_sliders_and_enter_toggles_keyboard_editing() {
-        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let mut grid = Grid::new("First", "Sensitivity: 50%");
         let enter = MenuInput {
             enter: true,
             ..Default::default()
@@ -2565,23 +2765,23 @@ mod tests {
         assert_eq!(grid.menu.focus, Some(1));
         // Locked, the first arrow did nothing; unlocked, one step is
         // `1 / (150 - 8)` GUI units.
-        assert!((grid.menu.sensitivity - (0.5 + 1.0 / 142.0)).abs() < 1e-6);
+        assert!((grid.menu.options.sensitivity - (0.5 + 1.0 / 142.0)).abs() < 1e-6);
     }
 
     #[test]
     fn discrete_slider_steps_one_value_per_arrow() {
-        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+        let mut grid = Grid::new("First", "FOV: 70");
 
         grid.frame(&MenuInput::default());
         grid.frame(&tab());
         grid.frame(&tab());
         grid.frame(&key(KeyCode::ArrowRight));
-        assert_eq!(grid.menu.fov, 71);
+        assert_eq!(grid.menu.options.fov, 71);
     }
 
     #[test]
     fn gamepad_dpad_steps_a_focused_slider() {
-        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+        let mut grid = Grid::new("First", "FOV: 70");
         let dpad_right = MenuInput {
             gamepad_steps: 1,
             ..Default::default()
@@ -2591,7 +2791,7 @@ mod tests {
         grid.frame(&tab());
         grid.frame(&tab());
         grid.frame(&dpad_right);
-        assert_eq!(grid.menu.fov, 71);
+        assert_eq!(grid.menu.options.fov, 71);
     }
 
     #[test]
@@ -2603,7 +2803,7 @@ mod tests {
 
     #[test]
     fn slider_click_then_tab_moves_to_the_next_widget() {
-        let mut grid = Grid::with_slider("Sensitivity: 50%", "Second", "Sensitivity:");
+        let mut grid = Grid::new("Sensitivity: 50%", "Second");
 
         grid.frame(&click(300.0));
         grid.frame(&MenuInput::default());
@@ -2613,7 +2813,7 @@ mod tests {
 
     #[test]
     fn press_and_release_in_one_frame_releases_the_slider() {
-        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let mut grid = Grid::new("First", "Sensitivity: 50%");
         let tap = MenuInput {
             mouse_held: false,
             ..click(450.0)
@@ -2628,7 +2828,7 @@ mod tests {
     #[test]
     fn navigating_away_leaves_the_next_screen_unfocused() {
         let mut grid = Grid::new("First", "Second");
-        grid.nav = vec![("First", Screen::OptionsVideo)];
+        grid.nav = vec![(OptionId::Online, Screen::OptionsVideo)];
 
         grid.frame(&click(300.0));
         assert!(matches!(grid.menu.screen, Screen::OptionsVideo));
@@ -2668,7 +2868,7 @@ mod tests {
     /// Drives every options screen so `build_options_grid`'s debug assertion
     /// checks each screen's rows against its disabled list.
     #[test]
-    fn disabled_prefixes_cover_every_options_screen() {
+    fn typed_options_cover_every_options_screen() {
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-options-coverage-test", &mut key_bindings);
         let input = MenuInput::default();

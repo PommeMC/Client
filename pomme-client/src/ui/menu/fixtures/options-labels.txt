@@ -1,0 +1,295 @@
+---
+Options
+FOV: Normal
+Online...
+Skin Customization...
+Music & Sounds...
+Video Settings...
+Controls...
+Language...
+Chat Settings...
+Resource Packs...
+Accessibility Settings...
+Telemetry Data...
+Credits & Attribution...
+Done
+---
+Video Settings
+Display
+Fullscreen Resolution: Current
+Max Framerate: 120 fps
+VSync: ON
+Inactivity FPS Limit: 1 minute
+GUI Scale: 1
+Fullscreen: Windowed
+Exclusive Fullscreen: OFF
+Brightness: Default
+Graphics Backend: Default
+Quality
+Graphics: Fancy
+Biome Blend: 5x5
+Render Distance: 12 chunks
+Prioritize Chunk Updates: None
+Simulation Distance: 12 chunks
+Smooth Lighting: ON
+Clouds: Fancy
+Chunk Detail: Off
+Distant Terrain: OFF
+Particles: All
+Mipmap Levels: 4
+Entity Shadows: ON
+Entity Distance: 100%
+Menu Background Blur: 5
+Cloud Range: 128
+Cutout Leaves: Fancy
+Improved Transparency: OFF
+Texture Filtering: None
+Max Anisotropy: 1
+Weather Radius: 10
+Shader Pack: OFF
+Preferences
+Show Autosave Indicator: ON
+Vignette: ON
+Attack Indicator: Crosshair
+Chunk Fade-in: 1.0s
+Done
+---
+Controls
+Mouse Settings...
+Key Binds...
+Sneak: Hold
+Sprint: Hold
+Attack/Destroy: Hold
+Use Item/Place Block: Hold
+Auto-Jump: OFF
+Sprint Window: 7
+Operator Items Tab: OFF
+Done
+---
+Mouse Settings
+Sensitivity: 100%
+Scroll Sensitivity: 1.00
+Discrete Scrolling: OFF
+Invert Mouse X: OFF
+Invert Mouse Y: OFF
+Allow Cursor Changes: ON
+Raw Input: ON
+Done
+---
+Key Binds
+Movement
+Jump
+Reset
+Sneak
+Reset
+Sprint
+Reset
+Strafe Left
+Reset
+Strafe Right
+Reset
+Walk Backward
+Reset
+Walk Forward
+Reset
+Miscellaneous
+Take Screenshot
+Reset
+Toggle Fullscreen
+Reset
+Toggle GUI
+Reset
+Toggle Perspective
+Reset
+Toggle Spectator Shader Effects
+Reset
+Multiplayer
+List Players
+Reset
+Open Chat
+Reset
+Open Command
+Reset
+Gameplay
+Attack/Destroy
+Reset
+Pick Block
+Reset
+Use Item/Place Block
+Reset
+Inventory
+Drop Selected Item
+Reset
+Hotbar Slot 1
+Reset
+Hotbar Slot 2
+Reset
+Hotbar Slot 3
+Reset
+Hotbar Slot 4
+Reset
+Hotbar Slot 5
+Reset
+Hotbar Slot 6
+Reset
+Hotbar Slot 7
+Reset
+Hotbar Slot 8
+Reset
+Hotbar Slot 9
+Reset
+Open/Close Inventory
+Reset
+Swap Item With Off Hand
+Reset
+Spectator
+Highlight Players
+Reset
+Select On Hotbar
+Reset
+Debug
+Toggle Overlay
+Reset
+Debug Modifier Key
+Reset
+Clear Chat
+Reset
+Copy Data
+Reset
+Copy Location
+Reset
+Cycle Spectator
+Reset
+Debug Options
+Reset
+Dump Version Info
+Reset
+Game Mode Switcher
+Reset
+Reload Chunks
+Reset
+Show Advanced Tooltips
+Reset
+Show Chunk Boundaries
+Reset
+Toggle Chunk Occlusion
+Reset
+Reset Keys
+Done
+---
+Chat Settings
+Chat: Shown
+Colors: ON
+Web Links: ON
+Prompt on Links: ON
+Chat Text Opacity: 100%
+Text Background Opacity: 50%
+Chat Text Size: 100%
+Line Spacing: 0%
+Chat Delay: None
+Width: 320px
+Focused Height: 180px
+Unfocused Height: 90px
+Narrator: OFF
+Command Suggestions: ON
+Hide Matched Names: ON
+Reduced Debug Info: OFF
+Only Show Secure Chat: OFF
+Save Unsent Chats: OFF
+Done
+---
+Font Settings
+Force Unicode Font: OFF
+Japanese Glyph Variants: OFF
+Done
+---
+Accessibility Settings
+Narrator: OFF
+Show Subtitles: OFF
+High Contrast: OFF
+Menu Background Blur: 5
+Text Background Opacity: 50%
+Background for Chat Only: OFF
+Chat Text Opacity: 100%
+Line Spacing: 0%
+Chat Delay: None
+Notification Time: 10.0s
+View Bobbing: ON
+Distortion Effects: 100%
+FOV Effects: 100%
+Darkness Pulsing: 100%
+Damage Tilt: 100%
+Glint Speed: 100%
+Glint Strength: 100%
+Hide Lightning Flashes: OFF
+Dark Loading Screen: OFF
+Panorama Scroll Speed: 100%
+Hide Splash Texts: OFF
+Narrator Hotkey: ON
+Rotate with Minecart: OFF
+High Contrast Outlines: OFF
+Done
+---
+Music & Sounds
+Master Volume: 100%
+Music: 100%
+Jukebox/Note Blocks: 100%
+Weather: 100%
+Blocks: 100%
+Hostile Creatures: 100%
+Friendly Creatures: 100%
+Players: 100%
+Ambient/Environment: 100%
+Voice/Speech: 100%
+UI: 100%
+Device: Default
+Show Subtitles: OFF
+Directional Audio: OFF
+Music Frequency: Normal
+Music Toast: ON
+Done
+---
+Skin Customization
+Cape: ON
+Jacket: ON
+Left Sleeve: ON
+Right Sleeve: ON
+Left Pants Leg: ON
+Right Pants Leg: ON
+Hat: ON
+Main Hand: Right
+Done
+---
+Online Options...
+Realms Notifications: ON
+Allow Server Listings: ON
+Show Online Status: ON
+Show Current Server: ON
+Done
+---
+Language
+Coming soon
+Font Settings...
+Done
+---
+Telemetry Data
+Coming soon
+Done
+---
+Select Resource Packs
+Drag and drop files into this window to add packs
+
+Search...
+Available
+Selected
+Default
+The default look and feel of Minecraft
+Compatible
+Open Pack Folder
+Done
+---
+Credits and Attribution
+Credits
+Attribution
+Licenses
+Done

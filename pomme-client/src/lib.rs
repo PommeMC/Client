@@ -24,6 +24,7 @@ mod lang;
 mod logging;
 mod mob_effect;
 mod net;
+mod options;
 mod particle;
 mod physics;
 mod player;

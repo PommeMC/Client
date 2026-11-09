@@ -2239,7 +2239,7 @@ pub fn start_chunk_load(
     game.chunk_load_bench = Some(ChunkLoadBench::new(
         rd,
         game.server_render_distance,
-        core.menu.chunk_detail,
+        core.menu.options.chunk_detail,
         BenchMode::Windowed {
             gpu: gfx.renderer.gpu_name().to_owned(),
             vulkan: gfx.renderer.api_version().to_owned(),
@@ -2265,7 +2265,7 @@ fn apply_render_distance(
     game.sync_client_information(
         connection,
         rd,
-        core.menu.chat_options,
+        core.menu.options.chat_options,
         core.menu.skin_options(),
     );
 }
@@ -2277,7 +2277,7 @@ fn end_chunk_load(core: &mut AppCore, game: &mut GameState, connection: &Connect
         game.sync_client_information(
             connection,
             rd,
-            core.menu.chat_options,
+            core.menu.options.chat_options,
             core.menu.skin_options(),
         );
     }
@@ -2938,7 +2938,7 @@ fn run_ticks(
     }
     gfx.renderer.tick_lightmap(lightmap_info(
         game,
-        core.menu.brightness,
+        core.menu.options.brightness,
         sky_partial_tick(core),
     ));
 }
@@ -2967,12 +2967,13 @@ pub fn update_game(
     core.audio
         .update_entity_sound_position(game.player.entity_id, game.player.position);
     core.audio.set_volumes(core.menu.category_volumes());
-    core.audio.set_subtitles_enabled(core.menu.show_subtitles);
+    core.audio
+        .set_subtitles_enabled(core.menu.options.show_subtitles);
 
-    gfx.renderer.set_vsync(core.menu.vsync);
+    gfx.renderer.set_vsync(core.menu.options.vsync);
     gfx.renderer
-        .set_menu_blur_radius(core.menu.menu_background_blurriness);
-    game.chat.set_options(core.menu.chat_options);
+        .set_menu_blur_radius(core.menu.options.menu_background_blurriness);
+    game.chat.set_options(core.menu.options.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
     // with no screen open pauses the game, which also releases the cursor
@@ -3047,9 +3048,9 @@ pub fn update_game(
         gfx.renderer.update_camera(
             &mut core.input,
             dt,
-            core.menu.sensitivity,
-            core.menu.invert_mouse_x,
-            core.menu.invert_mouse_y,
+            core.menu.options.sensitivity,
+            core.menu.options.invert_mouse_x,
+            core.menu.options.invert_mouse_y,
         );
         // `Entity.turn` tells the vehicle (`onPassengerTurned`): a boat holds
         // its rider's yaw within reach of its own.
@@ -3243,7 +3244,7 @@ pub fn update_game(
     gfx.renderer.set_hurt(
         game.player.hurt_time,
         game.player.hurt_dir,
-        core.menu.damage_tilt_strength,
+        core.menu.options.damage_tilt_strength,
     );
     // Plain lerp (vanilla getInterpolatedWalkDistance); the forward-extrapolating
     // camera variant judders across tick boundaries when per-tick speed varies.
@@ -3255,7 +3256,7 @@ pub fn update_game(
     gfx.renderer.set_view_bob(
         bob_walk,
         bob_amount,
-        core.menu.view_bobbing && !game.deterministic,
+        core.menu.options.view_bobbing && !game.deterministic,
     );
     gfx.renderer.set_post_effect(game.drawn_spectator_effect());
     gfx.renderer.update_third_person_distance(
@@ -3315,7 +3316,7 @@ pub fn update_game(
             &enabled,
             &DebugEntryInput {
                 fps: gfx.fps_counter.display_fps(),
-                framerate_limit: core.menu.max_framerate,
+                framerate_limit: core.menu.options.max_framerate,
                 present_mode: gfx.renderer.present_mode(),
                 refresh_rate_hz: gfx
                     .window
@@ -3420,7 +3421,10 @@ pub fn update_game(
             &mut elements,
             sw,
             sh,
-            core.menu.vignette.then_some(game.vignette_brightness),
+            core.menu
+                .options
+                .vignette
+                .then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
         );
@@ -3542,7 +3546,7 @@ pub fn update_game(
                     .get(&hit.entity_id)
                     .is_some_and(|e| e.health > 0.0));
         let attack = hud::AttackIndicatorState {
-            mode: core.menu.attack_indicator,
+            mode: core.menu.options.attack_indicator,
             scale,
             show_full,
         };
@@ -4573,7 +4577,7 @@ pub fn update_game(
         game.subtitles
             .on_play_sound(&ev.key, *ev.pos, ev.range, subtitle_now);
     }
-    if core.menu.show_subtitles && !benchmark_running && !game.hide_gui {
+    if core.menu.options.show_subtitles && !benchmark_running && !game.hide_gui {
         let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
         game.subtitles.build(
             &mut elements,
@@ -4964,7 +4968,7 @@ pub fn update_game(
     let moving_block_renders =
         moving_block_renders(game, gfx.renderer.camera_render_position(), partial_tick);
 
-    let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
+    let shadow_casters = if core.menu.options.entity_shadows && !benchmark_running {
         shadow_casters(
             &entity_renders,
             &game.item_entity_store,
@@ -5122,9 +5126,12 @@ pub fn update_game(
     };
 
     let effective_rd = if game.server_render_distance > 0 {
-        core.menu.render_distance.min(game.server_render_distance)
+        core.menu
+            .options
+            .render_distance
+            .min(game.server_render_distance)
     } else {
-        core.menu.render_distance
+        core.menu.options.render_distance
     };
     // `EntityRenderer.extractNameTags` with the living renderers'
     // `shouldShowName`.
@@ -5196,7 +5203,7 @@ pub fn update_game(
     // Off without sky light (see `renderer::distant`'s TODO); capturing
     // stops with it.
     let distant_terrain = if game.light_engine.has_sky() {
-        core.menu.distant_terrain
+        core.menu.options.distant_terrain
     } else {
         0
     };
@@ -5236,7 +5243,7 @@ pub fn update_game(
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
-    if !benchmark_running && !game.deterministic && core.menu.show_autosave_indicator {
+    if !benchmark_running && !game.deterministic && core.menu.options.show_autosave_indicator {
         let alpha = game
             .last_saving_indicator_value
             .lerp(game.saving_indicator_value, partial_tick)
@@ -5253,6 +5260,7 @@ pub fn update_game(
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
     let shader_pack = core
         .menu
+        .options
         .shader_pack
         .as_ref()
         .map(|name| core.menu.shader_packs_dir.join(name));
@@ -5318,7 +5326,7 @@ pub fn update_game(
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {
-            core.menu.cloud_mode
+            core.menu.options.cloud_mode
         },
         effective_rd,
         distant_terrain,
@@ -5406,7 +5414,7 @@ pub fn update_game(
                 gfx.renderer.gpu_name(),
                 gfx.renderer.screen_width(),
                 gfx.renderer.screen_height(),
-                core.menu.render_distance,
+                core.menu.options.render_distance,
             ));
             game.benchmark_result = None;
             game.pause_screen = PauseScreen::Main;
@@ -5426,14 +5434,14 @@ pub fn update_game(
     }
 
     // Vanilla `Options.broadcastOptions`, which sends only what changed.
-    let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
+    let (chat_options, skin_options) = (core.menu.options.chat_options, core.menu.skin_options());
     if core.menu.take_options_saved()
-        && (core.menu.render_distance != game.last_render_distance
+        && (core.menu.options.render_distance != game.last_render_distance
             || game.client_options_changed(chat_options, skin_options))
     {
         game.sync_client_information(
             connection,
-            core.menu.render_distance,
+            core.menu.options.render_distance,
             chat_options,
             skin_options,
         );
