@@ -1,0 +1,49 @@
+# A standing mob's body turns to its head: a cow facing south, rotated to
+# face west (toward the camera), ends square on, not 50 degrees short.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 -90 0"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:cow 4.5 -60 0.5 {NoAI:1b,Rotation:[0f,0f]}"
+
+[[step]]
+expect = { entity = "cow" }
+
+[[step]]
+look_at = [4.5, -59.3, 0.5]
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+chat = "/rotate @e[type=cow,limit=1] 90 0"
+
+# Ten still ticks before the body starts to face the head, ten more to get
+# there; chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "turned"
+
+[[step]]
+chat = "/kill @e[type=!player]"

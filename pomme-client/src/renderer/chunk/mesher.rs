@@ -2000,7 +2000,8 @@ fn emit_block_model(
     by: i32,
     bz: i32,
 ) -> bool {
-    if let Some(baked) = registry.get_baked_model(state) {
+    let pos = Some([bx, by, bz]);
+    if let Some(baked) = registry.get_baked_model(state, pos) {
         emit_quads(
             sink,
             model_pos,
@@ -2012,7 +2013,7 @@ fn emit_block_model(
             by,
             bz,
         );
-    } else if let Some(quads) = registry.get_multipart_quads(state) {
+    } else if let Some(quads) = registry.get_multipart_quads(state, pos) {
         emit_quads(
             sink,
             model_pos,

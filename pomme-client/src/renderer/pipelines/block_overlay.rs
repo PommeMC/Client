@@ -204,11 +204,12 @@ fn build_overlay_vertices(
     );
     let mut verts = Vec::new();
 
-    if let Some(model) = registry.get_baked_model(state) {
+    let block_pos = Some([pos.x, pos.y, pos.z]);
+    if let Some(model) = registry.get_baked_model(state, block_pos) {
         for quad in &model.quads {
             push_quad(&mut verts, origin, quad);
         }
-    } else if let Some(quads) = registry.get_multipart_quads(state) {
+    } else if let Some(quads) = registry.get_multipart_quads(state, block_pos) {
         for quad in quads {
             push_quad(&mut verts, origin, quad);
         }

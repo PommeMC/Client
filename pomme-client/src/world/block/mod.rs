@@ -1143,7 +1143,7 @@ impl PositionOffset {
 
     /// Vanilla `BlockBehaviour.OffsetType` function for this column.
     fn at(&self, x: i32, z: i32) -> DVec3 {
-        let seed = vanilla_position_seed(x, z);
+        let seed = position_seed(x, 0, z);
         let raw_x = (f64::from((seed & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
         let raw_z = (f64::from(((seed >> 8) & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
         let max = f64::from(self.max_horizontal);
@@ -1158,10 +1158,13 @@ impl PositionOffset {
     }
 }
 
-fn vanilla_position_seed(x: i32, z: i32) -> i64 {
-    // Vanilla `Mth.getSeed(x, 0, z)`: the X multiplication is an i32
-    // operation before widening, and the later products wrap signed 64-bit.
-    let seed = i64::from(x.wrapping_mul(3_129_871)) ^ i64::from(z).wrapping_mul(116_129_781);
+/// Vanilla `Mth.getSeed(x, y, z)`: the X multiplication is an i32 operation
+/// before widening, and the later products wrap signed 64-bit.
+#[inline]
+pub fn position_seed(x: i32, y: i32, z: i32) -> i64 {
+    let seed = i64::from(x.wrapping_mul(3_129_871))
+        ^ i64::from(z).wrapping_mul(116_129_781)
+        ^ i64::from(y);
     seed.wrapping_mul(seed)
         .wrapping_mul(42_317_861)
         .wrapping_add(seed.wrapping_mul(11))
@@ -1218,6 +1221,14 @@ pub(crate) fn shape_occludes_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_seed_matches_mth_get_seed() {
+        // `Mth.getSeed` run on the JVM.
+        assert_eq!(position_seed(0, -61, 0), 2_402_721);
+        assert_eq!(position_seed(100_000, 64, -31_337), 87_928_236_203_573);
+        assert_eq!(position_seed(-7, 5, 12), 132_190_812_565_532);
+    }
 
     #[test]
     fn chest_states_decode() {

@@ -59,6 +59,11 @@ impl JavaRandom {
         (self.seed >> (48 - bits)) as i32
     }
 
+    /// Matches `Random.nextLong`.
+    pub fn next_long(&mut self) -> i64 {
+        (i64::from(self.next(32)) << 32).wrapping_add(i64::from(self.next(32)))
+    }
+
     /// Matches `Random.nextFloat`: `next(24) / 2^24`, in `[0, 1)`.
     pub fn next_float(&mut self) -> f32 {
         self.next(24) as f32 / (1u32 << 24) as f32

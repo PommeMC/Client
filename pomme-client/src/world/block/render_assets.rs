@@ -17,7 +17,7 @@ const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 use super::block_state_table::BlockStateTable;
 use super::json_bundle::JsonBundle;
 use super::model;
-use super::model::BakedModel;
+use super::model::{BakedModel, WeightedModels};
 use crate::assets::AssetIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +86,7 @@ impl FaceTextures {
 
 /// A block state's model lookups, resolved once per state.
 struct StateRender {
-    model: Option<Arc<BakedModel>>,
+    model: Option<Arc<WeightedModels>>,
     opaque_full_cube: bool,
     occludes: bool,
     hidden_when_enclosed: bool,
@@ -95,7 +95,7 @@ struct StateRender {
 #[derive(Default)]
 pub struct BlockRenderAssets {
     textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
+    baked: HashMap<String, HashMap<String, Arc<WeightedModels>>>,
     /// Per block-state table slot, every state's resolved model lookups,
     /// indexed by state id; built on first use of the slot. The mesher queries
     /// these for every block and neighbour, so they must not hash or parse.
@@ -374,12 +374,12 @@ impl BlockRenderAssets {
                         // `isSolidRender` (`canOcclude` and a full occlusion shape),
                         // but it still counts the model's quads and ignores
                         // `canOcclude`, so glass counts as solid there.
-                        let opaque_full_cube = !block_state_data.is_air
-                            && model.as_ref().is_some_and(|m| m.is_full_cube);
+                        let first = model.as_deref().map(WeightedModels::first);
+                        let opaque_full_cube =
+                            !block_state_data.is_air && first.is_some_and(|m| m.is_full_cube);
                         let occludes = block_state_data.occludes_neighbor_faces();
-                        let all_quads_cull = model
-                            .as_ref()
-                            .is_some_and(|m| m.quads.iter().all(|q| q.cullface.is_some()));
+                        let all_quads_cull =
+                            first.is_some_and(|m| m.quads.iter().all(|q| q.cullface.is_some()));
                         StateRender {
                             model,
                             opaque_full_cube,
@@ -394,7 +394,7 @@ impl BlockRenderAssets {
             .get(u32::from(state) as usize)
     }
 
-    fn resolve_model(&self, block: &str, props: &super::PropMap) -> Option<&Arc<BakedModel>> {
+    fn resolve_model(&self, block: &str, props: &super::PropMap) -> Option<&Arc<WeightedModels>> {
         let variants = self.baked.get(block)?;
 
         if variants.len() == 1 {
@@ -426,11 +426,11 @@ impl BlockRenderAssets {
         let models = self
             .baked
             .values()
-            .flat_map(|variants| variants.values().map(|model| &**model))
+            .flat_map(|variants| variants.values().flat_map(|models| models.models()))
             .chain(
                 self.multipart
                     .values()
-                    .flat_map(|entries| entries.iter().map(|entry| &*entry.model)),
+                    .flat_map(|entries| entries.iter().flat_map(|entry| entry.models.models())),
             )
             .chain(self.item_models.values());
         let quad_textures =
@@ -451,23 +451,40 @@ impl<'a> BlockRenderView<'a> {
             .get(self.block_state_table.block_state_data(state).id)
     }
 
-    pub(crate) fn get_baked_model(self, state: BlockState) -> Option<&'a BakedModel> {
-        self.assets
+    /// The state's variant model as vanilla `ModelBlockRenderer` picks it for
+    /// the block at `pos`, or the first of a weighted list without one.
+    pub(crate) fn get_baked_model(
+        self,
+        state: BlockState,
+        pos: Option<[i32; 3]>,
+    ) -> Option<&'a BakedModel> {
+        let models = self
+            .assets
             .state_render(self.block_state_table, state)?
             .model
-            .as_deref()
+            .as_deref()?;
+        Some(models.pick_at(pos, position_random))
     }
 
+    /// Vanilla `MultiPartModel.collectParts`: every matching case reseeded
+    /// from one draw, so each picks as if alone. The draw waits for the first
+    /// weighted case, as a single model's pick takes none.
     pub(crate) fn get_multipart_quads(
         self,
         state: BlockState,
+        pos: Option<[i32; 3]>,
     ) -> Option<Vec<&'a model::BakedQuad>> {
         let block_state_data = self.block_state_table.block_state_data(state);
         let entries = self.assets.multipart.get(block_state_data.id)?;
+        let mut seed = None;
         let mut quads = Vec::new();
         for entry in entries {
             if entry.when.matches(&block_state_data.properties) {
-                quads.extend(entry.model.quads.iter());
+                let model = entry.models.pick_at(pos, |pos| {
+                    let seed = *seed.get_or_insert_with(|| position_random(pos).next_long());
+                    crate::util::JavaRandom::new(seed)
+                });
+                quads.extend(model.quads.iter());
             }
         }
         if quads.is_empty() { None } else { Some(quads) }
@@ -493,6 +510,15 @@ impl<'a> BlockRenderView<'a> {
             .state_render(self.block_state_table, state)
             .is_some_and(|r| r.hidden_when_enclosed)
     }
+}
+
+/// Vanilla `ModelBlockRenderer`'s random, seeded by `BlockState.getSeed`.
+// TODO: doors, double plants and beds override `getSeed` to share one seed
+// between their halves; no vanilla blockstate of theirs is weighted, so only
+// a resource pack's would differ.
+#[inline]
+fn position_random([x, y, z]: [i32; 3]) -> crate::util::JavaRandom {
+    crate::util::JavaRandom::new(super::position_seed(x, y, z))
 }
 
 fn opaque_rgb(color: u32) -> u32 {
