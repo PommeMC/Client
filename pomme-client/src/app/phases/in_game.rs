@@ -935,11 +935,14 @@ impl GameState {
     }
 
     pub fn gui_open(&self) -> bool {
+        self.in_game_ui() || self.dialog_open() || self.game_mode_switcher.is_some()
+    }
+
+    /// Vanilla `Screen.isInGameUi`: the open screen is a container or a sign.
+    fn in_game_ui(&self) -> bool {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
-            || self.dialog_open()
-            || self.game_mode_switcher.is_some()
             || self.sign_editor.is_some()
     }
 
@@ -3402,14 +3405,7 @@ pub fn update_game(
             game.player.look_dir.x_rot_deg(),
         );
     }
-    if !benchmark_running && game.hide_gui {
-        // F1 hides the debug lines too, unless a screen is open.
-        if !game.input_live() {
-            debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
-                gfx.renderer.menu_text_width(t, s)
-            });
-        }
-    } else if !benchmark_running {
+    if !benchmark_running && !game.hide_gui {
         // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
         // draw under everything else in the HUD.
         let portal_intensity = game
@@ -3588,7 +3584,6 @@ pub fn update_game(
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
-            &debug,
             gs,
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
@@ -3615,6 +3610,61 @@ pub fn update_game(
         hud::build_sleep_overlay(&mut elements, sw, sh, game.player.sleep_counter);
     }
 
+    // Before chat so chat draws over it (vanilla extract order).
+    if !benchmark_running && !game.hide_gui {
+        game.title.build(&mut elements, sw, sh, gs, partial_tick);
+    }
+
+    // F1 hides the closed-chat overlay; an open chat is a screen and renders
+    // regardless (vanilla Hud.extractChat vs ChatScreen).
+    if !game.hide_gui || game.chat.is_focused() {
+        let dialog_open = game.dialog_open();
+        let command_tree = game.command_tree.clone();
+        // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
+        // targets before its widgets.
+        let chat_takes_click = game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
+        let chat_action = game.chat.build(
+            &mut elements,
+            crate::ui::chat::ChatBuildContext {
+                screen_w: sw,
+                screen_h: sh,
+                gui_scale: gs,
+                cursor: core.input.cursor_pos(),
+                covered: dialog_open,
+                clicked: core.input.left_just_pressed(),
+                shift: core.input.shift_held(),
+                command_tree: command_tree.as_deref(),
+                advanced_item_tooltips: game.advanced_item_tooltips,
+                key_bindings: &core.input.key_bindings,
+                text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
+                spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            },
+        );
+        if let Some(action) = chat_action {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        if game.chat.is_in_bed() && !dialog_open && !game.chat.has_pending_modal_prompt() {
+            let hovered = common::push_button(
+                &mut elements,
+                core.input.cursor_pos(),
+                sw / 2.0 - 100.0 * gs,
+                sh - 40.0 * gs,
+                200.0 * gs,
+                20.0 * gs,
+                gs,
+                common::FONT_SIZE * gs,
+                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
+                true,
+            );
+            if hovered && core.input.left_just_pressed() && !chat_takes_click {
+                core.audio.play_ui_click();
+                game.stop_sleeping_requested = true;
+            }
+        }
+    }
+
     if core.input.performing_action(input::Action::ViewPlayerList)
         && !game.hide_gui
         && !game.paused
@@ -3635,21 +3685,32 @@ pub fn update_game(
         );
     }
 
-    if !benchmark_running && !game.hide_gui {
-        let renderer = &gfx.renderer;
-        crate::ui::player_tab::build_player_nameplates(
-            &mut elements,
-            crate::ui::player_tab::PlayerNameplates {
-                entity_store: &game.entity_store,
-                tab_list: &game.tab_list,
-                scoreboard: &game.scoreboard,
-                local_uuid: core.user.uuid,
-                partial_tick,
-                gs,
-                camera_pos: renderer.camera_render_position(),
-                project: &|position| renderer.project_world_to_screen(position),
-            },
+    // Vanilla Hud.extractSubtitleOverlay: drawn last when no screen or an
+    // in-game one is open (then even with F1), else here under the screen.
+    // The queue is empty while the option is off.
+    let subtitle_now = std::time::Instant::now();
+    for ev in core.audio.take_subtitle_events() {
+        game.subtitles
+            .on_play_sound(&ev.key, *ev.pos, ev.range, subtitle_now);
+    }
+    let in_game_ui = game.in_game_ui() && !game.dialog_open();
+    let mut subtitles = Vec::new();
+    if core.menu.show_subtitles && !benchmark_running && (!game.hide_gui || in_game_ui) {
+        let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
+        game.subtitles.build(
+            &mut subtitles,
+            sw,
+            sh,
+            gs,
+            gfx.renderer.camera_render_position(),
+            yaw_deg,
+            pitch_deg,
+            subtitle_now,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+    }
+    if !in_game_ui && !game.input_live() {
+        elements.append(&mut subtitles);
     }
 
     if let Some(switcher) = &mut game.game_mode_switcher {
@@ -4510,95 +4571,6 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    // Before chat so chat draws over it (vanilla extract order).
-    if !benchmark_running && !game.hide_gui {
-        game.title.build(&mut elements, sw, sh, gs, partial_tick);
-    }
-
-    // F1 hides the closed-chat overlay; an open chat is a screen and renders
-    // regardless (vanilla Hud.extractChat vs ChatScreen).
-    // TODO: the closed chat (and titles) build after screens, so they draw
-    // sharp over the menu blur; vanilla's HUD extracts them before the screen.
-    if !game.hide_gui || game.chat.is_focused() {
-        let command_tree = game.command_tree.clone();
-        // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
-        // targets before its widgets.
-        let chat_takes_click = game
-            .chat
-            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held());
-        let chat_action = game.chat.build(
-            &mut elements,
-            crate::ui::chat::ChatBuildContext {
-                screen_w: sw,
-                screen_h: sh,
-                gui_scale: gs,
-                cursor: core.input.cursor_pos(),
-                covered: dialog_open,
-                clicked: core.input.left_just_pressed(),
-                shift: core.input.shift_held(),
-                command_tree: command_tree.as_deref(),
-                advanced_item_tooltips: game.advanced_item_tooltips,
-                key_bindings: &core.input.key_bindings,
-                text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
-                spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
-            },
-        );
-        if let Some(action) = chat_action {
-            handle_chat_ui_action(action, core, connection, game);
-        }
-        if game.chat.is_in_bed() && !dialog_open && !game.chat.has_pending_modal_prompt() {
-            let hovered = common::push_button(
-                &mut elements,
-                core.input.cursor_pos(),
-                sw / 2.0 - 100.0 * gs,
-                sh - 40.0 * gs,
-                200.0 * gs,
-                20.0 * gs,
-                gs,
-                common::FONT_SIZE * gs,
-                crate::lang::translate("multiplayer.stopSleeping").unwrap_or("Leave Bed"),
-                true,
-            );
-            if hovered && core.input.left_just_pressed() && !chat_takes_click {
-                core.audio.play_ui_click();
-                game.stop_sleeping_requested = true;
-            }
-        }
-    }
-
-    // Subtitles draw above chat and the tab list; toasts stay on top
-    // (vanilla extract order). The queue is empty while the option is off.
-    let subtitle_now = std::time::Instant::now();
-    for ev in core.audio.take_subtitle_events() {
-        game.subtitles
-            .on_play_sound(&ev.key, *ev.pos, ev.range, subtitle_now);
-    }
-    if core.menu.show_subtitles && !benchmark_running && !game.hide_gui {
-        let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
-        game.subtitles.build(
-            &mut elements,
-            sw,
-            sh,
-            gs,
-            gfx.renderer.camera_render_position(),
-            yaw_deg,
-            pitch_deg,
-            subtitle_now,
-            &|t, s| gfx.renderer.menu_text_width(t, s),
-        );
-    }
-
-    // Vanilla Gui.update() runs the toast manager every frame regardless of
-    // screens or F1; only rendering is gated (ToastManager.extractRenderState).
-    for event in game.toasts.update() {
-        core.audio.play_ui_sound(event, 1.0, 1.0);
-    }
-    if !benchmark_running && !game.hide_gui {
-        game.toasts.build(&mut elements, sw, gs, &|spans, s| {
-            gfx.renderer.menu_spans_width(spans, s)
-        });
-    }
-
     build_server_screens(
         &mut elements,
         sw,
@@ -4634,6 +4606,42 @@ pub fn update_game(
         }
         core.input.clear_just_pressed_actions();
     }
+
+    // Above screens and under toasts, shown with F1 too.
+    if !benchmark_running && !game.deterministic && core.menu.show_autosave_indicator {
+        let alpha = game
+            .last_saving_indicator_value
+            .lerp(game.saving_indicator_value, partial_tick)
+            .clamp(0.0, 1.0);
+        if (alpha * 255.0).floor() > 0.0 {
+            hud::build_saving_indicator(&mut elements, sw, sh, gs, alpha, &|t, s| {
+                gfx.renderer.menu_text_width(t, s)
+            });
+        }
+    }
+
+    // Vanilla Gui.update() runs the toast manager every frame regardless of
+    // screens or F1; only rendering is gated (ToastManager.extractRenderState).
+    for event in game.toasts.update() {
+        core.audio.play_ui_sound(event, 1.0, 1.0);
+    }
+    if !benchmark_running && !game.hide_gui {
+        game.toasts.build(&mut elements, sw, gs, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
+        });
+    }
+
+    // Vanilla `DebugScreenOverlay`: above toasts, shown with the GUI hidden
+    // (F1) only while a screen is open, and never over Debug Options.
+    if !benchmark_running
+        && (!game.hide_gui || !game.input_live())
+        && !(game.options_from_game && core.menu.is_debug_options())
+    {
+        debug_entries::push_debug_columns(&mut elements, &debug, sw, gs, &|t, s| {
+            gfx.renderer.menu_text_width(t, s)
+        });
+    }
+    elements.append(&mut subtitles);
 
     if screen_pointer != game.screen_pointer {
         game.screen_pointer = screen_pointer;
@@ -5234,20 +5242,6 @@ pub fn update_game(
         };
         [held(main_stack), held(inventory.offhand())]
     };
-    // Last element pushed: vanilla draws the saving indicator on its own
-    // stratum above screens, with the GUI hidden (F1) included.
-    if !benchmark_running && !game.deterministic && core.menu.show_autosave_indicator {
-        let alpha = game
-            .last_saving_indicator_value
-            .lerp(game.saving_indicator_value, partial_tick)
-            .clamp(0.0, 1.0);
-        if (alpha * 255.0).floor() > 0.0 {
-            hud::build_saving_indicator(&mut elements, sw, sh, gs, alpha, &|t, s| {
-                gfx.renderer.menu_text_width(t, s)
-            });
-        }
-    }
-
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();

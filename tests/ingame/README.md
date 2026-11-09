@@ -153,7 +153,8 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # menu_background_blur,
                                               # brightness, render_distance
                                               # (chunks), distant_terrain
-                                              # (chunks, 0 for off) and
+                                              # (chunks, 0 for off),
+                                              # show_subtitles and
                                               # shader_pack (a name in
                                               # fixtures/shaderpacks, "" for
                                               # none)

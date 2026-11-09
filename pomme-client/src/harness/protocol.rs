@@ -143,6 +143,7 @@ pub struct OptionSet {
     pub render_distance: Option<u32>,
     /// Distant Terrain in chunks, 0 for off, else clamped to 32..256.
     pub distant_terrain: Option<u32>,
+    pub show_subtitles: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

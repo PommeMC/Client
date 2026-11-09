@@ -67,3 +67,88 @@ screenshot = "legacy_codes"
 
 [[step]]
 chat = "/title @a reset"
+
+# Titles draw under an open screen.
+[[step]]
+chat = "/title @a times 10 400 10"
+
+[[step]]
+chat = "/title @a title \"Covered\""
+
+[[step]]
+expect = { hud = { title = "Covered" } }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "title_under_inventory"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/title @a reset"
+
+# Subtitles draw over a container screen, with F1 too, and under the pause
+# menu.
+[[step]]
+option = { show_subtitles = true }
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+# A tick for the key to register before a screen opens.
+[[step]]
+wait_ms = 200
+
+[[step]]
+open_inventory = true
+
+[[step]]
+chat = "/playsound minecraft:block.note_block.pling master @a"
+
+[[step]]
+expect = { sound = "block.note_block.pling" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "subtitles_over_inventory"
+
+[[step]]
+close_menu = true
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+chat = "/playsound minecraft:block.note_block.pling master @a"
+
+[[step]]
+expect = { sound = "block.note_block.pling" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "subtitles_under_pause"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+option = { show_subtitles = false }
