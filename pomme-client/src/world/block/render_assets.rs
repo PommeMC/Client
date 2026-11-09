@@ -463,14 +463,12 @@ impl<'a> BlockRenderView<'a> {
             .state_render(self.block_state_table, state)?
             .model
             .as_deref()?;
-        Some(match pos {
-            Some(pos) if models.is_weighted() => models.pick(&mut position_random(pos)),
-            _ => models.first(),
-        })
+        Some(models.pick_at(pos, position_random))
     }
 
     /// Vanilla `MultiPartModel.collectParts`: every matching case reseeded
-    /// from one draw, so each picks as if alone.
+    /// from one draw, so each picks as if alone. The draw waits for the first
+    /// weighted case, as a single model's pick takes none.
     pub(crate) fn get_multipart_quads(
         self,
         state: BlockState,
@@ -478,21 +476,14 @@ impl<'a> BlockRenderView<'a> {
     ) -> Option<Vec<&'a model::BakedQuad>> {
         let block_state_data = self.block_state_table.block_state_data(state);
         let entries = self.assets.multipart.get(block_state_data.id)?;
-        let mut random = pos.map(|pos| {
-            let mut random = position_random(pos);
-            let seed = random.next_long();
-            (random, seed)
-        });
+        let mut seed = None;
         let mut quads = Vec::new();
         for entry in entries {
             if entry.when.matches(&block_state_data.properties) {
-                let model = match &mut random {
-                    Some((random, seed)) => {
-                        random.set_seed(*seed);
-                        entry.models.pick(random)
-                    }
-                    None => entry.models.first(),
-                };
+                let model = entry.models.pick_at(pos, |pos| {
+                    let seed = *seed.get_or_insert_with(|| position_random(pos).next_long());
+                    crate::util::JavaRandom::new(seed)
+                });
                 quads.extend(model.quads.iter());
             }
         }

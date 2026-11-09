@@ -541,9 +541,17 @@ impl WeightedModels {
         &self.entries[0].0
     }
 
-    /// Whether there's a choice, so a caller needs a random at all.
-    pub fn is_weighted(&self) -> bool {
-        self.entries.len() > 1
+    /// The model at `pos`, drawn with `random(pos)` only when there's a
+    /// choice; the first without a position.
+    pub fn pick_at(
+        &self,
+        pos: Option<[i32; 3]>,
+        random: impl FnOnce([i32; 3]) -> crate::util::JavaRandom,
+    ) -> &BakedModel {
+        match pos {
+            Some(pos) if self.entries.len() > 1 => self.pick(&mut random(pos)),
+            _ => self.first(),
+        }
     }
 
     /// `WeightedList.getRandomOrThrow` (its `Compact` selector; `Flat` picks
