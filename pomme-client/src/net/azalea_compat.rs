@@ -524,8 +524,8 @@ fn decode_lp_vec3(bytes: &[u8]) -> DVec3 {
 /// The wire translation under test for one protocol; the old-layout frames
 /// in the tests below are hand-built from that version's decompiled
 /// reference codecs (`reference/<version>/decompiled/.../network/`).
-fn translation_for(protocol: i32) -> crate::net::translate::Translation {
-    crate::net::translate::Translation::for_protocol(protocol).expect("translation data")
+fn translation_for(protocol: i32) -> crate::net::translate::TranslationSession {
+    crate::net::translate::TranslationSession::for_protocol(protocol).expect("translation data")
 }
 
 fn old_id(protocol: i32, dir: Direction, name: &str) -> u32 {
@@ -616,14 +616,14 @@ fn no_translation_without_coverage() {
     use pomme_protocol::version::{NATIVE, VERSIONS};
     for v in VERSIONS {
         assert_eq!(
-            crate::net::translate::Translation::for_protocol(v.protocol).is_some(),
+            crate::net::translate::TranslationSession::for_protocol(v.protocol).is_some(),
             crate::net::translate::joinable(v.protocol) && v.protocol != NATIVE.protocol,
             "{}",
             v.name
         );
     }
     assert!(PacketTable::for_protocol(762).is_none());
-    assert!(crate::net::translate::Translation::for_protocol(762).is_none());
+    assert!(crate::net::translate::TranslationSession::for_protocol(762).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -789,28 +789,68 @@ fn translate_set_player_team_26_1_reset_color() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// The registry tables must agree with azalea's 26.2 enums on the id anchors
-/// the remaps pivot around.
+/// Every native registry id must match the runtime enum used by remapping.
 #[test]
 fn registry_table_matches_azalea() {
     use azalea_registry::Registry;
-    use azalea_registry::builtin::{Attribute, BlockEntityKind, EntityKind};
+    use azalea_registry::builtin::*;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let t = RegistryTable::native();
-    let index = |reg, name: &str| t.names(reg).iter().position(|n| n == name).unwrap() as u32;
-    assert_eq!(
-        EntityKind::SulfurCube.to_u32(),
-        index(ClientRegistry::EntityType, "sulfur_cube")
-    );
-    assert_eq!(
-        Attribute::AirDragModifier.to_u32(),
-        index(ClientRegistry::Attribute, "air_drag_modifier")
-    );
-    assert_eq!(
-        BlockEntityKind::PotentSulfur.to_u32(),
-        index(ClientRegistry::BlockEntityType, "potent_sulfur")
-    );
+    let mut mismatches = Vec::new();
+    macro_rules! check {
+        ($kind:ident, $reg:ident) => {{
+            let names = RegistryTable::native().names(ClientRegistry::$reg);
+            assert!(
+                $kind::from_u32(names.len() as u32).is_none(),
+                "{} has more ids than the native registry",
+                stringify!($kind)
+            );
+            for (id, name) in names.iter().enumerate() {
+                let value = $kind::from_u32(id as u32).expect("builtin id");
+                assert_eq!(value.to_u32(), id as u32);
+                let azalea = value.to_str().trim_start_matches("minecraft:");
+                if azalea != name {
+                    mismatches.push((stringify!($kind), azalea.to_owned(), name.clone()));
+                }
+            }
+        }};
+    }
+    // Exhaustive match makes a new ClientRegistry require an enum comparison.
+    for registry in ClientRegistry::ALL {
+        match registry {
+            ClientRegistry::Attribute => check!(Attribute, Attribute),
+            ClientRegistry::BlockEntityType => check!(BlockEntityKind, BlockEntityType),
+            ClientRegistry::CommandArgumentType => check!(CommandArgumentKind, CommandArgumentType),
+            ClientRegistry::ConsumeEffectType => check!(ConsumeEffectKind, ConsumeEffectType),
+            ClientRegistry::DataComponentType => check!(DataComponentKind, DataComponentType),
+            ClientRegistry::DebugSubscription => check!(DebugSubscription, DebugSubscription),
+            ClientRegistry::EntityType => check!(EntityKind, EntityType),
+            ClientRegistry::GameEvent => check!(GameEvent, GameEvent),
+            ClientRegistry::Item => check!(ItemKind, Item),
+            ClientRegistry::Menu => check!(MenuKind, Menu),
+            ClientRegistry::NumberFormatType => check!(NumberFormatKind, NumberFormatType),
+            ClientRegistry::ParticleType => check!(ParticleKind, ParticleType),
+            ClientRegistry::PositionSourceType => check!(PositionSourceKind, PositionSourceType),
+            ClientRegistry::RecipeDisplay => check!(RecipeDisplay, RecipeDisplay),
+            ClientRegistry::RecipeSerializer => check!(RecipeSerializer, RecipeSerializer),
+            ClientRegistry::SlotDisplay => check!(SlotDisplay, SlotDisplay),
+            ClientRegistry::SoundEvent => check!(SoundEvent, SoundEvent),
+        }
+    }
+    // azalea names brigadier's own argument types in the minecraft namespace;
+    // vanilla registers them as brigadier:* (ArgumentTypeInfos.bootstrap).
+    let brigadier = ["bool", "float", "double", "integer", "long", "string"];
+    let expected: Vec<_> = brigadier
+        .iter()
+        .map(|t| {
+            (
+                "CommandArgumentKind",
+                t.to_string(),
+                format!("brigadier:{t}"),
+            )
+        })
+        .collect();
+    assert_eq!(mismatches, expected);
 }
 
 /// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
@@ -3015,7 +3055,8 @@ fn translate_config_registry_data_765() {
     );
     NbtTag::Compound(root).azalea_write(&mut old).unwrap();
 
-    let frames = translation_for(765).translate_config_frame(old.into_boxed_slice());
+    let translation = translation_for(765);
+    let frames = translation.translate_config_frame(old.into_boxed_slice());
     assert_eq!(frames.len(), 1);
     let packet: ClientboundConfigPacket =
         azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
@@ -3041,7 +3082,13 @@ fn translate_config_registry_data_765() {
     let LifecyclePacket::Respawn {
         spawn,
         data_to_keep,
-    } = translate_and_read(765, old, "respawn", lifecycle::read)
+    } = read_native_frame(
+        &translation
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap(),
+        "respawn",
+        lifecycle::read,
+    )
     else {
         panic!("wrong packet");
     };
@@ -3904,7 +3951,8 @@ fn translate_login_registries_763() {
         ],
     );
 
-    let frames = translation_for(763)
+    let translation = translation_for(763);
+    let frames = translation
         .split_login_registries(&old)
         .expect("registry codec");
     assert_eq!(frames.len(), 1);
@@ -3922,7 +3970,13 @@ fn translate_login_registries_763() {
 
     // The same frame then decodes as a game login, its dimension key resolved
     // against the order just captured.
-    let LifecyclePacket::Login(p) = translate_and_read(763, old, "login", lifecycle::read) else {
+    let LifecyclePacket::Login(p) = read_native_frame(
+        &translation
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap(),
+        "login",
+        lifecycle::read,
+    ) else {
         panic!("wrong packet");
     };
     assert_eq!(p.player_id, 7);
@@ -7410,4 +7464,56 @@ fn client_information_reports_the_skin_options() {
     assert_eq!(info.main_hand, HumanoidArm::Left);
     assert!(!info.model_customization.hat);
     assert!(info.model_customization.cape);
+}
+
+/// Reconnecting on the same protocol cannot inherit a previous dimension order.
+#[test]
+fn reconnect_resets_translation_dimensions() {
+    use std::sync::Arc;
+
+    use super::conn::{Conn, memory_pipes};
+
+    let (end, _peer) = memory_pipes();
+    let mut first = Conn::from_memory(end);
+    first.translation = Some(Arc::new(translation_for(763)));
+    let mut login = Vec::new();
+    write_login_763(
+        &mut login,
+        "minecraft:custom_end",
+        &[
+            ("minecraft:custom_overworld", 0),
+            ("minecraft:custom_end", 1),
+        ],
+    );
+    let translation = first.translation.as_deref().unwrap();
+    translation.split_login_registries(&login).unwrap();
+    let translated = translation
+        .translate_game_frame(login.into_boxed_slice())
+        .unwrap();
+    let LifecyclePacket::Login(old) = read_native_frame(&translated, "login", lifecycle::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(old.spawn.dimension_type, 1);
+    drop(first);
+
+    let (end, _peer) = memory_pipes();
+    let mut second = Conn::from_memory(end);
+    second.translation = Some(Arc::new(translation_for(763)));
+    let mut login = Vec::new();
+    write_login_763(&mut login, "minecraft:custom_end", &[]);
+    let translated = second
+        .translation
+        .as_deref()
+        .unwrap()
+        .translate_game_frame(login.into_boxed_slice())
+        .unwrap();
+    let LifecyclePacket::Login(new) = read_native_frame(&translated, "login", lifecycle::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(
+        new.spawn.dimension_type, 0,
+        "new connection must not retain custom_end at index 1"
+    );
 }

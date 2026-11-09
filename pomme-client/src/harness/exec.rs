@@ -280,6 +280,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
             .ok_or_else(|| format!("no resource pack {name} in resourcepacks/"))?;
         core.menu.toggle_resource_pack(id, enable);
     }
+    if let Some(show) = options.show_subtitles {
+        core.menu.show_subtitles = show;
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

@@ -1,0 +1,92 @@
+# The enchanting table's book: closed under the carried item, and open with
+# an item in the slot.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:diamond_sword"
+
+[[step]]
+expect = { slot = 36, item = "diamond_sword" }
+
+[[step]]
+chat = "/setblock 56 -60 3 minecraft:enchanting_table"
+
+[[step]]
+expect = { block = "enchanting_table", at = [56, -60, 3] }
+
+[[step]]
+chat = "/tp @s 56.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [56.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [56.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "enchantment", title = "Enchant" }
+
+# The sword is the first hotbar slot, 29 in this menu.
+[[step]]
+click = { slot = 29, op = "pickup_left" }
+
+# The book's centre at the harness's 427x240 GUI.
+[[step]]
+cursor = [158, 66]
+
+# Past the book's opening animation.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "carried_over_book"
+
+[[step]]
+click = { slot = 0, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 0, item = "diamond_sword" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "open_book"
+
+[[step]]
+click = { slot = 0, op = "pickup_left" }
+
+[[step]]
+click = { slot = 29, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 29, item = "diamond_sword" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/setblock 56 -60 3 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [56, -60, 3] }
+
+[[step]]
+chat = "/clear @s"

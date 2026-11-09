@@ -13,6 +13,7 @@ pub mod codec;
 pub mod container;
 pub mod entity;
 pub mod entity_data;
+pub mod entity_serializers;
 pub mod hud;
 pub mod item;
 pub mod known_packs;

@@ -21,6 +21,11 @@
 //! `select_known_packs` and the synchronized-registry elements they carry,
 //! read from `<reference-root>/extracted/data/minecraft`.
 //!
+//! Entity-data serializer registrations are generated from verified server
+//! jars by `just serializergen <version>`: the sibling tool reads the
+//! registration bytecode with `javap`, resolves official mappings, and
+//! records the verified artifact hashes in each generated table.
+//!
 //! The protocol number is parsed from `SharedConstants.getProtocolVersion()`;
 //! `--protocol` overrides it (and is required if the method body isn't a bare
 //! integer literal). The parser hard-fails on anything it can't resolve

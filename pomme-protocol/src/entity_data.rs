@@ -35,6 +35,38 @@ pub enum Serializer {
     Skip(Shape),
 }
 
+impl Serializer {
+    /// Skips a native value without decoding it. Items and particles return
+    /// false because their callers must translate their version-specific
+    /// payloads.
+    pub fn skip_native_value(&'static self, r: &mut Reader) -> DecodeResult<bool> {
+        let shape: &'static Shape = match self {
+            Self::Byte | Self::Bool => {
+                r.bytes(1)?;
+                return Ok(true);
+            }
+            Self::Long => {
+                r.varlong()?;
+                return Ok(true);
+            }
+            Self::Int | Self::Pose | Self::Variant(_) => &Shape::VarInt,
+            Self::Float => &Shape::Float,
+            Self::OptionalComponent => &Shape::Optional(&TEXT),
+            Self::OptionalBlockPos => &Shape::Optional(&Shape::Long),
+            Self::VillagerData => &Shape::Struct(&[Shape::VarInt, Shape::VarInt, Shape::VarInt]),
+            Self::ItemStack => return Ok(false),
+            Self::Skip(Shape::Ref(shape) | Shape::List(_, shape))
+                if std::ptr::eq(*shape, &PARTICLE) =>
+            {
+                return Ok(false);
+            }
+            Self::Skip(shape) => shape,
+        };
+        ItemCodec::native().skip(r, shape)?;
+        Ok(true)
+    }
+}
+
 /// One decoded entry's value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

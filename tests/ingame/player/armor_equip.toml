@@ -20,3 +20,14 @@ expect = { slot = 6, item = "iron_chestplate" }
 
 [[step]]
 screenshot = "equipped"
+
+# The chestplate slot's centre at the harness's 427x240 GUI; its tooltip
+# draws over the player model, not under it.
+[[step]]
+cursor = [141, 71]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "tooltip"

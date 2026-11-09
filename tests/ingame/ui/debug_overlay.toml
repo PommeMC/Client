@@ -33,6 +33,19 @@ wait_ms = 500
 [[step]]
 screenshot = "open"
 
+# The overlay draws over an open screen.
+[[step]]
+open_inventory = true
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "over_inventory"
+
+[[step]]
+close_menu = true
+
 [[step]]
 press = { key = "key.keyboard.f3" }
 

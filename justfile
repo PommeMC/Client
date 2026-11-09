@@ -170,6 +170,14 @@ registrygen version="26.2":
 knownpackgen version="26.2":
     @cargo run -p protogen -- knownpacks reference/{{ version }} {{ version }} pomme-protocol/src/data/known-packs-{{ version }}.json
 
+# Regenerate a version's entity-data serializer order from its server jar's
+# bytecode (tools/protogen/entity_serializers.py); needs javap from the JDK.
+serializergen version="26.2":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python=$(command -v python3 || command -v python)
+    PATH="{{ jdk }}:$PATH" "$python" tools/protogen/entity_serializers.py reference {{ version }} pomme-protocol/src/data/entity-serializers-{{ version }}.json
+
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json

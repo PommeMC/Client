@@ -146,6 +146,7 @@ pub struct OptionSet {
     /// A pack's folder name in `resourcepacks/` to select, as its row's
     /// arrow does; prefix `-` to deselect it.
     pub resource_pack: Option<String>,
+    pub show_subtitles: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
