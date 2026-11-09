@@ -4,6 +4,7 @@ use std::rc::Rc;
 use super::block_particle_option::BlockParticleOption;
 use super::dust_color_transition_options::DustColorTransitionOptions;
 use super::dust_particle_options::DustParticleOptions;
+use super::power_particle_option::PowerParticleOption;
 use super::registry::{MappedParticleRegistry, ParticleRegistry, ParticleTypeRegistrationError};
 use super::types::{ParticleType, SimpleParticleType};
 use crate::resources::resource_id;
@@ -57,6 +58,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) egg_crack: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) explosion: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) explosion_emitter: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dragon_breath: Rc<ParticleType<PowerParticleOption>>,
 }
 
 impl ParticleTypes {
@@ -211,6 +213,9 @@ impl ParticleTypes {
         let explosion_emitter = registry
             .register(resource_id!("minecraft:explosion_emitter"), true)
             .map_err(registration_error)?;
+        let dragon_breath = registry
+            .register(resource_id!("minecraft:dragon_breath"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -261,6 +266,7 @@ impl ParticleTypes {
             egg_crack,
             explosion,
             explosion_emitter,
+            dragon_breath,
         })
     }
 }
