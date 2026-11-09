@@ -15,3 +15,6 @@ pub(crate) const PARTICLES_WAX_OFF: u32 = 3004;
 pub(crate) const PARTICLES_SCRAPE: u32 = 3005;
 pub(crate) const PARTICLES_ELECTRIC_SPARK: u32 = 3002;
 pub(crate) const PARTICLES_SMASH_ATTACK: u32 = 2013;
+pub(crate) const PARTICLES_DRAGON_EGG_TELEPORT: u32 = 2015;
+pub(crate) const PARTICLES_SHULKER_TELEPORT: u32 = 2016;
+pub(crate) const PARTICLES_CONSUME_EFFECT_TELEPORT: u32 = 2017;
