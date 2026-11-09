@@ -15,6 +15,8 @@ mod falling_dust;
 mod flame;
 mod fly_towards_position;
 mod glow;
+mod huge_explosion;
+mod huge_explosion_seed;
 mod lava;
 mod portal;
 mod reverse_portal;
@@ -43,6 +45,8 @@ use self::fly_towards_position::EnchantParticleRegistration;
 use self::glow::{
     ScrapeParticleRegistration, WaxOffParticleRegistration, WaxOnParticleRegistration,
 };
+use self::huge_explosion::HugeExplosionParticleRegistration;
+use self::huge_explosion_seed::HugeExplosionSeedProvider;
 use self::lava::LavaParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::reverse_portal::ReversePortalParticleRegistration;
@@ -203,5 +207,13 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.egg_crack),
         &suspended_town::EggCrackParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.explosion),
+        &HugeExplosionParticleRegistration,
+    );
+    resources.register(
+        Rc::clone(&types.explosion_emitter),
+        Rc::new(HugeExplosionSeedProvider::new(Rc::clone(&types.explosion))),
     );
 }
