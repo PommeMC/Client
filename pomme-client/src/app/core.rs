@@ -3418,6 +3418,8 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_SHULKER_TELEPORT
                         || event_type == level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
                         || event_type == level_event::PARTICLES_ENDERMAN_TELEPORT
+                        || event_type == level_event::PARTICLES_DESTROY_PROGRESS
+                        || event_type == level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3543,6 +3545,18 @@ impl AppCore {
                             crate::world::level_event_handler::enderman_teleportation_particles(
                                 &mut level, pos, data, &portal,
                             );
+                        } else if matches!(
+                            event_type,
+                            level_event::PARTICLES_DESTROY_PROGRESS
+                                | level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
+                        ) {
+                            // Source broadcasts progress to the miner too.
+                            // COMPAT: 2020's hit sound is deferred; Source uses
+                            // independent sound RNG, never a LEVEL seed draw.
+                            let direction = crate::world::block::model::Direction::VALUES
+                                [(data as i32).clamp(0, 5) as usize];
+                            let state = level.get_block_state(pos);
+                            level.add_breaking_block_effect(pos, state, direction);
                         }
                     }
                 }
