@@ -3654,6 +3654,12 @@ impl AppCore {
                         ServerParticleKind::ExplosionEmitter => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.explosion_emitter,
                         )),
+                        ServerParticleKind::Heart => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.heart))
+                        }
+                        ServerParticleKind::AngryVillager => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.angry_villager))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();

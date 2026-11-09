@@ -59,6 +59,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) explosion: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) explosion_emitter: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) dragon_breath: Rc<ParticleType<PowerParticleOption>>,
+    pub(crate) heart: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) angry_villager: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -216,6 +218,12 @@ impl ParticleTypes {
         let dragon_breath = registry
             .register(resource_id!("minecraft:dragon_breath"), false)
             .map_err(registration_error)?;
+        let heart = registry
+            .register(resource_id!("minecraft:heart"), false)
+            .map_err(registration_error)?;
+        let angry_villager = registry
+            .register(resource_id!("minecraft:angry_villager"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -267,6 +275,8 @@ impl ParticleTypes {
             explosion,
             explosion_emitter,
             dragon_breath,
+            heart,
+            angry_villager,
         })
     }
 }
