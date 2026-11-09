@@ -423,3 +423,23 @@ pub(crate) fn lava_fizz_particles(
         level.add_particle(large_smoke, DVec3::new(x, y, z), DVec3::ZERO);
     }
 }
+
+pub(crate) fn redstone_torch_burnout_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    smoke: &SimpleParticleType,
+) {
+    let random = level.get_random().clone();
+    // COMPAT: omit REDSTONE_TORCH_BURNOUT/BLOCKS playback (volume 0.5,
+    // centered at block +0.5 on XYZ, distanceDelay=false), but preserve LEVEL
+    // pitch draws then the unconditional ClientLevel.playLocalSound seed.
+    let _pitch = 2.6_f32 + (random.next_float() - random.next_float()) * 0.8_f32;
+    let _ = random.next_long();
+
+    for _ in 0..5 {
+        let x = f64::from(pos.x) + random.next_double() * 0.6 + 0.2;
+        let y = f64::from(pos.y) + random.next_double() * 0.6 + 0.2;
+        let z = f64::from(pos.z) + random.next_double() * 0.6 + 0.2;
+        level.add_particle(smoke, DVec3::new(x, y, z), DVec3::ZERO);
+    }
+}

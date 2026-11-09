@@ -3425,6 +3425,7 @@ impl AppCore {
                         || event_type == level_event::ANIMATION_END_GATEWAY_SPAWN
                         || event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH
                         || event_type == level_event::LAVA_FIZZ
+                        || event_type == level_event::REDSTONE_TORCH_BURNOUT
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3613,6 +3614,12 @@ impl AppCore {
                                 &mut level,
                                 pos,
                                 &large_smoke,
+                            );
+                        } else if event_type == level_event::REDSTONE_TORCH_BURNOUT {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            crate::world::level_event_handler::redstone_torch_burnout_particles(
+                                &mut level, pos, &smoke,
                             );
                         }
                     }
