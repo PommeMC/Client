@@ -55,6 +55,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) electric_spark: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) dust_pillar: Rc<ParticleType<BlockParticleOption>>,
     pub(crate) egg_crack: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) explosion: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) explosion_emitter: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -203,6 +205,12 @@ impl ParticleTypes {
         let egg_crack = registry
             .register(resource_id!("minecraft:egg_crack"), false)
             .map_err(registration_error)?;
+        let explosion = registry
+            .register(resource_id!("minecraft:explosion"), true)
+            .map_err(registration_error)?;
+        let explosion_emitter = registry
+            .register(resource_id!("minecraft:explosion_emitter"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -251,6 +259,8 @@ impl ParticleTypes {
             electric_spark,
             dust_pillar,
             egg_crack,
+            explosion,
+            explosion_emitter,
         })
     }
 }

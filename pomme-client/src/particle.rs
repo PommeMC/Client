@@ -164,15 +164,20 @@ impl Particle {
 #[derive(Clone, Copy, Debug)]
 pub enum ServerParticleKind {
     EndRod,
+    Explosion,
+    ExplosionEmitter,
 }
 
 impl ServerParticleKind {
-    /// Maps a particle registry id (`ParticleTypes` registration order in the
-    /// 26.2 reference; ids shift between versions). Pomme owns this mapping
+    /// Maps a native particle registry id (ordered particle_type array in
+    /// pomme-protocol/src/data/registries-26.2.json; ids shift between
+    /// versions). Pomme owns this mapping
     /// because azalea's particle wire enum is out of sync with the registry.
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
             27 => Some(Self::EndRod),
+            29 => Some(Self::ExplosionEmitter),
+            30 => Some(Self::Explosion),
             _ => None,
         }
     }
