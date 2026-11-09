@@ -1,6 +1,4 @@
 //! Vanilla 26.3 ResourceManager contract, initialized by the application.
-//! Application asset consumers remain on their separate filesystem stack until
-//! migration.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;

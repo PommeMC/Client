@@ -211,9 +211,6 @@ fn directory_namespaces(root: &Path) -> HashSet<String> {
     namespaces
 }
 
-/// Logical IDs permit dot/parent components; filesystem resolution must not.
-/// The existing ASCII alphabet also excludes roots, drive prefixes and NULs,
-/// without imposing Java's lowercase-only restriction on resource paths.
 /// A root file's path: one or more segments, each valid on its own.
 pub(super) fn validate_root_path(path: &[&str]) -> io::Result<()> {
     if path.is_empty() {

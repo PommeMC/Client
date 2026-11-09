@@ -171,7 +171,7 @@ impl FallbackResourceManager {
         filter: Option<PathFilter>,
     ) {
         Rc::make_mut(&mut self.entries).push(PackEntry {
-            name: origin.name.clone(),
+            name: pack.pack_id().to_owned(),
             source: Some(ContentSource { origin, pack }),
             filter,
         });
@@ -209,9 +209,6 @@ impl ResourceManager for FallbackResourceManager {
     /// Scan high to low; defer metadata lookup to the owned winning-to-top
     /// snapshot.
     fn get_resource(&self, id: &ResourceId) -> io::Result<Option<Resource>> {
-        if id.namespace() != self.namespace {
-            return Ok(None);
-        }
         for (index, entry) in self.entries.iter().enumerate().rev() {
             if let Some(source) = &entry.source
                 && let Some(supplier) = source.lookup(self.pack_type, id)
@@ -237,9 +234,6 @@ impl ResourceManager for FallbackResourceManager {
     /// Scan high to low with source-local metadata; filters affect only lower
     /// entries.
     fn get_resource_stack(&self, id: &ResourceId) -> io::Result<Vec<Resource>> {
-        if id.namespace() != self.namespace {
-            return Ok(Vec::new());
-        }
         let metadata_id = id.sidecar();
         let mut resources = Vec::new();
         let mut metadata_blocked = false;

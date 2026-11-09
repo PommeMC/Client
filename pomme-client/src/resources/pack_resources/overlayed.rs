@@ -363,3 +363,42 @@ mod failing_layer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod priority_tests {
+    use std::rc::Rc;
+
+    use super::OverlayedPackResources;
+    use crate::resources::pack_resources::test_pack::TestPack;
+    use crate::resources::pack_resources::{PackType, tests};
+    use crate::resources::resource_id;
+
+    /// Vanilla `OverlayedPackResources`: the last overlay wins, then earlier
+    /// ones, then the primary, in lookups and listings alike.
+    #[test]
+    fn the_last_overlay_wins() {
+        let pack = OverlayedPackResources::new(
+            Rc::new(TestPack::new(
+                "primary",
+                &[("ns/dir/a.txt", "primary"), ("ns/dir/b.txt", "primary")],
+            )),
+            vec![
+                Rc::new(TestPack::new(
+                    "first",
+                    &[("ns/dir/a.txt", "first"), ("ns/dir/b.txt", "first")],
+                )),
+                Rc::new(TestPack::new("second", &[("ns/dir/a.txt", "second")])),
+            ],
+        );
+        let (a, b) = (resource_id!("ns:dir/a.txt"), resource_id!("ns:dir/b.txt"));
+        tests::test_get_resource(&pack, PackType::ClientResources, &a, b"second");
+        tests::test_get_resource(&pack, PackType::ClientResources, &b, b"first");
+        tests::test_list_resources(
+            &pack,
+            PackType::ClientResources,
+            "ns",
+            "dir",
+            &[(a, b"second".to_vec()), (b, b"first".to_vec())],
+        );
+    }
+}

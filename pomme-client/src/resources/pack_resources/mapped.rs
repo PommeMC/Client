@@ -191,14 +191,12 @@ impl PackResources for MappedPackResources {
         }
         let relative = alias.map_or(Path::new(id.path()), PathBuf::as_path);
         let path = self.root.root().join(relative);
-        // Mapped resources require a regular file.
-        // Only the selected candidate is inspected, never source ancestors.
+        // Mapped resources require a regular file; anything else is absent,
+        // as `list_resources` skips it. Only the selected candidate is
+        // inspected, never source ancestors.
         match fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => Ok(Some(file_supplier(path))),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("resource is not a file: {}", path.display()),
-            )),
+            Ok(_) => Ok(None),
             Err(error) if missing_directory(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -638,5 +636,65 @@ mod path_validation {
                 Ok(_) => panic!("constructor accepted escaping target {target:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod companion_tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::MappedPackResources;
+    use super::test_fixture::default_location;
+    use crate::resources::pack_resources::{PackType, tests};
+    use crate::resources::resource::ResourceId;
+    use crate::resources::test_dir::TempDir;
+
+    fn id(path: &str) -> ResourceId {
+        ResourceId::from_parts("ns", path).unwrap()
+    }
+
+    /// An alias brings its file's `.mcmeta` along unless that has an alias of
+    /// its own, and an alias naming a directory is absent everywhere.
+    #[test]
+    fn aliases_carry_their_mcmeta_and_skip_directories() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.0.join("files/folder")).unwrap();
+        for (name, text) in [
+            ("files/a.png", "a"),
+            ("files/a.png.mcmeta", "derived a"),
+            ("files/b.png", "b"),
+            ("files/b.png.mcmeta", "derived b"),
+            ("files/own.mcmeta", "explicit b"),
+        ] {
+            fs::write(temp.0.join(name), text).unwrap();
+        }
+        let pack = MappedPackResources::new(
+            default_location(),
+            temp.0.clone(),
+            "ns".into(),
+            BTreeMap::from([
+                (id("t/a.png"), PathBuf::from("files/a.png")),
+                (id("t/b.png"), PathBuf::from("files/b.png")),
+                (id("t/b.png.mcmeta"), PathBuf::from("files/own.mcmeta")),
+                (id("t/folder.png"), PathBuf::from("files/folder")),
+            ]),
+        )
+        .unwrap();
+        let client = PackType::ClientResources;
+        tests::test_get_resource_missing(&pack, client, &id("t/folder.png"));
+        tests::test_list_resources(
+            &pack,
+            client,
+            "ns",
+            "t",
+            &[
+                (id("t/a.png"), b"a".to_vec()),
+                (id("t/a.png.mcmeta"), b"derived a".to_vec()),
+                (id("t/b.png"), b"b".to_vec()),
+                (id("t/b.png.mcmeta"), b"explicit b".to_vec()),
+            ],
+        );
     }
 }

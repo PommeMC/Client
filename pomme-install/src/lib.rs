@@ -101,14 +101,12 @@ pub fn version_metadata_path(versions_dir: &Path, version: &str) -> PathBuf {
 /// Written into a version's extraction once it's complete.
 const EXTRACTED_MARKER: &str = ".extracted";
 
-/// The jar's extraction finished: its marker, its `assets` and its
-/// `version.json` are there. An extraction from before `version.json` was
-/// kept is redone, once, so the resource pack format is always known.
+/// The jar's extraction finished: its marker and its `assets` are there. An
+/// extraction from before `version.json` was kept still counts, since the jar
+/// isn't kept to redo it from; its pack format reads as unknown instead.
 fn is_extracted(versions_dir: &Path, version: &str) -> bool {
     let dir = extracted_dir(versions_dir, version);
-    dir.join(EXTRACTED_MARKER).exists()
-        && dir.join("assets").is_dir()
-        && dir.join(VERSION_METADATA).is_file()
+    dir.join(EXTRACTED_MARKER).exists() && dir.join("assets").is_dir()
 }
 
 /// The version's index and its jar's extraction are in place. Each is
@@ -471,9 +469,7 @@ mod tests {
         std::fs::create_dir_all(versions.join("26.2/extracted/assets")).unwrap();
         assert!(!is_installed(&assets, &versions, "26.2"));
         std::fs::write(versions.join("26.2/extracted/.extracted"), "26.2").unwrap();
-        // An extraction from before version.json was kept.
-        assert!(!is_installed(&assets, &versions, "26.2"));
-        std::fs::write(versions.join("26.2/extracted/version.json"), "{}").unwrap();
+        // An extraction from before version.json was kept needs no download.
         assert!(is_installed(&assets, &versions, "26.2"));
         assert!(!assets.join("indexes/26.2.json.part").exists());
         std::fs::remove_dir_all(dir).unwrap();

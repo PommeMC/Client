@@ -84,6 +84,8 @@ pub(super) fn pick(splashes: &[String], username: &str, month: u32, day: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::managers::MultiPackResourceManager;
+    use crate::resources::pack_resources::test_pack::TestPack;
 
     #[test]
     fn java_hash_matches_the_jdk() {
@@ -107,5 +109,23 @@ mod tests {
         assert_eq!(java_lines("a\nb\r\nc\rd\n"), ["a", "b", "c", "d"]);
         assert_eq!(java_lines("a\n\nb"), ["a", "", "b"]);
         assert!(java_lines("").is_empty());
+    }
+
+    fn manager(files: &[(&str, &'static str)]) -> MultiPackResourceManager {
+        MultiPackResourceManager::test(vec![TestPack::new("splashes", files)])
+    }
+
+    #[test]
+    fn load_trims_lines_and_drops_the_filtered_one() {
+        let splashes = load(&manager(&[(
+            "minecraft/texts/splashes.txt",
+            "  Awesome! \r\nThis message will never appear on the splash screen, isn't that weird?\r\nIndie!\n",
+        )]));
+        assert_eq!(splashes, ["Awesome!", "Indie!"]);
+    }
+
+    #[test]
+    fn load_without_the_file_gives_none() {
+        assert!(load(&manager(&[])).is_empty());
     }
 }

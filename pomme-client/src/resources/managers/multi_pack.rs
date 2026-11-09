@@ -137,6 +137,24 @@ fn check_directory(directory: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
+impl MultiPackResourceManager {
+    /// Client resources from `packs`, low to high, as the repository opens
+    /// them.
+    pub(crate) fn test(packs: Vec<crate::resources::pack_resources::test_pack::TestPack>) -> Self {
+        Self::new(
+            PackType::ClientResources,
+            packs
+                .into_iter()
+                .map(|pack| {
+                    let origin = ResourceOrigin::test(&pack.location.id);
+                    (origin, Rc::new(pack) as Rc<dyn PackResources>)
+                })
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
 mod resource_manager_tests {
     use super::MultiPackResourceManager;
     use crate::resources::managers::tests;
@@ -156,31 +174,13 @@ mod resource_manager_tests {
 mod priority_tests {
     use std::collections::BTreeMap;
     use std::io::Read;
-    use std::rc::Rc;
 
     use serde_json::{Value, json};
 
     use super::MultiPackResourceManager;
     use crate::resources::managers::ResourceManager;
     use crate::resources::pack_resources::test_pack::TestPack;
-    use crate::resources::pack_resources::{PackResources, PackType};
-    use crate::resources::{Resource, ResourceContent, ResourceId, ResourceOrigin};
-
-    /// Packs low to high, as the repository opens them.
-    fn manager(packs: Vec<TestPack>) -> MultiPackResourceManager {
-        MultiPackResourceManager::new(
-            PackType::ClientResources,
-            packs
-                .into_iter()
-                .map(|pack| {
-                    let origin = ResourceOrigin {
-                        name: pack.location.id.clone(),
-                    };
-                    (origin, Rc::new(pack) as Rc<dyn PackResources>)
-                })
-                .collect(),
-        )
-    }
+    use crate::resources::{Resource, ResourceContent, ResourceId};
 
     fn id(value: &str) -> ResourceId {
         ResourceId::new(value).unwrap()
@@ -215,7 +215,7 @@ mod priority_tests {
 
     #[test]
     fn the_top_pack_wins_and_stacks_run_low_to_high() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new("low", &[("minecraft/a.txt", "low")]),
             TestPack::new("high", &[("minecraft/a.txt", "high")]),
         ]);
@@ -226,7 +226,7 @@ mod priority_tests {
 
     #[test]
     fn a_filter_hides_lower_packs_but_not_its_own_files() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new(
                 "low",
                 &[("minecraft/a.txt", "low"), ("minecraft/b.txt", "low")],
@@ -244,7 +244,7 @@ mod priority_tests {
     /// namespace still filters the packs below it there.
     #[test]
     fn a_filter_only_pack_still_filters() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new("low", &[("minecraft/a.txt", "low")]),
             TestPack::new("high", &[("pomme/other.txt", "high")]).with_metadata(filter("a\\.txt")),
         ]);
@@ -255,7 +255,7 @@ mod priority_tests {
     /// at or above the one that supplied the file.
     #[test]
     fn metadata_comes_from_the_highest_pack_at_or_above_the_file() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new(
                 "low",
                 &[
@@ -270,10 +270,34 @@ mod priority_tests {
         assert_eq!(metadata(&resource).as_deref(), Some("high meta"));
     }
 
+    /// A filter that hides only the sidecar leaves the file but drops the
+    /// metadata from under it, in lookups, stacks and listings alike.
+    #[test]
+    fn a_filtered_sidecar_drops_the_metadata_below_it() {
+        let manager = MultiPackResourceManager::test(vec![
+            TestPack::new(
+                "low",
+                &[
+                    ("minecraft/d/a.txt", "low"),
+                    ("minecraft/d/a.txt.mcmeta", "low meta"),
+                ],
+            ),
+            TestPack::new("high", &[("pomme/other.txt", "high")])
+                .with_metadata(filter("a\\.txt\\.mcmeta")),
+        ]);
+        let resource = manager.get_resource(&id("d/a.txt")).unwrap().unwrap();
+        assert_eq!(read(&resource), "low");
+        assert_eq!(metadata(&resource), None);
+        let stack = manager.get_resource_stack(&id("d/a.txt")).unwrap();
+        assert_eq!(stack.iter().map(metadata).collect::<Vec<_>>(), [None]);
+        let listed = manager.list_resources("d", &|_| true).unwrap();
+        assert_eq!(metadata(&listed[&id("d/a.txt")]), None);
+    }
+
     /// `listResources`: a sidecar below the winning file isn't paired with it.
     #[test]
     fn listing_pairs_only_sidecars_at_or_above_the_file() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new("low", &[("minecraft/d/a.txt.mcmeta", "low meta")]),
             TestPack::new("high", &[("minecraft/d/a.txt", "high")]),
         ]);
@@ -286,7 +310,7 @@ mod priority_tests {
     /// Listings iterate in `Identifier.compareTo` order: path, then namespace.
     #[test]
     fn listing_order_is_path_then_namespace() {
-        let manager = manager(vec![TestPack::new(
+        let manager = MultiPackResourceManager::test(vec![TestPack::new(
             "pack",
             &[("minecraft/d/b.txt", "1"), ("pomme/d/a.txt", "2")],
         )]);
@@ -303,7 +327,7 @@ mod priority_tests {
     /// not having the resource, and its filter section counts as absent.
     #[test]
     fn a_failing_pack_is_skipped() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new("low", &[("minecraft/d/a.txt", "low")]),
             TestPack::new("broken", &[("minecraft/d/a.txt", "broken")]).broken(),
         ]);
@@ -317,7 +341,7 @@ mod priority_tests {
     /// `getPackFilterSection` logs a bad section and filters nothing.
     #[test]
     fn an_invalid_filter_filters_nothing() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new("low", &[("minecraft/a.txt", "low")]),
             TestPack::new("high", &[("pomme/x.txt", "x")])
                 .with_metadata(json!({"filter": {"block": "not a list"}})),
@@ -329,7 +353,7 @@ mod priority_tests {
     /// pack.
     #[test]
     fn stacks_pair_each_file_with_its_own_packs_sidecar() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new(
                 "low",
                 &[
@@ -350,7 +374,7 @@ mod priority_tests {
 
     #[test]
     fn a_filter_drops_lower_files_from_listings() {
-        let manager = manager(vec![
+        let manager = MultiPackResourceManager::test(vec![
             TestPack::new(
                 "low",
                 &[("minecraft/d/a.txt", "low"), ("minecraft/d/b.txt", "low")],
