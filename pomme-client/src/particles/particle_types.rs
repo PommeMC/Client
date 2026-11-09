@@ -62,6 +62,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) heart: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) angry_villager: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) note: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) sweep_attack: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -228,6 +229,9 @@ impl ParticleTypes {
         let note = registry
             .register(resource_id!("minecraft:note"), false)
             .map_err(registration_error)?;
+        let sweep_attack = registry
+            .register(resource_id!("minecraft:sweep_attack"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -282,6 +286,7 @@ impl ParticleTypes {
             heart,
             angry_villager,
             note,
+            sweep_attack,
         })
     }
 }
