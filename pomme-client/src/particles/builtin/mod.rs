@@ -20,6 +20,7 @@ mod heart;
 mod huge_explosion;
 mod huge_explosion_seed;
 mod lava;
+mod note;
 mod portal;
 mod reverse_portal;
 mod smoke;
@@ -52,6 +53,7 @@ use self::heart::{AngryVillagerParticleRegistration, HeartParticleRegistration};
 use self::huge_explosion::HugeExplosionParticleRegistration;
 use self::huge_explosion_seed::HugeExplosionSeedProvider;
 use self::lava::LavaParticleRegistration;
+use self::note::NoteParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::reverse_portal::ReversePortalParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
@@ -225,6 +227,7 @@ pub(crate) fn register_builtin_providers(
         &DragonBreathParticleRegistration,
     );
     resources.register_sprite_provider(Rc::clone(&types.heart), &HeartParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.note), &NoteParticleRegistration);
     resources.register_sprite_provider(
         Rc::clone(&types.angry_villager),
         &AngryVillagerParticleRegistration,
