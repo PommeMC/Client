@@ -443,3 +443,22 @@ pub(crate) fn redstone_torch_burnout_particles(
         level.add_particle(smoke, DVec3::new(x, y, z), DVec3::ZERO);
     }
 }
+
+pub(crate) fn end_portal_frame_fill_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    smoke: &SimpleParticleType,
+) {
+    let random = level.get_random().clone();
+    // COMPAT: omit END_PORTAL_FRAME_FILL/BLOCKS playback (volume 1, pitch 1,
+    // centered at block +0.5 on XYZ, distanceDelay=false), but preserve the
+    // unconditional LEVEL sound seed before particles. No pitch draws.
+    let _ = random.next_long();
+
+    for _ in 0..16 {
+        let x = f64::from(pos.x) + (5.0 + random.next_double() * 6.0) / 16.0;
+        let y = f64::from(pos.y) + 0.8125;
+        let z = f64::from(pos.z) + (5.0 + random.next_double() * 6.0) / 16.0;
+        level.add_particle(smoke, DVec3::new(x, y, z), DVec3::ZERO);
+    }
+}

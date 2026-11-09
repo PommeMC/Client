@@ -27,3 +27,4 @@ pub(crate) const ANIMATION_END_GATEWAY_SPAWN: u32 = 3000;
 pub(crate) const PARTICLES_DRAGON_FIREBALL_SPLASH: u32 = 2006;
 pub(crate) const LAVA_FIZZ: u32 = 1501;
 pub(crate) const REDSTONE_TORCH_BURNOUT: u32 = 1502;
+pub(crate) const END_PORTAL_FRAME_FILL: u32 = 1503;
