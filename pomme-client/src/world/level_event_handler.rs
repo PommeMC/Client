@@ -403,3 +403,23 @@ fn mth_sin_entry(angle: f32, offset: f64) -> f32 {
     let index = ((f64::from(angle) * 10430.378350470453 + offset) as i64) & 65535;
     (index as f64 / 10430.378350470453).sin() as f32
 }
+
+pub(crate) fn lava_fizz_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    large_smoke: &SimpleParticleType,
+) {
+    let random = level.get_random().clone();
+    // COMPAT: omit LAVA_EXTINGUISH/BLOCKS playback (volume 0.5, centered at
+    // block +0.5, distanceDelay=false), but preserve LEVEL pitch draws then
+    // the unconditional ClientLevel.playLocalSound seed before particles.
+    let _pitch = 2.6_f32 + (random.next_float() - random.next_float()) * 0.8_f32;
+    let _ = random.next_long();
+
+    for _ in 0..8 {
+        let x = f64::from(pos.x) + random.next_double();
+        let y = f64::from(pos.y) + 1.2;
+        let z = f64::from(pos.z) + random.next_double();
+        level.add_particle(large_smoke, DVec3::new(x, y, z), DVec3::ZERO);
+    }
+}

@@ -3424,6 +3424,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK
                         || event_type == level_event::ANIMATION_END_GATEWAY_SPAWN
                         || event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH
+                        || event_type == level_event::LAVA_FIZZ
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3603,6 +3604,15 @@ impl AppCore {
                                 pos,
                                 data,
                                 Rc::clone(&self.particle_types.dragon_breath),
+                            );
+                        } else if event_type == level_event::LAVA_FIZZ {
+                            let large_smoke = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.large_smoke,
+                            ));
+                            crate::world::level_event_handler::lava_fizz_particles(
+                                &mut level,
+                                pos,
+                                &large_smoke,
                             );
                         }
                     }
