@@ -74,6 +74,17 @@ pub struct AtlasUVMap {
 }
 
 impl AtlasUVMap {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            AtlasRegion::UNIT,
+        )
+    }
+
     fn new(
         regions: HashMap<String, AtlasRegion>,
         sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,

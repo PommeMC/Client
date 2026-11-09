@@ -2031,6 +2031,9 @@ impl AppCore {
                         },
                     ));
                 }
+                NetworkEvent::ItemCooldown { group, duration } => {
+                    game.interaction.set_item_cooldown(group, duration);
+                }
                 NetworkEvent::PlayerHealth {
                     health,
                     food,

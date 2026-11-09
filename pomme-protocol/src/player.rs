@@ -32,6 +32,10 @@ pub struct AttributeModifier {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerPacket {
+    Cooldown {
+        group: String,
+        duration: i32,
+    },
     Health {
         health: f32,
         food: i32,
@@ -81,6 +85,13 @@ pub enum PlayerPacket {
 /// Decodes packet `name`, or `None` if it isn't a player-state packet.
 pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<PlayerPacket>> {
     let read: fn(&mut Reader) -> DecodeResult<PlayerPacket> = match name {
+        // ClientboundCooldownPacket: Identifier, signed VAR_INT.
+        "cooldown" => |r| {
+            Ok(PlayerPacket::Cooldown {
+                group: r.identifier()?.to_owned(),
+                duration: r.var_i32()?,
+            })
+        },
         // ClientboundSetHealthPacket.java:26-36
         "set_health" => |r| {
             Ok(PlayerPacket::Health {
@@ -179,6 +190,58 @@ mod tests {
     #[test]
     fn other_packets_are_not_read() {
         assert!(read("add_entity", &mut Reader::new(&[])).is_none());
+    }
+
+    fn decode_native_cooldown(duration: i32) {
+        let mut bytes = Vec::new();
+        write_utf(&mut bytes, "example:shared_igniters");
+        write_varint(&mut bytes, duration as u32);
+        let mut r = Reader::new(&bytes);
+        let result = read("cooldown", &mut r)
+            .expect("native Identifier cooldown must be owned by the player decoder");
+        assert!(
+            result.is_ok(),
+            "valid signed cooldown {duration}: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap(),
+            PlayerPacket::Cooldown {
+                group: "example:shared_igniters".into(),
+                duration,
+            }
+        );
+        r.ensure_eof().expect("consume group and signed duration");
+    }
+
+    #[test]
+    fn native_cooldown_group_is_owned() {
+        decode_native_cooldown(100);
+    }
+
+    #[test]
+    fn native_cooldown_negative_duration_is_owned() {
+        decode_native_cooldown(-1);
+    }
+
+    #[test]
+    fn native_cooldown_zero_duration_is_owned() {
+        decode_native_cooldown(0);
+    }
+
+    #[test]
+    fn native_cooldown_malformed_payload_is_rejected() {
+        let mut group_only = Vec::new();
+        write_utf(&mut group_only, "minecraft:flint_and_steel");
+        let mut truncated_duration = group_only.clone();
+        truncated_duration.push(0x80);
+        for bytes in [vec![5, b'a'], group_only, truncated_duration] {
+            let result = read("cooldown", &mut Reader::new(&bytes))
+                .expect("malformed cooldown must remain owned, not fall back to Azalea");
+            assert!(
+                result.is_err(),
+                "malformed cooldown was accepted: {result:?}"
+            );
+        }
     }
 
     #[test]

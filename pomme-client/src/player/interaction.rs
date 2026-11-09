@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    BlocksAttacks, ChargedProjectiles, Consumable, Equippable, Food, ItemUseAnimation,
-    KineticWeapon, MinimumAttackCharge, UseEffects,
+    BlocksAttacks, ChargedProjectiles, Consumable, DataComponentTrait, Equippable, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseCooldown, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -15,6 +15,7 @@ use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::HolderSet;
 use azalea_registry::builtin::{EntityKind, ItemKind};
+use azalea_registry::identifier::Identifier;
 use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
@@ -152,6 +153,8 @@ pub struct InteractionState {
     destroy_delay: u32,
     miss_time: u32,
     use_delay: u32,
+    cooldown_tick: i64,
+    item_cooldowns: HashMap<String, (i64, i64)>,
     using_item: Option<ActiveUse>,
     swinging: bool,
     swinging_arm: InteractionHand,
@@ -188,6 +191,8 @@ impl InteractionState {
             destroy_delay: 0,
             miss_time: 0,
             use_delay: 0,
+            cooldown_tick: 0,
+            item_cooldowns: HashMap::new(),
             using_item: None,
             swinging: false,
             swinging_arm: InteractionHand::MainHand,
@@ -565,6 +570,33 @@ impl InteractionState {
         }
         self.tick_attack_cooldown(held_stack);
         self.update_swing();
+        self.tick_item_cooldowns();
+    }
+
+    /// Server cooldown updates replace the group's player-tick interval;
+    /// zero explicitly removes it, including an already-expired interval.
+    pub fn set_item_cooldown(&mut self, group: String, duration: i32) {
+        let group = Identifier::new(group).to_string();
+        if duration == 0 {
+            self.item_cooldowns.remove(&group);
+        } else {
+            self.item_cooldowns.insert(
+                group,
+                (self.cooldown_tick, self.cooldown_tick + i64::from(duration)),
+            );
+        }
+    }
+
+    fn tick_item_cooldowns(&mut self) {
+        self.cooldown_tick += 1;
+        self.item_cooldowns
+            .retain(|_, (_, end)| *end > self.cooldown_tick);
+    }
+
+    fn is_on_item_cooldown(&self, stack: &ItemStackData) -> bool {
+        self.item_cooldowns
+            .get(&item_cooldown_group(stack))
+            .is_some_and(|&(start, end)| end > start && end > self.cooldown_tick)
     }
 
     fn pick_block_or_entity(&self, sender: &PacketSender, include_data: bool) {
@@ -810,6 +842,7 @@ impl InteractionState {
                     chunks,
                     hit,
                     hand,
+                    held.stack,
                     held.place_block,
                     suppress_block_use,
                     player_pos,
@@ -849,6 +882,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         hit: BlockHitResult,
         hand: InteractionHand,
+        stack: Option<&ItemStackData>,
         place_block: Option<BlockState>,
         suppress_block_use: bool,
         player_pos: DVec3,
@@ -881,6 +915,9 @@ impl InteractionState {
                 return UseResult::Success { swing: true };
             }
         }
+        if stack.is_some_and(|stack| self.is_on_item_cooldown(stack)) {
+            return UseResult::Pass;
+        }
         // TODO: other `Item.useOn` successes (hoes, flint and steel, bone
         // meal, ...) pass here and fall through to `useItem`.
         if place_block.is_none() {
@@ -903,7 +940,6 @@ impl InteractionState {
     /// `ServerboundUseItem` for any held item (the server decides what it
     /// does) and predicts the result, beginning the local use timer when the
     /// item is consumable and edible right now.
-    // TODO: item cooldowns, which make vanilla's `useItem` pass.
     #[allow(clippy::too_many_arguments)]
     fn use_item(
         &mut self,
@@ -926,6 +962,10 @@ impl InteractionState {
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
         }));
+
+        if self.is_on_item_cooldown(stack) {
+            return UseResult::Pass;
+        }
 
         // `BundleItem`: a 200-tick use. Its BUNDLE animation is the plain
         // swing pose, which `None` already draws.
@@ -994,6 +1034,8 @@ impl InteractionState {
     /// transient player-owned animation/use state that Pomme keeps inside the
     /// longer-lived interaction controller; block prediction/sequences remain.
     pub fn reset_player_transients_for_respawn(&mut self) {
+        self.cooldown_tick = 0;
+        self.item_cooldowns.clear();
         self.using_item = None;
         self.swinging = false;
         self.swinging_arm = InteractionHand::MainHand;
@@ -1054,6 +1096,7 @@ impl InteractionState {
             self.update_swing();
         }
         self.tick_attack_cooldown(held_stack);
+        self.tick_item_cooldowns();
     }
 
     /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
@@ -1847,6 +1890,22 @@ pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
         && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
 }
 
+/// Effective UseCooldown group: a patch tombstone removes the default too.
+fn item_cooldown_group(stack: &ItemStackData) -> String {
+    let cooldown = if stack
+        .component_patch
+        .iter()
+        .any(|(kind, _)| kind == UseCooldown::KIND)
+    {
+        stack.component_patch.get::<UseCooldown>().cloned()
+    } else {
+        get_default_component::<UseCooldown>(stack.kind)
+    };
+    cooldown
+        .and_then(|cooldown| cooldown.cooldown_group)
+        .map_or_else(|| stack.kind.to_string(), |group| group.to_string())
+}
+
 /// The stack's component override if the server set one, else the item's
 /// default.
 fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
@@ -2137,6 +2196,10 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 }
 
 #[cfg(test)]
+#[path = "interaction_cooldown_tests.rs"]
+mod cooldown_tests;
+
+#[cfg(test)]
 mod tests {
     use glam::dvec3;
     use pomme_protocol::version::NATIVE;
@@ -2145,6 +2208,389 @@ mod tests {
     use crate::attribute::AttributeSnapshot;
     use crate::mob_effect::{CONDUIT_POWER, HASTE, MobEffectInstance};
     use crate::world::block::{BlockTags, block_tags_for_test};
+
+    fn use_on_with_empty_offhand(
+        kind: ItemKind,
+        block: &str,
+        props: &[(&str, &str)],
+        adjacent: &str,
+        sturdy_up: Option<bool>,
+    ) -> (bool, Vec<ServerboundGamePacket>, bool) {
+        use std::sync::Arc;
+
+        use crate::net::sender::Outbound;
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let mut registry = BlockRegistry::native();
+        let table = registry.block_state_table();
+        let names: Vec<_> = (0..).map_while(|id| table.registry_name(id)).collect();
+        registry.replace_tags(
+            [
+                ("candles", "candle"),
+                ("candle_cakes", "candle_cake"),
+                ("campfires", "campfire"),
+            ]
+            .into_iter()
+            .map(|(tag, name)| {
+                (
+                    format!("minecraft:{tag}"),
+                    vec![
+                        names
+                            .iter()
+                            .position(|candidate| *candidate == name)
+                            .unwrap() as i32,
+                    ],
+                )
+            })
+            .collect(),
+        );
+        let exact_state = |name, props: &[(&str, &str)]| {
+            let state = table
+                .state_with(name, props)
+                .expect("exact native fixture state");
+            let data = registry.block_state_data(state);
+            assert_eq!(data.id(), name);
+            assert_eq!(data.properties().entries().count(), props.len());
+            for &(key, value) in props {
+                assert_eq!(data.properties().get(key), Some(value), "{name}.{key}");
+            }
+            state
+        };
+        let target = exact_state(block, props);
+        if let Some(sturdy) = sturdy_up {
+            assert_eq!(
+                registry
+                    .block_state_data(target)
+                    .is_full_face_sturdy(crate::world::block::model::Direction::Up,),
+                Some(sturdy),
+                "fixture must have known UP support"
+            );
+        }
+        let chunks = ChunkStore::with_origin_chunk();
+        chunks.set_block_state(1, 64, 1, target, table);
+        let adjacent_state = exact_state(adjacent, &[]);
+        chunks.set_block_state(1, 65, 1, adjacent_state, table);
+        assert_eq!(chunks.get_block_state(1, 64, 1), target);
+        assert_eq!(chunks.get_block_state(1, 65, 1), adjacent_state);
+        let snapshot = || {
+            let mut states = Vec::new();
+            for x in 0..=2 {
+                for y in 63..=66 {
+                    for z in 0..=2 {
+                        states.push(chunks.get_block_state(x, y, z));
+                    }
+                }
+            }
+            states
+        };
+        let before = snapshot();
+        let hit = BlockHitResult {
+            block_pos: BlockPos::new(1, 64, 1),
+            face: Direction::Up,
+            hit_point: dvec3(1.5, 65.0, 1.5),
+        };
+        let mut state = InteractionState::new();
+        state.target = Some(HitResult::Block(hit));
+        let stack = ItemStackData::new(kind, 1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let audio = AudioEngine::silent_for_test();
+        let colormap = Arc::new(Colormap::fallback());
+        let mut particles = ParticleStore::new(
+            AtlasUVMap::for_test(),
+            colormap.clone(),
+            colormap.clone(),
+            colormap,
+        );
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: registry.render_view(),
+            biome_climate: &biome_climate,
+        };
+        let player_pos = dvec3(1.5, 64.0, 3.5);
+        let mut dirty_chunks = Vec::new();
+        let used = state.start_use_item(
+            &registry,
+            &sender,
+            &audio,
+            &chunks,
+            player_pos,
+            Aabb::from_center(player_pos, 0.3, 0.9),
+            player_pos + dvec3(0.0, 1.62, 0.0),
+            LookDirection::default(),
+            [Some(&stack), None].map(|stack| HandItem {
+                stack,
+                place_block: None,
+                worn: Worn::default(),
+            }),
+            MAX_FOOD_LEVEL,
+            false,
+            false,
+            &mut effects,
+            &mut dirty_chunks,
+        );
+        let mut packets = Vec::new();
+        while let Ok(outbound) = rx.try_recv() {
+            let Outbound::Packet(packet) = outbound else {
+                panic!("block/item use should send structured packets");
+            };
+            packets.push(*packet);
+        }
+        assert!(matches!(
+            packets.first(),
+            Some(ServerboundGamePacket::UseItemOn(packet))
+                if packet.hand == InteractionHand::MainHand
+                    && packet.seq == 1
+                    && packet.block_hit.block_pos == hit.block_pos.into()
+        ));
+        (
+            used,
+            packets,
+            before == snapshot() && dirty_chunks.is_empty(),
+        )
+    }
+
+    fn lightable_props(block: &str, lit: bool, wet: bool) -> Vec<(&'static str, &'static str)> {
+        let mut props = vec![("lit", if lit { "true" } else { "false" })];
+        match block {
+            "candle" => props.push(("candles", "1")),
+            "campfire" => props.extend([("facing", "north"), ("signal_fire", "false")]),
+            "candle_cake" => assert!(!wet, "candle cakes have no waterlogged property"),
+            _ => panic!("not a direct-light fixture: {block}"),
+        }
+        if block != "candle_cake" {
+            props.push(("waterlogged", if wet { "true" } else { "false" }));
+        }
+        props
+    }
+
+    // Both vanilla igniters return SUCCESS when canLight accepts the target.
+    fn assert_direct_ignition_stops_fallback(kind: ItemKind, block: &str) {
+        let (used, packets, _) = use_on_with_empty_offhand(
+            kind,
+            block,
+            &lightable_props(block, false, false),
+            "air",
+            None,
+        );
+        assert!(
+            matches!(packets.as_slice(), [
+                ServerboundGamePacket::UseItemOn(_),
+                ServerboundGamePacket::Swing(swing),
+            ] if swing.hand == InteractionHand::MainHand),
+            "{kind:?} on unlit {block}: expected only main UseItemOn and swing, got {packets:?}"
+        );
+        assert!(used, "direct ignition must consume the interaction");
+    }
+
+    #[test]
+    fn igniter_flint_and_steel_candle_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FlintAndSteel, "candle");
+    }
+
+    #[test]
+    fn igniter_fire_charge_candle_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FireCharge, "candle");
+    }
+
+    #[test]
+    fn igniter_flint_and_steel_candle_cake_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FlintAndSteel, "candle_cake");
+    }
+
+    #[test]
+    fn igniter_fire_charge_candle_cake_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FireCharge, "candle_cake");
+    }
+
+    #[test]
+    fn igniter_flint_and_steel_campfire_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FlintAndSteel, "campfire");
+    }
+
+    #[test]
+    fn igniter_fire_charge_campfire_stops_hand_fallback() {
+        assert_direct_ignition_stops_fallback(ItemKind::FireCharge, "campfire");
+    }
+
+    fn assert_nonpassing_ignition(
+        kind: ItemKind,
+        block: &str,
+        props: &[(&str, &str)],
+        adjacent: &str,
+    ) {
+        let (used, packets, unchanged) = use_on_with_empty_offhand(
+            kind,
+            block,
+            props,
+            adjacent,
+            (adjacent == "air").then_some(false),
+        );
+        assert!(!used, "failure/unknown must not predict success");
+        assert!(
+            unchanged,
+            "failure/unknown must not predict local world changes"
+        );
+        assert!(
+            matches!(packets.as_slice(), [ServerboundGamePacket::UseItemOn(_)]),
+            "{kind:?} on {block} {props:?}, adjacent {adjacent}: expected only main UseItemOn, no swing or fallback, got {packets:?}"
+        );
+    }
+
+    macro_rules! occupied_ignition_test {
+        ($name:ident, $kind:ident, $block:literal, $lit:literal, $wet:literal) => {
+            #[test]
+            fn $name() {
+                assert_nonpassing_ignition(
+                    ItemKind::$kind,
+                    $block,
+                    &lightable_props($block, $lit, $wet),
+                    "stone",
+                );
+            }
+        };
+    }
+
+    occupied_ignition_test!(
+        igniter_flint_lit_candle_occupied,
+        FlintAndSteel,
+        "candle",
+        true,
+        false
+    );
+    occupied_ignition_test!(
+        igniter_charge_lit_candle_occupied,
+        FireCharge,
+        "candle",
+        true,
+        false
+    );
+    occupied_ignition_test!(
+        igniter_flint_wet_candle_occupied,
+        FlintAndSteel,
+        "candle",
+        false,
+        true
+    );
+    occupied_ignition_test!(
+        igniter_charge_wet_candle_occupied,
+        FireCharge,
+        "candle",
+        false,
+        true
+    );
+    occupied_ignition_test!(
+        igniter_flint_lit_campfire_occupied,
+        FlintAndSteel,
+        "campfire",
+        true,
+        false
+    );
+    occupied_ignition_test!(
+        igniter_charge_lit_campfire_occupied,
+        FireCharge,
+        "campfire",
+        true,
+        false
+    );
+    occupied_ignition_test!(
+        igniter_flint_wet_campfire_occupied,
+        FlintAndSteel,
+        "campfire",
+        false,
+        true
+    );
+    occupied_ignition_test!(
+        igniter_charge_wet_campfire_occupied,
+        FireCharge,
+        "campfire",
+        false,
+        true
+    );
+    occupied_ignition_test!(
+        igniter_flint_lit_cake_occupied,
+        FlintAndSteel,
+        "candle_cake",
+        true,
+        false
+    );
+    occupied_ignition_test!(
+        igniter_charge_lit_cake_occupied,
+        FireCharge,
+        "candle_cake",
+        true,
+        false
+    );
+
+    fn assert_unsupported_ignition(kind: ItemKind) {
+        assert_nonpassing_ignition(
+            kind,
+            "glass_pane",
+            &[
+                ("east", "false"),
+                ("north", "false"),
+                ("south", "false"),
+                ("west", "false"),
+                ("waterlogged", "false"),
+            ],
+            "air",
+        );
+    }
+
+    #[test]
+    fn igniter_flint_unsupported_fire_stops_fallback() {
+        assert_unsupported_ignition(ItemKind::FlintAndSteel);
+    }
+
+    #[test]
+    fn igniter_charge_unsupported_fire_stops_fallback() {
+        assert_unsupported_ignition(ItemKind::FireCharge);
+    }
+
+    fn assert_supported_fire_ignition(kind: ItemKind) {
+        let (used, packets, _) = use_on_with_empty_offhand(kind, "stone", &[], "air", Some(true));
+        assert!(
+            matches!(packets.as_slice(), [
+                ServerboundGamePacket::UseItemOn(_), ServerboundGamePacket::Swing(swing),
+            ] if swing.hand == InteractionHand::MainHand),
+            "{kind:?} with air above sturdy stone: expected only main UseItemOn and swing, got {packets:?}"
+        );
+        assert!(used, "known supported fire must consume the interaction");
+    }
+
+    #[test]
+    fn igniter_flint_supported_fire_stops_fallback() {
+        assert_supported_fire_ignition(ItemKind::FlintAndSteel);
+    }
+
+    #[test]
+    fn igniter_charge_supported_fire_stops_fallback() {
+        assert_supported_fire_ignition(ItemKind::FireCharge);
+    }
+
+    #[test]
+    fn genuine_pass_stick_allows_empty_offhand_use_on() {
+        for lit in [false, true] {
+            let (_, packets, _) = use_on_with_empty_offhand(
+                ItemKind::Stick,
+                "candle",
+                &lightable_props("candle", lit, false),
+                "air",
+                None,
+            );
+            assert!(
+                matches!(packets.as_slice(), [
+                    ServerboundGamePacket::UseItemOn(_),
+                    ServerboundGamePacket::UseItem(item),
+                    ServerboundGamePacket::UseItemOn(off),
+                ] if item.hand == InteractionHand::MainHand && item.seq == 2
+                    && off.hand == InteractionHand::OffHand && off.seq == 3),
+                "a genuine PASS must allow generic use and the empty offhand: {packets:?}"
+            );
+        }
+    }
 
     #[test]
     fn carried_slot_starts_at_vanilla_zero_and_only_sends_on_change() {

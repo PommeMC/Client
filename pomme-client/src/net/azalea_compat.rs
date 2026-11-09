@@ -2217,19 +2217,136 @@ fn translate_container_set_slot_767() {
     );
 }
 
-/// 767 `cooldown` item ids remap into the native registry space (azalea
-/// still decodes the item id form).
+/// Legacy item cooldowns become native Identifier groups, not Azalea's
+/// obsolete numeric item payload.
 #[test]
 fn translate_cooldown_767() {
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(767, Direction::Clientbound, "cooldown"));
-    wire::write_varint(&mut old, 5); // item, unshifted below the divergence
-    wire::write_varint(&mut old, 100); // duration
+    let item = registry_id(
+        pomme_protocol::RegistryTable::for_protocol(767).unwrap(),
+        pomme_protocol::ClientRegistry::Item,
+        "flint_and_steel",
+    );
+    wire::write_varint(&mut old, item);
+    wire::write_varint(&mut old, 100);
 
-    let ClientboundGamePacket::Cooldown(p) = translate_and_decode(767, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.duration, 100);
+    let translated = translation_for(767)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        table_id(Phase::Game, Direction::Clientbound, "cooldown"),
+    );
+    wire::write_utf(&mut expected, "minecraft:flint_and_steel");
+    wire::write_varint(&mut expected, 100);
+    assert_eq!(
+        &*translated,
+        expected.as_slice(),
+        "legacy cooldown must use the native group layout"
+    );
+    let (tx, rx) = crossbeam_channel::unbounded();
+    assert!(
+        crate::net::handler::handle_raw_for_test(
+            &translated,
+            crate::world::block::BlockStateTable::for_protocol(767),
+            &tx,
+        )
+        .0
+    );
+    assert!(
+        matches!(rx.try_recv().unwrap(), crate::net::NetworkEvent::ItemCooldown { group, duration: 100 }
+        if group == "minecraft:flint_and_steel")
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn translate_cooldown_legacy_native_aliases_and_signed_ticks() {
+    use pomme_protocol::player::{self, PlayerPacket};
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    for (protocol, source, native) in [
+        (767, "chain", "iron_chain"),
+        (763, "grass", "short_grass"),
+        (767, "short_grass", "short_grass"),
+    ] {
+        for duration in [10_i32, 0, -1, i32::MIN] {
+            let mut old = Vec::new();
+            wire::write_varint(
+                &mut old,
+                old_id(protocol, Direction::Clientbound, "cooldown"),
+            );
+            wire::write_varint(
+                &mut old,
+                registry_id(
+                    RegistryTable::for_protocol(protocol).unwrap(),
+                    ClientRegistry::Item,
+                    source,
+                ),
+            );
+            wire::write_varint(&mut old, duration as u32);
+            assert_eq!(
+                translate_and_read(protocol, old, "cooldown", player::read),
+                PlayerPacket::Cooldown {
+                    group: format!("minecraft:{native}"),
+                    duration,
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn translate_cooldown_legacy_unknown_item_is_dropped() {
+    for protocol in [763, 767] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "cooldown"),
+        );
+        wire::write_varint(&mut old, u32::MAX);
+        wire::write_varint(&mut old, 10);
+        assert!(
+            translation_for(protocol)
+                .translate_game_frame(old.into_boxed_slice())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn translate_cooldown_modern_groups_are_not_item_aliases() {
+    use pomme_protocol::player::{self, PlayerPacket};
+
+    for protocol in [776, 777] {
+        for group in [
+            "minecraft:chain",
+            "minecraft:grass",
+            "example:shared_igniters",
+        ] {
+            let mut old = Vec::new();
+            wire::write_varint(
+                &mut old,
+                old_id(protocol, Direction::Clientbound, "cooldown"),
+            );
+            wire::write_utf(&mut old, group);
+            wire::write_varint(&mut old, (-1_i32) as u32);
+            let packet = if protocol == pomme_protocol::version::NATIVE.protocol {
+                read_native_frame(&old, "cooldown", player::read)
+            } else {
+                translate_and_read(protocol, old, "cooldown", player::read)
+            };
+            assert_eq!(
+                packet,
+                PlayerPacket::Cooldown {
+                    group: group.into(),
+                    duration: -1,
+                }
+            );
+        }
+    }
 }
 
 /// The clientbound `set_carried_item` -> `set_held_slot` rename alias.

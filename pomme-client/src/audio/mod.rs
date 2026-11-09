@@ -338,6 +338,11 @@ impl AudioEngine {
         (engine, event_tx, command_rx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn silent_for_test() -> Self {
+        Self::for_test().0
+    }
+
     pub fn set_volumes(&mut self, volumes: [f32; SoundCategory::COUNT]) {
         if volumes == self.volumes {
             return;
