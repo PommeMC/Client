@@ -1,0 +1,79 @@
+# Active effects list to the right of the inventory and creative screens, and
+# the HUD's effect icons hide while they do.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/effect give @s minecraft:speed infinite 4"
+
+[[step]]
+chat = "/effect give @s minecraft:jump_boost infinite 4"
+
+[[step]]
+expect = { player = { effect = "jump_boost" } }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "inventory" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "inventory"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+expect = { player = { game_mode = 1 } }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative" }
+
+# Too narrow for names: the hovered square shows them in a tooltip.
+[[step]]
+cursor = [320, 60]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "creative"
+
+[[step]]
+close_menu = true
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "hud"
+
+[[step]]
+chat = "/effect clear @s"
+
+[[step]]
+chat = "/gamemode survival"

@@ -2281,11 +2281,11 @@ fn main_panel(
     gs: f32,
     x_offset: f32,
 ) -> MainPanel {
-    let scale = super::container::panel_scale(screen_w, screen_h, gs, 176.0, spec.panel_h);
+    let panel = super::container::panel_at(screen_w, screen_h, gs, 176.0, spec.panel_h, x_offset);
     MainPanel {
-        x: (screen_w - 176.0 * scale) / 2.0 + x_offset * scale,
-        y: (screen_h - spec.panel_h * scale) / 2.0,
-        scale,
+        x: panel.ox,
+        y: panel.oy,
+        scale: panel.scale,
     }
 }
 
