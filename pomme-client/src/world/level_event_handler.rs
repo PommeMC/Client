@@ -143,6 +143,7 @@ pub(crate) fn spawn_particles_on_block_faces(
     level: &mut LevelContext<'_>,
     pos: BlockPos,
     particle: &SimpleParticleType,
+    particle_count: std::ops::RangeInclusive<usize>,
 ) {
     let random = level.get_random().clone();
     let center = DVec3::new(
@@ -150,8 +151,10 @@ pub(crate) fn spawn_particles_on_block_faces(
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     );
+    let min = *particle_count.start();
+    let max = *particle_count.end();
     for direction in Direction::VALUES {
-        let count = random.next_int(3) + 3;
+        let count = random.next_int(max - min + 1) + min;
         let step = direction.offset();
         for _ in 0..count {
             let speed = DVec3::new(
@@ -184,7 +187,7 @@ pub(crate) fn electric_spark_particles(
 ) {
     let axis = data as i32;
     if !(0..3).contains(&axis) {
-        spawn_particles_on_block_faces(level, pos, particle);
+        spawn_particles_on_block_faces(level, pos, particle, 3..=5);
         return;
     }
 
