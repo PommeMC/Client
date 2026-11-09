@@ -10,7 +10,7 @@ use crate::mob_effect::ActiveMobEffects;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
-use crate::ui::debug_entries::{DebugColumns, push_debug_columns};
+use crate::ui::debug_entries::DebugColumns;
 use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
@@ -676,7 +676,6 @@ pub fn build_hud(
     screen_shows_effects: bool,
     boss_bars: &BossBarState,
     first_person: bool,
-    debug: &DebugColumns,
     gs: f32,
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
@@ -688,8 +687,6 @@ pub fn build_hud(
     if first_person && (game_mode != 3 || spectator_crosshair) {
         build_crosshair(elements, cx, cy, gs, attack);
     }
-
-    push_debug_columns(elements, debug, screen_w, gs, text_width_fn);
 
     // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;

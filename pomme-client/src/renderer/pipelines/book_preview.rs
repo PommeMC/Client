@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3, Vec4};
 
 use super::entity_renderer::WHITE_TINT;
 use super::skin_preview::{
-    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_pipeline, preview_push_constant_range,
+    PREVIEW_ALPHA_CUTOFF, Uniform, Vertex, create_book_pipeline, preview_push_constant_range,
     push_preview_style, write_uniform,
 };
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
@@ -53,7 +53,7 @@ impl BookPreviewPipeline {
             Some(preview_push_constant_range()),
         );
 
-        let pipeline = create_pipeline(device, targets, pipeline_layout);
+        let pipeline = create_book_pipeline(device, targets, pipeline_layout);
 
         let (mvp_sets, mvp_buffers) = util::create_uniform_sets(
             device,
@@ -112,6 +112,8 @@ impl BookPreviewPipeline {
     /// setup: origin at (box center x, box top + 17 GUI px), 40 GUI px per
     /// unit, then `GuiBookModelRenderer`'s pose chain and `BookModel`'s
     /// `setupAnim`.
+    // TODO: vanilla lights the book (`Lighting.Entry.ENTITY_IN_UI`); drawn
+    // unlit, the open pages' edges show as light as their faces.
     pub fn draw_in_box(
         &mut self,
         pass: &mut rhi::backend::RenderPassEncoder,
@@ -192,7 +194,7 @@ impl BookPreviewPipeline {
         targets: rhi::backend::PipelineTargets,
     ) {
         self.pipeline.destroy(device);
-        self.pipeline = create_pipeline(device, targets, self.pipeline_layout);
+        self.pipeline = create_book_pipeline(device, targets, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {

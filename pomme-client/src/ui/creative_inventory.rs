@@ -530,6 +530,7 @@ pub fn build_creative_inventory(
     }
 
     draw_tabs(elements, state, ox, oy, scale, true);
+    elements.push(MenuElement::PictureInPicture);
     elements.append(&mut effects);
 
     if state.tab.shows_title() {
