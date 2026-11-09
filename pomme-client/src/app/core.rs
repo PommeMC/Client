@@ -3420,6 +3420,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_ENDERMAN_TELEPORT
                         || event_type == level_event::PARTICLES_DESTROY_PROGRESS
                         || event_type == level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
+                        || event_type == level_event::PARTICLES_EGG_CRACK
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3492,19 +3493,28 @@ impl AppCore {
                             let wax_on =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.wax_on));
                             crate::world::level_event_handler::spawn_particles_on_block_faces(
-                                &mut level, pos, &wax_on,
+                                &mut level,
+                                pos,
+                                &wax_on,
+                                3..=5,
                             );
                         } else if event_type == level_event::PARTICLES_WAX_OFF {
                             let wax_off =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.wax_off));
                             crate::world::level_event_handler::spawn_particles_on_block_faces(
-                                &mut level, pos, &wax_off,
+                                &mut level,
+                                pos,
+                                &wax_off,
+                                3..=5,
                             );
                         } else if event_type == level_event::PARTICLES_SCRAPE {
                             let scrape =
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.scrape));
                             crate::world::level_event_handler::spawn_particles_on_block_faces(
-                                &mut level, pos, &scrape,
+                                &mut level,
+                                pos,
+                                &scrape,
+                                3..=5,
                             );
                         } else if event_type == level_event::PARTICLES_ELECTRIC_SPARK {
                             let electric_spark = SimpleParticleType::new(Rc::clone(
@@ -3557,6 +3567,15 @@ impl AppCore {
                                 [(data as i32).clamp(0, 5) as usize];
                             let state = level.get_block_state(pos);
                             level.add_breaking_block_effect(pos, state, direction);
+                        } else if event_type == level_event::PARTICLES_EGG_CRACK {
+                            let egg_crack =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.egg_crack));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level,
+                                pos,
+                                &egg_crack,
+                                3..=6,
+                            );
                         }
                     }
                 }

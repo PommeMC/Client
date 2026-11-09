@@ -200,4 +200,8 @@ pub(crate) fn register_builtin_providers(
         &glow::ElectricSparkParticleRegistration,
     );
     resources.register(Rc::clone(&types.dust_pillar), Rc::new(DustPillarProvider));
+    resources.register_sprite_provider(
+        Rc::clone(&types.egg_crack),
+        &suspended_town::EggCrackParticleRegistration,
+    );
 }
