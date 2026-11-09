@@ -168,6 +168,7 @@ pub enum ServerParticleKind {
     ExplosionEmitter,
     Heart,
     AngryVillager,
+    Note,
 }
 
 impl ServerParticleKind {
@@ -180,6 +181,7 @@ impl ServerParticleKind {
             30 => Some(Self::Explosion),
             0 => Some(Self::AngryVillager),
             52 => Some(Self::Heart),
+            65 => Some(Self::Note),
             _ => None,
         }
     }
