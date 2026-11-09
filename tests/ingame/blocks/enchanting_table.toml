@@ -1,5 +1,5 @@
-# The enchanting table opens with its book, and the carried item draws over
-# the book.
+# The enchanting table's book: closed under the carried item, and open with
+# an item in the slot.
 
 [[step]]
 wait_ms = 2000
@@ -54,6 +54,21 @@ wait_ms = 1000
 
 [[step]]
 screenshot = "carried_over_book"
+
+[[step]]
+click = { slot = 0, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 0, item = "diamond_sword" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "open_book"
+
+[[step]]
+click = { slot = 0, op = "pickup_left" }
 
 [[step]]
 click = { slot = 29, op = "pickup_left" }
