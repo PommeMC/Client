@@ -3417,6 +3417,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_DRAGON_EGG_TELEPORT
                         || event_type == level_event::PARTICLES_SHULKER_TELEPORT
                         || event_type == level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
+                        || event_type == level_event::PARTICLES_ENDERMAN_TELEPORT
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3535,6 +3536,12 @@ impl AppCore {
                                 SimpleParticleType::new(Rc::clone(&self.particle_types.portal));
                             crate::world::level_event_handler::single_block_teleportation_particles(
                                 &mut level, pos, data, radii, &portal,
+                            );
+                        } else if event_type == level_event::PARTICLES_ENDERMAN_TELEPORT {
+                            let portal =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.portal));
+                            crate::world::level_event_handler::enderman_teleportation_particles(
+                                &mut level, pos, data, &portal,
                             );
                         }
                     }
