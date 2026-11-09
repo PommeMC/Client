@@ -3414,6 +3414,9 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_SCRAPE
                         || event_type == level_event::PARTICLES_ELECTRIC_SPARK
                         || event_type == level_event::PARTICLES_SMASH_ATTACK
+                        || event_type == level_event::PARTICLES_DRAGON_EGG_TELEPORT
+                        || event_type == level_event::PARTICLES_SHULKER_TELEPORT
+                        || event_type == level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3516,6 +3519,22 @@ impl AppCore {
                                 pos,
                                 data as i32,
                                 &self.particle_types.dust_pillar,
+                            );
+                        } else if matches!(
+                            event_type,
+                            level_event::PARTICLES_DRAGON_EGG_TELEPORT
+                                | level_event::PARTICLES_SHULKER_TELEPORT
+                                | level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
+                        ) {
+                            let radii = match event_type {
+                                level_event::PARTICLES_DRAGON_EGG_TELEPORT => [16, 8, 16],
+                                level_event::PARTICLES_SHULKER_TELEPORT => [8; 3],
+                                _ => [127; 3],
+                            };
+                            let portal =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.portal));
+                            crate::world::level_event_handler::single_block_teleportation_particles(
+                                &mut level, pos, data, radii, &portal,
                             );
                         }
                     }
