@@ -2711,13 +2711,9 @@ impl Renderer {
                     &item_atlas_uvs,
                 );
                 pass = blurred_pass;
-                let (below, above) = match overlay
-                    .iter()
-                    .position(|e| matches!(e, MenuElement::PictureInPicture))
-                {
-                    Some(i) => (&overlay[..i], &overlay[i + 1..]),
-                    None => (overlay, &[][..]),
-                };
+                let mut halves = overlay.splitn(2, |e| matches!(e, MenuElement::PictureInPicture));
+                let below = halves.next().unwrap_or_default();
+                let above = halves.next().unwrap_or_default();
                 let vbase = self.menu_pipeline.draw_from(
                     &self.ctx.device,
                     &mut pass,
