@@ -310,3 +310,33 @@ fn unpack_difference_in_position(pos: BlockPos, data: u32, radii: [i32; 3]) -> B
         pos.z.wrapping_add(dz),
     )
 }
+
+pub(crate) fn enderman_teleportation_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    data: u32,
+    portal: &SimpleParticleType,
+) {
+    let dimensions = crate::entity::dimensions::EntityDimensions::of(
+        azalea_registry::builtin::EntityKind::Enderman,
+    );
+    let to_pos = unpack_difference_in_position(pos, data, [127; 3]);
+    let random = level.get_random().clone();
+
+    for _ in 0..128 {
+        let distance = random.next_double();
+        let vx = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let vy = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let vz = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let x = f64::from(to_pos.x)
+            + distance * (f64::from(pos.x) - f64::from(to_pos.x))
+            + (random.next_double() - 0.5) * f64::from(dimensions.width) * 2.0;
+        let y = f64::from(to_pos.y)
+            + distance * (f64::from(pos.y) - f64::from(to_pos.y))
+            + random.next_double() * f64::from(dimensions.height);
+        let z = f64::from(to_pos.z)
+            + distance * (f64::from(pos.z) - f64::from(to_pos.z))
+            + (random.next_double() - 0.5) * f64::from(dimensions.width) * 2.0;
+        level.add_particle(portal, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
+    }
+}
