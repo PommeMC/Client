@@ -268,3 +268,45 @@ pub(crate) fn spawn_smash_attack_particles(
         i += 1;
     }
 }
+
+pub(crate) fn single_block_teleportation_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    data: u32,
+    radii: [i32; 3],
+    portal: &SimpleParticleType,
+) {
+    let to_pos = unpack_difference_in_position(pos, data, radii);
+    let random = level.get_random().clone();
+
+    for _ in 0..128 {
+        let distance = random.next_double();
+        let vx = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let vy = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let vz = f64::from((random.next_float() - 0.5_f32) * 0.2_f32);
+        let x = f64::from(to_pos.x)
+            + distance * (f64::from(pos.x) - f64::from(to_pos.x))
+            + (random.next_double() - 0.5)
+            + 0.5;
+        let y = f64::from(to_pos.y)
+            + distance * (f64::from(pos.y) - f64::from(to_pos.y))
+            + random.next_double()
+            - 0.5;
+        let z = f64::from(to_pos.z)
+            + distance * (f64::from(pos.z) - f64::from(to_pos.z))
+            + (random.next_double() - 0.5)
+            + 0.5;
+        level.add_particle(portal, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
+    }
+}
+
+fn unpack_difference_in_position(pos: BlockPos, data: u32, radii: [i32; 3]) -> BlockPos {
+    let dx = ((data >> 16) & 0xff) as i32 - radii[0];
+    let dy = ((data >> 8) & 0xff) as i32 - radii[1];
+    let dz = (data & 0xff) as i32 - radii[2];
+    BlockPos::new(
+        pos.x.wrapping_add(dx),
+        pos.y.wrapping_add(dy),
+        pos.z.wrapping_add(dz),
+    )
+}
