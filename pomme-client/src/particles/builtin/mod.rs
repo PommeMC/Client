@@ -7,6 +7,7 @@ use super::resources::{MappedParticleResources, ParticleResources};
 
 mod bubble_column;
 mod campfire_smoke;
+mod dragon_breath;
 mod drip;
 mod dust;
 mod dust_color_transition;
@@ -31,6 +32,7 @@ use self::bubble_column::{
     BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
 };
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
+use self::dragon_breath::DragonBreathParticleRegistration;
 use self::drip::{
     DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
 };
@@ -215,5 +217,9 @@ pub(crate) fn register_builtin_providers(
     resources.register(
         Rc::clone(&types.explosion_emitter),
         Rc::new(HugeExplosionSeedProvider::new(Rc::clone(&types.explosion))),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dragon_breath),
+        &DragonBreathParticleRegistration,
     );
 }
