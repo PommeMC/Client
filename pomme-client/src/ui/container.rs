@@ -136,18 +136,27 @@ pub fn push_backdrop(
     panel_w: f32,
     panel_h: f32,
 ) -> Panel {
+    push_transparent_background(elements, screen_w, screen_h);
+    panel_at(screen_w, screen_h, gs, panel_w, panel_h, 0.0)
+}
+
+/// The placement of a `panel_w` x `panel_h` (GUI units) panel, centered and
+/// then shifted `x_offset` GUI units right.
+pub fn panel_at(
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    panel_w: f32,
+    panel_h: f32,
+    x_offset: f32,
+) -> Panel {
     let scale = panel_scale(screen_w, screen_h, gs, panel_w, panel_h);
     let w = panel_w * scale;
     let h = panel_h * scale;
-    let ox = (screen_w - w) / 2.0;
-    let oy = (screen_h - h) / 2.0;
-
-    push_transparent_background(elements, screen_w, screen_h);
-
     Panel {
         scale,
-        ox,
-        oy,
+        ox: (screen_w - w) / 2.0 + x_offset * scale,
+        oy: (screen_h - h) / 2.0,
         w,
         h,
     }
@@ -184,8 +193,8 @@ pub fn push_panel_offset(
     sprite: SpriteId,
     x_offset: f32,
 ) -> Panel {
-    let mut panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
-    panel.ox += x_offset * panel.scale;
+    push_transparent_background(elements, screen_w, screen_h);
+    let panel = panel_at(screen_w, screen_h, gs, 176.0, panel_h, x_offset);
     panel.image(elements, sprite, 0.0, 0.0, 176.0, panel_h);
     panel
 }

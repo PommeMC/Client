@@ -368,6 +368,18 @@ pub enum CreativeAction {
     },
 }
 
+/// The panel's placement, for [`super::effects_in_inventory`].
+pub fn panel(screen_w: f32, screen_h: f32, gs: f32) -> super::container::Panel {
+    let (scale, ox, oy) = panel_layout(screen_w, screen_h, gs);
+    super::container::Panel {
+        scale,
+        ox,
+        oy,
+        w: TEX_W * scale,
+        h: TEX_H * scale,
+    }
+}
+
 /// Panel scale and top-left origin, centered on screen.
 fn panel_layout(screen_w: f32, screen_h: f32, gs: f32) -> (f32, f32, f32) {
     let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
@@ -466,6 +478,7 @@ pub fn build_creative_inventory(
     right_held: bool,
     shift: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
+    mut effects: Vec<MenuElement>,
 ) -> CreativeAction {
     // Vanilla creative keyPressed: T on a non-search tab jumps to the search
     // tab without typing the character (`ignoreTextInput`).
@@ -517,6 +530,7 @@ pub fn build_creative_inventory(
     }
 
     draw_tabs(elements, state, ox, oy, scale, true);
+    elements.append(&mut effects);
 
     if state.tab.shows_title() {
         elements.push(MenuElement::TextFlat {
@@ -1759,6 +1773,7 @@ mod tests {
             false,
             frame.shift,
             &|_, _| 0.0,
+            Vec::new(),
         )
     }
 

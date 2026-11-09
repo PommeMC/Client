@@ -39,7 +39,9 @@ pub struct InventoryResult {
 }
 
 /// Vanilla `InventoryScreen.extractBackground`: the panel and the player
-/// model, all a narrow screen shows behind the open recipe book.
+/// model, all a narrow screen shows behind the open recipe book, then the
+/// `effects` built by [`super::effects_in_inventory::push`].
+#[allow(clippy::too_many_arguments)]
 pub fn push_inventory_background(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
@@ -48,6 +50,7 @@ pub fn push_inventory_background(
     x_offset: f32,
     cursor: (f32, f32),
     inventory: &Inventory,
+    mut effects: Vec<MenuElement>,
 ) -> (Panel, PlayerPreview) {
     let panel = push_panel_offset(
         elements,
@@ -58,6 +61,7 @@ pub fn push_inventory_background(
         SpriteId::InventoryBackground,
         x_offset,
     );
+    elements.append(&mut effects);
     let preview = PlayerPreview {
         rect: [
             panel.ox + 26.0 * panel.scale,
@@ -87,9 +91,10 @@ pub fn build_inventory(
     gs: f32,
     x_offset: f32,
     deferred_cursor: Option<&mut ItemStack>,
+    effects: Vec<MenuElement>,
 ) -> InventoryResult {
     let (panel, player_preview) = push_inventory_background(
-        elements, screen_w, screen_h, gs, x_offset, cursor, inventory,
+        elements, screen_w, screen_h, gs, x_offset, cursor, inventory, effects,
     );
     panel.label(elements, 97.0, 6.0, "Crafting");
 

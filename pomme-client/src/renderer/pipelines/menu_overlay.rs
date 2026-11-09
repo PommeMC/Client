@@ -2287,6 +2287,8 @@ pub enum SpriteId {
     HotbarAttackIndicatorProgress,
     EffectBackground,
     EffectBackgroundAmbient,
+    EffectInventoryBackground,
+    EffectInventoryBackgroundAmbient,
     /// Index into `mob_effect::MOB_EFFECTS`.
     MobEffect(u8),
     /// Boss bar sprites, indexed by the wire ordinals: color 0..=6 (pink,
@@ -2753,6 +2755,16 @@ fn build_sprite_atlas(
             SpriteId::EffectBackgroundAmbient,
             "minecraft/textures/gui/sprites/hud/effect_background_ambient.png",
             0.0,
+        ),
+        (
+            SpriteId::EffectInventoryBackground,
+            "minecraft/textures/gui/sprites/container/inventory/effect_background.png",
+            4.0,
+        ),
+        (
+            SpriteId::EffectInventoryBackgroundAmbient,
+            "minecraft/textures/gui/sprites/container/inventory/effect_background_ambient.png",
+            4.0,
         ),
         (
             SpriteId::SpectatorClose,
