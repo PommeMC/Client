@@ -5,6 +5,7 @@ use std::rc::Rc;
 use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
+mod attack_sweep;
 mod bubble_column;
 mod campfire_smoke;
 mod dragon_breath;
@@ -30,6 +31,7 @@ mod suspended_town;
 mod terrain;
 mod water_drop;
 
+use self::attack_sweep::AttackSweepParticleRegistration;
 use self::bubble_column::{
     BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
 };
@@ -228,6 +230,10 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(Rc::clone(&types.heart), &HeartParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.note), &NoteParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.sweep_attack),
+        &AttackSweepParticleRegistration,
+    );
     resources.register_sprite_provider(
         Rc::clone(&types.angry_villager),
         &AngryVillagerParticleRegistration,
