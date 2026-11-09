@@ -25,3 +25,4 @@ pub(crate) const PARTICLES_EGG_CRACK: u32 = 3009;
 pub(crate) const PARTICLES_DRAGON_BLOCK_BREAK: u32 = 2008;
 pub(crate) const ANIMATION_END_GATEWAY_SPAWN: u32 = 3000;
 pub(crate) const PARTICLES_DRAGON_FIREBALL_SPLASH: u32 = 2006;
+pub(crate) const LAVA_FIZZ: u32 = 1501;
