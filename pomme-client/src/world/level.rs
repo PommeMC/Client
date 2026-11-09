@@ -156,6 +156,75 @@ impl<'a> LevelContext<'a> {
             }
         }
     }
+
+    /// One terrain particle at the struck face of the whole outline's bounds.
+    /// COMPAT: cached static outlines do not track animated shulker lids.
+    pub fn add_breaking_block_effect(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        direction: model::Direction,
+    ) {
+        use crate::particles::Particle;
+
+        let block_state_data = self.block_state_table().block_state_data(state);
+        if block_state_data.is_air()
+            || block_state_data.is_invisible()
+            || matches!(block_state_data.id(), "barrier" | "structure_void")
+        {
+            return;
+        }
+        let boxes = block_shape::outline_shape(block_state_data);
+        let Some((first, remaining)) = boxes.split_first() else {
+            // COMPAT: skip empty outlines instead of Source bounds()'s
+            // UnsupportedOperationException; do not substitute a full cube.
+            return;
+        };
+        let mut min = DVec3::new(first[0], first[1], first[2]);
+        let mut max = DVec3::new(first[3], first[4], first[5]);
+        for b in remaining {
+            min = min.min(DVec3::new(b[0], b[1], b[2]));
+            max = max.max(DVec3::new(b[3], b[4], b[5]));
+        }
+        let origin = DVec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        // Cached outlines include ZERO's offset; compensate in local bounds.
+        let offset = block_state_data.outline_shape_position(pos.x, pos.y, pos.z) - origin;
+        min += offset;
+        max += offset;
+
+        let random = self.get_random().clone();
+        let r = f64::from(0.1_f32);
+        let inset = f64::from(0.2_f32);
+        // All three LEVEL draws precede the face override and sprite lookup.
+        let mut spawn = DVec3::new(
+            origin.x + random.next_double() * (max.x - min.x - inset) + r + min.x,
+            origin.y + random.next_double() * (max.y - min.y - inset) + r + min.y,
+            origin.z + random.next_double() * (max.z - min.z - inset) + r + min.z,
+        );
+        match direction {
+            model::Direction::Down => spawn.y = origin.y + min.y - r,
+            model::Direction::Up => spawn.y = origin.y + max.y + r,
+            model::Direction::North => spawn.z = origin.z + min.z - r,
+            model::Direction::South => spawn.z = origin.z + max.z + r,
+            model::Direction::West => spawn.x = origin.x + min.x - r,
+            model::Direction::East => spawn.x = origin.x + max.x + r,
+        }
+
+        let appearance = self.block_particle_appearance();
+        let sprite = appearance.sprite(state);
+        let tint = appearance.tint(state, pos, self.chunks());
+        let mut particle = TerrainParticle::new(spawn, DVec3::ZERO, sprite, tint);
+        let velocity = particle.get_velocity();
+        let power = f64::from(0.2_f32);
+        particle.set_velocity(DVec3::new(
+            velocity.x * power,
+            (velocity.y - r) * power + r,
+            velocity.z * power,
+        ));
+        particle.scale(0.6_f32);
+        let particle: ParticleRef = Rc::new(RefCell::new(particle));
+        self.particle_engine().add(particle);
+    }
 }
 
 #[allow(dead_code, reason = "Particle spawning awaits producer integration")]
