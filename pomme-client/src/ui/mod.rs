@@ -11,6 +11,7 @@ pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;
 pub mod debug_entries;
+pub mod effects_in_inventory;
 pub mod enchantment;
 pub mod font;
 pub mod friends;

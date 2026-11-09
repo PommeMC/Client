@@ -185,10 +185,17 @@ impl ActiveMobEffects {
         }
     }
 
+    /// Vanilla `Ordering.natural().sortedCopy(activeEffects)`.
+    pub fn sorted(&self) -> Vec<MobEffectInstance> {
+        let mut sorted = self.0.clone();
+        sorted.sort_by(cmp_vanilla);
+        sorted
+    }
+
     /// Vanilla `Ordering.natural().reverse().sortedCopy(activeEffects)`.
     pub fn sorted_desc(&self) -> Vec<MobEffectInstance> {
-        let mut sorted = self.0.clone();
-        sorted.sort_by(|a, b| cmp_vanilla(b, a));
+        let mut sorted = self.sorted();
+        sorted.reverse();
         sorted
     }
 }

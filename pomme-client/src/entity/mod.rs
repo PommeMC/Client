@@ -1,4 +1,5 @@
 pub mod boat;
+pub mod body_rotation;
 pub mod components;
 pub mod dimensions;
 pub mod glowing;
@@ -854,6 +855,7 @@ pub struct LivingEntity {
     pub axolotl: AxolotlSim,
     pub armadillo: ArmadilloSim,
     pub goat: GoatSim,
+    body_control: body_rotation::BodyRotationControl,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
     pub laying_egg: bool,
@@ -1102,6 +1104,7 @@ impl LivingEntity {
             axolotl: AxolotlSim::default(),
             armadillo: ArmadilloSim::default(),
             goat: GoatSim::default(),
+            body_control: body_rotation::BodyRotationControl::default(),
             has_egg: false,
             laying_egg: false,
             puff_state: 0,
@@ -1651,18 +1654,25 @@ impl LivingEntity {
         }
     }
 
-    /// [`turn_body`] for this tick's move.
-    // TODO: a `Mob` turns its body through `BodyRotationControl.clientTick`
-    // instead: the body snaps to its yaw while moving, follows the head past
-    // `getMaxHeadYRot` (75 by default, 15 for a goat, 1 for an axolotl), and
-    // turns to face the head after it holds still for 10 ticks.
-    pub fn tick_body_rotation(&mut self) {
-        self.body_y_rot_deg = turn_body(
-            self.body_y_rot_deg,
-            self.look_dir.y_rot_deg(),
-            self.position.x - self.prev_position.x,
-            self.position.z - self.prev_position.z,
-            self.swing_time > 0,
+    /// Vanilla `tickHeadTurn` for this tick's move of (`dx`, `dz`):
+    /// [`turn_body`] for a player, the body control for a `Mob`.
+    pub fn tick_body_rotation(&mut self, dx: f64, dz: f64) {
+        let y_rot = self.look_dir.y_rot_deg();
+        if self.entity_type == EntityKind::Player {
+            self.body_y_rot_deg =
+                turn_body(self.body_y_rot_deg, y_rot, dx, dz, self.swing_time > 0);
+            return;
+        }
+        // A scared armadillo's control skips its client tick.
+        if self.entity_type == EntityKind::Armadillo && self.armadillo.is_scared() {
+            return;
+        }
+        self.body_control.client_tick(
+            &mut self.body_y_rot_deg,
+            &mut self.head_y_rot_deg,
+            y_rot,
+            (dx, dz),
+            body_rotation::max_head_y_rot(self.entity_type),
         );
     }
 }
@@ -2526,12 +2536,9 @@ impl EntityStore {
                 continue;
             }
             entity.tick_interpolation();
-            // A scared armadillo's body control skips its client tick.
-            if !(entity.entity_type == EntityKind::Armadillo && entity.armadillo.is_scared()) {
-                entity.tick_body_rotation();
-            }
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
+            entity.tick_body_rotation(dx, dz);
             let dy = if omnidirectional_air_mover(entity.entity_type) {
                 entity.position.y - entity.prev_position.y
             } else {

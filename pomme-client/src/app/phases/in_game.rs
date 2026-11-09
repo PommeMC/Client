@@ -47,7 +47,7 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::renderer::pipelines::entity_shadow::{ShadowCaster, ShadowScene};
 use crate::renderer::pipelines::lightmap::LightmapInfo;
-use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::renderer::pipelines::menu_overlay::{MenuElement, TooltipLine};
 use crate::renderer::pipelines::post_effect::PostEffect;
 use crate::renderer::pipelines::shaderpack::PackWorld;
 use crate::renderer::pipelines::sign_text::{SignFace, SignRenderInfo};
@@ -932,6 +932,55 @@ impl GameState {
             && !self.death_screen_open
             && !self.gui_open()
             && !self.chat.is_open()
+    }
+
+    /// The open screen's panel when it has vanilla's `EffectsInInventory`
+    /// (the inventory and creative screens).
+    fn effects_screen_panel(
+        &self,
+        sw: f32,
+        sh: f32,
+        gs: f32,
+    ) -> Option<crate::ui::container::Panel> {
+        if self.dialog_open() {
+            None
+        } else if self.creative_inventory_open {
+            Some(crate::ui::creative_inventory::panel(sw, sh, gs))
+        } else if self.inventory_open {
+            let x_offset = crate::ui::recipe_book::main_x_offset(
+                &self.recipe_book,
+                crate::recipe::RecipeBookType::Crafting,
+                sw,
+                gs,
+            );
+            Some(crate::ui::inventory::panel(sw, sh, gs, x_offset))
+        } else {
+            None
+        }
+    }
+
+    /// The open screen's `EffectsInInventory` elements, for it to draw over
+    /// its panel, and the tooltip to draw last.
+    fn screen_effects(
+        &self,
+        sw: f32,
+        sh: f32,
+        gs: f32,
+        cursor: (f32, f32),
+        spans_width_fn: crate::ui::common::SpansWidthFn<'_>,
+    ) -> (Vec<MenuElement>, Option<Vec<TooltipLine>>) {
+        let mut effects = Vec::new();
+        let tooltip = self.effects_screen_panel(sw, sh, gs).and_then(|panel| {
+            crate::ui::effects_in_inventory::push(
+                &mut effects,
+                &panel,
+                sw,
+                cursor,
+                &self.player.effects,
+                spans_width_fn,
+            )
+        });
+        (effects, tooltip)
     }
 
     pub fn gui_open(&self) -> bool {
@@ -3583,6 +3632,8 @@ pub fn update_game(
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
             &game.player.effects,
+            game.effects_screen_panel(sw, sh, gs)
+                .is_some_and(|panel| crate::ui::effects_in_inventory::can_see_effects(&panel, sw)),
             &game.boss_bars,
             gfx.renderer.is_first_person(),
             gs,
@@ -4113,6 +4164,9 @@ pub fn update_game(
                 }));
         }
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
+        let (mut effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
+        });
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
         let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
@@ -4152,6 +4206,7 @@ pub fn update_game(
                         cursor,
                         &game.player.inventory,
                     );
+                    elements.append(&mut effects);
                     player_preview = Some(preview);
                 }
             }
@@ -4335,6 +4390,7 @@ pub fn update_game(
                 gs,
                 main_x_offset,
                 recipe_book_visible.then_some(&mut deferred_recipe_cursor),
+                effects,
             );
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops, result.hovered, false)
@@ -4487,6 +4543,9 @@ pub fn update_game(
                 );
             }
         }
+        if let Some(lines) = effect_tooltip {
+            crate::ui::common::push_tooltip_lines(&mut elements, cursor, sw, sh, gs, lines);
+        }
         core.input.clear_just_pressed_actions();
     }
 
@@ -4510,6 +4569,9 @@ pub fn update_game(
         // Vanilla's focused search box takes every key, the drop key included.
         let drop = (!game.wants_text_input() && core.input.drop_key_just_pressed())
             .then(|| core.input.ctrl_held());
+        let (effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
+        });
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -4534,7 +4596,11 @@ pub fn update_game(
             core.input.right_held(),
             core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
+            effects,
         );
+        if let Some(lines) = effect_tooltip {
+            crate::ui::common::push_tooltip_lines(&mut elements, cursor, sw, sh, gs, lines);
+        }
         player_preview = crate::ui::creative_inventory::player_preview(
             &game.creative_state,
             sw,
