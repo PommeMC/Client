@@ -1209,7 +1209,7 @@ impl MainMenu {
     ) {
         let download = *self.bedrock.lock();
         let items = THEMES.map(|(label, theme)| {
-            let selected = theme == self.theme;
+            let selected = theme == self.options.theme;
             let (icon, progress) = match download {
                 _ if selected => (Some((ICON_CHECK, DROP_ACCENT)), None),
                 BedrockDownload::Running(done) if theme == PanoramaTheme::Bedrock => {
@@ -1239,7 +1239,7 @@ impl MainMenu {
             drop_bottom,
             drop_w,
             &items,
-        ) && THEMES[i].1 != self.theme
+        ) && THEMES[i].1 != self.options.theme
         {
             self.pick_theme(THEMES[i].1);
         }
@@ -1318,7 +1318,7 @@ impl MainMenu {
             let close_t = (tr.start.elapsed().as_secs_f32() / CLOSE_DURATION).min(1.0);
             if close_t >= 1.0 && !tr.reloaded {
                 tr.reloaded = true;
-                self.theme = tr.target;
+                self.options.theme = tr.target;
                 committed = true;
                 action = Some(MenuAction::ChangeTheme(tr.target));
             }

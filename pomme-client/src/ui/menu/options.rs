@@ -32,6 +32,15 @@ fn option_enabled(id: OptionId, disabled: &[OptionId]) -> bool {
     !disabled.contains(&id)
 }
 
+/// The controls a row builds; `Header` rows are text, not controls.
+fn row_ids(row: &OptRow) -> Vec<OptionId> {
+    match row {
+        OptRow::Header(_) => Vec::new(),
+        OptRow::Big(a) | OptRow::PairLeft(a) => vec![a.id],
+        OptRow::Pair(a, b) => vec![a.id, b.id],
+    }
+}
+
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
     match compat {
         PackCompat::Compatible => ("Compatible", [0.33, 0.87, 0.33, 1.0]),
@@ -200,7 +209,6 @@ impl MainMenu {
             (OptionId::CreditsAttribution, Screen::OptionsCredits),
         ];
 
-        let sliders: &[(OptionId, f32)] = &[(OptionId::Fov, self.slider_frac(OptionId::Fov))];
         // Nav rows are disabled only where the target is a `build_options_stub`
         // page; screens with real (if inert) controls stay reachable.
         let disabled = &[OptionId::Language, OptionId::TelemetryData];
@@ -212,7 +220,6 @@ impl MainMenu {
             Screen::Main,
             &rows,
             nav,
-            sliders,
             disabled,
             false,
             &[],
@@ -227,15 +234,6 @@ impl MainMenu {
         } else {
             "View Bobbing: OFF"
         }
-    }
-
-    /// The Menu Background Blur slider's label and position.
-    fn menu_background_blur_slider(&self) -> (String, f32) {
-        let radius = self.options.menu_background_blurriness;
-        (
-            menu_background_blur_label(radius),
-            f32::from(radius) / f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
-        )
     }
 
     fn show_subtitles_label(&self) -> &'static str {
@@ -389,7 +387,7 @@ impl MainMenu {
         } else {
             "Entity Shadows: OFF"
         };
-        let (blur_label, blur_frac) = self.menu_background_blur_slider();
+        let blur_label = menu_background_blur_label(self.options.menu_background_blurriness);
         let brightness = brightness_label(self.options.brightness);
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
@@ -472,30 +470,6 @@ impl MainMenu {
                 OptWidget::new(OptionId::ChunkFadeIn, "Chunk Fade-in: 1.0s"),
             ),
         ];
-        let sliders: &[(OptionId, f32)] = &[
-            (
-                OptionId::RenderDistance,
-                self.slider_frac(OptionId::RenderDistance),
-            ),
-            (
-                OptionId::ChunkDetail,
-                self.slider_frac(OptionId::ChunkDetail),
-            ),
-            (
-                OptionId::DistantTerrain,
-                self.slider_frac(OptionId::DistantTerrain),
-            ),
-            (
-                OptionId::SimulationDistance,
-                self.slider_frac(OptionId::SimulationDistance),
-            ),
-            (
-                OptionId::MaxFramerate,
-                self.slider_frac(OptionId::MaxFramerate),
-            ),
-            (OptionId::Brightness, self.options.brightness),
-            (OptionId::MenuBackgroundBlur, blur_frac),
-        ];
         let disabled = &[
             OptionId::FullscreenResolution,
             OptionId::InactivityFpsLimit,
@@ -525,7 +499,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -585,7 +558,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             nav,
-            &[],
             disabled,
             true,
             &[],
@@ -629,7 +601,6 @@ impl MainMenu {
             ),
             OptRow::PairLeft(OptWidget::new(OptionId::RawInput, "Raw Input: ON")),
         ];
-        let sliders: &[(OptionId, f32)] = &[(OptionId::Sensitivity, self.options.sensitivity)];
         let disabled = &[
             OptionId::ScrollSensitivity,
             OptionId::DiscreteScrolling,
@@ -644,7 +615,6 @@ impl MainMenu {
             Screen::OptionsControls,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -994,16 +964,6 @@ impl MainMenu {
                 OptWidget::new(OptionId::SaveUnsentChats, &drafts),
             ),
         ];
-        let sliders: &[(OptionId, f32)] = &[
-            (OptionId::ChatTextOpacity, o.opacity),
-            (OptionId::TextBackgroundOpacity, o.text_background_opacity),
-            (OptionId::ChatTextSize, o.scale),
-            (OptionId::LineSpacing, o.line_spacing),
-            (OptionId::ChatDelay, chat_delay_slider(o.delay_secs)),
-            (OptionId::Width, o.width),
-            (OptionId::FocusedHeight, o.height_focused),
-            (OptionId::UnfocusedHeight, o.height_unfocused),
-        ];
         // TODO: the menu tooltip wraps at 40% of the screen width and drops
         // `\n`; vanilla `Tooltip.create` splits lines and wraps at 170px.
         let tooltips: &[(OptionId, &str)] = &[
@@ -1033,7 +993,6 @@ impl MainMenu {
             self.settings_back.clone(),
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             tooltips,
@@ -1076,7 +1035,6 @@ impl MainMenu {
             &rows,
             &[],
             &[],
-            &[],
             true,
             tooltips,
             text_width_fn,
@@ -1110,7 +1068,7 @@ impl MainMenu {
         let chat_opacity = chat_opacity_label(o.opacity);
         let spacing = percent_label(CHAT_LINE_SPACING, o.line_spacing.into());
         let delay = chat_delay_label(o.delay_secs);
-        let (blur_label, blur_frac) = self.menu_background_blur_slider();
+        let blur_label = menu_background_blur_label(self.options.menu_background_blurriness);
         let rows: Vec<OptRow> = vec![
             OptRow::Pair(
                 OptWidget::new(OptionId::Narrator, "Narrator: OFF"),
@@ -1171,15 +1129,6 @@ impl MainMenu {
             ),
         ];
         let back = self.settings_back.clone();
-        let sliders: &[(OptionId, f32)] = &[
-            (OptionId::TextBackgroundOpacity, o.text_background_opacity),
-            (OptionId::ChatTextOpacity, o.opacity),
-            (OptionId::LineSpacing, o.line_spacing),
-            (OptionId::ChatDelay, chat_delay_slider(o.delay_secs)),
-            (OptionId::FovEffects, self.options.fov_effect_scale),
-            (OptionId::DamageTilt, self.options.damage_tilt_strength),
-            (OptionId::MenuBackgroundBlur, blur_frac),
-        ];
         let disabled = &[
             OptionId::Narrator,
             OptionId::HighContrast,
@@ -1205,7 +1154,6 @@ impl MainMenu {
             back,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -1273,19 +1221,6 @@ impl MainMenu {
                 OptWidget::new(OptionId::MusicToast, "Music Toast: ON"),
             ),
         ];
-        let sliders: &[(OptionId, f32)] = &[
-            (OptionId::MasterVolume, self.options.master_volume),
-            (OptionId::Music, self.options.music_volume),
-            (OptionId::JukeboxNoteBlocks, self.options.jukebox_volume),
-            (OptionId::Weather, self.options.weather_volume),
-            (OptionId::Blocks, self.options.blocks_volume),
-            (OptionId::HostileCreatures, self.options.hostile_volume),
-            (OptionId::FriendlyCreatures, self.options.friendly_volume),
-            (OptionId::Players, self.options.players_volume),
-            (OptionId::AmbientEnvironment, self.options.ambient_volume),
-            (OptionId::VoiceSpeech, self.options.voice_volume),
-            (OptionId::Ui, self.options.ui_volume),
-        ];
         let disabled = &[
             OptionId::Device,
             OptionId::DirectionalAudio,
@@ -1300,7 +1235,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            sliders,
             disabled,
             true,
             &[],
@@ -1394,7 +1328,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            &[],
             disabled,
             true,
             &[],
@@ -1463,7 +1396,6 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            &[],
             disabled,
             true,
             tooltips,
@@ -1482,7 +1414,6 @@ impl MainMenu {
         back: Screen,
         rows: &[OptRow],
         nav: &[(OptionId, Screen)],
-        sliders: &[(OptionId, f32)],
         disabled: &[OptionId],
         header_footer: bool,
         tooltips: &[(OptionId, &str)],
@@ -1585,6 +1516,13 @@ impl MainMenu {
             });
         }
 
+        for id in disabled {
+            debug_assert!(
+                rows.iter().flat_map(row_ids).any(|row_id| row_id == *id),
+                "{title}: disabled {id:?} matches no row",
+            );
+        }
+
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
 
@@ -1616,7 +1554,8 @@ impl MainMenu {
                 let enabled = option_enabled(id, disabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let hovered = enabled && hit;
-                if let Some((prefix, value)) = sliders.iter().find(|(p, _)| id == *p) {
+                if matches!(id.kind(), OptionKind::Slider { .. }) {
+                    let value = self.slider_frac(id);
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
                     // `setFocused` only re-arms editing when focus moves, so
@@ -1627,7 +1566,7 @@ impl MainMenu {
                     if focused && ctx.activate {
                         self.slider_can_change_value = !self.slider_can_change_value;
                     }
-                    let is_active = self.active_slider == Some(*prefix);
+                    let is_active = self.active_slider == Some(id);
                     let result = common::push_slider(
                         &mut elements,
                         cursor,
@@ -1640,7 +1579,7 @@ impl MainMenu {
                         gs,
                         fs,
                         label,
-                        *value,
+                        value,
                         enabled,
                         focused,
                         self.slider_can_change_value,
@@ -1649,16 +1588,15 @@ impl MainMenu {
                     );
                     any_hovered |= result.hovered;
                     if result.dragging {
-                        self.active_slider = Some(*prefix);
+                        self.active_slider = Some(id);
                     }
                     if let Some(v) = result.new_value {
-                        slider_results.push((*prefix, v));
+                        slider_results.push((id, v));
                     }
                     let steps = input.arrow_steps();
                     if focused && self.slider_can_change_value && steps != 0 {
-                        let step = self.slider_key_step(*prefix, bw, gs);
-                        slider_results
-                            .push((*prefix, (*value + steps as f32 * step).clamp(0.0, 1.0)));
+                        let step = self.slider_key_step(id, bw, gs);
+                        slider_results.push((id, (value + steps as f32 * step).clamp(0.0, 1.0)));
                     }
                     // `onRelease`: the click sound the press skipped. Also
                     // covers a press and release inside one frame.
@@ -1740,27 +1678,20 @@ impl MainMenu {
                         }
                         OptionId::MainHand => self
                             .set_main_hand_right(!self.options.skin_main_hand_right, key_bindings),
-                        _ => {
-                            if let Some(value) = id.get(&self.options) {
-                                let next = match id.kind() {
-                                    OptionKind::Toggle => 1.0 - value,
-                                    OptionKind::Cycle { count: Some(count) } => {
-                                        (value + 1.0) % count as f32
-                                    }
-                                    _ => value,
-                                };
-                                if id.set(&mut self.options, next) {
-                                    if matches!(
-                                        id,
-                                        OptionId::ForceUnicodeFont
-                                            | OptionId::JapaneseGlyphVariants
-                                    ) {
-                                        self.reload_fonts = true;
-                                    }
-                                    self.save_settings(key_bindings);
+                        _ if id.kind() == OptionKind::Toggle => {
+                            if let Some(value) = id.get(&self.options)
+                                && id.set(&mut self.options, 1.0 - value)
+                            {
+                                if matches!(
+                                    id,
+                                    OptionId::ForceUnicodeFont | OptionId::JapaneseGlyphVariants
+                                ) {
+                                    self.reload_fonts = true;
                                 }
+                                self.save_settings(key_bindings);
                             }
                         }
+                        _ => {}
                     }
                 }
             }
@@ -2673,15 +2604,14 @@ mod tests {
         key_bindings: KeyBindings,
         rows: [OptRow<'static>; 1],
         nav: Vec<(OptionId, Screen)>,
-        sliders: Vec<(OptionId, f32)>,
         disabled: Vec<OptionId>,
     }
 
     /// Assigns stable identities to the existing interaction fixtures.
     fn test_widget(label: &str) -> OptWidget<'_> {
         let id = match label {
-            "Sensitivity: 50%" | "Sensitivity:" => OptionId::Sensitivity,
-            "FOV: 70" | "FOV:" => OptionId::Fov,
+            "Sensitivity: 50%" => OptionId::Sensitivity,
+            "FOV: 70" => OptionId::Fov,
             "Entity Shadows: ON" => OptionId::EntityShadows,
             "First" => OptionId::Online,
             "Second" => OptionId::Language,
@@ -2698,15 +2628,8 @@ mod tests {
                 key_bindings,
                 rows: [OptRow::Pair(test_widget(left), test_widget(right))],
                 nav: Vec::new(),
-                sliders: Vec::new(),
                 disabled: Vec::new(),
             }
-        }
-
-        fn with_slider(left: &'static str, right: &'static str, prefix: &'static str) -> Self {
-            let mut grid = Self::new(left, right);
-            grid.sliders.push((test_widget(prefix).id, 0.5));
-            grid
         }
 
         fn frame(&mut self, input: &MenuInput) -> MainMenuResult {
@@ -2719,7 +2642,6 @@ mod tests {
                 Screen::Main,
                 &self.rows,
                 &self.nav,
-                &self.sliders,
                 &self.disabled,
                 false,
                 &[],
@@ -2823,7 +2745,7 @@ mod tests {
 
     #[test]
     fn tab_reaches_sliders_and_enter_toggles_keyboard_editing() {
-        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let mut grid = Grid::new("First", "Sensitivity: 50%");
         let enter = MenuInput {
             enter: true,
             ..Default::default()
@@ -2848,7 +2770,7 @@ mod tests {
 
     #[test]
     fn discrete_slider_steps_one_value_per_arrow() {
-        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+        let mut grid = Grid::new("First", "FOV: 70");
 
         grid.frame(&MenuInput::default());
         grid.frame(&tab());
@@ -2859,7 +2781,7 @@ mod tests {
 
     #[test]
     fn gamepad_dpad_steps_a_focused_slider() {
-        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+        let mut grid = Grid::new("First", "FOV: 70");
         let dpad_right = MenuInput {
             gamepad_steps: 1,
             ..Default::default()
@@ -2881,7 +2803,7 @@ mod tests {
 
     #[test]
     fn slider_click_then_tab_moves_to_the_next_widget() {
-        let mut grid = Grid::with_slider("Sensitivity: 50%", "Second", "Sensitivity:");
+        let mut grid = Grid::new("Sensitivity: 50%", "Second");
 
         grid.frame(&click(300.0));
         grid.frame(&MenuInput::default());
@@ -2891,7 +2813,7 @@ mod tests {
 
     #[test]
     fn press_and_release_in_one_frame_releases_the_slider() {
-        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let mut grid = Grid::new("First", "Sensitivity: 50%");
         let tap = MenuInput {
             mouse_held: false,
             ..click(450.0)
@@ -2943,8 +2865,8 @@ mod tests {
         assert_eq!(ctx.focus, Some(0));
     }
 
-    /// Every options screen builds with its typed control and disabled
-    /// identities.
+    /// Drives every options screen so `build_options_grid`'s debug assertion
+    /// checks each screen's rows against its disabled list.
     #[test]
     fn typed_options_cover_every_options_screen() {
         let mut key_bindings = KeyBindings::default();

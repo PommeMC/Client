@@ -415,7 +415,6 @@ pub struct MainMenu {
     /// title-screen icon row and the Options grid, and for Chat Settings,
     /// which also open from chat.
     settings_back: Screen,
-    theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
     /// Where `pomme_install::bedrock` installs the Bedrock theme's files.
     bedrock_dir: PathBuf,
@@ -455,8 +454,8 @@ pub struct MainMenu {
     pub options: GameOptions,
     /// Server-announced view distance cap; 0 when unknown.
     pub server_render_distance: u32,
-    /// The directory [`GameOptions::shader_pack`] names a pack in.
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
+    /// The directory [`GameOptions::shader_pack`] names a pack in.
     pub shader_packs_dir: PathBuf,
     /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
@@ -560,7 +559,6 @@ impl MainMenu {
             links_open: false,
             theme_open: false,
             settings_back: Screen::Options,
-            theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
             bedrock_dir,
             bedrock: Arc::new(parking_lot::Mutex::new(BedrockDownload::Idle)),
@@ -606,8 +604,8 @@ impl MainMenu {
         };
         // Saved on Bedrock but its files are gone: start on Default and pick
         // Bedrock again, which downloads them and then switches.
-        if menu.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
-            menu.theme = PanoramaTheme::Java;
+        if menu.options.theme == PanoramaTheme::Bedrock && !menu.bedrock_installed() {
+            menu.options.theme = PanoramaTheme::Java;
             menu.pick_theme(PanoramaTheme::Bedrock);
         }
         menu
@@ -786,7 +784,6 @@ impl MainMenu {
             .bench_render_distance
             .saved()
             .unwrap_or(options.render_distance);
-        options.theme = self.theme.to_u8();
         self.settings_dirty = save_settings(&self.settings_dir, &options).is_err();
     }
 
@@ -880,7 +877,7 @@ impl MainMenu {
     }
 
     pub fn theme(&self) -> PanoramaTheme {
-        self.theme
+        self.options.theme
     }
 
     /// The title screen's rotating 3D skin. Pomme's and Bedrock's screens
@@ -889,7 +886,7 @@ impl MainMenu {
         if !self.is_main_screen() {
             return None;
         }
-        match self.theme {
+        match self.options.theme {
             PanoramaTheme::Pomme => Some(crate::renderer::MenuSkin {
                 at: (0.7, 0.5),
                 scale: 1.0,
@@ -928,7 +925,7 @@ impl MainMenu {
     /// The favicons and faces the current screen draws, once either changed
     /// (`set_screen` marks both changed).
     pub fn menu_atlas_images(&mut self) -> Option<Vec<(String, Vec<u8>, u32)>> {
-        let bedrock_main = self.is_main_screen() && self.theme == PanoramaTheme::Bedrock;
+        let bedrock_main = self.is_main_screen() && self.options.theme == PanoramaTheme::Bedrock;
         let favicons = bedrock_main || self.is_server_list_screen();
         let faces = bedrock_main || self.is_friends_screen();
         let favicons_changed = favicons && self.favicons_changed();
@@ -1254,7 +1251,7 @@ mod tests {
     fn the_bedrock_title_screen_uploads_faces_and_favicons_together() {
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-menu-atlas-test", &mut key_bindings);
-        menu.theme = PanoramaTheme::Bedrock;
+        menu.options.theme = PanoramaTheme::Bedrock;
         menu.face_cache
             .write()
             .insert("face".into(), vec![0; 8 * 8 * 4]);
@@ -1475,7 +1472,7 @@ mod tests {
         let mut legacy = serde_json::to_value(GameOptions::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("theme");
         let legacy: GameOptions = serde_json::from_value(legacy).unwrap();
-        assert_eq!(PanoramaTheme::from_u8(legacy.theme), PanoramaTheme::Pomme);
+        assert_eq!(legacy.theme, PanoramaTheme::Pomme);
 
         for theme in [
             PanoramaTheme::Pomme,
@@ -1483,12 +1480,12 @@ mod tests {
             PanoramaTheme::Bedrock,
         ] {
             let settings = GameOptions {
-                theme: theme.to_u8(),
+                theme,
                 ..GameOptions::default()
             };
             let json = serde_json::to_string(&settings).unwrap();
             let loaded: GameOptions = serde_json::from_str(&json).unwrap();
-            assert_eq!(PanoramaTheme::from_u8(loaded.theme), theme);
+            assert_eq!(loaded.theme, theme);
         }
     }
 }

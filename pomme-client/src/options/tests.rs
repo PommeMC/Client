@@ -18,7 +18,7 @@ fn option_ids_change_one_field() {
         if let Some(value) = id.get(&options) {
             let next = match id.kind() {
                 OptionKind::Toggle => 1.0 - value,
-                OptionKind::Cycle { .. } => (value + 1.0) % 3.0,
+                OptionKind::Cycle => (value + 1.0) % 3.0,
                 OptionKind::Slider { min, max, .. } => {
                     if value == min {
                         max

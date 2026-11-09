@@ -47,6 +47,8 @@ pub(crate) fn distant_terrain_chunks(step: u32) -> u32 {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameOptions {
+    /// Read on load and written on save only: the live bindings are the
+    /// input state's.
     pub key_bindings: KeyBindings,
     #[serde(rename = "gui_scale")]
     pub gui_scale_setting: u32,
@@ -104,8 +106,8 @@ pub struct GameOptions {
     #[serde(with = "ordinal_codec")]
     pub display_mode: DisplayMode,
     // Legacy files without a theme selected Pomme; fresh games start on Java.
-    #[serde(default)]
-    pub theme: u8,
+    #[serde(with = "ordinal_codec", default = "legacy_theme")]
+    pub theme: PanoramaTheme,
     #[serde(rename = "chat")]
     pub chat_options: ChatOptions,
     pub force_unicode_font: bool,
@@ -162,12 +164,16 @@ impl Default for GameOptions {
             shader_pack: None,
             attack_indicator: AttackIndicatorMode::Crosshair,
             display_mode: DisplayMode::Windowed,
-            theme: PanoramaTheme::Java.to_u8(),
+            theme: PanoramaTheme::Java,
             chat_options: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
+}
+
+fn legacy_theme() -> PanoramaTheme {
+    PanoramaTheme::Pomme
 }
 
 // TODO: vanilla reads `Locale.getDefault()`, which follows the OS locale;
@@ -202,7 +208,7 @@ macro_rules! ordinal {
         }
     )*};
 }
-ordinal!(DisplayMode, CloudMode, AttackIndicatorMode);
+ordinal!(DisplayMode, CloudMode, AttackIndicatorMode, PanoramaTheme);
 
 mod ordinal_codec {
     use serde::{Deserialize, Serialize};

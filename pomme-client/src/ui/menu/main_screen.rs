@@ -13,7 +13,7 @@ impl MainMenu {
         text_width_fn: impl Fn(&str, f32) -> f32,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        match self.theme {
+        match self.options.theme {
             PanoramaTheme::Pomme => {
                 self.build_main_pomme(screen_w, screen_h, input, text_width_fn, key_bindings)
             }
