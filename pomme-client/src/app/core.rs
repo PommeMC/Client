@@ -3663,6 +3663,9 @@ impl AppCore {
                         ServerParticleKind::Note => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.note))
                         }
+                        ServerParticleKind::SweepAttack => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sweep_attack))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
