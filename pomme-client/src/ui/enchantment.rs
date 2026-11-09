@@ -227,6 +227,7 @@ pub fn build_enchantment(
         166.0,
         SpriteId::EnchantingTableBackground,
     );
+    elements.push(MenuElement::PictureInPicture);
     panel.label(elements, 8.0, 6.0, title);
     panel.inventory_label(elements, 72.0);
 

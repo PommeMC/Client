@@ -2696,13 +2696,16 @@ impl Renderer {
                     &item_atlas_uvs,
                 );
                 pass = blurred_pass;
-                self.menu_pipeline.draw_from(
+                let mut halves = overlay.splitn(2, |e| matches!(e, MenuElement::PictureInPicture));
+                let below = halves.next().unwrap_or_default();
+                let above = halves.next().unwrap_or_default();
+                let vbase = self.menu_pipeline.draw_from(
                     &self.ctx.device,
                     &mut pass,
                     frame,
                     sw,
                     sh,
-                    overlay,
+                    below,
                     &item_atlas_uvs,
                     vbase,
                 );
@@ -2733,6 +2736,17 @@ impl Renderer {
                     self.book_preview.draw_in_box(&mut pass, frame, *p, sw, sh);
                     pass.set_scissor_rect(scissor);
                 }
+
+                self.menu_pipeline.draw_from(
+                    &self.ctx.device,
+                    &mut pass,
+                    frame,
+                    sw,
+                    sh,
+                    above,
+                    &item_atlas_uvs,
+                    vbase,
+                );
 
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
