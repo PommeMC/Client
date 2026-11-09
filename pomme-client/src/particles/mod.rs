@@ -32,6 +32,7 @@ mod particle;
 pub(crate) mod particle_engine_access;
 mod particle_provider;
 mod particle_types;
+pub(crate) mod power_particle_option;
 mod registry;
 pub(crate) mod render;
 mod resources;

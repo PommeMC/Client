@@ -3423,6 +3423,7 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_EGG_CRACK
                         || event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK
                         || event_type == level_event::ANIMATION_END_GATEWAY_SPAWN
+                        || event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3595,6 +3596,13 @@ impl AppCore {
                                 &mut level,
                                 pos,
                                 &explosion_emitter,
+                            );
+                        } else if event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH {
+                            crate::world::level_event_handler::dragon_fireball_splash_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                Rc::clone(&self.particle_types.dragon_breath),
                             );
                         }
                     }

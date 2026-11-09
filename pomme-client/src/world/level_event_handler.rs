@@ -3,11 +3,14 @@
 //! particle emission helpers; dispatch remains in app/core.rs. Revisit its
 //! placement when porting the broader Vanilla handler.
 
+use std::rc::Rc;
+
 use glam::DVec3;
 
 use super::block::model::Direction;
 use super::level::LevelContext;
-use crate::particles::types::SimpleParticleType;
+use crate::particles::power_particle_option::PowerParticleOption;
+use crate::particles::types::{ParticleType, SimpleParticleType};
 use crate::position::BlockPos;
 use crate::util::random_source::RandomSource;
 
@@ -361,4 +364,42 @@ pub(crate) fn end_gateway_spawn_particles(
     let random = level.get_random();
     let _pitch = (1.0_f32 + (random.next_float() - random.next_float()) * 0.2_f32) * 0.7_f32;
     let _ = random.next_long();
+}
+
+pub(crate) fn dragon_fireball_splash_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    data: u32,
+    dragon_breath: Rc<ParticleType<PowerParticleOption>>,
+) {
+    let random = level.get_random().clone();
+    for _ in 0..200 {
+        let distance = random.next_float() * 4.0_f32;
+        let angle = random.next_float() * (std::f64::consts::PI * 2.0) as f32;
+        let vx = f64::from(mth_sin_entry(angle, 16384.0) * distance);
+        let vy = 0.01 + random.next_double() * 0.5;
+        let vz = f64::from(mth_sin_entry(angle, 0.0) * distance);
+        let options = PowerParticleOption::create(Rc::clone(&dragon_breath), distance);
+        let position = DVec3::new(
+            f64::from(pos.x) + vx * 0.1,
+            f64::from(pos.y) + 0.3,
+            f64::from(pos.z) + vz * 0.1,
+        );
+        level.add_particle(&options, position, DVec3::new(vx, vy, vz));
+    }
+    if data == 1 {
+        // COMPAT: omit DRAGON_FIREBALL_EXPLODE/HOSTILE playback, but preserve
+        // LEVEL pitch then seed. Source's BlockPos sound overload centers at
+        // +0.5; subsequent sound-instance randomness belongs to its own RNG.
+        let _pitch = random.next_float() * 0.1_f32 + 0.9_f32;
+        let _ = random.next_long();
+    }
+}
+
+fn mth_sin_entry(angle: f32, offset: f64) -> f32 {
+    // Source Mth selects a quantized table index, then uses this exact f64
+    // initializer expression, narrowed to f32. Compute only the selected entry;
+    // platform libm and Java Math need not agree in their final bit.
+    let index = ((f64::from(angle) * 10430.378350470453 + offset) as i64) & 65535;
+    (index as f64 / 10430.378350470453).sin() as f32
 }
