@@ -3387,23 +3387,6 @@ pub fn update_game(
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
-    // Name tags are world-space in vanilla, under screen effects and the GUI.
-    if !benchmark_running && !game.hide_gui {
-        let renderer = &gfx.renderer;
-        crate::ui::player_tab::build_player_nameplates(
-            &mut elements,
-            crate::ui::player_tab::PlayerNameplates {
-                entity_store: &game.entity_store,
-                tab_list: &game.tab_list,
-                scoreboard: &game.scoreboard,
-                local_uuid: core.user.uuid,
-                partial_tick,
-                gs,
-                camera_pos: renderer.camera_render_position(),
-                project: &|position| renderer.project_world_to_screen(position),
-            },
-        );
-    }
     // Underwater overlay (vanilla ScreenEffectRenderer.submitWater): part of
     // the 3D pass in vanilla, so it shows even with the GUI hidden, but not
     // while sleeping.

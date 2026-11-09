@@ -1,7 +1,6 @@
 //! Ported 1:1 from vanilla `PlayerTabOverlay.extractRenderState`
 //! (reference/26.1/decompiled/.../PlayerTabOverlay.java:103-204).
 
-use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::chat::wrap_spans;
@@ -200,57 +199,6 @@ fn wrap_lines(
 
 fn display_name_for(p: &TabListPlayer, scoreboard: &Scoreboard) -> Vec<TextSpan> {
     scoreboard.player_name(&p.name, p.display_name.as_deref())
-}
-
-pub struct PlayerNameplates<'a> {
-    pub entity_store: &'a EntityStore,
-    pub tab_list: &'a TabList,
-    pub scoreboard: &'a Scoreboard,
-    pub local_uuid: uuid::Uuid,
-    pub partial_tick: f32,
-    pub gs: f32,
-    pub camera_pos: glam::DVec3,
-    pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
-}
-
-// TODO: vanilla renders name tags as world-space billboards (0.025 scale,
-// shrinking with distance, 25% black backdrop, a see-through pass behind
-// walls, sneak dimming, no shadow) and honors team nametagVisibility; this
-// screen-space projection is an approximation until a world-space text path
-// exists.
-pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
-    for entity in nameplates.entity_store.living.values() {
-        let Some(uuid) = entity.player_uuid else {
-            continue;
-        };
-        if uuid == nameplates.local_uuid {
-            continue;
-        }
-        let Some(player) = nameplates.tab_list.players.get(&uuid) else {
-            continue;
-        };
-        let pos = entity
-            .prev_position
-            .lerp(entity.position, nameplates.partial_tick as f64)
-            // Vanilla anchors at the pose bounding-box height + 0.5.
-            + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
-        let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-        if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
-            continue;
-        }
-        let Some((x, y)) = (nameplates.project)(*pos) else {
-            continue;
-        };
-        elements.push(MenuElement::TextSpans {
-            x,
-            y: y - 4.0 * nameplates.gs,
-            // The tab-list display name is tab-only in vanilla; name tags
-            // always use the team-formatted profile name.
-            spans: nameplates.scoreboard.player_name(&player.name, None),
-            scale: FONT_SIZE * nameplates.gs,
-            centered: true,
-        });
-    }
 }
 
 fn ping_sprite(latency: i32) -> SpriteId {
