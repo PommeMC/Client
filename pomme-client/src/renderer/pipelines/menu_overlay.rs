@@ -2226,6 +2226,9 @@ pub enum MenuElement {
     /// Vanilla `blurBeforeThisStratum`: elements before it are blurred in
     /// place by the Menu Background Blur, and the rest drawn sharp on top.
     BlurBackground,
+    /// Vanilla `PictureInPictureRenderer.blitTexture`: the frame's 3D preview
+    /// (player model, enchanting book) draws here, under later elements.
+    PictureInPicture,
     /// Full-screen vignette, multiplying the framebuffer down by `brightness`.
     Vignette {
         w: f32,

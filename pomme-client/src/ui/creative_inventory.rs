@@ -517,6 +517,7 @@ pub fn build_creative_inventory(
     }
 
     draw_tabs(elements, state, ox, oy, scale, true);
+    elements.push(MenuElement::PictureInPicture);
 
     if state.tab.shows_title() {
         elements.push(MenuElement::TextFlat {

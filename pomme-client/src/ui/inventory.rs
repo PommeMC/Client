@@ -70,6 +70,7 @@ pub fn push_inventory_background(
         cursor,
         armor: armor_render_infos(inventory.armor_slots()),
     };
+    elements.push(MenuElement::PictureInPicture);
     (panel, preview)
 }
 
