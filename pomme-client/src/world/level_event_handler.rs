@@ -343,3 +343,22 @@ pub(crate) fn enderman_teleportation_particles(
         level.add_particle(portal, DVec3::new(x, y, z), DVec3::new(vx, vy, vz));
     }
 }
+
+pub(crate) fn end_gateway_spawn_particles(
+    level: &mut LevelContext<'_>,
+    pos: BlockPos,
+    explosion_emitter: &SimpleParticleType,
+) {
+    let center = DVec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    level.add_always_visible_particle_with_override(explosion_emitter, true, center, DVec3::ZERO);
+    // COMPAT: END_GATEWAY_SPAWN/BLOCKS playback (volume 10, no distance delay)
+    // is deferred. Preserve its LEVEL pitch draws and unconditional sound seed
+    // after particle construction, including when the sound would be muted.
+    let random = level.get_random();
+    let _pitch = (1.0_f32 + (random.next_float() - random.next_float()) * 0.2_f32) * 0.7_f32;
+    let _ = random.next_long();
+}

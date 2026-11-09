@@ -3421,6 +3421,8 @@ impl AppCore {
                         || event_type == level_event::PARTICLES_DESTROY_PROGRESS
                         || event_type == level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
                         || event_type == level_event::PARTICLES_EGG_CRACK
+                        || event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK
+                        || event_type == level_event::ANIMATION_END_GATEWAY_SPAWN
                     {
                         let level_random = game.level_runtime.get_random().clone();
                         let engine_access = self.particle_engine.engine_access();
@@ -3576,6 +3578,24 @@ impl AppCore {
                                 &egg_crack,
                                 3..=6,
                             );
+                        } else if event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK {
+                            let explosion =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.explosion));
+                            let center = dvec3(
+                                f64::from(pos.x) + 0.5,
+                                f64::from(pos.y) + 0.5,
+                                f64::from(pos.z) + 0.5,
+                            );
+                            level.add_particle(&explosion, center, dvec3(0.0, 0.0, 0.0));
+                        } else if event_type == level_event::ANIMATION_END_GATEWAY_SPAWN {
+                            let explosion_emitter = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.explosion_emitter,
+                            ));
+                            crate::world::level_event_handler::end_gateway_spawn_particles(
+                                &mut level,
+                                pos,
+                                &explosion_emitter,
+                            );
                         }
                     }
                 }
@@ -3596,6 +3616,12 @@ impl AppCore {
                         ServerParticleKind::EndRod => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.end_rod))
                         }
+                        ServerParticleKind::Explosion => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.explosion))
+                        }
+                        ServerParticleKind::ExplosionEmitter => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.explosion_emitter,
+                        )),
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
