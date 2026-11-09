@@ -3387,6 +3387,23 @@ pub fn update_game(
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
+    // Name tags are world-space in vanilla, under screen effects and the GUI.
+    if !benchmark_running && !game.hide_gui {
+        let renderer = &gfx.renderer;
+        crate::ui::player_tab::build_player_nameplates(
+            &mut elements,
+            crate::ui::player_tab::PlayerNameplates {
+                entity_store: &game.entity_store,
+                tab_list: &game.tab_list,
+                scoreboard: &game.scoreboard,
+                local_uuid: core.user.uuid,
+                partial_tick,
+                gs,
+                camera_pos: renderer.camera_render_position(),
+                project: &|position| renderer.project_world_to_screen(position),
+            },
+        );
+    }
     // Underwater overlay (vanilla ScreenEffectRenderer.submitWater): part of
     // the 3D pass in vanilla, so it shows even with the GUI hidden, but not
     // while sleeping.
@@ -3618,6 +3635,7 @@ pub fn update_game(
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_focused() {
+        let dialog_open = game.dialog_open();
         let command_tree = game.command_tree.clone();
         // Vanilla `ChatScreen.mouseClicked` offers the click to the chat's own
         // targets before its widgets.
@@ -3631,7 +3649,7 @@ pub fn update_game(
                 screen_h: sh,
                 gui_scale: gs,
                 cursor: core.input.cursor_pos(),
-                covered: game.dialog_open(),
+                covered: dialog_open,
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
@@ -3644,7 +3662,7 @@ pub fn update_game(
         if let Some(action) = chat_action {
             handle_chat_ui_action(action, core, connection, game);
         }
-        if game.chat.is_in_bed() && !game.dialog_open() && !game.chat.has_pending_modal_prompt() {
+        if game.chat.is_in_bed() && !dialog_open && !game.chat.has_pending_modal_prompt() {
             let hovered = common::push_button(
                 &mut elements,
                 core.input.cursor_pos(),
@@ -3692,7 +3710,7 @@ pub fn update_game(
         game.subtitles
             .on_play_sound(&ev.key, *ev.pos, ev.range, subtitle_now);
     }
-    let in_game_ui = game.in_game_ui();
+    let in_game_ui = game.in_game_ui() && !game.dialog_open();
     let mut subtitles = Vec::new();
     if core.menu.show_subtitles && !benchmark_running && (!game.hide_gui || in_game_ui) {
         let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
@@ -3710,23 +3728,6 @@ pub fn update_game(
     }
     if !in_game_ui && !game.input_live() {
         elements.append(&mut subtitles);
-    }
-
-    if !benchmark_running && !game.hide_gui {
-        let renderer = &gfx.renderer;
-        crate::ui::player_tab::build_player_nameplates(
-            &mut elements,
-            crate::ui::player_tab::PlayerNameplates {
-                entity_store: &game.entity_store,
-                tab_list: &game.tab_list,
-                scoreboard: &game.scoreboard,
-                local_uuid: core.user.uuid,
-                partial_tick,
-                gs,
-                camera_pos: renderer.camera_render_position(),
-                project: &|position| renderer.project_world_to_screen(position),
-            },
-        );
     }
 
     if let Some(switcher) = &mut game.game_mode_switcher {
