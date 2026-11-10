@@ -187,6 +187,7 @@ pub enum ServerParticleKind {
     Poof,
     Rain,
     Ash,
+    WhiteAsh,
 }
 
 impl ServerParticleKind {
@@ -220,6 +221,7 @@ impl ServerParticleKind {
             66 => Some(Self::Poof),
             68 => Some(Self::Rain),
             91 => Some(Self::Ash),
+            99 => Some(Self::WhiteAsh),
             _ => None,
         }
     }
