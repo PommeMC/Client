@@ -117,6 +117,46 @@ mouse_down = "right"
 [[step]]
 expect = { player = { using_item = true } }
 
+# Disabled again, for long enough to outlast a dimension change. The new
+# player the change makes has no cooldowns, so the shield goes straight back
+# up.
+[[step]]
+chat = "/item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] weapon.mainhand with minecraft:iron_axe[weapon={disable_blocking_for_seconds:20}]"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+chat = "/execute in minecraft:the_nether run tp @s 0 100 0"
+
+[[step]]
+expect = { player = { dimension = "the_nether" } }
+
+[[step]]
+chat = "/execute in minecraft:overworld run tp @s 0.5 -60 0.5"
+
+[[step]]
+expect = { player = { dimension = "overworld", position = [0.5, -60.0, 0.5] } }
+
+# Past the loading screen, which would take the click.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
 [[step]]
 mouse_up = "right"
 

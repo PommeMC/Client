@@ -858,7 +858,7 @@ impl InteractionState {
                     chunks,
                     hit,
                     hand,
-                    held.place_block,
+                    self.placed_block(&held),
                     suppress_block_use,
                     player_pos,
                     player_aabb,
@@ -1045,6 +1045,18 @@ impl InteractionState {
         self.o_attack_anim = 0.0;
         self.attack_strength_ticker = 0;
         self.last_item_in_main_hand = None;
+        // The new `LocalPlayer` starts with no cooldowns.
+        self.item_cooldowns = ItemCooldowns::default();
+    }
+
+    /// The block `held` places, unless it's on cooldown: vanilla
+    /// `performUseItemOn` passes before `useOn` for an item on cooldown.
+    fn placed_block(&self, held: &HandItem) -> Option<BlockState> {
+        held.place_block.filter(|_| {
+            !held
+                .stack
+                .is_some_and(|s| self.item_cooldowns.is_on_cooldown(s))
+        })
     }
 
     /// Client `LivingEntity.onSyncedDataUpdated(DATA_LIVING_ENTITY_FLAGS)`:
@@ -2304,6 +2316,29 @@ mod tests {
         state.update_swing();
         assert!(state.swing_progress(InteractionHand::OffHand, 1.0) > 0.0);
         assert_eq!(state.swing_progress(InteractionHand::MainHand, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_block_on_cooldown_places_nothing() {
+        let mut state = InteractionState::new();
+        let stone = ItemStackData::new(ItemKind::Stone, 1);
+        let held = HandItem {
+            stack: Some(&stone),
+            place_block: Some(BlockState::AIR),
+            worn: Worn::default(),
+        };
+        assert!(state.placed_block(&held).is_some());
+        state.item_cooldowns.set("minecraft:stone".into(), 20);
+        assert!(state.placed_block(&held).is_none());
+    }
+
+    #[test]
+    fn respawning_clears_item_cooldowns() {
+        let mut state = InteractionState::new();
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        state.item_cooldowns.set("minecraft:shield".into(), 100);
+        state.reset_player_transients_for_respawn();
+        assert!(!state.item_cooldowns.is_on_cooldown(&shield));
     }
 
     #[test]
