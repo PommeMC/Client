@@ -27,6 +27,7 @@ mod portal;
 mod reverse_portal;
 mod smoke;
 mod snowflake;
+mod soul;
 mod squid_ink;
 mod sulfur_bubble;
 mod suspended;
@@ -272,5 +273,10 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.snowflake),
         &snowflake::SnowflakeParticleRegistration,
+    );
+    resources.register_sprite_provider(Rc::clone(&types.soul), &soul::SoulParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.sculk_soul),
+        &soul::SculkSoulParticleRegistration,
     );
 }
