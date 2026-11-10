@@ -312,6 +312,12 @@ impl AudioEngine {
         (engine, event_tx, command_rx)
     }
 
+    /// An engine with no worker and nothing to play, for tests outside audio.
+    #[cfg(test)]
+    pub(crate) fn silent() -> Self {
+        Self::for_test().0
+    }
+
     pub fn set_volumes(&mut self, volumes: [f32; SoundCategory::COUNT]) {
         if volumes == self.volumes {
             return;

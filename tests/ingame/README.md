@@ -220,7 +220,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none) and `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `sign` (the sign editor), `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
-| The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom), `tab_list` (every listed player as `{ name, game_mode? }`, in tab order) and `chat_open` |
+| The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom), `tab_list` (every listed player as `{ name, game_mode? }`, in tab order), `chat_open` and `action_bar` (`""` when none shows) |
 | A played sound | `sound` (event name, e.g. `block.note_block.harp`), among the last 64 played |
 
 Slots are menu slots. In the player inventory, 5-8 are armor (head to feet),

@@ -508,6 +508,8 @@ pub struct HudInfo {
     /// The listed players, in the tab overlay's order.
     pub tab_list: Vec<TabEntryInfo>,
     pub chat_open: bool,
+    /// The action bar while it shows.
+    pub action_bar: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,6 +567,7 @@ pub fn hud(game: &GameState) -> HudInfo {
             })
             .collect(),
         chat_open: game.chat.is_open(),
+        action_bar: game.shown_action_bar().map(|(spans, _)| span_text(spans)),
     }
 }
 

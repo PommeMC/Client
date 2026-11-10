@@ -877,8 +877,15 @@ impl InteractionState {
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
             let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-            if opens_menu(block_registry.block_state_data(target).id()) {
+            let id = block_registry.block_state_data(target).id();
+            if opens_menu(id) {
                 return UseResult::Success { swing: true };
+            }
+            // Vanilla `AbstractBedBlock.useWithoutItem`: `SUCCESS_SERVER` on the
+            // client, which ends the click unswung, so no item use or off-hand
+            // packet follows the server's teleport into the bed.
+            if id.ends_with("_bed") {
+                return UseResult::Success { swing: false };
             }
         }
         // TODO: other `Item.useOn` successes (hoes, flint and steel, bone
@@ -2374,6 +2381,46 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    #[test]
+    fn a_bed_ends_the_click_after_its_one_packet() {
+        use crate::net::sender::Outbound;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let audio = AudioEngine::silent();
+        let block_registry = BlockRegistry::native();
+        let chunks = ChunkStore::with_origin_chunk();
+        let bed = block_registry
+            .block_state_table()
+            .first_state_of("red_bed")
+            .expect("red_bed state");
+        chunks.set_block_state(1, 64, 1, bed, block_registry.block_state_table());
+        let hit = BlockHitResult {
+            block_pos: BlockPos::new(1, 64, 1),
+            face: Direction::Up,
+            hit_point: dvec3(1.5, 64.5625, 1.5),
+        };
+        let result = InteractionState::new().use_item_on(
+            &block_registry,
+            &sender,
+            &audio,
+            &chunks,
+            hit,
+            InteractionHand::MainHand,
+            None,
+            false,
+            dvec3(1.5, 64.0, -0.5),
+            Aabb::new(dvec3(1.2, 64.0, -0.8), dvec3(1.8, 65.8, -0.2)),
+            &mut Vec::new(),
+        );
+        assert_eq!(result, UseResult::Success { swing: false });
+        let Outbound::Packet(packet) = rx.try_recv().expect("use packet") else {
+            panic!("expected structured packet");
+        };
+        assert!(matches!(*packet, ServerboundGamePacket::UseItemOn(_)));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

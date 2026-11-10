@@ -183,6 +183,8 @@ struct HudFields {
     /// Every listed player, in the tab overlay's order.
     tab_list: Option<Vec<TabEntryExpect>>,
     chat_open: Option<bool>,
+    /// The action bar's text; `""` when none shows.
+    action_bar: Option<String>,
 }
 
 /// A tab list player; `game_mode` is checked when given.
@@ -820,7 +822,11 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                                     && want.game_mode.is_none_or(|m| m == seen.game_mode)
                             })
                     })
-                    && want.chat_open.is_none_or(|open| open == seen.chat_open),
+                    && want.chat_open.is_none_or(|open| open == seen.chat_open)
+                    && want
+                        .action_bar
+                        .as_ref()
+                        .is_none_or(|t| *t == shown(&seen.action_bar)),
                 || format!("hud is {seen:?}"),
             )
         }

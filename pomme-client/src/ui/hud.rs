@@ -642,6 +642,10 @@ pub fn build_sleep_overlay(
     });
 }
 
+/// Vanilla `Hud.setOverlayMessage`'s `overlayMessageTime`: how long the action
+/// bar stays up.
+pub(crate) const ACTION_BAR_TICKS: u64 = 60;
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_hud(
     elements: &mut Vec<MenuElement>,
@@ -808,10 +812,8 @@ pub fn build_hud(
         });
     }
 
-    if let Some((spans, ticks)) = action_bar
-        && ticks < 60
-    {
-        let alpha = ((60 - ticks).min(20) as f32) / 20.0;
+    if let Some((spans, ticks)) = action_bar {
+        let alpha = ((ACTION_BAR_TICKS - ticks).min(20) as f32) / 20.0;
         let spans = crate::ui::text::with_alpha(spans, alpha);
         elements.push(MenuElement::McText {
             x: cx,
