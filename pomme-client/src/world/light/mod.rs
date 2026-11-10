@@ -357,6 +357,21 @@ impl LevelLightEngine {
             self.apply_task(task, world, out);
         }
         self.run_light_updates(world, light_data, out);
+        // Vanilla publishes before its increase pass and runs every frame, so
+        // the increases go out the next frame. This thread runs only when told
+        // something, so it runs again now rather than hold them until then.
+        if self.has_unpublished() {
+            self.run_light_updates(world, light_data, out);
+        }
+    }
+
+    /// Whether the last run changed sections after publishing them.
+    fn has_unpublished(&self) -> bool {
+        !self.block.storage.changed_sections.is_empty()
+            || self
+                .sky
+                .as_ref()
+                .is_some_and(|sky| !sky.storage.changed_sections.is_empty())
     }
 
     fn apply_task(&mut self, task: LightTask, world: &LightWorld, out: &mut LightDirty) {
