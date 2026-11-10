@@ -170,6 +170,9 @@ pub enum ServerParticleKind {
     AngryVillager,
     Note,
     SweepAttack,
+    Crit,
+    EnchantedHit,
+    DamageIndicator,
 }
 
 impl ServerParticleKind {
@@ -184,6 +187,9 @@ impl ServerParticleKind {
             52 => Some(Self::Heart),
             65 => Some(Self::Note),
             74 => Some(Self::SweepAttack),
+            13 => Some(Self::Crit),
+            25 => Some(Self::EnchantedHit),
+            14 => Some(Self::DamageIndicator),
             _ => None,
         }
     }

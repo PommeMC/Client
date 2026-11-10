@@ -8,6 +8,7 @@ use super::resources::{MappedParticleResources, ParticleResources};
 mod attack_sweep;
 mod bubble_column;
 mod campfire_smoke;
+mod crit;
 mod dragon_breath;
 mod drip;
 mod dust;
@@ -36,6 +37,9 @@ use self::bubble_column::{
     BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
 };
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
+use self::crit::{
+    CritParticleRegistration, DamageIndicatorParticleRegistration, EnchantedHitParticleRegistration,
+};
 use self::dragon_breath::DragonBreathParticleRegistration;
 use self::drip::{
     DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
@@ -230,6 +234,15 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(Rc::clone(&types.heart), &HeartParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.note), &NoteParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.crit), &CritParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.enchanted_hit),
+        &EnchantedHitParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.damage_indicator),
+        &DamageIndicatorParticleRegistration,
+    );
     resources.register_sprite_provider(
         Rc::clone(&types.sweep_attack),
         &AttackSweepParticleRegistration,

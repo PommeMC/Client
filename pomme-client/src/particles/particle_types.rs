@@ -63,6 +63,9 @@ pub(crate) struct ParticleTypes {
     pub(crate) angry_villager: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) note: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) sweep_attack: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) crit: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) enchanted_hit: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) damage_indicator: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -232,6 +235,15 @@ impl ParticleTypes {
         let sweep_attack = registry
             .register(resource_id!("minecraft:sweep_attack"), true)
             .map_err(registration_error)?;
+        let crit = registry
+            .register(resource_id!("minecraft:crit"), false)
+            .map_err(registration_error)?;
+        let enchanted_hit = registry
+            .register(resource_id!("minecraft:enchanted_hit"), false)
+            .map_err(registration_error)?;
+        let damage_indicator = registry
+            .register(resource_id!("minecraft:damage_indicator"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -287,6 +299,9 @@ impl ParticleTypes {
             angry_villager,
             note,
             sweep_attack,
+            crit,
+            enchanted_hit,
+            damage_indicator,
         })
     }
 }
