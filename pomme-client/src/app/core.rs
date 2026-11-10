@@ -3711,6 +3711,9 @@ impl AppCore {
                         ServerParticleKind::Poof => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.poof))
                         }
+                        ServerParticleKind::Rain => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.rain))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();

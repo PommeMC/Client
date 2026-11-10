@@ -322,3 +322,36 @@ impl SpriteParticleRegistration<SimpleParticleType> for SplashParticleRegistrati
         })
     }
 }
+
+pub struct RainProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for RainProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        Some(Rc::new(RefCell::new(WaterDropParticle::new(
+            position, sprite,
+        ))))
+    }
+}
+
+pub(in crate::particles) struct RainParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for RainParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(RainProvider {
+            sprites: sprite_set,
+        })
+    }
+}

@@ -297,4 +297,8 @@ pub(crate) fn register_builtin_providers(
         Rc::new(GustSeedProvider::new(1.0, 3, 2, Rc::clone(&types.gust))),
     );
     resources.register_sprite_provider(Rc::clone(&types.poof), &ExplodeParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.rain),
+        &water_drop::RainParticleRegistration,
+    );
 }
