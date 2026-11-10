@@ -39,6 +39,7 @@ mod suspended_town;
 mod terrain;
 mod totem;
 mod water_drop;
+mod white_ash;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -85,6 +86,7 @@ pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::{DustPillarProvider, TerrainProvider};
 use self::totem::TotemParticleRegistration;
 use self::water_drop::SplashParticleRegistration;
+use self::white_ash::WhiteAshParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -304,4 +306,5 @@ pub(crate) fn register_builtin_providers(
         &water_drop::RainParticleRegistration,
     );
     resources.register_sprite_provider(Rc::clone(&types.ash), &AshParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.white_ash), &WhiteAshParticleRegistration);
 }
