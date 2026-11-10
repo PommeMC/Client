@@ -3708,6 +3708,9 @@ impl AppCore {
                         ServerParticleKind::GustEmitterSmall => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.gust_emitter_small,
                         )),
+                        ServerParticleKind::Poof => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.poof))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
