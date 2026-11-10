@@ -77,6 +77,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) small_gust: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) gust_emitter_large: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) gust_emitter_small: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) poof: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -288,6 +289,9 @@ impl ParticleTypes {
         let gust_emitter_small = registry
             .register(resource_id!("minecraft:gust_emitter_small"), true)
             .map_err(registration_error)?;
+        let poof = registry
+            .register(resource_id!("minecraft:poof"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -357,6 +361,7 @@ impl ParticleTypes {
             small_gust,
             gust_emitter_large,
             gust_emitter_small,
+            poof,
         })
     }
 }
