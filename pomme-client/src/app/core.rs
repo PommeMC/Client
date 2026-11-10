@@ -3672,6 +3672,9 @@ impl AppCore {
                         ServerParticleKind::EnchantedHit => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.enchanted_hit))
                         }
+                        ServerParticleKind::TotemOfUndying => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.totem_of_undying,
+                        )),
                         ServerParticleKind::DamageIndicator => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.damage_indicator,
                         )),

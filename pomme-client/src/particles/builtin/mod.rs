@@ -30,6 +30,7 @@ mod sulfur_bubble;
 mod suspended;
 mod suspended_town;
 mod terrain;
+mod totem;
 mod water_drop;
 
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -70,12 +71,17 @@ use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleReg
 use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::{DustPillarProvider, TerrainProvider};
+use self::totem::TotemParticleRegistration;
 use self::water_drop::SplashParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
     resources: &mut MappedParticleResources,
 ) {
+    resources.register_sprite_provider(
+        Rc::clone(&types.totem_of_undying),
+        &TotemParticleRegistration,
+    );
     resources.register_sprite_provider(Rc::clone(&types.dust), &DustParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.smoke), &SmokeParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.flame), &FlameParticleRegistration);
