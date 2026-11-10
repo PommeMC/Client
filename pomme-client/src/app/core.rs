@@ -3666,6 +3666,15 @@ impl AppCore {
                         ServerParticleKind::SweepAttack => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.sweep_attack))
                         }
+                        ServerParticleKind::Crit => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.crit))
+                        }
+                        ServerParticleKind::EnchantedHit => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.enchanted_hit))
+                        }
+                        ServerParticleKind::DamageIndicator => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.damage_indicator,
+                        )),
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
