@@ -182,6 +182,8 @@ pub enum ServerParticleKind {
     SculkSoul,
     Gust,
     SmallGust,
+    GustEmitterLarge,
+    GustEmitterSmall,
 }
 
 impl ServerParticleKind {
@@ -210,6 +212,8 @@ impl ServerParticleKind {
             44 => Some(Self::SculkSoul),
             31 => Some(Self::Gust),
             32 => Some(Self::SmallGust),
+            33 => Some(Self::GustEmitterLarge),
+            34 => Some(Self::GustEmitterSmall),
             _ => None,
         }
     }

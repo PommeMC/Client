@@ -19,6 +19,7 @@ mod flame;
 mod fly_towards_position;
 mod glow;
 mod gust;
+mod gust_seed;
 mod heart;
 mod huge_explosion;
 mod huge_explosion_seed;
@@ -61,6 +62,7 @@ use self::glow::{
     ScrapeParticleRegistration, WaxOffParticleRegistration, WaxOnParticleRegistration,
 };
 use self::gust::{GustParticleRegistration, SmallGustParticleRegistration};
+use self::gust_seed::GustSeedProvider;
 use self::heart::{AngryVillagerParticleRegistration, HeartParticleRegistration};
 use self::huge_explosion::HugeExplosionParticleRegistration;
 use self::huge_explosion_seed::HugeExplosionSeedProvider;
@@ -284,4 +286,12 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(Rc::clone(&types.gust), &GustParticleRegistration);
     resources
         .register_sprite_provider(Rc::clone(&types.small_gust), &SmallGustParticleRegistration);
+    resources.register(
+        Rc::clone(&types.gust_emitter_large),
+        Rc::new(GustSeedProvider::new(3.0, 7, 0, Rc::clone(&types.gust))),
+    );
+    resources.register(
+        Rc::clone(&types.gust_emitter_small),
+        Rc::new(GustSeedProvider::new(1.0, 3, 2, Rc::clone(&types.gust))),
+    );
 }
