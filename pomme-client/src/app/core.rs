@@ -3687,6 +3687,9 @@ impl AppCore {
                         ServerParticleKind::SonicBoom => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.sonic_boom))
                         }
+                        ServerParticleKind::Snowflake => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.snowflake))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
