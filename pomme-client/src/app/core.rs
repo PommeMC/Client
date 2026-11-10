@@ -3675,6 +3675,12 @@ impl AppCore {
                         ServerParticleKind::TotemOfUndying => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.totem_of_undying,
                         )),
+                        ServerParticleKind::SquidInk => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.squid_ink))
+                        }
+                        ServerParticleKind::GlowSquidInk => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.glow_squid_ink))
+                        }
                         ServerParticleKind::DamageIndicator => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.damage_indicator,
                         )),

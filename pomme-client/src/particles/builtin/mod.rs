@@ -26,6 +26,7 @@ mod note;
 mod portal;
 mod reverse_portal;
 mod smoke;
+mod squid_ink;
 mod sulfur_bubble;
 mod suspended;
 mod suspended_town;
@@ -66,6 +67,7 @@ use self::reverse_portal::ReversePortalParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 use self::smoke::{LargeSmokeParticleRegistration, WhiteSmokeParticleRegistration};
 pub use self::smoke::{SmokeParticle, SmokeProvider};
+use self::squid_ink::{GlowSquidInkParticleRegistration, SquidInkParticleRegistration};
 use self::sulfur_bubble::SulfurBubbleParticleRegistration;
 use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
 use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
@@ -81,6 +83,11 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.totem_of_undying),
         &TotemParticleRegistration,
+    );
+    resources.register_sprite_provider(Rc::clone(&types.squid_ink), &SquidInkParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.glow_squid_ink),
+        &GlowSquidInkParticleRegistration,
     );
     resources.register_sprite_provider(Rc::clone(&types.dust), &DustParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.smoke), &SmokeParticleRegistration);
