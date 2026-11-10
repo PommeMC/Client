@@ -180,6 +180,8 @@ pub enum ServerParticleKind {
     Snowflake,
     Soul,
     SculkSoul,
+    Gust,
+    SmallGust,
 }
 
 impl ServerParticleKind {
@@ -206,6 +208,8 @@ impl ServerParticleKind {
             101 => Some(Self::Snowflake),
             48 => Some(Self::Soul),
             44 => Some(Self::SculkSoul),
+            31 => Some(Self::Gust),
+            32 => Some(Self::SmallGust),
             _ => None,
         }
     }

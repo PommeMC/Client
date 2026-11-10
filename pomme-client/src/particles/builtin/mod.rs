@@ -18,6 +18,7 @@ mod falling_dust;
 mod flame;
 mod fly_towards_position;
 mod glow;
+mod gust;
 mod heart;
 mod huge_explosion;
 mod huge_explosion_seed;
@@ -59,6 +60,7 @@ use self::fly_towards_position::EnchantParticleRegistration;
 use self::glow::{
     ScrapeParticleRegistration, WaxOffParticleRegistration, WaxOnParticleRegistration,
 };
+use self::gust::{GustParticleRegistration, SmallGustParticleRegistration};
 use self::heart::{AngryVillagerParticleRegistration, HeartParticleRegistration};
 use self::huge_explosion::HugeExplosionParticleRegistration;
 use self::huge_explosion_seed::HugeExplosionSeedProvider;
@@ -279,4 +281,7 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.sculk_soul),
         &soul::SculkSoulParticleRegistration,
     );
+    resources.register_sprite_provider(Rc::clone(&types.gust), &GustParticleRegistration);
+    resources
+        .register_sprite_provider(Rc::clone(&types.small_gust), &SmallGustParticleRegistration);
 }
