@@ -5,6 +5,7 @@ use std::rc::Rc;
 use super::particle_types::ParticleTypes;
 use super::resources::{MappedParticleResources, ParticleResources};
 
+mod ash;
 mod attack_sweep;
 mod bubble_column;
 mod campfire_smoke;
@@ -39,6 +40,7 @@ mod terrain;
 mod totem;
 mod water_drop;
 
+use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
 use self::bubble_column::{
     BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
@@ -301,4 +303,5 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.rain),
         &water_drop::RainParticleRegistration,
     );
+    resources.register_sprite_provider(Rc::clone(&types.ash), &AshParticleRegistration);
 }
