@@ -330,3 +330,41 @@ impl SpriteParticleRegistration<SimpleParticleType> for HugeExplosionParticleReg
         })
     }
 }
+
+pub struct SonicBoomProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for SonicBoomProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        _random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        // COMPAT: Source's constructor-only SonicBoom subclass reuses Huge's simulation
+        // through its canonical provider, like the WhiteSmoke/Town constructor
+        // variants.
+        let mut particle =
+            HugeExplosionParticle::new(position, auxiliary.x, Rc::clone(&self.sprites));
+        particle.lifetime = 16;
+        particle.quad_size = 1.5_f32;
+        particle.sprite = particle.sprites.get(particle.age, particle.lifetime);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct SonicBoomParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for SonicBoomParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(SonicBoomProvider {
+            sprites: sprite_set,
+        })
+    }
+}
