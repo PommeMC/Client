@@ -3696,6 +3696,12 @@ impl AppCore {
                         ServerParticleKind::SculkSoul => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.sculk_soul))
                         }
+                        ServerParticleKind::Gust => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.gust))
+                        }
+                        ServerParticleKind::SmallGust => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.small_gust))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
