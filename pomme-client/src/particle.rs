@@ -177,6 +177,7 @@ pub enum ServerParticleKind {
     SquidInk,
     GlowSquidInk,
     SonicBoom,
+    Snowflake,
 }
 
 impl ServerParticleKind {
@@ -198,6 +199,7 @@ impl ServerParticleKind {
             73 => Some(Self::SquidInk),
             106 => Some(Self::GlowSquidInk),
             35 => Some(Self::SonicBoom),
+            101 => Some(Self::Snowflake),
             _ => None,
         }
     }
