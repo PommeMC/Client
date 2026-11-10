@@ -1155,7 +1155,7 @@ impl MeshDispatcher {
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
     /// shared handles to their light data.
     fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
-        let chunks_needed = chunk::mesh_neighborhood(pos);
+        let chunks_needed: Vec<_> = chunk::column_neighborhood(pos).collect();
         ChunkStoreSnapshot {
             block_state_table: self.render_view.block_state_table(),
             chunks: chunks_needed
