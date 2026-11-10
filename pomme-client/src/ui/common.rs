@@ -7,7 +7,7 @@ use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
-use crate::player::item_cooldowns::ItemCooldowns;
+use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::bundle::Frac;
 use crate::ui::text_edit::TextFieldRenderInfo;
@@ -752,7 +752,7 @@ pub(crate) fn push_item_decorations(
         x,
         y,
         scale,
-        stack: data.clone(),
+        group: CooldownGroup::of(data),
     });
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
@@ -768,10 +768,10 @@ pub(crate) fn resolve_item_cooldowns(
     partial_tick: f32,
 ) {
     elements.retain_mut(|element| {
-        let MenuElement::ItemCooldown { x, y, scale, stack } = element else {
+        let MenuElement::ItemCooldown { x, y, scale, group } = element else {
             return true;
         };
-        let cooldown = cooldowns.cooldown_percent(stack, partial_tick);
+        let cooldown = cooldowns.cooldown_percent(group, partial_tick);
         if cooldown <= 0.0 {
             return false;
         }

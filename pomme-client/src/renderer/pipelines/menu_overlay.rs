@@ -2230,13 +2230,13 @@ pub enum MenuElement {
         item_tints: Vec<u32>,
         tint: [f32; 4],
     },
-    /// Where `stack`'s cooldown overlay goes in the 16-unit slot at `(x, y)`;
+    /// Where `group`'s cooldown overlay goes in the 16-unit slot at `(x, y)`;
     /// the game screen swaps it for the overlay (`resolve_item_cooldowns`).
     ItemCooldown {
         x: f32,
         y: f32,
         scale: f32,
-        stack: azalea_inventory::ItemStackData,
+        group: crate::player::item_cooldowns::CooldownGroup,
     },
     McText {
         x: f32,
