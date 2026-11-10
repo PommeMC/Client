@@ -216,6 +216,7 @@ struct PlayerFields {
     y_rot: Option<f32>,
     spectating: Option<String>,
     post_effect: Option<String>,
+    using_item: Option<bool>,
 }
 
 /// The block state name the client holds at `at`, e.g. `air`.
@@ -787,7 +788,8 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                     && want
                         .post_effect
                         .as_ref()
-                        .is_none_or(|e| seen.post_effect == e),
+                        .is_none_or(|e| seen.post_effect == e)
+                    && want.using_item.is_none_or(|u| seen.using_item == u),
                 || format!("player is {seen:?}"),
             )
         }

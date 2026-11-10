@@ -117,11 +117,8 @@ pub(super) fn translate_container_set_slot_767(v: &Ids767, payload: &[u8]) -> Op
     Some(out)
 }
 
-/// Rewrites `cooldown`'s item id into the native registry space. Vanilla
-/// 26.2 names a cooldown group instead, but azalea still decodes the item
-/// registry id and these frames feed azalea (like the team-color ordinal).
-/// TODO: write the cooldown group once pomme owns the decoder (see the
-/// azalea-divergence list).
+/// Rewrites `cooldown`'s item id into the cooldown group 26.2 names: the
+/// item's own id, as no older item has a `use_cooldown` group.
 pub(super) fn translate_cooldown_767(
     remaps: &RegistryRemaps,
     id: u32,
@@ -129,9 +126,11 @@ pub(super) fn translate_cooldown_767(
 ) -> Option<Vec<u8>> {
     let mut p = 0;
     let item = wire::read_varint(payload, &mut p)?;
-    let mut out = Vec::with_capacity(payload.len() + 2);
+    let item =
+        azalea_registry::builtin::ItemKind::from_u32(remaps.remap(ClientRegistry::Item, item)?)?;
+    let mut out = Vec::with_capacity(payload.len() + 32);
     wire::write_varint(&mut out, id);
-    wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
+    wire::write_utf(&mut out, &item.to_string());
     out.extend_from_slice(&payload[p..]);
     Some(out)
 }

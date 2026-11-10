@@ -4709,6 +4709,11 @@ pub fn update_game(
         });
     }
     elements.append(&mut subtitles);
+    crate::ui::common::resolve_item_cooldowns(
+        &mut elements,
+        &game.interaction.item_cooldowns,
+        partial_tick,
+    );
 
     if screen_pointer != game.screen_pointer {
         game.screen_pointer = screen_pointer;

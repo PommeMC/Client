@@ -1,0 +1,199 @@
+# A shield held up with the use key blocks a hit from in front: no health
+# lost, and the shield takes the damage instead. Let go, the next hit lands.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:armor_stand 0.5 -60 3.5"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+look_at = [0.5, -61.0, 2.0]
+
+# The hand settles after the turn.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "held"
+
+[[step]]
+mouse_down = "right"
+
+# Past the shield's block delay.
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { slot = 36, item = "shield", components = ["damage"] }
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+screenshot = "blocking"
+
+[[step]]
+mouse_up = "right"
+
+# Past the invulnerability the first hit left.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+# Mob damage scales with difficulty: 3 of the 4 on easy.
+[[step]]
+expect = { player = { health = 17.0 } }
+
+# An axe hit on the raised shield disables it: lowered, and it can't go up
+# again while on cooldown, though the use key stays down.
+[[step]]
+chat = "/item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] weapon.mainhand with minecraft:iron_axe"
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+# Long enough for the held key to try again.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+screenshot = "disabled"
+
+[[step]]
+mouse_up = "right"
+
+# The 5 s cooldown runs out.
+[[step]]
+wait_ms = 4500
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+# Disabled again, for long enough to outlast a dimension change. The new
+# player the change makes has no cooldowns, so the shield goes straight back
+# up.
+[[step]]
+chat = "/item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] weapon.mainhand with minecraft:iron_axe[weapon={disable_blocking_for_seconds:20}]"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+chat = "/execute in minecraft:the_nether run tp @s 0 100 0"
+
+[[step]]
+expect = { player = { dimension = "the_nether" } }
+
+[[step]]
+chat = "/execute in minecraft:overworld run tp @s 0.5 -60 0.5"
+
+[[step]]
+expect = { player = { dimension = "overworld", position = [0.5, -60.0, 0.5] } }
+
+# Past the loading screen, which would take the click.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+mouse_up = "right"
+
+# The inventory's player holds a shield in each hand, arms forward.
+[[step]]
+chat = "/item replace entity @s weapon.offhand with minecraft:shield"
+
+[[step]]
+expect = { slot = 45, item = "shield" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "inventory" }
+
+# Up and left of the preview, so the player turns to show both shields.
+[[step]]
+cursor = [140, 60]
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "inventory"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/kill @e[type=minecraft:armor_stand]"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/effect give @s minecraft:instant_health 1 1"
+
+[[step]]
+chat = "/gamemode creative"
