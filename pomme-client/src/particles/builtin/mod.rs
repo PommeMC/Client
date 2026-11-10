@@ -264,4 +264,8 @@ pub(crate) fn register_builtin_providers(
         Rc::clone(&types.angry_villager),
         &AngryVillagerParticleRegistration,
     );
+    resources.register_sprite_provider(
+        Rc::clone(&types.sonic_boom),
+        &huge_explosion::SonicBoomParticleRegistration,
+    );
 }
