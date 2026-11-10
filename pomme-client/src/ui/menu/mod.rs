@@ -146,6 +146,9 @@ struct Settings {
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
     japanese_glyph_variants: bool,
+    /// The Direct Connect address, as it was when the screen last closed.
+    #[serde(default)]
+    last_server: String,
 }
 
 fn default_fov() -> u32 {
@@ -306,6 +309,7 @@ impl Default for Settings {
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
+            last_server: String::new(),
         }
     }
 }
@@ -878,7 +882,7 @@ impl MainMenu {
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
-            last_mp_ip: String::new(),
+            last_mp_ip: settings.last_server,
             ping_results,
             ping_generation: Default::default(),
             access_token,
@@ -1230,6 +1234,7 @@ impl MainMenu {
                 chat: self.chat_options,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
+                last_server: self.last_mp_ip.clone(),
             },
         )
         .is_err();

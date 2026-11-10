@@ -543,6 +543,13 @@ impl MainMenu {
         result
     }
 
+    /// Vanilla `DirectJoinServerScreen.removed`: the address is kept and saved
+    /// however the screen closes.
+    fn close_direct_connect(&mut self, key_bindings: &KeyBindings) {
+        self.last_mp_ip = self.edit_address.value().to_string();
+        self.save_settings(key_bindings);
+    }
+
     pub(super) fn build_direct_connect(
         &mut self,
         screen_w: f32,
@@ -561,6 +568,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
+            self.close_direct_connect(key_bindings);
             self.set_screen(Screen::ServerList, key_bindings);
             return empty_result();
         }
@@ -628,7 +636,7 @@ impl MainMenu {
         ) && clicked)
             || enter_submit
         {
-            self.last_mp_ip = address.clone();
+            self.close_direct_connect(key_bindings);
             let persisted = self
                 .server_list
                 .servers
@@ -655,6 +663,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
+            self.close_direct_connect(key_bindings);
             self.set_screen(Screen::ServerList, key_bindings);
         }
 
@@ -1159,6 +1168,28 @@ pub(super) fn join_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_direct_connect_address_survives_escape_and_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pomme-last-server-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        menu.set_screen(Screen::DirectConnect, &key_bindings);
+        menu.edit_address
+            .set_value("play.example.net", 1000.0, &|text| text.len() as f32);
+        let escape = MenuInput {
+            escape: true,
+            ..MenuInput::default()
+        };
+        menu.build(1280.0, 720.0, &escape, &mut key_bindings, |text, _| {
+            text.len() as f32
+        });
+
+        let reopened = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        assert_eq!(reopened.last_mp_ip, "play.example.net");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn a_long_disconnect_reason_wraps_inside_the_screen() {
