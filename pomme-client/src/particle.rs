@@ -186,6 +186,7 @@ pub enum ServerParticleKind {
     GustEmitterSmall,
     Poof,
     Rain,
+    Ash,
 }
 
 impl ServerParticleKind {
@@ -218,6 +219,7 @@ impl ServerParticleKind {
             34 => Some(Self::GustEmitterSmall),
             66 => Some(Self::Poof),
             68 => Some(Self::Rain),
+            91 => Some(Self::Ash),
             _ => None,
         }
     }
