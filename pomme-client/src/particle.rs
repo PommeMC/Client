@@ -173,6 +173,7 @@ pub enum ServerParticleKind {
     Crit,
     EnchantedHit,
     DamageIndicator,
+    TotemOfUndying,
 }
 
 impl ServerParticleKind {
@@ -190,6 +191,7 @@ impl ServerParticleKind {
             13 => Some(Self::Crit),
             25 => Some(Self::EnchantedHit),
             14 => Some(Self::DamageIndicator),
+            75 => Some(Self::TotemOfUndying),
             _ => None,
         }
     }
