@@ -382,7 +382,7 @@ impl MainMenu {
             top_w,
             btn_h,
             gs,
-            "Direct Connect",
+            "Direct Connection",
             true,
         ) {
             self.edit_address
@@ -586,7 +586,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y,
-            text: "Direct Connect".into(),
+            text: "Direct Connection".into(),
             scale: fs,
             color: WHITE,
             centered: true,

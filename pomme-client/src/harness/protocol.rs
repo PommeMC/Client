@@ -64,6 +64,10 @@ pub enum Command {
     Cursor {
         at: [f32; 2],
     },
+    /// Moves the cursor to the middle of the button labelled `label`.
+    CursorToButton {
+        label: String,
+    },
     /// Turns the mouse wheel `y` lines (positive scrolls up) over the open
     /// screen.
     Scroll {

@@ -144,6 +144,19 @@ impl FramerateLimiter {
 /// task, which closes the pipe on a runtime thread, so the server may see the
 /// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
 /// and persists every player still online before it saves the worlds.
+/// Vanilla `Minecraft.disconnectFromWorld`, for a player's own disconnect.
+fn disconnect(
+    core: &mut AppCore,
+    gfx: Gfx,
+    panorama: Panorama,
+    connection: ConnectionHandle,
+    world: Option<World>,
+) -> AppPhase {
+    core.menu
+        .show_after_disconnect(world.is_some(), &core.input.key_bindings);
+    leave_world(core, gfx, panorama, connection, world, AfterSaving::Menu)
+}
+
 fn leave_world(
     core: &mut AppCore,
     mut gfx: Gfx,
@@ -1281,14 +1294,9 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            ConnectingUpdateResult::ManualDisconnect => leave_world(
-                                core,
-                                gfx,
-                                panorama,
-                                connection,
-                                world,
-                                AfterSaving::Menu,
-                            ),
+                            ConnectingUpdateResult::ManualDisconnect => {
+                                disconnect(core, gfx, panorama, connection, world)
+                            }
                             ConnectingUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
 
@@ -1341,14 +1349,9 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            GameUpdateResult::ManualDisconnect => leave_world(
-                                core,
-                                gfx,
-                                Panorama::new(),
-                                connection,
-                                world,
-                                AfterSaving::Menu,
-                            ),
+                            GameUpdateResult::ManualDisconnect => {
+                                disconnect(core, gfx, Panorama::new(), connection, world)
+                            }
                             GameUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
 

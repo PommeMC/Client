@@ -553,6 +553,7 @@ const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
+#[derive(Debug)]
 enum Screen {
     Main,
     Account,
@@ -1457,6 +1458,17 @@ impl MainMenu {
             .collect()
     }
 
+    /// The screen a player's own disconnect leaves them on: the title screen
+    /// after a singleplayer world, the server list after a server.
+    pub fn show_after_disconnect(&mut self, singleplayer: bool, key_bindings: &KeyBindings) {
+        let screen = if singleplayer {
+            Screen::Main
+        } else {
+            Screen::ServerList
+        };
+        self.set_screen(screen, key_bindings);
+    }
+
     pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
         self.set_screen(Screen::Disconnected(reason), key_bindings);
     }
@@ -1654,6 +1666,31 @@ impl MainMenu {
         self.ping_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.ping_results.write().clear();
+    }
+}
+
+#[cfg(feature = "test-harness")]
+impl MainMenu {
+    /// The open screen's name: `title` for the title screen, else the
+    /// screen's own in snake case (`server_list`, `direct_connect`).
+    pub(crate) fn harness_screen(&self) -> String {
+        if matches!(self.screen, Screen::Main) {
+            return "title".into();
+        }
+        let name = format!("{:?}", self.screen);
+        let name = name.split('(').next().unwrap_or_default();
+        let mut snake = String::new();
+        for (i, c) in name.char_indices() {
+            if c.is_ascii_uppercase() && i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        }
+        snake
+    }
+
+    pub(crate) fn harness_address(&self) -> &str {
+        self.edit_address.value()
     }
 }
 
