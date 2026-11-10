@@ -176,6 +176,7 @@ pub enum ServerParticleKind {
     TotemOfUndying,
     SquidInk,
     GlowSquidInk,
+    SonicBoom,
 }
 
 impl ServerParticleKind {
@@ -198,6 +199,7 @@ impl ServerParticleKind {
             75 => Some(Self::TotemOfUndying),
             73 => Some(Self::SquidInk),
             106 => Some(Self::GlowSquidInk),
+            35 => Some(Self::SonicBoom),
             _ => None,
         }
     }
