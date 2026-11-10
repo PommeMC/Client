@@ -31,6 +31,13 @@ wait_ms = 300
 [[step]]
 look_at = [0.5, -61.0, 2.0]
 
+# The hand settles after the turn.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "held"
+
 [[step]]
 mouse_down = "right"
 

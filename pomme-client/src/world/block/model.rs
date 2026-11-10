@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::json_bundle::JsonBundle;
 use super::render_assets::{FaceTextures, LoadProgress, Tint};
 use crate::assets::AssetId;
-use crate::renderer::block_entity_model::{SkullKind, bake_skull_model};
+use crate::renderer::block_entity_model::{SkullKind, bake_shield_model, bake_skull_model};
 use crate::renderer::chunk::mesher::Colormap;
 use crate::renderer::entity_model::{PartAnim, cube_face_positions, cube_face_uvs};
 use crate::resources::managers::ResourceManager;
@@ -1058,19 +1058,24 @@ pub fn bake_item_models(
         }
     }
 
-    // The mesh comes from the special renderer, but the chest's display
-    // transforms live in `item/template_chest` like any other item's.
+    // Special renderers' meshes, with their display transforms from the
+    // item's `base` model like any other item's.
+    let mut register_special = |name: &str, base: &ResolvedModel, model: BakedModel| {
+        item_models.insert(name.to_string(), model);
+        gui_transforms.insert(name.to_string(), base.gui_transform);
+        ground_transforms.insert(name.to_string(), base.ground_transform);
+        flat_keys.remove(name);
+    };
+
     let chest = resolve_model("item/template_chest", inputs, &mut model_cache);
-    item_models.insert(
-        "chest".to_string(),
+    register_special(
+        "chest",
+        &chest,
         bake_chest_item_model(chest.gui_transform, chest.gui_light),
     );
-    gui_transforms.insert("chest".to_string(), chest.gui_transform);
-    ground_transforms.insert("chest".to_string(), chest.ground_transform);
-    flat_keys.remove("chest");
 
     for kind in SkullKind::ALL {
-        let (name, _) = kind.item_and_texture();
+        let (name, texture) = kind.item_and_texture();
         // The item's `base` in `items/<name>.json`.
         let base = if kind == SkullKind::Dragon {
             "item/dragon_head"
@@ -1078,14 +1083,35 @@ pub fn bake_item_models(
             "item/template_skull"
         };
         let base = resolve_model(base, inputs, &mut model_cache);
-        item_models.insert(
-            name.to_string(),
-            bake_skull_item_model(kind, base.gui_transform, base.gui_light),
+        // `SkullSpecialRenderer`'s transformation: translate (0.5, 0, 0.5),
+        // then 180 degrees about x.
+        let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_rotation_x(std::f32::consts::PI);
+        let model = bake_entity_item_model(
+            &bake_skull_model(kind),
+            item,
+            texture,
+            kind.texture_size(),
+            base.gui_transform,
+            base.gui_light,
         );
-        gui_transforms.insert(name.to_string(), base.gui_transform);
-        ground_transforms.insert(name.to_string(), base.ground_transform);
-        flat_keys.remove(name);
+        register_special(name, &base, model);
     }
+
+    // `ShieldSpecialRenderer` with its default transformation, scale
+    // (1, -1, -1).
+    // TODO: banner patterns (`Sheets.SHIELD_BASE` under the pattern layers)
+    // and the enchantment glint.
+    let shield = resolve_model("item/shield", inputs, &mut model_cache);
+    let model = bake_entity_item_model(
+        &bake_shield_model(),
+        Mat4::from_scale(Vec3::new(1.0, -1.0, -1.0)),
+        "entity/shield/shield_base_nopattern",
+        (64, 64),
+        shield.gui_transform,
+        shield.gui_light,
+    );
+    register_special("shield", &shield, model);
 
     tracing::info!(
         "Baked {} item models, {} flat items, and registered {} generated-item textures",
@@ -1103,19 +1129,17 @@ pub fn bake_item_models(
     }
 }
 
-/// `SkullSpecialRenderer` as a mesh: the skull model under the item's
-/// `transformation` (translate (0.5, 0, 0.5), then 180 degrees about x), each
-/// face lit by its own normal as the GUI's item lighting does.
-fn bake_skull_item_model(
-    kind: SkullKind,
+/// A special renderer's entity model as an item mesh: `model` under the
+/// item's `transformation`, each face lit by its own normal as the GUI's item
+/// lighting does.
+fn bake_entity_item_model(
+    model: &crate::renderer::entity_model::BakedEntityModel,
+    item: Mat4,
+    texture: &str,
+    (tex_w, tex_h): (u32, u32),
     gui: DisplayTransform,
     gui_light: GuiLight,
 ) -> BakedModel {
-    let model = bake_skull_model(kind);
-    let (_, texture) = kind.item_and_texture();
-    let (tex_w, tex_h) = kind.texture_size();
-    let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-        * Mat4::from_rotation_x(std::f32::consts::PI);
     let (l0, l1) = gui_lights(gui_light);
     let transforms = model.compute_part_transforms(&PartAnim::default());
     let mut quads = Vec::new();
@@ -1491,6 +1515,16 @@ fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
 /// renderer's `base`.
 pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
     first_model_ref(json.get("model").map_or(json, default_stack_branch))
+}
+
+/// The model an item definition's root `minecraft:using_item` condition picks
+/// while the item is in use, e.g. `item/shield_blocking`.
+pub fn using_item_model_ref(json: &serde_json::Value) -> Option<String> {
+    let node = json.get("model")?;
+    if node_type(node) != Some("condition") || node_property(node) != Some("using_item") {
+        return None;
+    }
+    first_model_ref(node.get("on_true")?)
 }
 
 fn first_model_ref(node: &serde_json::Value) -> Option<String> {
@@ -2776,6 +2810,24 @@ mod tests {
         assert_eq!(parts[1].path, "block/red_bed_foot");
         let moved = parts[1].transform.unwrap().transform_point3(Vec3::ZERO);
         assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn an_item_in_use_takes_its_using_item_model() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"model":{
+                "type":"minecraft:condition",
+                "property":"minecraft:using_item",
+                "on_false":{"type":"minecraft:special","base":"minecraft:item/shield","model":{"type":"minecraft:shield"}},
+                "on_true":{"type":"minecraft:special","base":"minecraft:item/shield_blocking","model":{"type":"minecraft:shield"}}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            using_item_model_ref(&json).as_deref(),
+            Some("item/shield_blocking")
+        );
+        assert_eq!(first_item_model_ref(&json).as_deref(), Some("item/shield"));
     }
 
     #[test]

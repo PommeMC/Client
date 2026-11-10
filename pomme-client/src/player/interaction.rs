@@ -30,7 +30,7 @@ use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::position::BlockPos;
-use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
+use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
@@ -1224,21 +1224,21 @@ impl InteractionState {
         hand_render_selection(main, off, using)
     }
 
-    /// First-person use-animation state for the held-item renderer, vanilla
-    /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless `hand`
-    /// is in an eat/drink use with ticks remaining.
+    /// First-person use-animation state for the held-item renderer: `None`
+    /// unless `hand` is in an eat, drink or block use with ticks remaining.
     pub fn use_animation(&self, hand: InteractionHand, partial_tick: f32) -> Option<UseAnim> {
         let active = self.using_item.as_ref()?;
-        if active.hand != hand
-            || active.remaining <= 0
-            || !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink)
-        {
+        if active.hand != hand || active.remaining <= 0 {
             return None;
         }
-        Some(UseAnim {
-            curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
-            duration: active.duration as f32,
-        })
+        match active.anim {
+            ItemUseAnimation::Eat | ItemUseAnimation::Drink => Some(UseAnim::Eat(EatAnim {
+                curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
+                duration: active.duration as f32,
+            })),
+            ItemUseAnimation::BlockKind => Some(UseAnim::Block),
+            _ => None,
+        }
     }
 
     /// Predicts placement locally for unambiguous single-state blocks,
@@ -2283,6 +2283,22 @@ mod tests {
         state.update_swing();
         assert!(state.swing_progress(InteractionHand::OffHand, 1.0) > 0.0);
         assert_eq!(state.swing_progress(InteractionHand::MainHand, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_raised_shield_blocks_in_its_hand() {
+        let mut state = InteractionState::new();
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        state.using_item = block_use(InteractionHand::OffHand, &shield);
+        assert!(matches!(
+            state.use_animation(InteractionHand::OffHand, 0.0),
+            Some(UseAnim::Block)
+        ));
+        assert!(
+            state
+                .use_animation(InteractionHand::MainHand, 0.0)
+                .is_none()
+        );
     }
 
     #[test]

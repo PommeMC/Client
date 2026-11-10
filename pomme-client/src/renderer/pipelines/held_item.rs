@@ -31,10 +31,19 @@ pub struct HeldHand<'a> {
     pub use_anim: Option<UseAnim>,
 }
 
-/// First-person use-animation state (eat/drink), the inputs to vanilla
-/// `ItemInHandRenderer.applyEatTransform`.
+/// A hand's first-person use animation (vanilla
+/// `FirstPersonHandsAndItemsRenderer`'s use-animation switch).
 #[derive(Clone, Copy)]
-pub struct UseAnim {
+pub enum UseAnim {
+    /// Eating or drinking.
+    Eat(EatAnim),
+    /// A shield held up: its blocking display, without the swing.
+    Block,
+}
+
+/// The inputs to vanilla `applyEatTransform`.
+#[derive(Clone, Copy)]
+pub struct EatAnim {
     /// Vanilla `useItemRemaining - partialTick + 1`.
     pub curr_usage_time: f32,
     pub duration: f32,
@@ -134,14 +143,18 @@ impl HeldItemPipeline {
                 continue;
             };
             let default = default_first_person(item.has_3d_model, hand.right_arm);
+            let using = hand.use_anim.is_some();
             let display = if hand.right_arm {
-                self.right_display.resolve(&item.name, default)
+                self.right_display.resolve(&item.name, using, default)
             } else {
-                self.left_display.resolve(&item.name, default).mirrored()
+                self.left_display
+                    .resolve(&item.name, using, default)
+                    .mirrored()
             };
             let invert = hand::arm_invert(hand.right_arm);
             let mut arm = match hand.use_anim {
-                Some(anim) => eat_item_matrix(anim, invert),
+                Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert),
+                Some(UseAnim::Block) => item_arm_matrix(invert),
                 None => first_person_item_matrix(hand.swing_progress, invert),
             };
             // Vanilla `submitArmWithItem`'s crossbow branch: a charged one
@@ -205,7 +218,7 @@ fn first_person_item_matrix(swing_progress: f32, invert: f32) -> Mat4 {
 
 // Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
 // (EAT/DRINK skip the usual pre-transform).
-fn eat_item_matrix(anim: UseAnim, invert: f32) -> Mat4 {
+fn eat_item_matrix(anim: EatAnim, invert: f32) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
     // The chew bob runs after the first 20% of the eat, oscillating every 4
     // ticks; the jiggle shoves the item into the mouth over the last bite.
@@ -260,7 +273,7 @@ mod tests {
                 "swing {swing}"
             );
         }
-        let anim = UseAnim {
+        let anim = EatAnim {
             curr_usage_time: 12.0,
             duration: 32.0,
         };

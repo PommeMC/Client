@@ -5,6 +5,7 @@ use crate::resources::{ResourceContent, ResourceId};
 pub(crate) use crate::world::block::model::DisplayTransform;
 use crate::world::block::model::{
     ModelInputs, first_item_model_ref, parse_display_transform, read_model_json, strip_mc_prefix,
+    using_item_model_ref,
 };
 
 const MODEL_PARENT_LIMIT: u32 = 16;
@@ -15,7 +16,7 @@ const MODEL_PARENT_LIMIT: u32 = 16;
 /// to the same model's right-hand one).
 pub struct DisplayResolver {
     keys: &'static [&'static str],
-    cache: RefCell<HashMap<String, DisplayTransform>>,
+    cache: RefCell<HashMap<(String, bool), DisplayTransform>>,
     items: BTreeMap<ResourceId, ResourceContent>,
     models: BTreeMap<ResourceId, ResourceContent>,
 }
@@ -30,16 +31,22 @@ impl DisplayResolver {
         }
     }
 
-    pub fn resolve(&self, item_name: &str, default: DisplayTransform) -> DisplayTransform {
-        if let Some(t) = self.cache.borrow().get(item_name) {
+    /// The transform for `item_name`, from its `using_item` model while it's
+    /// `in_use`.
+    pub fn resolve(
+        &self,
+        item_name: &str,
+        in_use: bool,
+        default: DisplayTransform,
+    ) -> DisplayTransform {
+        let key = (item_name.to_string(), in_use);
+        if let Some(t) = self.cache.borrow().get(&key) {
             return *t;
         }
-        let resolved = resolve_item_model_path(item_name, &self.items)
+        let resolved = resolve_item_model_path(item_name, in_use, &self.items)
             .and_then(|path| resolve_display(&path, &self.models, self.keys))
             .unwrap_or(default);
-        self.cache
-            .borrow_mut()
-            .insert(item_name.to_string(), resolved);
+        self.cache.borrow_mut().insert(key, resolved);
         resolved
     }
 }
@@ -51,11 +58,15 @@ fn read_json(content: &ResourceContent) -> Option<serde_json::Value> {
 
 fn resolve_item_model_path(
     name: &str,
+    in_use: bool,
     items: &BTreeMap<ResourceId, ResourceContent>,
 ) -> Option<String> {
     let id = ResourceId::from_parts("minecraft", &format!("items/{name}.json")).ok()?;
     let item_json = read_json(items.get(&id)?)?;
-    first_item_model_ref(&item_json)
+    in_use
+        .then(|| using_item_model_ref(&item_json))
+        .flatten()
+        .or_else(|| first_item_model_ref(&item_json))
 }
 
 /// The first model up the parent chain with any of `keys` in its `display`,
@@ -120,7 +131,7 @@ mod tests {
         let inputs = ModelInputs::prepare(&resources).unwrap();
         let left =
             DisplayResolver::new(&inputs, &["firstperson_lefthand", "firstperson_righthand"]);
-        let resolved = left.resolve("thing", DisplayTransform::IDENTITY);
+        let resolved = left.resolve("thing", false, DisplayTransform::IDENTITY);
         assert_eq!(resolved.rotation, glam::Vec3::new(0.0, 10.0, 0.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
