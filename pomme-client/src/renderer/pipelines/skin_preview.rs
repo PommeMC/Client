@@ -1,10 +1,11 @@
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_6, PI};
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use glam::camera::rh::{proj, view};
 use glam::{Mat3, Mat4, Vec2, Vec3};
 
 use crate::renderer::entity_model::{
-    HumanoidArmorSlot, ModelCube, cube_face_positions, cube_face_uvs, humanoid_armor_parts,
+    HumanoidArmPose, HumanoidArmorSlot, ModelCube, cube_face_positions, cube_face_uvs,
+    humanoid_armor_parts,
 };
 use crate::renderer::pipelines::entity_renderer::{
     ARMOR_ALPHA_CUTOFF, ARMOR_SUBMIT_ORDER, EntityRenderer, WHITE_TINT,
@@ -52,33 +53,6 @@ pub(crate) fn push_preview_style(
 /// `(first, count)` vertex ranges drawn with the body, head, right arm and
 /// left arm MVPs.
 type ArmorRanges = [(u32, u32); 4];
-
-/// Vanilla `HumanoidModel.ArmPose`, for the poses the preview draws.
-// TODO: the two-handed and use poses (bow, crossbow, trident, spyglass,
-// horn, brush, spear).
-#[derive(Clone, Copy)]
-pub enum ArmPose {
-    Empty,
-    Item,
-    Block,
-}
-
-impl ArmPose {
-    /// Vanilla `poseRightArm`/`poseLeftArm` from a still arm, as the arm's
-    /// `(xRot, yRot, zRot)`; `head` is the head's `(xRot, yRot)`.
-    fn rotation(self, right_arm: bool, head: Vec2) -> Vec3 {
-        match self {
-            Self::Empty => Vec3::ZERO,
-            Self::Item => Vec3::new(-0.31415927, 0.0, 0.0),
-            Self::Block => Vec3::new(
-                -0.9424779 + head.x.clamp(-1.3962634, 0.43633232),
-                if right_arm { -30.0f32 } else { 30.0 }.to_radians()
-                    + head.y.clamp(-FRAC_PI_6, FRAC_PI_6),
-                0.0,
-            ),
-        }
-    }
-}
 
 /// Where the preview's held items draw, from `draw_in_box`.
 pub struct PreviewHands {
@@ -289,7 +263,7 @@ impl SkinPreviewPipeline {
         sw: f32,
         sh: f32,
         entity_renderer: &EntityRenderer,
-        arm_poses: [ArmPose; 2],
+        arm_poses: [HumanoidArmPose; 2],
     ) -> PreviewHands {
         let cx = p.rect[0] + p.rect[2] / 2.0;
         let cy = p.rect[1] + p.rect[3] / 2.0;
@@ -316,7 +290,7 @@ impl SkinPreviewPipeline {
         // Vanilla's head angles: the half turn about X between its model
         // space and this mesh's keeps the pitch and flips the yaw.
         let head = Vec2::new(head_pitch_rad, body_rot_rad - head_yaw_rad);
-        let arm_rots = self.swung([0, 1].map(|i| arm_poses[i].rotation(i == 0, head)));
+        let arm_rots = self.swung([0, 1].map(|i| arm_poses[i].pose(Vec3::ZERO, i == 0, head)));
         self.record(
             pass,
             frame,

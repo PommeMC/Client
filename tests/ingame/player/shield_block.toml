@@ -71,6 +71,55 @@ chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit
 [[step]]
 expect = { player = { health = 17.0 } }
 
+# An axe hit on the raised shield disables it: lowered, and it can't go up
+# again while on cooldown, though the use key stays down.
+[[step]]
+chat = "/item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] weapon.mainhand with minecraft:iron_axe"
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+# Long enough for the held key to try again.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+screenshot = "disabled"
+
+[[step]]
+mouse_up = "right"
+
+# The 5 s cooldown runs out.
+[[step]]
+wait_ms = 4500
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+mouse_up = "right"
+
 # The inventory's player holds a shield in each hand, arms forward.
 [[step]]
 chat = "/item replace entity @s weapon.offhand with minecraft:shield"

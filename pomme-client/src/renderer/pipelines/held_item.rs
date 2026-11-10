@@ -4,7 +4,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::hand;
-use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
+use crate::renderer::pipelines::item_display::{DisplayKeys, DisplayResolver, DisplayTransform};
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi;
@@ -86,45 +86,19 @@ impl HandRenderSelection {
     };
 }
 
-/// One display context's transforms for each hand: the left hand tries its
-/// own key first, then the right's, and mirrors whichever it finds (vanilla
-/// `ItemTransform.apply`'s left-hand fix).
-struct HandDisplays {
-    right: DisplayResolver,
-    left: DisplayResolver,
-}
+/// One display context's keys for the right then the left hand: the left
+/// hand tries its own key first, then the right's, and mirrors whichever it
+/// finds (vanilla `ItemTransform.apply`'s left-hand fix).
+type HandKeys = [DisplayKeys; 2];
 
-const FIRST_PERSON_KEYS: [&[&str]; 2] = [
+const FIRST_PERSON_KEYS: HandKeys = [
     &["firstperson_righthand"],
     &["firstperson_lefthand", "firstperson_righthand"],
 ];
-const THIRD_PERSON_KEYS: [&[&str]; 2] = [
+const THIRD_PERSON_KEYS: HandKeys = [
     &["thirdperson_righthand"],
     &["thirdperson_lefthand", "thirdperson_righthand"],
 ];
-
-impl HandDisplays {
-    fn new(inputs: &ModelInputs, [right, left]: [&'static [&'static str]; 2]) -> Self {
-        Self {
-            right: DisplayResolver::new(inputs, right),
-            left: DisplayResolver::new(inputs, left),
-        }
-    }
-
-    fn resolve(
-        &self,
-        item: &HeldItemInfo,
-        in_use: bool,
-        default: DisplayTransform,
-        right_arm: bool,
-    ) -> DisplayTransform {
-        if right_arm {
-            self.right.resolve(&item.name, in_use, default)
-        } else {
-            self.left.resolve(&item.name, in_use, default).mirrored()
-        }
-    }
-}
 
 pub struct HeldItemPipeline {
     pipeline: rhi::backend::RenderPipeline,
@@ -132,8 +106,7 @@ pub struct HeldItemPipeline {
     /// The player preview's own camera and instances, as first person draws
     /// in the same frame.
     preview: ItemPipelineShared,
-    first_person: HandDisplays,
-    third_person: HandDisplays,
+    display: DisplayResolver,
 }
 
 impl HeldItemPipeline {
@@ -151,8 +124,7 @@ impl HeldItemPipeline {
             pipeline,
             shared,
             preview,
-            first_person: HandDisplays::new(inputs, FIRST_PERSON_KEYS),
-            third_person: HandDisplays::new(inputs, THIRD_PERSON_KEYS),
+            display: DisplayResolver::new(inputs),
         }
     }
 
@@ -162,8 +134,25 @@ impl HeldItemPipeline {
     }
 
     pub(crate) fn reload_display(&mut self, inputs: &ModelInputs) {
-        self.first_person = HandDisplays::new(inputs, FIRST_PERSON_KEYS);
-        self.third_person = HandDisplays::new(inputs, THIRD_PERSON_KEYS);
+        self.display = DisplayResolver::new(inputs);
+    }
+
+    /// `item`'s display in one hand under `keys`, mirrored for the left.
+    fn hand_display(
+        &self,
+        keys: HandKeys,
+        item: &HeldItemInfo,
+        in_use: bool,
+        default: DisplayTransform,
+        right_arm: bool,
+    ) -> DisplayTransform {
+        if right_arm {
+            self.display.resolve(&item.name, in_use, keys[0], default)
+        } else {
+            self.display
+                .resolve(&item.name, in_use, keys[1], default)
+                .mirrored()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -195,13 +184,18 @@ impl HeldItemPipeline {
                 continue;
             };
             let default = default_first_person(item.has_3d_model, hand.right_arm);
-            let display =
-                self.first_person
-                    .resolve(item, hand.use_anim.is_some(), default, hand.right_arm);
+            let display = self.hand_display(
+                FIRST_PERSON_KEYS,
+                item,
+                hand.use_anim.is_some(),
+                default,
+                hand.right_arm,
+            );
             let invert = hand::arm_invert(hand.right_arm);
             let mut arm = match hand.use_anim {
                 Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert),
-                Some(UseAnim::Block) => item_arm_matrix(invert),
+                Some(UseAnim::Block) if item.name == "shield" => item_arm_matrix(invert),
+                Some(UseAnim::Block) => item_arm_matrix(invert) * block_matrix(invert),
                 None => first_person_item_matrix(hand.swing_progress, invert),
             };
             // Vanilla `submitArmWithItem`'s crossbow branch: a charged one
@@ -249,9 +243,13 @@ impl HeldItemPipeline {
                 continue;
             };
             let default = default_third_person(item.has_3d_model);
-            let display = self
-                .third_person
-                .resolve(item, hand.in_use, default, hand.right_arm);
+            let display = self.hand_display(
+                THIRD_PERSON_KEYS,
+                item,
+                hand.in_use,
+                default,
+                hand.right_arm,
+            );
             let instance = self.preview.push_item(
                 frame,
                 &(hand.hand * display.to_matrix()),
@@ -341,6 +339,15 @@ fn default_first_person(has_3d_model: bool, right_arm: bool) -> DisplayTransform
             scale: Vec3::splat(0.68),
         }
     }
+}
+
+/// Vanilla `FirstPersonHandsAndItemsRenderer`'s `BLOCK` pose for an item
+/// other than a shield.
+fn block_matrix(invert: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(invert * -0.14142136, 0.08, 0.14142136))
+        * Mat4::from_rotation_x((-102.25f32).to_radians())
+        * Mat4::from_rotation_y((invert * 13.365f32).to_radians())
+        * Mat4::from_rotation_z((invert * 78.05f32).to_radians())
 }
 
 /// The fallback third-person right-hand display: `block/block.json`'s or

@@ -53,7 +53,7 @@ use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::post_effect::{PostEffect, PostEffects};
 use pipelines::sign_text::SignRenderInfo;
-use pipelines::skin_preview::{ArmPose, SkinPreviewPipeline};
+use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pipelines::world_text::{WorldTextPipeline, WorldTextVertices};
@@ -66,6 +66,7 @@ use crate::entity::components::{LookDirection, Position};
 use crate::physics::block_shape::LocalBox;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::renderer::entity_model::HumanoidArmPose;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand, PreviewHand, UseAnim};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
@@ -2729,11 +2730,10 @@ impl Renderer {
                     let arm_hand = |arm: usize| usize::from(*main_hand_right != (arm == 0));
                     let arm_poses = [0, 1].map(|arm| {
                         let hand = arm_hand(arm);
-                        match (&held_items[hand], use_anim[hand]) {
-                            (None, _) => ArmPose::Empty,
-                            (Some(_), Some(UseAnim::Block)) => ArmPose::Block,
-                            (Some(_), _) => ArmPose::Item,
-                        }
+                        HumanoidArmPose::for_hand(
+                            held_items[hand].is_some(),
+                            matches!(use_anim[hand], Some(UseAnim::Block)),
+                        )
                     });
                     let preview = self.skin_preview.draw_in_box(
                         &mut pass,

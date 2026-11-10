@@ -10,44 +10,57 @@ use crate::world::block::model::{
 
 const MODEL_PARENT_LIMIT: u32 = 16;
 
-/// Per-item cache of one display transform, resolved from the item's model
-/// JSON parent chain: the first model with any of `keys`, which it tries in
-/// order (vanilla `ItemTransforms` falls back from a missing left-hand entry
-/// to the same model's right-hand one).
+/// `display` keys tried in order: vanilla `ItemTransforms` falls back from a
+/// missing left-hand entry to the same model's right-hand one.
+pub type DisplayKeys = &'static [&'static str];
+
+/// An item's resolved `(in_use, keys)` lookups; `None` when no model has
+/// the keys.
+type ItemDisplays = HashMap<(bool, DisplayKeys), Option<DisplayTransform>>;
+
+/// Per-item cache of display transforms, each resolved from the item's model
+/// JSON parent chain: the first model with any of the lookup's keys.
 pub struct DisplayResolver {
-    keys: &'static [&'static str],
-    cache: RefCell<HashMap<(String, bool), DisplayTransform>>,
+    cache: RefCell<HashMap<String, ItemDisplays>>,
     items: BTreeMap<ResourceId, ResourceContent>,
     models: BTreeMap<ResourceId, ResourceContent>,
 }
 
 impl DisplayResolver {
-    pub fn new(inputs: &ModelInputs, keys: &'static [&'static str]) -> Self {
+    pub fn new(inputs: &ModelInputs) -> Self {
         Self {
-            keys,
             cache: RefCell::new(HashMap::new()),
             items: inputs.items.clone(),
             models: inputs.models.clone(),
         }
     }
 
-    /// The transform for `item_name`, from its `using_item` model while it's
-    /// `in_use`.
+    /// The transform for `item_name` under `keys`, from its `using_item`
+    /// model while it's `in_use`.
     pub fn resolve(
         &self,
         item_name: &str,
         in_use: bool,
+        keys: DisplayKeys,
         default: DisplayTransform,
     ) -> DisplayTransform {
-        let key = (item_name.to_string(), in_use);
-        if let Some(t) = self.cache.borrow().get(&key) {
-            return *t;
+        let lookup = (in_use, keys);
+        if let Some(t) = self
+            .cache
+            .borrow()
+            .get(item_name)
+            .and_then(|c| c.get(&lookup))
+        {
+            return t.unwrap_or(default);
         }
         let resolved = resolve_item_model_path(item_name, in_use, &self.items)
-            .and_then(|path| resolve_display(&path, &self.models, self.keys))
-            .unwrap_or(default);
-        self.cache.borrow_mut().insert(key, resolved);
-        resolved
+            .and_then(|path| resolve_display(&path, &self.models, keys));
+        self.cache
+            .borrow_mut()
+            .entry(item_name.to_owned())
+            .or_default()
+            .insert(lookup, resolved);
+        resolved.unwrap_or(default)
     }
 }
 
@@ -129,9 +142,12 @@ mod tests {
         );
         let resources = crate::test_util::test_resources(std::slice::from_ref(&dir));
         let inputs = ModelInputs::prepare(&resources).unwrap();
-        let left =
-            DisplayResolver::new(&inputs, &["firstperson_lefthand", "firstperson_righthand"]);
-        let resolved = left.resolve("thing", false, DisplayTransform::IDENTITY);
+        let resolved = DisplayResolver::new(&inputs).resolve(
+            "thing",
+            false,
+            &["firstperson_lefthand", "firstperson_righthand"],
+            DisplayTransform::IDENTITY,
+        );
         assert_eq!(resolved.rotation, glam::Vec3::new(0.0, 10.0, 0.0));
         std::fs::remove_dir_all(dir).unwrap();
     }

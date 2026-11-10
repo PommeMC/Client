@@ -1,4 +1,6 @@
-use glam::{Mat4, Vec3};
+use std::f32::consts::FRAC_PI_6;
+
+use glam::{Mat4, Vec2, Vec3};
 
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
@@ -4194,6 +4196,43 @@ fn witch_parts() -> Vec<EntityPart> {
 
 pub fn bake_witch_model() -> BakedEntityModel {
     bake_scaled(witch_parts(), VILLAGER_SCALE, 128)
+}
+
+/// Vanilla `HumanoidModel.ArmPose`, for the poses Pomme draws.
+// TODO: the two-handed and use poses (bow, crossbow, trident, spyglass,
+// horn, brush, spear).
+#[derive(Clone, Copy)]
+pub enum HumanoidArmPose {
+    Empty,
+    Item,
+    Block,
+}
+
+impl HumanoidArmPose {
+    /// Vanilla `AvatarRenderer.getArmPose` for a hand holding an item or
+    /// not, `blocking` while it's used with the `BLOCK` animation.
+    pub fn for_hand(holding: bool, blocking: bool) -> Self {
+        match (holding, blocking) {
+            (false, _) => Self::Empty,
+            (true, true) => Self::Block,
+            (true, false) => Self::Item,
+        }
+    }
+
+    /// Vanilla `poseRightArm`/`poseLeftArm`: `arm` is the arm's
+    /// `(xRot, yRot, zRot)` so far, `head` the head's `(xRot, yRot)`.
+    pub fn pose(self, arm: Vec3, right_arm: bool, head: Vec2) -> Vec3 {
+        match self {
+            Self::Empty => arm,
+            Self::Item => Vec3::new(arm.x * 0.5 - 0.31415927, 0.0, arm.z),
+            Self::Block => Vec3::new(
+                arm.x * 0.5 - 0.9424779 + head.x.clamp(-1.3962634, 0.43633232),
+                if right_arm { -30.0f32 } else { 30.0 }.to_radians()
+                    + head.y.clamp(-FRAC_PI_6, FRAC_PI_6),
+                arm.z,
+            ),
+        }
+    }
 }
 
 pub fn compute_humanoid_anim(

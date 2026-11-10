@@ -3229,6 +3229,9 @@ impl AppCore {
                     // Vanilla `handleExplosion`: `LocalPlayer.addDeltaMovement`.
                     *game.player.velocity += delta;
                 }
+                NetworkEvent::ItemCooldown { group, duration } => {
+                    game.interaction.item_cooldowns.set(group, duration);
+                }
                 NetworkEvent::EntityTeleported {
                     id,
                     position,

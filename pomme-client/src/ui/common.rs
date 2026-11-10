@@ -7,6 +7,7 @@ use azalea_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
+use crate::player::item_cooldowns::ItemCooldowns;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::bundle::Frac;
 use crate::ui::text_edit::TextFieldRenderInfo;
@@ -736,7 +737,8 @@ pub(crate) fn push_item_glyph(
     });
 }
 
-/// Vanilla `GuiGraphics.itemDecorations`: durability bar and stack count.
+/// Vanilla `GuiGraphics.itemDecorations`: durability bar, cooldown and stack
+/// count.
 pub(crate) fn push_item_decorations(
     elements: &mut Vec<MenuElement>,
     x: f32,
@@ -746,10 +748,44 @@ pub(crate) fn push_item_decorations(
     data: &ItemStackData,
 ) {
     push_item_bar(elements, x, y, scale, data);
-    // TODO: itemCooldown overlay once item cooldowns are tracked.
+    elements.push(MenuElement::ItemCooldown {
+        x,
+        y,
+        scale,
+        stack: data.clone(),
+    });
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
     }
+}
+
+/// Vanilla `GuiGraphics.itemCooldown`: swaps each `ItemCooldown` for a
+/// translucent white fill over the cooldown's remaining share of the slot,
+/// rising from the bottom, or drops it when the item isn't on cooldown.
+pub(crate) fn resolve_item_cooldowns(
+    elements: &mut Vec<MenuElement>,
+    cooldowns: &ItemCooldowns,
+    partial_tick: f32,
+) {
+    elements.retain_mut(|element| {
+        let MenuElement::ItemCooldown { x, y, scale, stack } = element else {
+            return true;
+        };
+        let cooldown = cooldowns.cooldown_percent(stack, partial_tick);
+        if cooldown <= 0.0 {
+            return false;
+        }
+        let top = (16.0 * (1.0 - cooldown)).floor();
+        *element = MenuElement::Rect {
+            x: *x,
+            y: *y + top * *scale,
+            w: 16.0 * *scale,
+            h: (16.0 * cooldown).ceil() * *scale,
+            corner_radius: 0.0,
+            color: [1.0, 1.0, 1.0, 127.0 / 255.0],
+        };
+        true
+    });
 }
 
 /// Vanilla `Item.MAX_BAR_WIDTH`.
@@ -1160,8 +1196,39 @@ mod tests {
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
-        push_item_count, push_item_icon, push_slot_with_owner,
+        push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
+    use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn a_cooldown_covers_its_remaining_share_from_the_bottom() {
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        let mut elements = Vec::new();
+        push_item_icon(&mut elements, 10.0, 20.0, 32.0, 2.0, &shield);
+        push_item_icon(
+            &mut elements,
+            50.0,
+            20.0,
+            32.0,
+            2.0,
+            &ItemStackData::new(ItemKind::Stick, 1),
+        );
+        let mut cooldowns = ItemCooldowns::default();
+        cooldowns.set("minecraft:shield".into(), 4);
+        cooldowns.tick();
+
+        resolve_item_cooldowns(&mut elements, &cooldowns, 0.0);
+        let rects: Vec<_> = elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::Rect { x, y, w, h, .. } => Some([*x, *y, *w, *h]),
+                MenuElement::ItemCooldown { .. } => panic!("unresolved cooldown"),
+                _ => None,
+            })
+            .collect();
+        // Three of four ticks left: the top quarter of the 16-unit slot clear.
+        assert_eq!(rects, [[10.0, 28.0, 32.0, 24.0]]);
+    }
 
     #[test]
     fn a_head_draws_its_patch_or_its_ids_default_skin() {
@@ -1268,7 +1335,8 @@ mod tests {
 
         push_item_icon(&mut elements, 10.0, 20.0, 32.0, 2.0, &data);
 
-        assert_eq!(elements.len(), 3);
+        // The icon, the bar's two rectangles, then the cooldown placeholder.
+        assert_eq!(elements.len(), 4);
         let MenuElement::Rect {
             x, y, w, h, color, ..
         } = &elements[1]

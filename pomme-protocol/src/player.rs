@@ -76,6 +76,10 @@ pub enum PlayerPacket {
         /// The death message, a text component as NBT.
         message: Box<[u8]>,
     },
+    Cooldown {
+        group: String,
+        duration: i32,
+    },
 }
 
 /// Decodes packet `name`, or `None` if it isn't a player-state packet.
@@ -143,6 +147,13 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<PlayerPacket>> {
             Ok(PlayerPacket::CombatKill {
                 player: r.var_i32()?,
                 message: r.nbt()?.into(),
+            })
+        },
+        // ClientboundCooldownPacket.java:17
+        "cooldown" => |r| {
+            Ok(PlayerPacket::Cooldown {
+                group: r.identifier()?.to_owned(),
+                duration: r.var_i32()?,
             })
         },
         _ => return None,
@@ -279,6 +290,20 @@ mod tests {
             PlayerPacket::CombatKill {
                 player: 1,
                 message: message.into()
+            }
+        );
+    }
+
+    #[test]
+    fn cooldown_matches_vanilla_encoder() {
+        assert_eq!(
+            decode(
+                "cooldown",
+                &crate::vanilla_fixtures::case("cooldown/shield")
+            ),
+            PlayerPacket::Cooldown {
+                group: "minecraft:shield".into(),
+                duration: 100
             }
         );
     }

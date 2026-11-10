@@ -29,6 +29,7 @@ use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
+use crate::player::item_cooldowns::ItemCooldowns;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
@@ -135,8 +136,11 @@ struct ActiveUse {
 }
 
 /// Vanilla `Item.use` for an item that blocks attacks: held up until released
-/// (`getUseDuration`'s 72000 ticks).
+/// (`getUseDuration`'s 72000 ticks). A swappable `equippable` swaps instead.
 fn block_use(hand: InteractionHand, stack: &ItemStackData) -> Option<ActiveUse> {
+    if swappable(stack).is_some() {
+        return None;
+    }
     stack_component::<BlocksAttacks>(stack)?;
     Some(ActiveUse::new(
         hand,
@@ -204,6 +208,7 @@ pub struct InteractionState {
     attack_strength_ticker: u32,
     /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
     last_item_in_main_hand: Option<ItemStackData>,
+    pub item_cooldowns: ItemCooldowns,
 }
 
 impl InteractionState {
@@ -237,6 +242,7 @@ impl InteractionState {
             o_attack_anim: 0.0,
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
+            item_cooldowns: ItemCooldowns::default(),
         }
     }
 
@@ -604,7 +610,7 @@ impl InteractionState {
         if cursor_captured && self.miss_time > 0 {
             self.miss_time -= 1;
         }
-        self.tick_attack_cooldown(held_stack);
+        self.tick_cooldowns(held_stack);
         self.update_swing();
     }
 
@@ -627,9 +633,9 @@ impl InteractionState {
     }
 
     /// Vanilla `Player.tick`: advance the attack cooldown, and reset it when
-    /// the main-hand item *type* changes; component or count changes only
-    /// refresh the cache.
-    fn tick_attack_cooldown(&mut self, held_stack: Option<&ItemStackData>) {
+    /// the main-hand item *type* changes (component or count changes only
+    /// refresh the cache); then count the item cooldowns down.
+    fn tick_cooldowns(&mut self, held_stack: Option<&ItemStackData>) {
         self.attack_strength_ticker = self.attack_strength_ticker.saturating_add(1);
         // Vanilla `ItemStack.matches`: same item, components, and count.
         let matches = same_item_same_components(held_stack, self.last_item_in_main_hand.as_ref())
@@ -645,6 +651,7 @@ impl InteractionState {
             }
             self.last_item_in_main_hand = held_stack.cloned();
         }
+        self.item_cooldowns.tick();
     }
 
     /// Vanilla `Player.getAttackStrengthScale(0.0)` (the HUD passes no
@@ -943,8 +950,8 @@ impl InteractionState {
     /// Vanilla `MultiPlayerGameMode.useItem` + `Item.use`: sends
     /// `ServerboundUseItem` for any held item (the server decides what it
     /// does) and predicts the result, beginning the local use timer when the
-    /// item is consumable and edible right now.
-    // TODO: item cooldowns, which make vanilla's `useItem` pass.
+    /// item is consumable and edible right now. An item on cooldown still
+    /// sends the packet but does nothing.
     #[allow(clippy::too_many_arguments)]
     fn use_item(
         &mut self,
@@ -967,6 +974,9 @@ impl InteractionState {
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
         }));
+        if self.item_cooldowns.is_on_cooldown(stack) {
+            return UseResult::Pass;
+        }
 
         // `BundleItem`: a 200-tick use. Its BUNDLE animation is the plain
         // swing pose, which `None` already draws.
@@ -1086,7 +1096,7 @@ impl InteractionState {
         if advance_swing {
             self.update_swing();
         }
-        self.tick_attack_cooldown(held_stack);
+        self.tick_cooldowns(held_stack);
     }
 
     /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
@@ -1202,6 +1212,12 @@ impl InteractionState {
         self.using_item
             .as_ref()
             .map_or(1.0, |a| a.use_effects.speed_multiplier)
+    }
+
+    /// Vanilla `LivingEntity.isUsingItem`.
+    #[cfg(feature = "test-harness")]
+    pub fn is_using_item(&self) -> bool {
+        self.using_item.is_some()
     }
 
     /// Vanilla `LocalPlayer.isSlowDueToUsingItem`, which gates sprinting.
@@ -1614,7 +1630,7 @@ fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData
 // eyes of ender, gliding fireworks, items on a stick) and the failures of
 // bows, crossbows, tridents and knowledge books.
 fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
-    if let Some(equippable) = stack_component::<Equippable>(stack).filter(|e| e.swappable) {
+    if let Some(equippable) = swappable(stack) {
         return equip_swap_result(&equippable, stack, worn);
     }
     if stack_component::<BlocksAttacks>(stack).is_some()
@@ -1633,6 +1649,11 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
         }
         _ => UseResult::Pass,
     }
+}
+
+/// The stack's `equippable`, if it swaps into its slot on use.
+fn swappable(stack: &ItemStackData) -> Option<Equippable> {
+    stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
@@ -1880,7 +1901,7 @@ pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
 
 /// The stack's component override if the server set one, else the item's
 /// default.
-fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
+pub(crate) fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
     stack
         .component_patch
         .get::<T>()
