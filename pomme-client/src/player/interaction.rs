@@ -125,15 +125,56 @@ struct ActiveUse {
     /// Bundle entries left to drop, predicted like vanilla's local
     /// `removeOne`; `None` unless using a bundle.
     bundle: Option<usize>,
-    sound: SoundRef,
-    has_particles: bool,
-    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
-    texture: String,
+    /// A consumable's periodic sound and crumbs; `None` for other uses.
+    consume: Option<ConsumeEffects>,
     use_effects: UseEffects,
     duration: i32,
     /// Counts down from `duration`; vanilla lets it run negative until the
     /// server completes the use.
     remaining: i32,
+}
+
+/// Vanilla `Item.use` for an item that blocks attacks: held up until released
+/// (`getUseDuration`'s 72000 ticks).
+fn block_use(hand: InteractionHand, stack: &ItemStackData) -> Option<ActiveUse> {
+    stack_component::<BlocksAttacks>(stack)?;
+    Some(ActiveUse::new(
+        hand,
+        stack,
+        ItemUseAnimation::BlockKind,
+        72000,
+    ))
+}
+
+impl ActiveUse {
+    /// A plain use of `stack` lasting `duration` ticks.
+    fn new(
+        hand: InteractionHand,
+        stack: &ItemStackData,
+        anim: ItemUseAnimation,
+        duration: i32,
+    ) -> Self {
+        Self {
+            hand,
+            kind: stack.kind,
+            anim,
+            bundle: None,
+            consume: None,
+            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            duration,
+            remaining: duration,
+        }
+    }
+}
+
+/// Vanilla `Consumable.emitParticlesAndSounds`'s inputs.
+struct ConsumeEffects {
+    sound: SoundRef,
+    /// Drinks play their sound quieter and lower.
+    drink: bool,
+    has_particles: bool,
+    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
+    texture: String,
 }
 
 pub struct InteractionState {
@@ -932,22 +973,17 @@ impl InteractionState {
         if crate::ui::bundle::is_bundle(stack) {
             if let Some(contents) = crate::ui::bundle::contents(stack) {
                 self.using_item = Some(ActiveUse {
-                    hand,
-                    kind: stack.kind,
-                    anim: ItemUseAnimation::None,
                     bundle: Some(contents.items.len()),
-                    sound: SoundRef::event("item.bundle.drop_contents"),
-                    has_particles: false,
-                    texture: format!("item/{}", item_resource_name(stack.kind)),
-                    use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-                    duration: 200,
-                    remaining: 200,
+                    ..ActiveUse::new(hand, stack, ItemUseAnimation::None, 200)
                 });
             }
             return UseResult::Success { swing: true };
         }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
+            if let Some(block) = block_use(hand, stack) {
+                self.using_item = Some(block);
+            }
             return item_use_result(stack, worn);
         };
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
@@ -960,25 +996,22 @@ impl InteractionState {
         }
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
-        let active = ActiveUse {
-            hand,
-            kind: stack.kind,
-            anim: consumable.animation,
-            bundle: None,
+        let consume = ConsumeEffects {
             sound: SoundRef::resolve(&consumable.sound),
+            drink: consumable.animation == ItemUseAnimation::Drink,
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
-            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-            duration,
-            remaining: duration,
         };
         if duration > 0 {
-            self.using_item = Some(active);
+            self.using_item = Some(ActiveUse {
+                consume: Some(consume),
+                ..ActiveUse::new(hand, stack, consumable.animation, duration)
+            });
         } else {
             // Vanilla `Consumable.startConsuming`: a zero-duration consumable
             // skips the use timer and consumes on the spot (`onConsume`).
             emit_consume_effects(
-                &active,
+                &consume,
                 16,
                 audio,
                 effects.particles,
@@ -1111,12 +1144,12 @@ impl InteractionState {
         // `Consumable.shouldEmitParticlesAndSounds`.
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if active.bundle.is_none()
+        if let Some(consume) = &active.consume
             && elapsed > wait
             && active.remaining % CONSUME_EFFECTS_INTERVAL == 0
         {
             emit_consume_effects(
-                active,
+                consume,
                 5,
                 audio,
                 effects.particles,
@@ -1155,14 +1188,12 @@ impl InteractionState {
         eye_pos: DVec3,
         look: LookDirection,
     ) {
-        let Some(active) = self.using_item.take() else {
-            return;
-        };
-        // A bundle isn't a `Consumable`: finishing it plays nothing.
-        if active.bundle.is_some() {
-            return;
+        // Only a `Consumable` plays anything on finishing.
+        if let Some(active) = self.using_item.take()
+            && let Some(consume) = &active.consume
+        {
+            emit_consume_effects(consume, 16, audio, particles, player_pos, eye_pos, look);
         }
-        emit_consume_effects(&active, 16, audio, particles, player_pos, eye_pos, look);
     }
 
     /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
@@ -1862,7 +1893,7 @@ fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Op
 /// and again from the server's broadcast, doubling up for the eater exactly
 /// like vanilla (MC-98310).
 fn emit_consume_effects(
-    active: &ActiveUse,
+    consume: &ConsumeEffects,
     particle_count: u32,
     audio: &AudioEngine,
     particles: &mut ParticleStore,
@@ -1870,16 +1901,16 @@ fn emit_consume_effects(
     eye_pos: DVec3,
     look: LookDirection,
 ) {
-    if active.has_particles {
+    if consume.has_particles {
         particles.add_item_use_particles(
             particle_count,
-            &active.texture,
+            &consume.texture,
             eye_pos,
             look.x_rot_deg(),
             look.y_rot_deg(),
         );
     }
-    let (volume, pitch) = if matches!(active.anim, ItemUseAnimation::Drink) {
+    let (volume, pitch) = if consume.drink {
         (0.5, 0.9 + fastrand::f32() * 0.1)
     } else {
         (
@@ -1888,7 +1919,7 @@ fn emit_consume_effects(
         )
     };
     audio.play_world_sound(
-        &active.sound,
+        &consume.sound,
         CATEGORY_PLAYERS,
         Position::new(player_pos.x, player_pos.y, player_pos.z),
         volume,
@@ -2232,9 +2263,12 @@ mod tests {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
             bundle: None,
-            sound: SoundRef::event("entity.generic.eat"),
-            has_particles: true,
-            texture: "item/apple".to_string(),
+            consume: Some(ConsumeEffects {
+                sound: SoundRef::event("entity.generic.eat"),
+                drink: false,
+                has_particles: true,
+                texture: "item/apple".to_string(),
+            }),
             use_effects: UseEffects::default(),
             duration: 32,
             remaining: 12,
@@ -2324,6 +2358,20 @@ mod tests {
         assert_eq!(state.attack_strength_ticker, 0);
         assert!(state.last_item_in_main_hand.is_none());
         assert!(state.using_item.is_none());
+    }
+
+    #[test]
+    fn a_shield_is_held_up_and_nothing_else_is() {
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        let use_ = block_use(InteractionHand::OffHand, &shield).expect("a shield blocks");
+        assert_eq!(use_.anim, ItemUseAnimation::BlockKind);
+        assert_eq!(
+            (use_.duration, use_.hand),
+            (72000, InteractionHand::OffHand)
+        );
+        assert!(use_.consume.is_none());
+        let apple = ItemStackData::new(ItemKind::Apple, 1);
+        assert!(block_use(InteractionHand::MainHand, &apple).is_none());
     }
 
     #[test]

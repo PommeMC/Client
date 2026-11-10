@@ -1,0 +1,77 @@
+# A shield held up with the use key blocks a hit from in front: no health
+# lost, and the shield takes the damage instead. Let go, the next hit lands.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:armor_stand 0.5 -60 3.5"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+look_at = [0.5, -61.0, 2.0]
+
+[[step]]
+mouse_down = "right"
+
+# Past the shield's block delay.
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+[[step]]
+expect = { slot = 36, item = "shield", components = ["damage"] }
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+screenshot = "blocking"
+
+[[step]]
+mouse_up = "right"
+
+# Past the invulnerability the first hit left.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit=1,sort=nearest]"
+
+# Mob damage scales with difficulty: 3 of the 4 on easy.
+[[step]]
+expect = { player = { health = 17.0 } }
+
+[[step]]
+chat = "/kill @e[type=minecraft:armor_stand]"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/effect give @s minecraft:instant_health 1 1"
+
+[[step]]
+chat = "/gamemode creative"
