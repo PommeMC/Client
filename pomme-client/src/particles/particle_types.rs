@@ -67,6 +67,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) enchanted_hit: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) damage_indicator: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) totem_of_undying: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) squid_ink: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) glow_squid_ink: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -248,6 +250,12 @@ impl ParticleTypes {
         let totem_of_undying = registry
             .register(resource_id!("minecraft:totem_of_undying"), false)
             .map_err(registration_error)?;
+        let squid_ink = registry
+            .register(resource_id!("minecraft:squid_ink"), true)
+            .map_err(registration_error)?;
+        let glow_squid_ink = registry
+            .register(resource_id!("minecraft:glow_squid_ink"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -307,6 +315,8 @@ impl ParticleTypes {
             enchanted_hit,
             damage_indicator,
             totem_of_undying,
+            squid_ink,
+            glow_squid_ink,
         })
     }
 }

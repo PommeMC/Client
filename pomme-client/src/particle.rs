@@ -174,6 +174,8 @@ pub enum ServerParticleKind {
     EnchantedHit,
     DamageIndicator,
     TotemOfUndying,
+    SquidInk,
+    GlowSquidInk,
 }
 
 impl ServerParticleKind {
@@ -194,6 +196,8 @@ impl ServerParticleKind {
             25 => Some(Self::EnchantedHit),
             14 => Some(Self::DamageIndicator),
             75 => Some(Self::TotemOfUndying),
+            73 => Some(Self::SquidInk),
+            106 => Some(Self::GlowSquidInk),
             _ => None,
         }
     }
