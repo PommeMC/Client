@@ -4,7 +4,6 @@ mod openal;
 mod sounds;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -14,10 +13,9 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use self::decoder::{StreamDecoder, decode_all};
 use self::openal::{Buffer, Context, Source, SourceState};
-use self::sounds::{SoundVariant, SoundsIndex};
-use crate::assets::AssetIndex;
+use self::sounds::SoundsIndex;
 use crate::entity::components::Position;
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::{ResourceContent, ResourceId, ResourceManager};
 
 const MENU_MUSIC_EVENT: &str = "music.menu";
 const UI_CLICK_EVENT: &str = "ui.button.click";
@@ -132,21 +130,19 @@ pub struct QueuedSubtitle {
     pub range: f32,
 }
 
-#[derive(Clone, Debug)]
 struct ResolvedSound {
     sound_id: String,
-    path: PathBuf,
+    content: ResourceContent,
     entry_volume: f32,
     entry_pitch: f32,
     stream: bool,
     attenuation_distance: f32,
 }
 
-#[derive(Debug)]
 struct PlayCommand {
     id: u64,
     sound_id: String,
-    path: PathBuf,
+    content: ResourceContent,
     category: SoundCategory,
     volume: f32,
     pitch: f32,
@@ -159,7 +155,6 @@ struct PlayCommand {
     report_completion: bool,
 }
 
-#[derive(Debug)]
 enum AudioCommand {
     Play(PlayCommand),
     SetVolumes([f32; SoundCategory::COUNT]),
@@ -199,8 +194,6 @@ pub struct AudioEngine {
     command_tx: Option<Sender<AudioCommand>>,
     event_rx: Receiver<AudioEvent>,
     worker: Option<JoinHandle<()>>,
-    jar_assets_dir: PathBuf,
-    asset_index: Option<AssetIndex>,
     sounds: SoundsIndex,
     volumes: [f32; SoundCategory::COUNT],
     subtitles_enabled: bool,
@@ -220,13 +213,8 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn new(
-        jar_assets_dir: &Path,
-        asset_index: Option<AssetIndex>,
-        packs: &ResourcePackManager,
-        volumes: [f32; SoundCategory::COUNT],
-    ) -> Self {
-        let sounds = SoundsIndex::load(jar_assets_dir, &asset_index, packs);
+    pub fn new(resources: &dyn ResourceManager, volumes: [f32; SoundCategory::COUNT]) -> Self {
+        let sounds = SoundsIndex::load(resources);
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         // The worker reports with `try_send`, and a dropped `Finished` would
         // park the menu-music delay at `i32::MAX` forever.
@@ -278,15 +266,7 @@ impl AudioEngine {
             }
         };
 
-        Self::attached(
-            command_tx,
-            event_rx,
-            worker,
-            jar_assets_dir.to_path_buf(),
-            asset_index,
-            sounds,
-            volumes,
-        )
+        Self::attached(command_tx, event_rx, worker, sounds, volumes)
     }
 
     /// Wraps an already-running (or absent) worker.
@@ -294,8 +274,6 @@ impl AudioEngine {
         command_tx: Option<Sender<AudioCommand>>,
         event_rx: Receiver<AudioEvent>,
         worker: Option<JoinHandle<()>>,
-        jar_assets_dir: PathBuf,
-        asset_index: Option<AssetIndex>,
         sounds: SoundsIndex,
         volumes: [f32; SoundCategory::COUNT],
     ) -> Self {
@@ -303,8 +281,6 @@ impl AudioEngine {
             command_tx,
             event_rx,
             worker,
-            jar_assets_dir,
-            asset_index,
             sounds,
             volumes,
             subtitles_enabled: false,
@@ -330,8 +306,6 @@ impl AudioEngine {
             Some(command_tx),
             event_rx,
             None,
-            PathBuf::new(),
-            None,
             SoundsIndex::default(),
             [1.0; SoundCategory::COUNT],
         );
@@ -346,10 +320,10 @@ impl AudioEngine {
         self.send(AudioCommand::SetVolumes(volumes));
     }
 
-    /// Rebuilds the sound-event registry against the current resource-pack
-    /// stack and clears native sources/buffers that may reference old assets.
-    pub fn reload_assets(&mut self, packs: &ResourcePackManager) {
-        self.sounds = SoundsIndex::load(&self.jar_assets_dir, &self.asset_index, packs);
+    /// Rebuilds the registry and queues a native source/buffer reset. Call on
+    /// every resource activation before dispatching sounds from the new view.
+    pub fn reload_assets(&mut self, resources: &dyn ResourceManager) {
+        self.sounds = SoundsIndex::load(resources);
         self.forget_active_sounds();
         self.send(AudioCommand::ReloadAssets);
     }
@@ -408,7 +382,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            content: sound.content,
             category: SoundCategory::Ui,
             volume: volume * sound.entry_volume,
             pitch: pitch * sound.entry_pitch,
@@ -424,6 +398,7 @@ impl AudioEngine {
 
     /// Plays a positional world sound. OpenAL owns spatialization and distance
     /// attenuation; Pomme passes Vanilla-equivalent source parameters only.
+    #[allow(clippy::too_many_arguments)]
     pub fn play_world_sound(
         &self,
         sound_ref: &SoundRef,
@@ -437,6 +412,7 @@ impl AudioEngine {
     }
 
     /// Returns the playing instance's id, for [`Self::stop`].
+    #[allow(clippy::too_many_arguments)]
     pub fn play_entity_sound(
         &mut self,
         sound_ref: &SoundRef,
@@ -494,7 +470,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            content: sound.content,
             category: SoundCategory::from_index(category),
             volume: instance_volume,
             pitch: pitch * sound.entry_pitch,
@@ -643,7 +619,7 @@ impl AudioEngine {
         self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
-            path: sound.path,
+            content: sound.content,
             category: SoundCategory::Music,
             volume: sound.entry_volume,
             pitch: sound.entry_pitch,
@@ -665,18 +641,14 @@ impl AudioEngine {
 
     fn resolve_event(&self, event: &str, seed: Option<u64>) -> Option<ResolvedSound> {
         let variant = self.sounds.choose(event, seed)?;
-        Some(self.resolve_variant(event, variant))
-    }
-
-    fn resolve_variant(&self, event: &str, variant: SoundVariant) -> ResolvedSound {
-        ResolvedSound {
+        Some(ResolvedSound {
             sound_id: canonical_sound_id(event),
-            path: variant.path,
+            content: variant.content,
             entry_volume: variant.volume,
             entry_pitch: variant.pitch,
             stream: variant.stream,
             attenuation_distance: variant.attenuation_distance,
-        }
+        })
     }
 
     fn allocate_id(&self) -> u64 {
@@ -710,7 +682,8 @@ struct AudioWorker {
     volumes: [f32; SoundCategory::COUNT],
     commands: Receiver<AudioCommand>,
     events: Sender<AudioEvent>,
-    static_buffers: HashMap<PathBuf, Rc<Buffer>>,
+    // Resource activation queues ReloadAssets before any play from the new view.
+    static_buffers: HashMap<ResourceId, Rc<Buffer>>,
     active: HashMap<u64, ActiveSound>,
 }
 
@@ -920,8 +893,9 @@ impl AudioWorker {
         };
         if at_capacity {
             tracing::debug!(
-                "OpenAL source pool exhausted; dropping sound {}",
-                play.path.display()
+                "OpenAL source pool exhausted; dropping sound {} from {:?}",
+                play.content.id(),
+                play.content.origin()
             );
             return false;
         }
@@ -946,18 +920,26 @@ impl AudioWorker {
         }
 
         let (source, kind) = if play.stream {
-            match self.start_stream(source, &play.path) {
+            match self.start_stream(source, &play.content) {
                 Ok((source, stream)) => (source, ActiveKind::Stream(stream)),
                 Err(e) => {
-                    tracing::warn!("failed to stream sound {}: {e}", play.path.display());
+                    tracing::warn!(
+                        "failed to stream sound {} from {:?}: {e}",
+                        play.content.id(),
+                        play.content.origin()
+                    );
                     return false;
                 }
             }
         } else {
-            let buffer = match self.static_buffer(&play.path) {
+            let buffer = match self.static_buffer(&play.content) {
                 Ok(buffer) => buffer,
                 Err(e) => {
-                    tracing::warn!("failed to decode sound {}: {e}", play.path.display());
+                    tracing::warn!(
+                        "failed to decode sound {} from {:?}: {e}",
+                        play.content.id(),
+                        play.content.origin()
+                    );
                     return false;
                 }
             };
@@ -987,26 +969,26 @@ impl AudioWorker {
         true
     }
 
-    fn static_buffer(&mut self, path: &Path) -> Result<Rc<Buffer>, String> {
-        if let Some(buffer) = self.static_buffers.get(path) {
+    fn static_buffer(&mut self, content: &ResourceContent) -> Result<Rc<Buffer>, String> {
+        if let Some(buffer) = self.static_buffers.get(content.id()) {
             return Ok(Rc::clone(buffer));
         }
-        let decoded = decode_all(path)?;
+        let decoded = decode_all(content)?;
         let buffer = Rc::new(
             self.context
                 .create_buffer(decoded.format, &decoded.samples)?,
         );
         self.static_buffers
-            .insert(path.to_path_buf(), Rc::clone(&buffer));
+            .insert(content.id().clone(), Rc::clone(&buffer));
         Ok(buffer)
     }
 
     fn start_stream(
         &self,
         source: Source,
-        path: &Path,
+        content: &ResourceContent,
     ) -> Result<(Source, StreamPlayback), String> {
-        let mut decoder = StreamDecoder::open(path)?;
+        let mut decoder = StreamDecoder::open(content)?;
         let mut queued = VecDeque::new();
         let mut finished_decoding = false;
         for _ in 0..4 {

@@ -154,10 +154,13 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # brightness, render_distance
                                               # (chunks), distant_terrain
                                               # (chunks, 0 for off),
-                                              # show_subtitles and
+                                              # show_subtitles,
                                               # shader_pack (a name in
                                               # fixtures/shaderpacks, "" for
-                                              # none)
+                                              # none) and resource_pack (a name
+                                              # in fixtures/resourcepacks to
+                                              # select as the pack screen does,
+                                              # "-name" to deselect)
 [[step]]
 deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view

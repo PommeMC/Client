@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azalea_inventory::ItemStack;
@@ -8,7 +7,6 @@ use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot,
 use azalea_registry::builtin::EntityKind;
 use serde::Deserialize;
 
-use crate::assets::{AssetIndex, resolve_asset_path, resolve_asset_path_with_packs};
 use crate::entity::components::Position;
 use crate::entity::dimensions;
 use crate::renderer::camera::CameraUniform;
@@ -18,7 +16,8 @@ use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::shaderpack::PackGeometry;
 use crate::renderer::rhi::{self, VertexFormat};
 use crate::renderer::{entity_model, shader, util};
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::managers::ResourceManager;
+use crate::resources::{ResourceContent, ResourceId, resource_id};
 use crate::world::block::BedDirection;
 
 pub const MAX_OVERLAYS: usize = 4;
@@ -375,6 +374,8 @@ enum OverlayKind {
 }
 
 struct MobVariant {
+    texture_keys: &'static [ResourceId],
+    fallback_size: u32,
     model: BakedEntityModel,
     vertex_buffer: rhi::backend::Buffer,
     texture: rhi::backend::Texture,
@@ -431,7 +432,7 @@ enum ArmorDye {
 }
 
 struct ArmorLayerDef {
-    texture_key: String,
+    texture_key: ResourceId,
     dye: ArmorDye,
 }
 
@@ -643,89 +644,41 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
     ]
 }
 
-fn equipment_texture_key(texture: &str, layer_type: &str) -> Option<String> {
+fn equipment_texture_key(texture: &str, layer_type: &str) -> Option<ResourceId> {
     let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
-    let key = format!("{namespace}/textures/entity/equipment/{layer_type}/{path}.png");
-    if namespace.contains('/') || !crate::assets::valid_asset_key(&key) {
-        tracing::warn!("Ignoring invalid equipment texture id {texture:?}");
-        return None;
-    }
-    Some(key)
+    let path = format!("textures/entity/equipment/{layer_type}/{path}.png");
+    ResourceId::from_parts(namespace, &path).ok()
 }
 
-fn collect_equipment_json_dir(
-    dir: &Path,
-    base: &Path,
-    namespace: &str,
-    out: &mut HashMap<String, PathBuf>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn discover_equipment_json(resources: &dyn ResourceManager) -> HashMap<String, ResourceContent> {
+    let entries = match resources.list_resources("equipment", &|id| id.path().ends_with(".json")) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!("Failed to list equipment definitions: {error}");
+            return HashMap::new();
+        }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_equipment_json_dir(&path, base, namespace, out);
-            continue;
-        }
-        if path.extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
-        let Ok(relative) = path.strip_prefix(base) else {
-            continue;
-        };
-        let mut resource_path = relative
-            .with_extension("")
-            .to_string_lossy()
-            .replace('\\', "/");
-        while resource_path.starts_with('/') {
-            resource_path.remove(0);
-        }
-        if !resource_path.is_empty() {
-            out.insert(format!("{namespace}:{resource_path}"), path);
-        }
-    }
+    entries
+        .into_iter()
+        .filter_map(|(id, resource)| {
+            let path = id
+                .path()
+                .strip_prefix("equipment/")?
+                .strip_suffix(".json")?;
+            Some((
+                format!("{}:{path}", id.namespace()),
+                resource.content().clone(),
+            ))
+        })
+        .collect()
 }
 
-fn collect_equipment_json_root(root: &Path, out: &mut HashMap<String, PathBuf>) {
-    let Ok(namespaces) = std::fs::read_dir(root) else {
-        return;
-    };
-    for namespace in namespaces.flatten() {
-        let ns_path = namespace.path();
-        if !ns_path.is_dir() {
-            continue;
-        }
-        let ns = namespace.file_name().to_string_lossy().to_string();
-        let equipment = ns_path.join("equipment");
-        if equipment.is_dir() {
-            collect_equipment_json_dir(&equipment, &equipment, &ns, out);
-        }
-    }
-}
-
-fn discover_equipment_json(
-    jar_assets_dir: &Path,
-    packs: Option<&ResourcePackManager>,
-) -> HashMap<String, PathBuf> {
-    let mut resources = HashMap::new();
-    collect_equipment_json_root(jar_assets_dir, &mut resources);
-    // Packs come low-to-high priority, so later inserts override.
-    if let Some(packs) = packs {
-        for pack in packs.active_pack_dirs() {
-            collect_equipment_json_root(&pack.join("assets"), &mut resources);
-        }
-    }
-    resources
-}
-
-fn read_equipment_json(path: &Path) -> Option<EquipmentClientInfoJson> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes)
+fn read_equipment_json(content: &ResourceContent) -> Option<EquipmentClientInfoJson> {
+    serde_json::from_reader(content.open().ok()?)
         .map_err(|error| {
             tracing::warn!(
                 "Failed to parse equipment definition {}: {error}",
-                path.display()
+                content.id()
             );
             error
         })
@@ -750,11 +703,8 @@ fn armor_layer_defs(layers: &[EquipmentLayerJson], layer_type: &str) -> Vec<Armo
         .collect()
 }
 
-fn load_armor_asset_defs(
-    jar_assets_dir: &Path,
-    packs: Option<&ResourcePackManager>,
-) -> HashMap<String, ArmorAssetDef> {
-    discover_equipment_json(jar_assets_dir, packs)
+fn load_armor_asset_defs(resources: &dyn ResourceManager) -> HashMap<String, ArmorAssetDef> {
+    discover_equipment_json(resources)
         .into_iter()
         .filter_map(|(id, path)| {
             let info = read_equipment_json(&path)?;
@@ -783,19 +733,19 @@ fn build_armor_texture_layer(
     device: &rhi::backend::Device,
     texture_layout: rhi::backend::BindGroupLayout,
     texture_sampler: rhi::backend::Sampler,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: Option<&ResourcePackManager>,
+    resources: &dyn ResourceManager,
     def: ArmorLayerDef,
 ) -> ArmorTextureLayer {
-    let path = resolve_asset_path_with_packs(jar_assets_dir, asset_index, &def.texture_key, packs);
-    let (pixels, width, height) = util::load_png(&path).unwrap_or_else(|| {
-        tracing::warn!(
-            "Failed to load equipment texture {}, using fallback",
-            def.texture_key
-        );
-        fallback_texture(64)
-    });
+    let resource = resources.get_resource(&def.texture_key).ok().flatten();
+    let (pixels, width, height) = resource
+        .and_then(|r| util::load_resource_png(r.content()))
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "Failed to load equipment texture {}, using fallback",
+                def.texture_key
+            );
+            fallback_texture(64)
+        });
     let texture = util::create_sampled_texture(device, "armor_texture", &pixels, width, height);
 
     let set = util::create_texture_group(device, texture_layout, texture.handle(), texture_sampler);
@@ -813,24 +763,13 @@ fn load_armor_assets(
     device: &rhi::backend::Device,
     texture_layout: rhi::backend::BindGroupLayout,
     texture_sampler: rhi::backend::Sampler,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    packs: &ResourcePackManager,
+    resources: &dyn ResourceManager,
 ) -> HashMap<String, ArmorAsset> {
-    let packs = Some(packs);
-    let defs = load_armor_asset_defs(jar_assets_dir, packs);
+    let defs = load_armor_asset_defs(resources);
     defs.into_iter()
         .map(|(id, def)| {
             let build = |layer| {
-                build_armor_texture_layer(
-                    device,
-                    texture_layout,
-                    texture_sampler,
-                    jar_assets_dir,
-                    asset_index,
-                    packs,
-                    layer,
-                )
+                build_armor_texture_layer(device, texture_layout, texture_sampler, resources, layer)
             };
             (
                 id,
@@ -1017,8 +956,8 @@ enum AnimationType {
 struct VariantDef {
     model: BakedEntityModel,
     /// Outer slice: one entry per texture variant (variant_index). Inner slice:
-    /// fallback chain of asset keys.
-    tex_variants: &'static [&'static [&'static str]],
+    /// fallback chain of resource IDs.
+    tex_variants: &'static [&'static [ResourceId]],
     tex_size: u32,
     overlay_kind: OverlayKind,
     invisible_outline: bool,
@@ -1037,7 +976,7 @@ fn mob_definitions() -> Vec<MobDef> {
     // One single-fallback texture entry per name under an entity texture dir.
     macro_rules! tex_table {
         ($dir:expr => $($name:literal),+ $(,)?) => {
-            &[$(&[concat!("minecraft/textures/entity/", $dir, "/", $name, ".png")]),+]
+            &[$(&[resource_id!(concat!("minecraft:textures/entity/", $dir, "/", $name, ".png"))]),+]
         };
     }
     // The villager and zombie-villager overlay dirs ship identical
@@ -1063,65 +1002,87 @@ fn mob_definitions() -> Vec<MobDef> {
         };
     }
 
-    const PIG_ADULT_TEX: &[&[&str]] = &[&[
-        "minecraft/textures/entity/pig/pig_temperate.png",
-        "minecraft/textures/entity/pig/temperate_pig.png",
+    const PIG_ADULT_TEX: &[&[ResourceId]] = &[&[
+        resource_id!("minecraft:textures/entity/pig/pig_temperate.png"),
+        resource_id!("minecraft:textures/entity/pig/temperate_pig.png"),
     ]];
-    const PIG_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/pig/pig_temperate_baby.png"]];
-    const COW_ADULT_TEX: &[&[&str]] = &[
+    const PIG_BABY_TEX: &[&[ResourceId]] = &[&[resource_id!(
+        "minecraft:textures/entity/pig/pig_temperate_baby.png"
+    )]];
+    const COW_ADULT_TEX: &[&[ResourceId]] = &[
         &[
-            "minecraft/textures/entity/cow/cow_temperate.png",
-            "minecraft/textures/entity/cow/cow.png",
+            resource_id!("minecraft:textures/entity/cow/cow_temperate.png"),
+            resource_id!("minecraft:textures/entity/cow/cow.png"),
         ],
-        &["minecraft/textures/entity/cow/cow_cold.png"],
-        &["minecraft/textures/entity/cow/cow_warm.png"],
+        &[resource_id!("minecraft:textures/entity/cow/cow_cold.png")],
+        &[resource_id!("minecraft:textures/entity/cow/cow_warm.png")],
     ];
-    const COW_BABY_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/cow/cow_temperate_baby.png"],
-        &["minecraft/textures/entity/cow/cow_cold_baby.png"],
-        &["minecraft/textures/entity/cow/cow_warm_baby.png"],
+    const COW_BABY_TEX: &[&[ResourceId]] = &[
+        &[resource_id!(
+            "minecraft:textures/entity/cow/cow_temperate_baby.png"
+        )],
+        &[resource_id!(
+            "minecraft:textures/entity/cow/cow_cold_baby.png"
+        )],
+        &[resource_id!(
+            "minecraft:textures/entity/cow/cow_warm_baby.png"
+        )],
     ];
     // The two normal-mesh variants share one VariantDef, the cold mesh gets
     // its own; the flattened pool follows CHICKEN_VARIANT_ORDER.
-    const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
+    const CHICKEN_NORMAL_TEX: &[&[ResourceId]] = &[
         &[
-            "minecraft/textures/entity/chicken/chicken_temperate.png",
-            "minecraft/textures/entity/chicken.png",
+            resource_id!("minecraft:textures/entity/chicken/chicken_temperate.png"),
+            resource_id!("minecraft:textures/entity/chicken.png"),
         ],
-        &["minecraft/textures/entity/chicken/chicken_warm.png"],
+        &[resource_id!(
+            "minecraft:textures/entity/chicken/chicken_warm.png"
+        )],
     ];
-    const CHICKEN_COLD_TEX: &[&[&str]] = &[&["minecraft/textures/entity/chicken/chicken_cold.png"]];
-    const CHICKEN_BABY_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/chicken/chicken_temperate_baby.png"],
-        &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
-        &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
+    const CHICKEN_COLD_TEX: &[&[ResourceId]] = &[&[resource_id!(
+        "minecraft:textures/entity/chicken/chicken_cold.png"
+    )]];
+    const CHICKEN_BABY_TEX: &[&[ResourceId]] = &[
+        &[resource_id!(
+            "minecraft:textures/entity/chicken/chicken_temperate_baby.png"
+        )],
+        &[resource_id!(
+            "minecraft:textures/entity/chicken/chicken_warm_baby.png"
+        )],
+        &[resource_id!(
+            "minecraft:textures/entity/chicken/chicken_cold_baby.png"
+        )],
     ];
-    const SHEEP_ADULT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep");
-    const SHEEP_BABY_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_baby");
-    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_undercoat");
-    const SHEEP_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool");
-    const SHEEP_BABY_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_baby");
-    const PLAYER_TEX: &[&[&str]] = tex_table!("player/wide" => "steve");
-    const ZOMBIE_TEX: &[&[&str]] = tex_table!("zombie" => "zombie");
-    const ZOMBIE_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "zombie_baby");
-    const HUSK_TEX: &[&[&str]] = tex_table!("zombie" => "husk");
-    const HUSK_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "husk_baby");
-    const DROWNED_TEX: &[&[&str]] = tex_table!("zombie" => "drowned");
-    const DROWNED_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_baby");
-    const DROWNED_OUTER_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer");
-    const DROWNED_OUTER_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer_baby");
-    const ZOMBIE_VILLAGER_TEX: &[&[&str]] = tex_table!("zombie_villager" => "zombie_villager");
-    const ZOMBIE_VILLAGER_BABY_TEX: &[&[&str]] =
+    const SHEEP_ADULT_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep");
+    const SHEEP_BABY_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_baby");
+    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[ResourceId]] =
+        tex_table!("sheep" => "sheep_wool_undercoat");
+    const SHEEP_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool");
+    const SHEEP_BABY_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool_baby");
+    const PLAYER_TEX: &[&[ResourceId]] = tex_table!("player/wide" => "steve");
+    const ZOMBIE_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie");
+    const ZOMBIE_BABY_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie_baby");
+    const HUSK_TEX: &[&[ResourceId]] = tex_table!("zombie" => "husk");
+    const HUSK_BABY_TEX: &[&[ResourceId]] = tex_table!("zombie" => "husk_baby");
+    const DROWNED_TEX: &[&[ResourceId]] = tex_table!("zombie" => "drowned");
+    const DROWNED_BABY_TEX: &[&[ResourceId]] = tex_table!("zombie" => "drowned_baby");
+    const DROWNED_OUTER_TEX: &[&[ResourceId]] = tex_table!("zombie" => "drowned_outer_layer");
+    const DROWNED_OUTER_BABY_TEX: &[&[ResourceId]] =
+        tex_table!("zombie" => "drowned_outer_layer_baby");
+    const ZOMBIE_VILLAGER_TEX: &[&[ResourceId]] =
+        tex_table!("zombie_villager" => "zombie_villager");
+    const ZOMBIE_VILLAGER_BABY_TEX: &[&[ResourceId]] =
         tex_table!("zombie_villager" => "zombie_villager_baby");
-    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/type");
-    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/baby");
-    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[&str]] =
+    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[ResourceId]] = villager_type_table!("zombie_villager/type");
+    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[ResourceId]] =
+        villager_type_table!("zombie_villager/baby");
+    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[ResourceId]] =
         villager_profession_table!("zombie_villager/profession");
-    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] =
+    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[ResourceId]] =
         villager_level_table!("zombie_villager/profession_level");
     // Wolf pool: variant_index = variant * 3 + state (0 wild, 1 tame,
     // 2 angry); variants follow WOLF_VARIANT_ORDER.
-    const WOLF_TEX: &[&[&str]] = tex_table!("wolf" =>
+    const WOLF_TEX: &[&[ResourceId]] = tex_table!("wolf" =>
         "wolf", "wolf_tame", "wolf_angry",
         "wolf_spotted", "wolf_spotted_tame", "wolf_spotted_angry",
         "wolf_snowy", "wolf_snowy_tame", "wolf_snowy_angry",
@@ -1131,7 +1092,7 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_woods", "wolf_woods_tame", "wolf_woods_angry",
         "wolf_chestnut", "wolf_chestnut_tame", "wolf_chestnut_angry",
         "wolf_striped", "wolf_striped_tame", "wolf_striped_angry");
-    const WOLF_BABY_TEX: &[&[&str]] = tex_table!("wolf" =>
+    const WOLF_BABY_TEX: &[&[ResourceId]] = tex_table!("wolf" =>
         "wolf_baby", "wolf_tame_baby", "wolf_angry_baby",
         "wolf_spotted_baby", "wolf_spotted_tame_baby", "wolf_spotted_angry_baby",
         "wolf_snowy_baby", "wolf_snowy_tame_baby", "wolf_snowy_angry_baby",
@@ -1141,50 +1102,50 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_woods_baby", "wolf_woods_tame_baby", "wolf_woods_angry_baby",
         "wolf_chestnut_baby", "wolf_chestnut_tame_baby", "wolf_chestnut_angry_baby",
         "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
-    const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar");
-    const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar_baby");
+    const WOLF_COLLAR_TEX: &[&[ResourceId]] = tex_table!("wolf" => "wolf_collar");
+    const WOLF_COLLAR_BABY_TEX: &[&[ResourceId]] = tex_table!("wolf" => "wolf_collar_baby");
     // Cat pool follows CAT_VARIANT_ORDER.
-    const CAT_TEX: &[&[&str]] = tex_table!("cat" =>
+    const CAT_TEX: &[&[ResourceId]] = tex_table!("cat" =>
         "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
         "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
-    const CAT_BABY_TEX: &[&[&str]] = tex_table!("cat" =>
+    const CAT_BABY_TEX: &[&[ResourceId]] = tex_table!("cat" =>
         "cat_all_black_baby", "cat_black_baby", "cat_british_shorthair_baby", "cat_calico_baby",
         "cat_jellie_baby", "cat_persian_baby", "cat_ragdoll_baby", "cat_red_baby",
         "cat_siamese_baby", "cat_tabby_baby", "cat_white_baby");
-    const CAT_COLLAR_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar");
-    const CAT_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar_baby");
-    const OCELOT_TEX: &[&[&str]] = tex_table!("cat" => "ocelot");
-    const OCELOT_BABY_TEX: &[&[&str]] = tex_table!("cat" => "ocelot_baby");
+    const CAT_COLLAR_TEX: &[&[ResourceId]] = tex_table!("cat" => "cat_collar");
+    const CAT_COLLAR_BABY_TEX: &[&[ResourceId]] = tex_table!("cat" => "cat_collar_baby");
+    const OCELOT_TEX: &[&[ResourceId]] = tex_table!("cat" => "ocelot");
+    const OCELOT_BABY_TEX: &[&[ResourceId]] = tex_table!("cat" => "ocelot_baby");
     // Rabbit: variant ids 0-6 in vanilla id order, slot 7 = the "Toast"
     // custom-name override.
-    const RABBIT_TEX: &[&[&str]] = tex_table!("rabbit" =>
+    const RABBIT_TEX: &[&[ResourceId]] = tex_table!("rabbit" =>
         "rabbit_brown", "rabbit_white", "rabbit_black", "rabbit_white_splotched",
         "rabbit_gold", "rabbit_salt", "rabbit_caerbannog", "rabbit_toast");
-    const RABBIT_BABY_TEX: &[&[&str]] = tex_table!("rabbit" =>
+    const RABBIT_BABY_TEX: &[&[ResourceId]] = tex_table!("rabbit" =>
         "rabbit_brown_baby", "rabbit_white_baby", "rabbit_black_baby",
         "rabbit_white_splotched_baby", "rabbit_gold_baby", "rabbit_salt_baby",
         "rabbit_caerbannog_baby", "rabbit_toast_baby");
     // Horse variant_index = color id 0-6; markings overlay variant = id - 1.
-    const HORSE_TEX: &[&[&str]] = tex_table!("horse" =>
+    const HORSE_TEX: &[&[ResourceId]] = tex_table!("horse" =>
         "horse_white", "horse_creamy", "horse_chestnut", "horse_brown", "horse_black",
         "horse_gray", "horse_darkbrown");
-    const HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
+    const HORSE_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" =>
         "horse_white_baby", "horse_creamy_baby", "horse_chestnut_baby", "horse_brown_baby",
         "horse_black_baby", "horse_gray_baby", "horse_darkbrown_baby");
-    const HORSE_MARKINGS_TEX: &[&[&str]] = tex_table!("horse" =>
+    const HORSE_MARKINGS_TEX: &[&[ResourceId]] = tex_table!("horse" =>
         "horse_markings_white", "horse_markings_whitefield", "horse_markings_whitedots",
         "horse_markings_blackdots");
-    const HORSE_MARKINGS_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
+    const HORSE_MARKINGS_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" =>
         "horse_markings_white_baby", "horse_markings_whitefield_baby",
         "horse_markings_whitedots_baby", "horse_markings_blackdots_baby");
-    const DONKEY_TEX: &[&[&str]] = tex_table!("horse" => "donkey");
-    const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse" => "donkey_baby");
-    const MULE_TEX: &[&[&str]] = tex_table!("horse" => "mule");
-    const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "mule_baby");
+    const DONKEY_TEX: &[&[ResourceId]] = tex_table!("horse" => "donkey");
+    const DONKEY_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" => "donkey_baby");
+    const MULE_TEX: &[&[ResourceId]] = tex_table!("horse" => "mule");
+    const MULE_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" => "mule_baby");
     // `BoatRenderer` and `RaftRenderer` for each wood, with their chest
     // forms.
     #[rustfmt::skip]
-    let boats: [(EntityKind, &'static [&'static [&'static str]]); 20] = [
+    const BOATS: [(EntityKind, &[&[ResourceId]]); 20] = [
         (EntityKind::OakBoat, tex_table!("boat" => "oak")),
         (EntityKind::SpruceBoat, tex_table!("boat" => "spruce")),
         (EntityKind::BirchBoat, tex_table!("boat" => "birch")),
@@ -1206,120 +1167,124 @@ fn mob_definitions() -> Vec<MobDef> {
         (EntityKind::PaleOakChestBoat, tex_table!("chest_boat" => "pale_oak")),
         (EntityKind::BambooChestRaft, tex_table!("chest_boat" => "bamboo")),
     ];
-    const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton");
-    const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton_baby");
-    const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie");
-    const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie_baby");
-    const SQUID_TEX: &[&[&str]] = tex_table!("squid" => "squid");
-    const SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "squid_baby");
-    const GLOW_SQUID_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid");
-    const GLOW_SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid_baby");
-    const BAT_TEX: &[&[&str]] = tex_table!("bat" => "bat");
-    const SNIFFER_TEX: &[&[&str]] = tex_table!("sniffer" => "sniffer");
-    const SNIFFLET_TEX: &[&[&str]] = tex_table!("sniffer" => "snifflet");
-    const ALLAY_TEX: &[&[&str]] = tex_table!("allay" => "allay");
-    const SNOW_GOLEM_TEX: &[&[&str]] = tex_table!("snow_golem" => "snow_golem");
-    const WANDERING_TRADER_TEX: &[&[&str]] = tex_table!("wandering_trader" => "wandering_trader");
+    const SKELETON_HORSE_TEX: &[&[ResourceId]] = tex_table!("horse" => "horse_skeleton");
+    const SKELETON_HORSE_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" => "horse_skeleton_baby");
+    const ZOMBIE_HORSE_TEX: &[&[ResourceId]] = tex_table!("horse" => "horse_zombie");
+    const ZOMBIE_HORSE_BABY_TEX: &[&[ResourceId]] = tex_table!("horse" => "horse_zombie_baby");
+    const SQUID_TEX: &[&[ResourceId]] = tex_table!("squid" => "squid");
+    const SQUID_BABY_TEX: &[&[ResourceId]] = tex_table!("squid" => "squid_baby");
+    const GLOW_SQUID_TEX: &[&[ResourceId]] = tex_table!("squid" => "glow_squid");
+    const GLOW_SQUID_BABY_TEX: &[&[ResourceId]] = tex_table!("squid" => "glow_squid_baby");
+    const BAT_TEX: &[&[ResourceId]] = tex_table!("bat" => "bat");
+    const SNIFFER_TEX: &[&[ResourceId]] = tex_table!("sniffer" => "sniffer");
+    const SNIFFLET_TEX: &[&[ResourceId]] = tex_table!("sniffer" => "snifflet");
+    const ALLAY_TEX: &[&[ResourceId]] = tex_table!("allay" => "allay");
+    const SNOW_GOLEM_TEX: &[&[ResourceId]] = tex_table!("snow_golem" => "snow_golem");
+    const WANDERING_TRADER_TEX: &[&[ResourceId]] =
+        tex_table!("wandering_trader" => "wandering_trader");
     // Indexed by `WeatheringCopper.WeatherState`.
-    const COPPER_GOLEM_TEX: &[&[&str]] = tex_table!("copper_golem" =>
+    const COPPER_GOLEM_TEX: &[&[ResourceId]] = tex_table!("copper_golem" =>
         "copper_golem", "copper_golem_exposed", "copper_golem_weathered", "copper_golem_oxidized");
-    const COPPER_GOLEM_EYES_TEX: &[&[&str]] = tex_table!("copper_golem" =>
+    const COPPER_GOLEM_EYES_TEX: &[&[ResourceId]] = tex_table!("copper_golem" =>
         "copper_golem_eyes", "copper_golem_eyes_exposed", "copper_golem_eyes_weathered",
         "copper_golem_eyes_oxidized");
-    const SULFUR_CUBE_OUTER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_outer");
-    const SULFUR_CUBE_OUTER_SMALL_TEX: &[&[&str]] =
+    const SULFUR_CUBE_OUTER_TEX: &[&[ResourceId]] =
+        tex_table!("sulfur_cube" => "sulfur_cube_outer");
+    const SULFUR_CUBE_OUTER_SMALL_TEX: &[&[ResourceId]] =
         tex_table!("sulfur_cube" => "sulfur_cube_outer_small");
-    const SULFUR_CUBE_INNER_TEX: &[&[&str]] = tex_table!("sulfur_cube" => "sulfur_cube_inner");
-    const SULFUR_CUBE_INNER_SMALL_TEX: &[&[&str]] =
+    const SULFUR_CUBE_INNER_TEX: &[&[ResourceId]] =
+        tex_table!("sulfur_cube" => "sulfur_cube_inner");
+    const SULFUR_CUBE_INNER_SMALL_TEX: &[&[ResourceId]] =
         tex_table!("sulfur_cube" => "sulfur_cube_inner_small");
-    const DOLPHIN_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin");
+    const DOLPHIN_TEX: &[&[ResourceId]] = tex_table!("dolphin" => "dolphin");
     // Indexed by `Axolotl.Variant` id.
-    const AXOLOTL_TEX: &[&[&str]] = tex_table!("axolotl" =>
+    const AXOLOTL_TEX: &[&[ResourceId]] = tex_table!("axolotl" =>
         "axolotl_lucy", "axolotl_wild", "axolotl_gold", "axolotl_cyan", "axolotl_blue");
-    const AXOLOTL_BABY_TEX: &[&[&str]] = tex_table!("axolotl" =>
+    const AXOLOTL_BABY_TEX: &[&[ResourceId]] = tex_table!("axolotl" =>
         "axolotl_lucy_baby", "axolotl_wild_baby", "axolotl_gold_baby", "axolotl_cyan_baby",
         "axolotl_blue_baby");
-    const POLAR_BEAR_TEX: &[&[&str]] = tex_table!("bear" => "polarbear");
-    const POLAR_BEAR_BABY_TEX: &[&[&str]] = tex_table!("bear" => "polarbear_baby");
+    const POLAR_BEAR_TEX: &[&[ResourceId]] = tex_table!("bear" => "polarbear");
+    const POLAR_BEAR_BABY_TEX: &[&[ResourceId]] = tex_table!("bear" => "polarbear_baby");
     // Indexed by `variant * 2 + sleeping`.
-    const FOX_TEX: &[&[&str]] =
+    const FOX_TEX: &[&[ResourceId]] =
         tex_table!("fox" => "fox", "fox_sleep", "fox_snow", "fox_snow_sleep");
-    const FOX_BABY_TEX: &[&[&str]] = tex_table!("fox" =>
+    const FOX_BABY_TEX: &[&[ResourceId]] = tex_table!("fox" =>
         "fox_baby", "fox_sleep_baby", "fox_snow_baby", "fox_snow_sleep_baby");
     // Indexed by `Panda.Gene` id.
-    const PANDA_TEX: &[&[&str]] = tex_table!("panda" =>
+    const PANDA_TEX: &[&[ResourceId]] = tex_table!("panda" =>
         "panda", "panda_lazy", "panda_worried", "panda_playful", "panda_brown",
         "panda_weak", "panda_aggressive");
-    const PANDA_BABY_TEX: &[&[&str]] = tex_table!("panda" =>
+    const PANDA_BABY_TEX: &[&[ResourceId]] = tex_table!("panda" =>
         "panda_baby", "lazy_panda_baby", "worried_panda_baby", "playful_panda_baby",
         "brown_panda_baby", "weak_panda_baby", "aggressive_panda_baby");
     // Indexed by `angry * 2 + nectar`.
-    const BEE_TEX: &[&[&str]] =
+    const BEE_TEX: &[&[ResourceId]] =
         tex_table!("bee" => "bee", "bee_nectar", "bee_angry", "bee_angry_nectar");
-    const BEE_BABY_TEX: &[&[&str]] = tex_table!("bee" =>
+    const BEE_BABY_TEX: &[&[ResourceId]] = tex_table!("bee" =>
         "bee_baby", "bee_nectar_baby", "bee_angry_baby", "bee_angry_nectar_baby");
     // Indexed by `Parrot.Variant` id.
-    const PARROT_TEX: &[&[&str]] = tex_table!("parrot" =>
+    const PARROT_TEX: &[&[ResourceId]] = tex_table!("parrot" =>
         "parrot_red_blue", "parrot_blue", "parrot_green", "parrot_yellow_blue", "parrot_grey");
-    const DOLPHIN_BABY_TEX: &[&[&str]] = tex_table!("dolphin" => "dolphin_baby");
-    const TURTLE_TEX: &[&[&str]] = tex_table!("turtle" => "turtle");
-    const TURTLE_BABY_TEX: &[&[&str]] = tex_table!("turtle" => "turtle_baby");
-    const ARMADILLO_TEX: &[&[&str]] = tex_table!("armadillo" => "armadillo");
-    const ARMADILLO_BABY_TEX: &[&[&str]] = tex_table!("armadillo" => "armadillo_baby");
-    const GOAT_TEX: &[&[&str]] = tex_table!("goat" => "goat");
-    const GOAT_BABY_TEX: &[&[&str]] = tex_table!("goat" => "goat_baby");
+    const DOLPHIN_BABY_TEX: &[&[ResourceId]] = tex_table!("dolphin" => "dolphin_baby");
+    const TURTLE_TEX: &[&[ResourceId]] = tex_table!("turtle" => "turtle");
+    const TURTLE_BABY_TEX: &[&[ResourceId]] = tex_table!("turtle" => "turtle_baby");
+    const ARMADILLO_TEX: &[&[ResourceId]] = tex_table!("armadillo" => "armadillo");
+    const ARMADILLO_BABY_TEX: &[&[ResourceId]] = tex_table!("armadillo" => "armadillo_baby");
+    const GOAT_TEX: &[&[ResourceId]] = tex_table!("goat" => "goat");
+    const GOAT_BABY_TEX: &[&[ResourceId]] = tex_table!("goat" => "goat_baby");
     // Indexed by `Llama.Variant` id.
-    const LLAMA_TEX: &[&[&str]] =
+    const LLAMA_TEX: &[&[ResourceId]] =
         tex_table!("llama" => "llama_creamy", "llama_white", "llama_brown", "llama_gray");
-    const LLAMA_BABY_TEX: &[&[&str]] = tex_table!("llama" =>
+    const LLAMA_BABY_TEX: &[&[ResourceId]] = tex_table!("llama" =>
         "llama_creamy_baby", "llama_white_baby", "llama_brown_baby", "llama_gray_baby");
     // Indexed by `MushroomCow.Variant` id.
-    const MOOSHROOM_TEX: &[&[&str]] = tex_table!("cow" => "mooshroom_red", "mooshroom_brown");
-    const MOOSHROOM_BABY_TEX: &[&[&str]] =
+    const MOOSHROOM_TEX: &[&[ResourceId]] = tex_table!("cow" => "mooshroom_red", "mooshroom_brown");
+    const MOOSHROOM_BABY_TEX: &[&[ResourceId]] =
         tex_table!("cow" => "mooshroom_red_baby", "mooshroom_brown_baby");
-    const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
-    const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
-    const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
-    const IRON_GOLEM_TEX: &[&[&str]] = tex_table!("iron_golem" => "iron_golem");
+    const COD_TEX: &[&[ResourceId]] = tex_table!("fish" => "cod");
+    const SALMON_TEX: &[&[ResourceId]] = tex_table!("fish" => "salmon");
+    const PUFFERFISH_TEX: &[&[ResourceId]] = tex_table!("fish" => "pufferfish");
+    const IRON_GOLEM_TEX: &[&[ResourceId]] = tex_table!("iron_golem" => "iron_golem");
     // Indexed by crackiness level minus one (low, medium, high).
-    const IRON_GOLEM_CRACKINESS_TEX: &[&[&str]] = tex_table!("iron_golem" =>
+    const IRON_GOLEM_CRACKINESS_TEX: &[&[ResourceId]] = tex_table!("iron_golem" =>
         "iron_golem_crackiness_low", "iron_golem_crackiness_medium",
         "iron_golem_crackiness_high");
-    const TROPICAL_A_TEX: &[&[&str]] = tex_table!("fish" => "tropical_a");
-    const TROPICAL_B_TEX: &[&[&str]] = tex_table!("fish" => "tropical_b");
-    const TROPICAL_A_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+    const TROPICAL_A_TEX: &[&[ResourceId]] = tex_table!("fish" => "tropical_a");
+    const TROPICAL_B_TEX: &[&[ResourceId]] = tex_table!("fish" => "tropical_b");
+    const TROPICAL_A_PATTERN_TEX: &[&[ResourceId]] = tex_table!("fish" =>
         "tropical_a_pattern_1", "tropical_a_pattern_2", "tropical_a_pattern_3",
         "tropical_a_pattern_4", "tropical_a_pattern_5", "tropical_a_pattern_6");
-    const TROPICAL_B_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+    const TROPICAL_B_PATTERN_TEX: &[&[ResourceId]] = tex_table!("fish" =>
         "tropical_b_pattern_1", "tropical_b_pattern_2", "tropical_b_pattern_3",
         "tropical_b_pattern_4", "tropical_b_pattern_5", "tropical_b_pattern_6");
-    const SKELETON_TEX: &[&[&str]] = tex_table!("skeleton" => "skeleton");
-    const STRAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray");
-    const STRAY_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray_overlay");
-    const BOGGED_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged");
-    const BOGGED_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged_overlay");
-    const CREEPER_TEX: &[&[&str]] = tex_table!("creeper" => "creeper");
-    const CREEPER_ARMOR_TEX: &[&[&str]] = tex_table!("creeper" => "creeper_armor");
-    const SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "spider");
-    const SPIDER_EYES_TEX: &[&[&str]] = tex_table!("spider" => "spider_eyes");
-    const ENDERMAN_TEX: &[&[&str]] = tex_table!("enderman" => "enderman");
-    const ENDERMAN_EYES_TEX: &[&[&str]] = tex_table!("enderman" => "enderman_eyes");
-    const SLIME_TEX: &[&[&str]] = tex_table!("slime" => "slime");
-    const WITCH_TEX: &[&[&str]] = &[&[
-        "minecraft/textures/entity/witch/witch.png",
-        "minecraft/textures/entity/witch.png",
+    const SKELETON_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "skeleton");
+    const STRAY_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "stray");
+    const STRAY_OVERLAY_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "stray_overlay");
+    const BOGGED_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "bogged");
+    const BOGGED_OVERLAY_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "bogged_overlay");
+    const CREEPER_TEX: &[&[ResourceId]] = tex_table!("creeper" => "creeper");
+    const CREEPER_ARMOR_TEX: &[&[ResourceId]] = tex_table!("creeper" => "creeper_armor");
+    const SPIDER_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider");
+    const SPIDER_EYES_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider_eyes");
+    const ENDERMAN_TEX: &[&[ResourceId]] = tex_table!("enderman" => "enderman");
+    const ENDERMAN_EYES_TEX: &[&[ResourceId]] = tex_table!("enderman" => "enderman_eyes");
+    const SLIME_TEX: &[&[ResourceId]] = tex_table!("slime" => "slime");
+    const WITCH_TEX: &[&[ResourceId]] = &[&[
+        resource_id!("minecraft:textures/entity/witch/witch.png"),
+        resource_id!("minecraft:textures/entity/witch.png"),
     ]];
-    const VILLAGER_TEX: &[&[&str]] = tex_table!("villager" => "villager");
-    const VILLAGER_BABY_TEX: &[&[&str]] = tex_table!("villager" => "villager_baby");
-    const VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/type");
-    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/baby");
-    const VILLAGER_PROFESSION_TEX: &[&[&str]] = villager_profession_table!("villager/profession");
-    const VILLAGER_LEVEL_TEX: &[&[&str]] = villager_level_table!("villager/profession_level");
+    const VILLAGER_TEX: &[&[ResourceId]] = tex_table!("villager" => "villager");
+    const VILLAGER_BABY_TEX: &[&[ResourceId]] = tex_table!("villager" => "villager_baby");
+    const VILLAGER_TYPE_TEX: &[&[ResourceId]] = villager_type_table!("villager/type");
+    const VILLAGER_BABY_TYPE_TEX: &[&[ResourceId]] = villager_type_table!("villager/baby");
+    const VILLAGER_PROFESSION_TEX: &[&[ResourceId]] =
+        villager_profession_table!("villager/profession");
+    const VILLAGER_LEVEL_TEX: &[&[ResourceId]] = villager_level_table!("villager/profession_level");
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
         model: BakedEntityModel,
-        tex_variants: &'static [&'static [&'static str]],
+        tex_variants: &'static [&'static [ResourceId]],
         tex_size: u32,
     ) -> VariantDef {
         VariantDef {
@@ -1333,7 +1298,7 @@ fn mob_definitions() -> Vec<MobDef> {
     // Vanilla `entityTranslucent`, as a body or a layer.
     fn translucent(
         model: BakedEntityModel,
-        tex_variants: &'static [&'static [&'static str]],
+        tex_variants: &'static [&'static [ResourceId]],
         tex_size: u32,
     ) -> VariantDef {
         VariantDef {
@@ -1357,9 +1322,9 @@ fn mob_definitions() -> Vec<MobDef> {
     // each slot's texture variant. The `bake` parameter takes `no_hat`.
     fn villager_like_overlays(
         bake: fn(bool) -> BakedEntityModel,
-        type_tex: &'static [&'static [&'static str]],
-        profession_tex: &'static [&'static [&'static str]],
-        level_tex: &'static [&'static [&'static str]],
+        type_tex: &'static [&'static [ResourceId]],
+        profession_tex: &'static [&'static [ResourceId]],
+        level_tex: &'static [&'static [ResourceId]],
     ) -> Vec<VariantDef> {
         // Slots 0/2/3 share one bake of the hatted model.
         let hatted = bake(false);
@@ -1373,7 +1338,7 @@ fn mob_definitions() -> Vec<MobDef> {
 
     fn villager_like_baby_overlays(
         bake: fn(bool) -> BakedEntityModel,
-        type_tex: &'static [&'static [&'static str]],
+        type_tex: &'static [&'static [ResourceId]],
     ) -> Vec<VariantDef> {
         vec![
             opaque(bake(false), type_tex, 64),
@@ -2250,7 +2215,7 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
     ];
-    defs.extend(boats.into_iter().map(|(kind, tex)| {
+    defs.extend(BOATS.into_iter().map(|(kind, tex)| {
         let (model, water_patch) = entity_model::bake_boat(kind);
         let tex_size = if crate::entity::is_chest_boat(kind) {
             128
@@ -2281,9 +2246,7 @@ impl EntityRenderer {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        packs: &ResourcePackManager,
+        resources: &dyn ResourceManager,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -2330,14 +2293,7 @@ impl EntityRenderer {
         let texture_sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let texture_sampler_repeat =
             rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
-        let armor_assets = load_armor_assets(
-            device,
-            texture_layout,
-            texture_sampler,
-            jar_assets_dir,
-            asset_index,
-            packs,
-        );
+        let armor_assets = load_armor_assets(device, texture_layout, texture_sampler, resources);
         let armor_meshes = build_armor_meshes(device);
 
         let mut mobs = HashMap::new();
@@ -2349,8 +2305,7 @@ impl EntityRenderer {
                     texture_layout,
                     texture_sampler,
                     texture_sampler_repeat,
-                    jar_assets_dir,
-                    asset_index,
+                    resources,
                     v,
                 )
             };
@@ -2430,19 +2385,46 @@ impl EntityRenderer {
     pub fn reload_armor_assets(
         &mut self,
         device: &rhi::backend::Device,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        packs: &ResourcePackManager,
+        resources: &dyn ResourceManager,
     ) {
         destroy_armor_assets(device, &mut self.armor_assets);
-        self.armor_assets = load_armor_assets(
-            device,
-            self.texture_layout,
-            self.texture_sampler,
-            jar_assets_dir,
-            asset_index,
-            packs,
-        );
+        self.armor_assets =
+            load_armor_assets(device, self.texture_layout, self.texture_sampler, resources);
+    }
+
+    /// Refresh fixed sheets without discarding player skins or model buffers.
+    /// The caller has retired in-flight draws before replacing bindings.
+    pub fn reload_textures(
+        &mut self,
+        device: &rhi::backend::Device,
+        resources: &dyn ResourceManager,
+    ) {
+        for entry in self.mobs.values_mut() {
+            for variant in entry
+                .adult_variants
+                .iter_mut()
+                .chain(entry.baby_variants.iter_mut().flatten())
+                .chain(entry.adult_overlays.iter_mut().flatten())
+                .chain(entry.baby_overlays.iter_mut().flatten())
+            {
+                let texture = load_entity_texture(
+                    device,
+                    resources,
+                    variant.texture_keys,
+                    variant.fallback_size,
+                );
+                let sampler = match variant.overlay_kind {
+                    OverlayKind::SwirlAdditive => self.texture_sampler_repeat,
+                    _ => self.texture_sampler,
+                };
+                variant.texture_set.replace(
+                    device,
+                    self.texture_layout,
+                    &util::texture_binding(texture.handle(), sampler),
+                );
+                std::mem::replace(&mut variant.texture, texture).destroy(device);
+            }
+        }
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -3866,8 +3848,7 @@ fn build_variants(
     texture_layout: rhi::backend::BindGroupLayout,
     texture_sampler: rhi::backend::Sampler,
     texture_sampler_repeat: rhi::backend::Sampler,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &dyn ResourceManager,
     variant: VariantDef,
 ) -> Vec<MobVariant> {
     let VariantDef {
@@ -3894,13 +3875,14 @@ fn build_variants(
                 rhi::BufferUsages::VERTEX,
             );
 
-            let texture =
-                load_entity_texture(device, jar_assets_dir, asset_index, tex_keys, tex_size);
+            let texture = load_entity_texture(device, resources, tex_keys, tex_size);
 
             let texture_set =
                 util::create_texture_group(device, texture_layout, texture.handle(), sampler);
 
             MobVariant {
+                texture_keys: tex_keys,
+                fallback_size: tex_size,
                 model: model.clone(),
                 vertex_buffer,
                 texture,
@@ -3915,17 +3897,13 @@ fn build_variants(
 
 fn load_entity_texture(
     device: &rhi::backend::Device,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    asset_keys: &[&str],
+    resources: &dyn ResourceManager,
+    asset_keys: &[ResourceId],
     fallback_size: u32,
 ) -> rhi::backend::Texture {
     let (pixels, width, height) = asset_keys
         .iter()
-        .find_map(|key| {
-            let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-            util::load_png(&path)
-        })
+        .find_map(|key| util::load_asset_png(resources, key))
         .unwrap_or_else(|| {
             tracing::warn!(
                 "Failed to load entity texture {:?}, using fallback",
@@ -4128,7 +4106,7 @@ mod tests {
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
-        armor_render_info, body_route, equipment_texture_key, layer_route,
+        armor_render_info, body_route, layer_route,
     };
 
     /// `LlamaDecorLayer` takes any equippable asset, whatever its slot.
@@ -4156,7 +4134,9 @@ mod tests {
         let layers = armor_layer_defs(&info.layers["llama_body"], "llama_body");
         assert_eq!(
             layers[0].texture_key,
-            "minecraft/textures/entity/equipment/llama_body/trader_llama.png"
+            crate::resources::resource_id!(
+                "minecraft:textures/entity/equipment/llama_body/trader_llama.png"
+            )
         );
         assert_eq!(layers[0].dye, ArmorDye::None);
     }
@@ -4265,7 +4245,9 @@ mod tests {
         assert_eq!(layers.len(), 2);
         assert_eq!(
             layers[0].texture_key,
-            "minecraft/textures/entity/equipment/humanoid/leather.png"
+            crate::resources::resource_id!(
+                "minecraft:textures/entity/equipment/humanoid/leather.png"
+            )
         );
         assert_eq!(
             layers[0].dye,
@@ -4275,19 +4257,11 @@ mod tests {
         );
         assert_eq!(
             layers[1].texture_key,
-            "example/textures/entity/equipment/humanoid/overlay.png"
+            crate::resources::resource_id!(
+                "example:textures/entity/equipment/humanoid/overlay.png"
+            )
         );
         assert_eq!(layers[1].dye, ArmorDye::None);
-    }
-
-    #[test]
-    fn equipment_texture_ids_reject_path_traversal() {
-        assert_eq!(
-            equipment_texture_key("iron", "humanoid"),
-            Some("minecraft/textures/entity/equipment/humanoid/iron.png".into())
-        );
-        assert!(equipment_texture_key("minecraft:../iron", "humanoid").is_none());
-        assert!(equipment_texture_key(":iron", "humanoid").is_none());
     }
 
     use azalea_registry::builtin::EntityKind;

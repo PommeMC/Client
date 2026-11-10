@@ -1,6 +1,9 @@
 use super::*;
+use crate::app::core::AppCore;
 use crate::app::input::{InputKey, NOT_BOUND};
-use crate::resource_pack::PackCompat;
+use crate::app::phases::in_game::GameState;
+use crate::renderer::Renderer;
+use crate::resources::packs::{Pack, PackCompat};
 use crate::ui::common::BTN_H;
 use crate::ui::text::TextSpan;
 
@@ -36,6 +39,92 @@ fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
         PackCompat::Compatible => ("Compatible", [0.33, 0.87, 0.33, 1.0]),
         PackCompat::TooOld => ("Made for an older version", COL_RED),
         PackCompat::TooNew => ("Made for a newer version", COL_RED),
+        PackCompat::Unknown => ("Compatibility unknown", COL_DIM),
+    }
+}
+
+impl ResourcePackRow {
+    fn new(pack: &Pack, enabled: bool, is_server: bool) -> Self {
+        Self {
+            id: pack.id().clone(),
+            name: pack.location().title.plain_text(),
+            description: pack.metadata().description.plain_text(),
+            compat: pack.metadata().compatibility,
+            is_server,
+            enabled,
+        }
+    }
+}
+
+fn available_resource_packs<'a>(
+    packs: impl Iterator<Item = &'a Pack>,
+    selected_ids: &[PackId],
+    is_server: impl Fn(&PackId) -> bool,
+) -> Vec<ResourcePackRow> {
+    packs
+        .filter(|pack| !pack.enablement_config().required)
+        .filter(|pack| !is_server(pack.id()))
+        .map(|pack| ResourcePackRow::new(pack, selected_ids.contains(pack.id()), false))
+        .collect()
+}
+
+fn selected_resource_packs<'a>(
+    selected_ids: &[PackId],
+    get_pack: impl Fn(&PackId) -> Option<&'a Pack>,
+    is_server: impl Fn(&PackId) -> bool,
+) -> Vec<ResourcePackRow> {
+    selected_ids
+        .iter()
+        .filter_map(get_pack)
+        .filter(|pack| !pack.enablement_config().required || is_server(pack.id()))
+        .map(|pack| ResourcePackRow::new(pack, true, is_server(pack.id())))
+        .collect()
+}
+
+pub(crate) fn sync_resource_packs(core: &mut AppCore) {
+    let revision = core.resource_completion_revision();
+    if core.menu.resource_completion_revision != revision {
+        let packs = core.completed_resource_packs();
+        let selected_ids = core.completed_resource_ids();
+        let active = selected_resource_packs(
+            selected_ids,
+            |id| packs.iter().find(|pack| pack.id() == id),
+            |id| core.is_completed_server_resource_pack(id),
+        );
+        let available = available_resource_packs(packs.iter(), selected_ids, |id| {
+            core.is_completed_server_resource_pack(id)
+        });
+        core.menu.active_packs = active;
+        core.menu.available_packs = available;
+        core.menu.resource_completion_revision = revision;
+    }
+    let revision = core.asset_reload_revision();
+    if core.menu.asset_reload_revision != revision {
+        core.menu.reload_assets = false;
+        core.menu.reload_fonts = false;
+        core.menu.asset_reload_revision = revision;
+    }
+}
+
+pub(crate) fn apply_resource_pack_options(
+    core: &mut AppCore,
+    renderer: &mut Renderer,
+    game: Option<&mut GameState>,
+) {
+    if std::mem::take(&mut core.menu.rescan_packs) {
+        core.rescan_resource_packs();
+        core.menu.available_packs = available_resource_packs(
+            core.resource_catalog().available_packs(),
+            core.completed_resource_ids(),
+            |id| core.is_server_resource_pack(id),
+        );
+    }
+    let toggle = core.menu.pack_toggle.take();
+    if std::mem::take(&mut core.menu.reload_assets) || toggle.is_some() {
+        if let Err(error) = core.reload_resource_selection(toggle, renderer, game) {
+            tracing::warn!(%error, "Resource pack activation or asset refresh failed");
+        }
+        sync_resource_packs(core);
     }
 }
 
@@ -132,6 +221,13 @@ fn chat_delay_from_slider(slider: f32) -> f32 {
 }
 
 impl MainMenu {
+    /// Selects or deselects a pack as a click on its row does; the game or
+    /// menu loop applies it on its next frame.
+    pub(crate) fn toggle_resource_pack(&mut self, id: PackId, enable: bool) {
+        self.pack_toggle = Some((id, enable));
+        self.reload_assets = true;
+    }
+
     pub(super) fn build_options(
         &mut self,
         sw: f32,
@@ -1686,8 +1782,6 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        use crate::resource_pack::PackSource;
-
         if input.escape {
             self.pack_search.clear();
             self.set_screen(Screen::Options, key_bindings);
@@ -1823,7 +1917,7 @@ impl MainMenu {
                           name: &str,
                           desc: &str,
                           name_color: [f32; 4],
-                          compat: crate::resource_pack::PackCompat,
+                          compat: PackCompat,
                           interactive: bool|
          -> bool {
             let hovered = interactive && common::hit_test(cursor, [panel_x, ey, list_w, entry_h]);
@@ -1880,8 +1974,7 @@ impl MainMenu {
                 true,
             ) && clicked
             {
-                self.pack_toggle = Some((pack.name.clone(), true));
-                self.reload_assets = true;
+                self.toggle_resource_pack(pack.id.clone(), true);
             }
         }
 
@@ -1890,7 +1983,7 @@ impl MainMenu {
 
         for (i, pack) in selected.iter().enumerate() {
             let ey = entries_top + i as f32 * (entry_h + entry_gap);
-            let is_server = pack.source == PackSource::Server;
+            let is_server = pack.is_server;
             let label = if is_server {
                 format!("[Server] {}", pack.name)
             } else {
@@ -1913,8 +2006,7 @@ impl MainMenu {
                 !is_server,
             ) && clicked
             {
-                self.pack_toggle = Some((pack.name.clone(), false));
-                self.reload_assets = true;
+                self.toggle_resource_pack(pack.id.clone(), false);
             }
         }
 
@@ -1926,7 +2018,7 @@ impl MainMenu {
             "Default",
             "The default look and feel of Minecraft",
             WHITE,
-            crate::resource_pack::PackCompat::Compatible,
+            PackCompat::Compatible,
             false,
         );
 

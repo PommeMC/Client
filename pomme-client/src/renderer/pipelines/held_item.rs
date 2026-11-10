@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use glam::{Mat3, Mat4, Vec3};
 
 use crate::renderer::camera::CameraUniform;
@@ -10,7 +8,7 @@ use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi;
-use crate::world::block::model::CardinalLightType;
+use crate::world::block::model::{CardinalLightType, ModelInputs};
 
 pub struct HeldItemInfo {
     /// The item, whose model JSON gives the display transforms.
@@ -81,7 +79,7 @@ impl HeldItemPipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
         atlas: &TextureAtlas,
-        jar_assets_dir: &Path,
+        inputs: &ModelInputs,
         lightmap: &Lightmap,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, atlas, lightmap, "held_item");
@@ -89,9 +87,9 @@ impl HeldItemPipeline {
         Self {
             pipeline,
             shared,
-            right_display: DisplayResolver::new(jar_assets_dir, &["firstperson_righthand"]),
+            right_display: DisplayResolver::new(inputs, &["firstperson_righthand"]),
             left_display: DisplayResolver::new(
-                jar_assets_dir,
+                inputs,
                 &["firstperson_lefthand", "firstperson_righthand"],
             ),
         }
@@ -99,6 +97,12 @@ impl HeldItemPipeline {
 
     pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
+    }
+
+    pub(crate) fn reload_display(&mut self, inputs: &ModelInputs) {
+        self.right_display = DisplayResolver::new(inputs, &["firstperson_righthand"]);
+        self.left_display =
+            DisplayResolver::new(inputs, &["firstperson_lefthand", "firstperson_righthand"]);
     }
 
     #[allow(clippy::too_many_arguments)]

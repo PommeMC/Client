@@ -588,7 +588,7 @@ pub(crate) struct HeadProfile {
     pub(crate) id: Option<uuid::Uuid>,
     pub(crate) name: Option<String>,
     pub(crate) textures: Option<String>,
-    /// The `skinPatch`'s body texture, `namespace/path` under `textures/`,
+    /// The `skinPatch`'s body texture, `namespace:path` under `textures/`,
     /// which replaces whatever skin the profile has.
     pub(crate) patch_texture: Option<String>,
 }
@@ -607,7 +607,7 @@ impl HeadProfile {
             .skin_patch
             .body
             .as_ref()
-            .map(|texture| format!("{}/{}", texture.id.namespace(), texture.id.path()));
+            .map(|texture| format!("{}:{}", texture.id.namespace(), texture.id.path()));
         Some(match &*profile.unpack {
             PartialOrFullProfile::Partial(partial) => Self {
                 id: partial.id,
@@ -635,27 +635,27 @@ impl HeadProfile {
     /// when it has none: the `skinPatch` texture, which it always draws, else
     /// `DefaultPlayerSkin.get(partialProfile())`, picked by the partial
     /// profile's id (an offline id from the name when it has no id, else
-    /// nil). A `namespace/path` under `textures/`.
+    /// nil). A `namespace:path` under `textures/`.
     pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
         const DEFAULT_SKINS: [&str; 18] = [
-            "minecraft/entity/player/slim/alex",
-            "minecraft/entity/player/slim/ari",
-            "minecraft/entity/player/slim/efe",
-            "minecraft/entity/player/slim/kai",
-            "minecraft/entity/player/slim/makena",
-            "minecraft/entity/player/slim/noor",
-            "minecraft/entity/player/slim/steve",
-            "minecraft/entity/player/slim/sunny",
-            "minecraft/entity/player/slim/zuri",
-            "minecraft/entity/player/wide/alex",
-            "minecraft/entity/player/wide/ari",
-            "minecraft/entity/player/wide/efe",
-            "minecraft/entity/player/wide/kai",
-            "minecraft/entity/player/wide/makena",
-            "minecraft/entity/player/wide/noor",
-            "minecraft/entity/player/wide/steve",
-            "minecraft/entity/player/wide/sunny",
-            "minecraft/entity/player/wide/zuri",
+            "minecraft:entity/player/slim/alex",
+            "minecraft:entity/player/slim/ari",
+            "minecraft:entity/player/slim/efe",
+            "minecraft:entity/player/slim/kai",
+            "minecraft:entity/player/slim/makena",
+            "minecraft:entity/player/slim/noor",
+            "minecraft:entity/player/slim/steve",
+            "minecraft:entity/player/slim/sunny",
+            "minecraft:entity/player/slim/zuri",
+            "minecraft:entity/player/wide/alex",
+            "minecraft:entity/player/wide/ari",
+            "minecraft:entity/player/wide/efe",
+            "minecraft:entity/player/wide/kai",
+            "minecraft:entity/player/wide/makena",
+            "minecraft:entity/player/wide/noor",
+            "minecraft:entity/player/wide/steve",
+            "minecraft:entity/player/wide/sunny",
+            "minecraft:entity/player/wide/zuri",
         ];
         if let Some(texture) = &self.patch_texture {
             return texture.into();
@@ -1174,7 +1174,7 @@ mod tests {
         // `UUID.hashCode` of the nil id is 0: the first default skin.
         assert_eq!(
             head(None, None, None).asset_skin(),
-            "minecraft/entity/player/slim/alex"
+            "minecraft:entity/player/slim/alex"
         );
         // A name alone picks by its offline id.
         assert_eq!(
@@ -1186,11 +1186,11 @@ mod tests {
             )
             .asset_skin()
         );
-        let patched = head(None, Some("Steve"), Some("pack/skins/knight"));
-        assert_eq!(patched.asset_skin(), "pack/skins/knight");
+        let patched = head(None, Some("Steve"), Some("pack:skins/knight"));
+        assert_eq!(patched.asset_skin(), "pack:skins/knight");
         assert_eq!(
             patched.skin_keys().collect::<Vec<_>>(),
-            ["asset:pack/skins/knight"]
+            ["asset:pack:skins/knight"]
         );
         assert_eq!(head(None, Some("Steve"), None).skin_keys().count(), 2);
     }

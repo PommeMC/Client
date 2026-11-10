@@ -1002,6 +1002,7 @@ mod tests {
                 shader_pack: None,
                 render_distance: None,
                 distant_terrain: None,
+                resource_pack: None,
                 show_subtitles: None,
             }))
         );

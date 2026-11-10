@@ -143,6 +143,9 @@ pub struct OptionSet {
     pub render_distance: Option<u32>,
     /// Distant Terrain in chunks, 0 for off, else clamped to 32..256.
     pub distant_terrain: Option<u32>,
+    /// A pack's folder name in `resourcepacks/` to select, as its row's
+    /// arrow does; prefix `-` to deselect it.
+    pub resource_pack: Option<String>,
     pub show_subtitles: Option<bool>,
 }
 

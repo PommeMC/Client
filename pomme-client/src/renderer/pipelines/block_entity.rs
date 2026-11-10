@@ -1,9 +1,7 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use azalea_registry::builtin::BlockEntityKind;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::LightLevels;
@@ -13,6 +11,7 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{block_entity_model, rhi, util};
+use crate::resources::{ResourceId, ResourceManager, resource_id};
 use crate::world::block_entity::DYE_COLOR_NAMES;
 
 pub struct BlockEntityRenderInfo {
@@ -61,24 +60,24 @@ struct KindEntry {
 struct KindDef {
     kind: BlockEntityKind,
     models: Vec<BakedEntityModel>,
-    tex_variants: &'static [&'static [&'static str]],
+    tex_variants: &'static [&'static [ResourceId]],
     tex_size: u32,
 }
 
 /// In `SIGN_WOOD_NAMES` order.
-const SIGN_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/block/oak_sign.png"],
-    &["minecraft/textures/block/spruce_sign.png"],
-    &["minecraft/textures/block/birch_sign.png"],
-    &["minecraft/textures/block/jungle_sign.png"],
-    &["minecraft/textures/block/acacia_sign.png"],
-    &["minecraft/textures/block/dark_oak_sign.png"],
-    &["minecraft/textures/block/mangrove_sign.png"],
-    &["minecraft/textures/block/cherry_sign.png"],
-    &["minecraft/textures/block/pale_oak_sign.png"],
-    &["minecraft/textures/block/bamboo_sign.png"],
-    &["minecraft/textures/block/crimson_sign.png"],
-    &["minecraft/textures/block/warped_sign.png"],
+const SIGN_TEXTURES: &[&[ResourceId]] = &[
+    &[resource_id!("minecraft:textures/block/oak_sign.png")],
+    &[resource_id!("minecraft:textures/block/spruce_sign.png")],
+    &[resource_id!("minecraft:textures/block/birch_sign.png")],
+    &[resource_id!("minecraft:textures/block/jungle_sign.png")],
+    &[resource_id!("minecraft:textures/block/acacia_sign.png")],
+    &[resource_id!("minecraft:textures/block/dark_oak_sign.png")],
+    &[resource_id!("minecraft:textures/block/mangrove_sign.png")],
+    &[resource_id!("minecraft:textures/block/cherry_sign.png")],
+    &[resource_id!("minecraft:textures/block/pale_oak_sign.png")],
+    &[resource_id!("minecraft:textures/block/bamboo_sign.png")],
+    &[resource_id!("minecraft:textures/block/crimson_sign.png")],
+    &[resource_id!("minecraft:textures/block/warped_sign.png")],
 ];
 
 /// Chest textures mirroring vanilla `Sheets.chooseSprite`: material-major with
@@ -93,39 +92,74 @@ macro_rules! chest_textures {
     };
     ($($mat:literal),+ $(,)?) => {
         &[$(
-            &[concat!("minecraft/textures/entity/chest/", $mat, ".png")],
-            &[concat!("minecraft/textures/entity/chest/", $mat, "_left.png")],
-            &[concat!("minecraft/textures/entity/chest/", $mat, "_right.png")],
+            &[resource_id!(concat!("minecraft:textures/entity/chest/", $mat, ".png"))],
+            &[resource_id!(concat!("minecraft:textures/entity/chest/", $mat, "_left.png"))],
+            &[resource_id!(concat!("minecraft:textures/entity/chest/", $mat, "_right.png"))],
         )+]
     };
 }
 
-const CHEST_TEXTURES: &[&[&str]] = chest_textures!("normal", copper);
+const CHEST_TEXTURES: &[&[ResourceId]] = chest_textures!("normal", copper);
 
-const CHEST_XMAS_TEXTURES: &[&[&str]] = chest_textures!("christmas", copper);
+const CHEST_XMAS_TEXTURES: &[&[ResourceId]] = chest_textures!("christmas", copper);
 
-const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
+const TRAPPED_CHEST_TEXTURES: &[&[ResourceId]] = chest_textures!("trapped");
 
-const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
+const ENDER_CHEST_TEXTURES: &[&[ResourceId]] =
+    &[&[resource_id!("minecraft:textures/entity/chest/ender.png")]];
 
-const SHULKER_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/entity/shulker/shulker_white.png"],
-    &["minecraft/textures/entity/shulker/shulker_orange.png"],
-    &["minecraft/textures/entity/shulker/shulker_magenta.png"],
-    &["minecraft/textures/entity/shulker/shulker_light_blue.png"],
-    &["minecraft/textures/entity/shulker/shulker_yellow.png"],
-    &["minecraft/textures/entity/shulker/shulker_lime.png"],
-    &["minecraft/textures/entity/shulker/shulker_pink.png"],
-    &["minecraft/textures/entity/shulker/shulker_gray.png"],
-    &["minecraft/textures/entity/shulker/shulker_light_gray.png"],
-    &["minecraft/textures/entity/shulker/shulker_cyan.png"],
-    &["minecraft/textures/entity/shulker/shulker_purple.png"],
-    &["minecraft/textures/entity/shulker/shulker_blue.png"],
-    &["minecraft/textures/entity/shulker/shulker_brown.png"],
-    &["minecraft/textures/entity/shulker/shulker_green.png"],
-    &["minecraft/textures/entity/shulker/shulker_red.png"],
-    &["minecraft/textures/entity/shulker/shulker_black.png"],
-    &["minecraft/textures/entity/shulker/shulker.png"],
+const SHULKER_TEXTURES: &[&[ResourceId]] = &[
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_white.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_orange.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_magenta.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_light_blue.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_yellow.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_lime.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_pink.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_gray.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_light_gray.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_cyan.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_purple.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_blue.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_brown.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_green.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_red.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker_black.png"
+    )],
+    &[resource_id!(
+        "minecraft:textures/entity/shulker/shulker.png"
+    )],
 ];
 
 fn name_index(table: &[&str], name: &str) -> Option<u32> {
@@ -313,8 +347,7 @@ impl BlockEntityPipeline {
     pub fn new(
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        resources: &dyn ResourceManager,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -355,8 +388,7 @@ impl BlockEntityPipeline {
                 device,
                 texture_layout,
                 texture_sampler,
-                jar_assets_dir,
-                asset_index,
+                resources,
                 def.models,
                 def.tex_variants,
                 def.tex_size,
@@ -521,10 +553,9 @@ fn build_entry(
     device: &rhi::backend::Device,
     texture_layout: rhi::backend::BindGroupLayout,
     texture_sampler: rhi::backend::Sampler,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
+    resources: &dyn ResourceManager,
     mut models: Vec<BakedEntityModel>,
-    tex_variants: &[&[&str]],
+    tex_variants: &[&[ResourceId]],
     fallback_tex_size: u32,
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<rhi::backend::Buffer>,
@@ -546,14 +577,13 @@ fn build_entry(
 
     let textures = tex_variants
         .iter()
-        .map(|keys| {
+        .map(|ids| {
             build_texture_slot(
                 device,
                 texture_layout,
                 texture_sampler,
-                jar_assets_dir,
-                asset_index,
-                keys,
+                resources,
+                ids,
                 fallback_tex_size,
                 pending_uploads,
                 staging_to_free,
@@ -573,19 +603,15 @@ fn build_texture_slot(
     device: &rhi::backend::Device,
     texture_layout: rhi::backend::BindGroupLayout,
     texture_sampler: rhi::backend::Sampler,
-    jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
-    keys: &[&str],
+    resources: &dyn ResourceManager,
+    keys: &[ResourceId],
     fallback_tex_size: u32,
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<rhi::backend::Buffer>,
 ) -> TextureSlot {
     let (pixels, width, height) = keys
         .iter()
-        .find_map(|key| {
-            let path = resolve_asset_path(jar_assets_dir, asset_index, key);
-            util::load_png(&path)
-        })
+        .find_map(|key| util::load_asset_png(resources, key))
         .unwrap_or_else(|| {
             tracing::warn!("Failed to load BE texture {:?}, using fallback", keys);
             fallback_texture(fallback_tex_size)

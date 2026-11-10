@@ -7,11 +7,12 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use glam::DVec3;
 
-use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
+use crate::headless::vanilla_resources;
 use crate::position::ChunkPos;
 use crate::renderer::chunk::mesh_source::{CpuMeshAssets, MeshSource};
 use crate::renderer::chunk::mesher::MeshDispatcher;
+use crate::resources::managers::MultiPackResourceManager;
 use crate::world::block::BlockStateTable;
 use crate::world::block::model::CardinalLightType;
 use crate::world::block::render_assets::OwnedBlockRenderView;
@@ -21,6 +22,7 @@ use crate::world::light::DataLayer;
 pub struct Assets {
     pub mesh: CpuMeshAssets,
     pub block_state_table: BlockStateTable,
+    resources: MultiPackResourceManager,
 }
 
 impl Assets {
@@ -36,10 +38,18 @@ impl Assets {
             ));
         }
         eprintln!("cpu-bench: loading block models and packing the atlas...");
-        let asset_index = AssetIndex::load(&dirs.indexes_dir, &dirs.objects_dir, version);
+        let installation = dirs.installation_location(version);
+        let resources = vanilla_resources(
+            &installation.extracted_root,
+            &installation.index_file,
+            &installation.objects_dir,
+        )
+        .map_err(|error| format!("load vanilla resources: {error}"))?;
         Ok(Self {
-            mesh: CpuMeshAssets::load(&dirs.jar_assets_dir, asset_index),
+            mesh: CpuMeshAssets::load(&resources)
+                .map_err(|error| format!("prepare CPU mesh assets: {error}"))?,
             block_state_table,
+            resources,
         })
     }
 
@@ -48,7 +58,7 @@ impl Assets {
         self.mesh.create_mesh_dispatcher(
             OwnedBlockRenderView::new(self.mesh.render_assets.clone(), self.block_state_table),
             Arc::new(HashMap::new()),
-            None,
+            &self.resources,
             CardinalLightType::Default,
         )
     }

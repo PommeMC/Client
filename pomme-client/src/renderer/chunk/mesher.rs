@@ -8,6 +8,7 @@ use super::block_lighter::{self, LightLevels, LightSource, VertexLight};
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::resources::{ResourceId, resource_id};
 use crate::shaderpack::block_ids::{BlockIds, PackBlockIds};
 use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
@@ -473,18 +474,16 @@ pub struct Colormap {
 
 impl Colormap {
     pub fn load(
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-        colormap_path: &str,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
+        resources: &dyn crate::resources::managers::ResourceManager,
+        colormap_id: &ResourceId,
     ) -> Self {
-        let path = crate::assets::resolve_asset_path_with_packs(
-            jar_assets_dir,
-            asset_index,
-            colormap_path,
-            packs,
-        );
-        let pixels = crate::renderer::util::load_png(&path)
+        let resource = resources.get_resource(colormap_id).ok().flatten();
+        Self::from_content(resource.as_ref().map(|resource| resource.content()))
+    }
+
+    pub(crate) fn from_content(content: Option<&crate::resources::ResourceContent>) -> Self {
+        let pixels = content
+            .and_then(crate::renderer::util::load_resource_png)
             .map(|(data, _w, _h)| {
                 data.chunks(4)
                     .take(256 * 256)
@@ -846,26 +845,25 @@ impl MeshDispatcher {
     pub fn load(
         render_view: OwnedBlockRenderView,
         uv_map: AtlasUVMap,
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-        packs: Option<&crate::resource_pack::ResourcePackManager>,
+        resources: &dyn crate::resources::managers::ResourceManager,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
         cardinal_lighting: CardinalLighting,
     ) -> Self {
-        let colormap = |name| {
-            Colormap::load(
-                jar_assets_dir,
-                asset_index,
-                &format!("minecraft/textures/colormap/{name}.png"),
-                packs,
-            )
-        };
         Self::new(
             render_view,
             uv_map,
-            colormap("grass"),
-            colormap("foliage"),
-            colormap("dry_foliage"),
+            Colormap::load(
+                resources,
+                &resource_id!("minecraft:textures/colormap/grass.png"),
+            ),
+            Colormap::load(
+                resources,
+                &resource_id!("minecraft:textures/colormap/foliage.png"),
+            ),
+            Colormap::load(
+                resources,
+                &resource_id!("minecraft:textures/colormap/dry_foliage.png"),
+            ),
             biome_climate,
             cardinal_lighting,
         )

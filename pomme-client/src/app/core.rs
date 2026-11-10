@@ -18,7 +18,6 @@ use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
-use crate::assets::AssetIndex;
 use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
@@ -31,10 +30,18 @@ use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::ResourceManager;
+use crate::resources::managers::ReloadableResourceManager;
+use crate::resources::pack_resources::PackType;
+use crate::resources::packs::{
+    BuiltinRepositorySource, FolderRepositorySource, PackEnablementConfig, PackId,
+    PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
+    SymlinkPolicy, ThemeSpecification, download_server_pack,
+};
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
+    PanoramaTheme,
 };
 use crate::ui::text::InlineObject;
 use crate::user::UserData;
@@ -49,7 +56,8 @@ pub struct PendingPackDownload {
     pub handle: std::thread::JoinHandle<PackDownloadResult>,
 }
 
-pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
+pub type PackDownloadResult =
+    Result<std::path::PathBuf, crate::resources::packs::PackDownloadError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlayerSkinSource {
@@ -517,6 +525,7 @@ impl GameState {
         dim: DimensionInfo,
         render_distance: u32,
         mesh_source: &impl MeshSource,
+        resources: &dyn ResourceManager,
     ) {
         let DimensionInfo {
             height,
@@ -565,7 +574,7 @@ impl GameState {
         self.mesh_dispatcher = mesh_source.create_mesh_dispatcher(
             self.block_registry.owned_render_view(),
             Arc::clone(&self.biome_climate),
-            None,
+            resources,
             cardinal_light,
         );
         self.sync_distant_colors();
@@ -997,10 +1006,24 @@ pub struct AppCore {
     pub tokio_rt: Arc<tokio::runtime::Runtime>,
     pub data_dirs: DataDirs,
     pub version: String,
-    pub resource_packs: ResourcePackManager,
+    builtin_resources: BuiltinRepositorySource,
+    folder_resources: FolderRepositorySource,
+    registered_resources: RegisteredRepositorySource,
+    resource_repository: PackRepository,
+    resources: ReloadableResourceManager,
+    // The active view can advance before GPU refresh fails. Cache eligibility
+    // follows this view, not the last completed consumer refresh.
+    active_resource_ids: Vec<PackId>,
+    active_custom_resource_ids: Vec<PackId>,
+    // Unlike the manager's active IDs, these advance only after asset refresh succeeds.
+    completed_custom_resource_ids: Vec<PackId>,
+    completed_resource_packs: Vec<crate::resources::packs::Pack>,
+    completed_server_resource_ids: HashSet<PackId>,
+    resource_completion_revision: u64,
+    asset_reload_revision: u64,
+    server_resource_ids: HashMap<uuid::Uuid, PackId>,
     pub(crate) block_definitions: Rc<BlockDefinitions>,
     pub pending_pack_download: Option<PendingPackDownload>,
-    pub asset_index: Option<AssetIndex>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
@@ -1041,6 +1064,7 @@ pub struct AppCore {
     /// The skins from the game's assets heads draw (`HeadProfile::asset_skin`),
     /// by texture; `None` when the asset is missing or isn't a 64x64 skin.
     asset_head_skins: HashMap<String, Option<Vec<u8>>>,
+    asset_head_skins_stale: bool,
     head_tx: crossbeam_channel::Sender<HeadResult>,
     head_rx: crossbeam_channel::Receiver<HeadResult>,
     /// A packed glyph's pixels changed (a head arrived), so the atlas needs
@@ -1094,25 +1118,6 @@ fn cursor_step(grabbed: bool, stale: bool, want: bool, focused: bool) -> (Cursor
     }
 }
 
-/// The asset index, the menu's splash and the audio engine, which `AppCore`
-/// builds from the version's assets.
-fn load_assets(
-    data_dirs: &DataDirs,
-    version: &str,
-    resource_packs: &ResourcePackManager,
-    menu: &mut MainMenu,
-) -> (Option<AssetIndex>, crate::audio::AudioEngine) {
-    let asset_index = AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, version);
-    menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
-    let audio = crate::audio::AudioEngine::new(
-        &data_dirs.jar_assets_dir,
-        asset_index.clone(),
-        resource_packs,
-        menu.category_volumes(),
-    );
-    (asset_index, audio)
-}
-
 /// `LocalPlayerResolver`: a `Dynamic` profile resolves through the tab list
 /// first (by name, ignoring case), and only then through the Mojang API. A
 /// `Static` profile resolves to itself.
@@ -1148,10 +1153,19 @@ impl AppCore {
         user: UserData,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
-        let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
+        let pack_type = PackType::ClientResources;
+        let builtin_resources = BuiltinRepositorySource::new(None);
+        let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
+        let registered_resources = RegisteredRepositorySource::new(pack_type, None);
+        let resource_repository = PackRepository::new(vec![
+            Box::new(builtin_resources.clone()),
+            Box::new(folder_resources.clone()),
+            Box::new(registered_resources.clone()),
+        ]);
+        let resources = ReloadableResourceManager::new(pack_type);
 
         let mut input = InputState::new();
-        let mut menu = MainMenu::new(
+        let menu = MainMenu::new(
             &data_dirs.game_dir,
             data_dirs.bedrock_assets_dir.clone(),
             Arc::clone(&tokio_rt),
@@ -1163,11 +1177,11 @@ impl AppCore {
 
         let display_mode = menu.display_mode;
 
-        let (asset_index, audio) = load_assets(&data_dirs, &version, &resource_packs, &mut menu);
+        let audio = crate::audio::AudioEngine::new(&resources, menu.category_volumes());
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
-        Self {
+        let mut core = Self {
             user,
             presence,
             display_mode,
@@ -1178,10 +1192,21 @@ impl AppCore {
             tokio_rt,
             data_dirs,
             version,
-            resource_packs,
+            builtin_resources,
+            folder_resources,
+            registered_resources,
+            active_resource_ids: resource_repository.enabled_ids().to_vec(),
+            active_custom_resource_ids: Vec::new(),
+            completed_custom_resource_ids: Vec::new(),
+            completed_resource_packs: Vec::new(),
+            completed_server_resource_ids: HashSet::new(),
+            resource_completion_revision: 0,
+            asset_reload_revision: 0,
+            server_resource_ids: HashMap::new(),
+            resource_repository,
+            resources,
             block_definitions: Rc::new(BlockDefinitions::new()),
             pending_pack_download: None,
-            asset_index,
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
@@ -1202,12 +1227,191 @@ impl AppCore {
             player_heads: HashMap::new(),
             head_skins_dirty: false,
             asset_head_skins: HashMap::new(),
+            asset_head_skins_stale: false,
             head_tx,
             head_rx,
             inline_atlas_dirty: false,
             player_faces_packed: false,
             game_dynamic_atlas_keys: HashSet::new(),
+        };
+        core.configure_resources();
+        core
+    }
+
+    fn configure_resources(&mut self) {
+        let policy_path = self.data_dirs.game_dir.join("allowed_symlinks.txt");
+        let policy = SymlinkPolicy::load(&policy_path);
+        self.folder_resources.set_symlink_policy(policy.clone());
+        self.registered_resources.set_symlink_policy(policy);
+
+        let root = self.data_dirs.game_dir.join("resourcepacks");
+        if !root.is_dir()
+            && let Err(error) = std::fs::create_dir_all(&root)
+        {
+            tracing::warn!(path = %root.display(), %error, "Cannot create resource pack directory");
         }
+        let cache = root.join(".server_cache");
+        self.folder_resources.set_paths(vec![root], Some(cache));
+        self.set_resource_theme(self.menu.theme());
+        self.set_resource_installation();
+        self.reload_resources();
+        self.complete_resource_selection();
+        self.menu.pick_splash();
+    }
+
+    /// Points the vanilla pack at the version's install, once it's complete.
+    fn set_resource_installation(&self) {
+        let installation = self
+            .data_dirs
+            .is_installed(&self.version)
+            .then(|| self.data_dirs.installation_location(&self.version));
+        self.builtin_resources.set_installation(installation);
+        let target = self.builtin_resources.target_format();
+        self.folder_resources.set_target_format(target);
+        self.registered_resources.set_target_format(target);
+    }
+
+    fn set_resource_theme(&self, theme: PanoramaTheme) {
+        self.builtin_resources.set_bedrock_ui(
+            self.data_dirs.bedrock_ui_dir(),
+            crate::renderer::pipelines::menu_overlay::bedrock_ui_aliases(),
+        );
+        self.builtin_resources.set_theme(match theme {
+            PanoramaTheme::Java => None,
+            PanoramaTheme::Pomme => Some(ThemeSpecification::Pomme {
+                root: self.data_dirs.pomme_assets_dir.clone(),
+            }),
+            PanoramaTheme::Bedrock => Some(ThemeSpecification::Bedrock {
+                root: pomme_install::bedrock::dir(&self.data_dirs.bedrock_assets_dir)
+                    .join("resource_pack"),
+            }),
+        });
+    }
+
+    pub(crate) fn resources(&self) -> &dyn crate::resources::ResourceManager {
+        &self.resources
+    }
+
+    pub(crate) fn update_menu_music(&mut self, dt: f32) {
+        self.audio.update_menu_music(dt);
+    }
+
+    pub(crate) fn reload_resource_theme(&mut self, theme: PanoramaTheme, renderer: &mut Renderer) {
+        self.set_resource_theme(theme);
+        self.reload_resources();
+        renderer.reload_theme_assets(&self.resources);
+        self.complete_resource_selection();
+    }
+
+    /// Activates the selection with nothing to prepare.
+    fn reload_resources(&mut self) {
+        self.activate_resource_selection(None, |_| Ok(()))
+            .expect("activation with nothing to prepare can't fail");
+    }
+
+    /// Catalog/source changes are not rolled back. Manager preparation retains
+    /// its old view on failure.
+    fn activate_resource_selection<T>(
+        &mut self,
+        toggle: Option<(PackId, bool)>,
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        self.resource_repository.reload();
+        self.resource_repository
+            .set_enabled(&self.active_resource_ids);
+        if let Some((id, enable)) = toggle {
+            if enable {
+                self.resource_repository.select_pack(&id);
+            } else {
+                self.resource_repository.disable_pack(&id);
+            }
+        }
+        let opened = self.resource_repository.open_all_enabled();
+        let menu = &mut self.menu;
+        let audio = &mut self.audio;
+        let prepared = self
+            .resources
+            .reload_with_preparation(opened, prepare, |resources| {
+                crate::lang::load(resources);
+                menu.load_splashes(resources);
+                audio.reload_assets(resources);
+            })?;
+        self.asset_head_skins.clear();
+        self.asset_head_skins_stale = true;
+        self.head_skins_dirty = true;
+        self.active_resource_ids = self.resource_repository.enabled_ids().to_vec();
+        // Server packs are required like vanilla's, but still not the stock
+        // assets the block cache was built from.
+        let server_ids = &self.server_resource_ids;
+        self.active_custom_resource_ids = self
+            .resource_repository
+            .enabled_packs()
+            .filter(|pack| {
+                !pack.enablement_config().required || server_ids.values().any(|id| id == pack.id())
+            })
+            .map(|pack| pack.id().clone())
+            .collect();
+        Ok(prepared)
+    }
+
+    pub(crate) fn resource_catalog(&self) -> &PackRepository {
+        &self.resource_repository
+    }
+
+    pub(crate) fn completed_resource_packs(&self) -> &[crate::resources::packs::Pack] {
+        &self.completed_resource_packs
+    }
+
+    pub(crate) fn completed_resource_ids(&self) -> &[PackId] {
+        &self.completed_custom_resource_ids
+    }
+
+    pub(crate) fn is_server_resource_pack(&self, id: &PackId) -> bool {
+        self.server_resource_ids.values().any(|server| server == id)
+    }
+
+    pub(crate) fn is_completed_server_resource_pack(&self, id: &PackId) -> bool {
+        self.completed_server_resource_ids.contains(id)
+    }
+
+    pub(crate) fn resource_completion_revision(&self) -> u64 {
+        self.resource_completion_revision
+    }
+
+    pub(crate) fn asset_reload_revision(&self) -> u64 {
+        self.asset_reload_revision
+    }
+
+    pub(crate) fn rescan_resource_packs(&mut self) {
+        self.resource_repository.reload();
+    }
+
+    fn complete_resource_selection(&mut self) {
+        self.completed_custom_resource_ids
+            .clone_from(&self.active_custom_resource_ids);
+        // Network draining can complete one reload and then fail another before
+        // consumers observe it. Keep the successful catalog and classification.
+        self.completed_resource_packs = self
+            .resource_repository
+            .available_packs()
+            .cloned()
+            .collect();
+        self.completed_server_resource_ids = self.server_resource_ids.values().cloned().collect();
+        self.resource_completion_revision = self.resource_completion_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn reload_resource_selection(
+        &mut self,
+        toggle: Option<(PackId, bool)>,
+        renderer: &mut Renderer,
+        game: Option<&mut GameState>,
+    ) -> std::io::Result<()> {
+        let prepared = self.activate_resource_selection(toggle, Renderer::prepare_resources)?;
+        match game {
+            Some(game) => self.reload_live_resource_assets(game, renderer, prepared),
+            None => self.reload_pack_assets(renderer, prepared),
+        }
+        Ok(())
     }
 
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
@@ -1337,14 +1541,15 @@ impl AppCore {
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
         self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
+        // Leaving the world still retires it if resource preparation failed.
         gfx.renderer.clear_chunk_meshes();
         gfx.renderer.reset_distant();
         if let Some(p) = &mut self.presence {
             p.set_in_menu(&self.version);
         }
         self.apply_cursor_grab(&gfx.window, None);
-        self.menu
-            .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
+        self.menu.splash = None;
+        self.menu.pick_splash();
     }
 
     /// Releases the cursor, warping it to the window center only when it was
@@ -1538,20 +1743,17 @@ impl AppCore {
             for profile in self.player_heads.keys() {
                 let texture = profile.asset_skin();
                 if !self.asset_head_skins.contains_key(texture.as_ref()) {
-                    let (namespace, path) = texture.split_once('/').unwrap_or_default();
-                    let file = crate::assets::resolve_asset_path(
-                        &self.data_dirs.jar_assets_dir,
-                        &self.asset_index,
-                        &format!("{namespace}/textures/{path}.png"),
-                    );
-                    let skin = crate::renderer::util::load_png(&file)
+                    let skin = crate::assets::AssetId::parse(&texture)
+                        .resource_id("textures", ".png")
+                        .ok()
+                        .and_then(|id| crate::renderer::util::load_asset_png(&self.resources, &id))
                         .filter(|&(_, width, height)| (width, height) == (64, 64))
                         .map(|(pixels, ..)| pixels);
                     self.asset_head_skins.insert(texture.into_owned(), skin);
                 }
             }
-            // The asset skins stay until disconnect, so a head's own skin
-            // arriving frees nothing the GPU may still read.
+            // Asset skins stay until disconnect or resource-view replacement;
+            // downloaded profile skins survive resource reloads.
             let own = self
                 .player_heads
                 .iter()
@@ -1561,11 +1763,16 @@ impl AppCore {
                     }
                     _ => None,
                 });
+            let mut skins: Vec<(String, &[u8])> = own.collect();
+            if std::mem::take(&mut self.asset_head_skins_stale) {
+                renderer
+                    .sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)), true);
+            }
             let assets = self.asset_head_skins.iter().filter_map(|(texture, skin)| {
                 Some((HeadProfile::asset_skin_key(texture), skin.as_deref()?))
             });
-            let skins: Vec<(String, &[u8])> = own.chain(assets).collect();
-            renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)));
+            skins.extend(assets);
+            renderer.sync_head_skins(skins.iter().map(|(key, skin)| (key.as_str(), *skin)), false);
         }
         for entry in self.inline_objects.values() {
             if let InlineObjectContent::Head { profile, .. } = &entry.content
@@ -1680,19 +1887,14 @@ impl AppCore {
     ) -> InlineObjectContent {
         match object {
             InlineObject::AtlasSprite { atlas, sprite } => {
-                let frames = crate::ui::object_glyph::load_atlas_sprite(
-                    &self.data_dirs.jar_assets_dir,
-                    &self.asset_index,
-                    &self.resource_packs,
-                    atlas,
-                    sprite,
-                )
-                .unwrap_or_else(|| {
-                    // A sprite the atlas doesn't have keeps the missing
-                    // texture, as `TextureAtlas.missingSprite` does.
-                    let (pixels, size) = crate::ui::object_glyph::missing_tile();
-                    crate::ui::object_glyph::SpriteFrames::still(pixels, size)
-                });
+                let frames =
+                    crate::ui::object_glyph::load_atlas_sprite(&self.resources, atlas, sprite)
+                        .unwrap_or_else(|| {
+                            // A sprite the atlas doesn't have keeps the missing
+                            // texture, as `TextureAtlas.missingSprite` does.
+                            let (pixels, size) = crate::ui::object_glyph::missing_tile();
+                            crate::ui::object_glyph::SpriteFrames::still(pixels, size)
+                        });
                 InlineObjectContent::Sprite { frames, frame: 0 }
             }
             InlineObject::Player {
@@ -1804,20 +2006,25 @@ impl AppCore {
         renderer.remove_player_entity_skin(uuid);
     }
 
-    fn reload_live_resource_assets(&mut self, game: &mut GameState, renderer: &mut Renderer) {
+    fn reload_live_resource_assets(
+        &mut self,
+        game: &mut GameState,
+        renderer: &mut Renderer,
+        prepared: crate::renderer::PreparedResources,
+    ) {
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
         // CPU mesher and particle atlas state from the same freshly-reloaded
         // registry/UV map, then let the normal rescan rebuild loaded columns.
         renderer.clear_chunk_meshes();
-        self.reload_pack_assets(renderer);
+        self.reload_pack_assets(renderer, prepared);
         game.block_registry
             .replace_render_assets(renderer.shared_render_assets());
 
         let mesh_dispatcher = renderer.create_mesh_dispatcher(
             game.block_registry.owned_render_view(),
             Arc::clone(&game.biome_climate),
-            Some(&self.resource_packs),
+            self.resources(),
             game.cardinal_light,
         );
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
@@ -1854,55 +2061,147 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        if self.resource_packs.clear_server_packs() {
-            self.reload_pack_assets(renderer);
+        match self.remove_server_resource_packs(None, Renderer::prepare_resources) {
+            Ok(Some(prepared)) => {
+                renderer.clear_chunk_meshes();
+                self.reload_pack_assets(renderer, prepared);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Failed to clear server resource assets"),
         }
     }
 
-    /// Rebuilds every asset a pack can override. Only call this once the
-    /// active stack has really changed: it waits for device idle and rebuilds
-    /// the texture atlas. Clearing
-    /// `menu.reload_assets` and `menu.reload_fonts` is safe here because the
-    /// pending toggles they stand for are covered by the reload we just did.
+    fn remove_server_resource_packs<T>(
+        &mut self,
+        uuid: Option<uuid::Uuid>,
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<Option<T>> {
+        let ids: Vec<_> = match uuid {
+            Some(uuid) => self
+                .server_resource_ids
+                .remove(&uuid)
+                .map(|id| (uuid, id))
+                .into_iter()
+                .collect(),
+            None => self.server_resource_ids.drain().collect(),
+        };
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let removed: Vec<_> = ids
+            .into_iter()
+            .map(|(uuid, id)| {
+                let registration = self.registered_resources.take_registration(&id);
+                (uuid, id, registration)
+            })
+            .collect();
+        match self.activate_resource_selection(None, prepare) {
+            Ok(prepared) => Ok(Some(prepared)),
+            Err(error) => {
+                // Positions were captured as each definition was removed.
+                for (uuid, id, registration) in removed.into_iter().rev() {
+                    if let Some(registration) = registration {
+                        self.registered_resources.restore_registration(registration);
+                    }
+                    self.server_resource_ids.insert(uuid, id);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn activate_server_resource_pack<T>(
+        &mut self,
+        uuid: uuid::Uuid,
+        hash: &str,
+        path: std::path::PathBuf,
+        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        let previous = self
+            .server_resource_ids
+            .get(&uuid)
+            .and_then(|id| self.registered_resources.take_registration(id));
+        let id = self.registered_resources.register(
+            PackLocationInfo {
+                id: uuid.to_string(),
+                title: crate::chat_component::Component::text(hash),
+                known_pack_info: None,
+            },
+            PhysicalPack::Directory(path),
+            // Vanilla `DownloadedPackSource.DOWNLOADED_PACK_SELECTION`: pinned
+            // above the player's packs, so one enabled later can't cover it.
+            PackEnablementConfig {
+                required: true,
+                default_position: PackPosition::Top,
+                fixed_position: true,
+            },
+        );
+        let previous_id = self.server_resource_ids.insert(uuid, id.clone());
+        let prepared = match self.activate_resource_selection(Some((id.clone(), true)), prepare) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.registered_resources.unregister(&id);
+                if let Some(previous) = previous {
+                    self.registered_resources.restore_registration(previous);
+                }
+                if self.server_resource_ids.get(&uuid) == Some(&id) {
+                    match previous_id {
+                        Some(previous_id) => {
+                            self.server_resource_ids.insert(uuid, previous_id);
+                        }
+                        None => {
+                            self.server_resource_ids.remove(&uuid);
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        };
+        Ok(prepared)
+    }
+
     pub(crate) fn font_sources(&self) -> crate::ui::font::FontSources<'_> {
         crate::ui::font::FontSources {
-            jar_assets_dir: &self.data_dirs.jar_assets_dir,
-            asset_index: &self.asset_index,
-            packs: &self.resource_packs,
+            resources: &self.resources,
             options: self.menu.font_options(),
         }
     }
 
     /// Rebuilds what was built from assets that didn't exist yet, once the
-    /// first-run download has put them on disk.
+    /// first-run download has put them on disk. Only the install boot screen
+    /// exists here; it is discarded before constructing the new Renderer.
     pub(crate) fn reload_installed_assets(&mut self) {
-        let (asset_index, audio) = load_assets(
-            &self.data_dirs,
-            &self.version,
-            &self.resource_packs,
-            &mut self.menu,
-        );
-        self.asset_index = asset_index;
-        self.audio = audio;
+        self.set_resource_installation();
+        self.set_resource_theme(self.menu.theme());
+        self.reload_resources();
+        self.menu.pick_splash();
+        self.audio = crate::audio::AudioEngine::new(&self.resources, self.menu.category_volumes());
+        self.complete_resource_selection();
     }
 
-    pub(crate) fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
-        self.menu.active_packs = self.resource_packs.active_pack_info();
-        renderer.reload_assets(&self.resource_packs, self.menu.font_options());
-        self.audio.reload_assets(&self.resource_packs);
+    pub(crate) fn use_vanilla_block_cache(&self) -> bool {
+        self.active_custom_resource_ids.is_empty()
+    }
+
+    fn reload_pack_assets(
+        &mut self,
+        renderer: &mut Renderer,
+        prepared: crate::renderer::PreparedResources,
+    ) {
+        renderer.reload_assets(self.font_sources(), prepared);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
-        self.menu.reload_assets = false;
-        self.menu.reload_fonts = false;
+        self.asset_reload_revision = self.asset_reload_revision.wrapping_add(1);
+        self.complete_resource_selection();
     }
 
     /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
     /// once, from the title screen or in game.
     pub fn apply_font_options(&mut self, renderer: &mut Renderer) {
         if std::mem::take(&mut self.menu.reload_fonts) {
-            renderer.reload_fonts(&self.resource_packs, self.menu.font_options());
+            renderer.reload_fonts(self.font_sources());
         }
     }
 
@@ -1966,7 +2265,12 @@ impl AppCore {
                 }
                 NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
                 NetworkEvent::DimensionInfo(dim) => {
-                    game.enter_dimension(dim, self.menu.render_distance, &*renderer);
+                    game.enter_dimension(
+                        dim,
+                        self.menu.render_distance,
+                        &*renderer,
+                        self.resources(),
+                    );
                     renderer.clear_chunk_meshes();
                     renderer.reset_distant();
                 }
@@ -3318,24 +3622,26 @@ impl AppCore {
                     required,
                 } => {
                     tracing::info!("Resource pack push: {id} url={url} required={required}");
-                    let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
+                    let cache_dir = self.data_dirs.game_dir.join("resourcepacks/.server_cache");
                     self.pending_pack_download = Some(PendingPackDownload {
                         id,
                         required,
                         hash: hash.clone(),
                         handle: std::thread::spawn(move || {
-                            ResourcePackManager::download_server_pack(&cache_dir, &url, &hash)
+                            download_server_pack(&cache_dir, &url, &hash)
                         }),
                     });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
-                    let removed = match id {
-                        Some(id) => self.resource_packs.remove_server_pack(&id),
-                        None => self.resource_packs.clear_server_packs(),
-                    };
-                    if removed {
-                        self.reload_live_resource_assets(game, renderer);
+                    match self.remove_server_resource_packs(id, Renderer::prepare_resources) {
+                        Ok(Some(prepared)) => {
+                            self.reload_live_resource_assets(game, renderer, prepared);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "Failed to pop server resource assets");
+                        }
                     }
                 }
                 NetworkEvent::Reconfiguring => {
@@ -3417,15 +3723,36 @@ impl AppCore {
                     }
                     s_resource_pack::Action::FailedDownload
                 }
-                Ok(Ok(_path)) => {
-                    self.resource_packs
-                        .apply_server_pack(pending.id, &pending.hash);
+                Ok(Ok(path)) => {
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
-                    self.reload_live_resource_assets(game, renderer);
-                    tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    s_resource_pack::Action::SuccessfullyLoaded
+                    // A failed preflight leaves the pack unregistered and the
+                    // old view active, as vanilla's `onFailure` drops it.
+                    let reload = self
+                        .activate_server_resource_pack(
+                            pending.id,
+                            &pending.hash,
+                            path,
+                            Renderer::prepare_resources,
+                        )
+                        .map(|prepared| {
+                            self.reload_live_resource_assets(game, renderer, prepared);
+                        });
+                    match reload {
+                        Ok(()) => {
+                            tracing::info!("Resource pack {} loaded successfully", pending.id);
+                            s_resource_pack::Action::SuccessfullyLoaded
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, id = %pending.id, "Resource pack reload failed");
+                            if pending.required {
+                                disconnect_reason =
+                                    Some(format!("Required resource pack failed: {error}"));
+                            }
+                            s_resource_pack::Action::FailedReload
+                        }
+                    }
                 }
             };
 
@@ -3437,7 +3764,6 @@ impl AppCore {
                         action,
                     },
                 ));
-            self.menu.active_packs = self.resource_packs.active_pack_info();
         }
 
         let player_chunk = game.player_chunk();

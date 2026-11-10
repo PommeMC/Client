@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::io::BufReader;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::resource_pack::ResourcePackManager;
+use crate::resources::{ResourceContent, ResourceId, ResourceManager};
 use crate::util::JavaRandom;
 
 /// Vanilla `SoundEventRegistrationSerializer`'s `attenuation_distance` default.
@@ -10,10 +9,10 @@ const DEFAULT_ATTENUATION_DISTANCE: i32 = 16;
 
 /// A single playable file variant from `sounds.json` after resolving any
 /// `type: "event"` indirection.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct SoundVariant {
-    /// Resolved file in the current resource-pack stack.
-    pub path: PathBuf,
+    /// Selected when the index loads, so playing it needs no lookup.
+    pub content: ResourceContent,
     pub weight: u32,
     /// Per-entry volume multiplier (defaults to 1.0 when unspecified).
     pub volume: f32,
@@ -25,7 +24,7 @@ pub struct SoundVariant {
     pub attenuation_distance: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum SoundEntry {
     File(SoundVariant),
     Event {
@@ -51,50 +50,56 @@ pub struct SoundsIndex {
 }
 
 impl SoundsIndex {
-    /// Loads the built-in `minecraft/sounds.json`, then applies every active
-    /// resource-pack `sounds.json` from low to high priority. Higher packs
-    /// append by default and reset an event only when `replace: true`,
-    /// matching Vanilla.
-    pub fn load(
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-        packs: &ResourcePackManager,
-    ) -> Self {
+    /// Applies each namespace's `sounds.json` stack from low to high priority.
+    /// Higher packs append by default and reset an event only when
+    /// `replace: true`, matching Vanilla.
+    pub fn load(resources: &dyn ResourceManager) -> Self {
         let mut index = Self {
             events: HashMap::new(),
         };
 
+        // Vanilla `SoundManager.validateSoundResource`: a missing file drops
+        // only itself from its event.
         let resolve_sound = |name: &str| {
-            let asset_key = sound_asset_key(name);
-            if let Some(path) = packs.resolve_asset(&asset_key) {
-                return Some(path);
-            }
-            if let Some(path) = asset_index.as_ref().and_then(|idx| idx.resolve(&asset_key)) {
-                return Some(path);
-            }
-            let path = jar_assets_dir.join(&asset_key);
-            path.is_file().then_some(path)
+            let location = sound_location(name)?;
+            Ok(match resources.get_resource(&location) {
+                Ok(Some(resource)) => Some(resource.content().clone()),
+                Ok(None) => {
+                    tracing::warn!("File {location} does not exist, cannot add it to its event");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to look up sound {location}: {error}");
+                    None
+                }
+            })
         };
 
-        let base = resolve_asset_path(jar_assets_dir, asset_index, "minecraft/sounds.json");
-        index.apply_file("minecraft", &base, &resolve_sound);
-
-        for pack_dir in packs.active_pack_dirs() {
-            let assets_dir = pack_dir.join("assets");
-            let Ok(entries) = std::fs::read_dir(&assets_dir) else {
-                continue;
-            };
-            let mut namespaces: Vec<_> = entries
-                .flatten()
-                .filter(|entry| entry.path().is_dir())
-                .collect();
-            namespaces.sort_by_key(|entry| entry.file_name());
-            for namespace in namespaces {
-                let namespace_name = namespace.file_name().to_string_lossy().into_owned();
-                let sounds_path = namespace.path().join("sounds.json");
-                if sounds_path.is_file() {
-                    index.apply_file(&namespace_name, &sounds_path, &resolve_sound);
+        let mut namespaces: Vec<_> = match resources.get_namespaces() {
+            Ok(namespaces) => namespaces.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!("failed to enumerate sound namespaces: {error}");
+                return index;
+            }
+        };
+        namespaces.sort();
+        for namespace in namespaces {
+            let location = match ResourceId::from_parts(&namespace, "sounds.json") {
+                Ok(location) => location,
+                Err(error) => {
+                    tracing::warn!("invalid sounds.json location: {error}");
+                    continue;
                 }
+            };
+            let layers = match resources.get_resource_stack(&location) {
+                Ok(layers) => layers,
+                Err(error) => {
+                    tracing::warn!("failed to load sound layers for {location}: {error}");
+                    continue;
+                }
+            };
+            for layer in layers {
+                index.apply_resource(&namespace, layer.content(), &resolve_sound);
             }
         }
 
@@ -114,7 +119,7 @@ impl SoundsIndex {
     #[cfg(test)]
     pub fn for_test_event(event: &str) -> Self {
         let variant = SoundVariant {
-            path: PathBuf::from("test.ogg"),
+            content: ResourceContent::test(crate::resources::pack_resources::POMME_ICON),
             weight: 1,
             volume: 1.0,
             pitch: 1.0,
@@ -141,22 +146,36 @@ impl SoundsIndex {
             .as_deref()
     }
 
-    fn apply_file(
+    fn apply_resource(
         &mut self,
         namespace: &str,
-        path: &Path,
-        resolve_sound: &impl Fn(&str) -> Option<PathBuf>,
+        content: &ResourceContent,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            tracing::warn!("sounds.json not found at {}", path.display());
-            return;
+        let stream = match content.open() {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!("failed to open sounds.json: {error}");
+                return;
+            }
         };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-            tracing::warn!("failed to parse sounds.json at {}", path.display());
-            return;
+        let json = match serde_json::from_reader::<_, serde_json::Value>(BufReader::new(stream)) {
+            Ok(json) => json,
+            Err(error) => {
+                tracing::warn!(
+                    "failed to parse {} from {:?}: {error}",
+                    content.id(),
+                    content.origin()
+                );
+                return;
+            }
         };
         if let Err(error) = self.apply_value(namespace, &json, resolve_sound) {
-            tracing::warn!("invalid sounds.json at {}: {error}", path.display());
+            tracing::warn!(
+                "invalid {} from {:?}: {error}",
+                content.id(),
+                content.origin()
+            );
         }
     }
 
@@ -164,7 +183,7 @@ impl SoundsIndex {
         &mut self,
         namespace: &str,
         json: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Option<PathBuf>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<(), String> {
         let registrations = self.parse_value(namespace, json, resolve_sound)?;
         for (event_name, replace, event) in registrations {
@@ -183,7 +202,7 @@ impl SoundsIndex {
         &self,
         namespace: &str,
         json: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Option<PathBuf>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<Vec<(String, bool, SoundEvent)>, String> {
         let obj = json
             .as_object()
@@ -238,16 +257,16 @@ impl SoundsIndex {
     fn parse_entry(
         &self,
         entry: &serde_json::Value,
-        resolve_sound: &impl Fn(&str) -> Option<PathBuf>,
+        resolve_sound: &impl Fn(&str) -> Result<Option<ResourceContent>, String>,
     ) -> Result<Option<SoundEntry>, String> {
         match entry {
             serde_json::Value::String(name) => {
                 validate_sound_name(name)?;
-                let Some(path) = resolve_sound(name) else {
+                let Some(content) = resolve_sound(name)? else {
                     return Ok(None);
                 };
                 Ok(Some(SoundEntry::File(SoundVariant {
-                    path,
+                    content,
                     weight: 1,
                     volume: 1.0,
                     pitch: 1.0,
@@ -292,11 +311,11 @@ impl SoundsIndex {
                         stream,
                     })),
                     "file" => {
-                        let Some(path) = resolve_sound(name) else {
+                        let Some(content) = resolve_sound(name)? else {
                             return Ok(None);
                         };
                         Ok(Some(SoundEntry::File(SoundVariant {
-                            path,
+                            content,
                             weight: weight as u32,
                             volume,
                             pitch,
@@ -492,13 +511,13 @@ fn json_i32(
     }
 }
 
-/// Converts a `sounds.json` file variant name into an asset key.
+/// Converts a `sounds.json` file variant name into a resource location.
 ///
-/// `music/menu/menu1` -> `minecraft/sounds/music/menu/menu1.ogg`
-/// `namespace:path`   -> `namespace/sounds/path.ogg`
-pub fn sound_asset_key(name: &str) -> String {
+/// `music/menu/menu1` -> `minecraft:sounds/music/menu/menu1.ogg`
+/// `namespace:path`   -> `namespace:sounds/path.ogg`
+fn sound_location(name: &str) -> Result<ResourceId, String> {
     let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
-    format!("{ns}/sounds/{path}.ogg")
+    ResourceId::from_parts(ns, &format!("sounds/{path}.ogg")).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -507,7 +526,7 @@ mod tests {
 
     fn file(name: &str, weight: u32) -> SoundEntry {
         SoundEntry::File(SoundVariant {
-            path: PathBuf::from(name),
+            content: ResourceContent::test(ResourceId::new(name).unwrap()),
             weight,
             volume: 1.0,
             pitch: 1.0,
@@ -516,17 +535,21 @@ mod tests {
         })
     }
 
-    fn resolve_test_sound(name: &str) -> Option<PathBuf> {
-        (!name.starts_with("missing")).then(|| PathBuf::from(name))
+    fn resolve_test_sound(name: &str) -> Result<Option<ResourceContent>, String> {
+        Ok((!name.starts_with("missing"))
+            .then(|| ResourceContent::test(ResourceId::new(name).unwrap())))
     }
 
     #[test]
     fn sound_asset_key_handles_default_and_explicit_namespaces() {
         assert_eq!(
-            sound_asset_key("music/menu/menu1"),
-            "minecraft/sounds/music/menu/menu1.ogg"
+            sound_location("music/menu/menu1").unwrap(),
+            ResourceId::new("minecraft:sounds/music/menu/menu1.ogg").unwrap()
         );
-        assert_eq!(sound_asset_key("mod:foo/bar"), "mod/sounds/foo/bar.ogg");
+        assert_eq!(
+            sound_location("mod:foo/bar").unwrap(),
+            ResourceId::new("mod:sounds/foo/bar.ogg").unwrap()
+        );
     }
 
     #[test]
@@ -605,8 +628,8 @@ mod tests {
         let event = index.events.get("test").unwrap();
         assert_eq!(event.entries.len(), 1);
         assert_eq!(
-            index.choose("test", Some(0)).unwrap().path,
-            PathBuf::from("present/file")
+            index.choose("test", Some(0)).unwrap().content.id().clone(),
+            ResourceId::new("present/file").unwrap()
         );
     }
 
@@ -703,7 +726,7 @@ mod tests {
         // LegacyRandomSource(1) draws 1 then 0 for nextInt(2). The first draw
         // selects the only redirect; the nested draw therefore selects `first`.
         let resolved = index.choose("parent", Some(1)).unwrap();
-        assert_eq!(resolved.path, PathBuf::from("first"));
+        assert_eq!(*resolved.content.id(), ResourceId::new("first").unwrap());
         assert_eq!(resolved.volume, 0.5);
         assert_eq!(resolved.pitch, 2.0);
         assert!(resolved.stream);
@@ -730,8 +753,13 @@ mod tests {
             )]),
         };
         assert_eq!(
-            index.choose("parent", Some(0)).unwrap().path,
-            PathBuf::from("fallback")
+            index
+                .choose("parent", Some(0))
+                .unwrap()
+                .content
+                .id()
+                .clone(),
+            ResourceId::new("fallback").unwrap()
         );
     }
 
@@ -766,5 +794,33 @@ mod tests {
             ]),
         };
         assert!(index.choose("a", Some(0)).is_none());
+    }
+
+    /// The highest pack's file is selected, and one no pack has drops only
+    /// itself.
+    #[test]
+    fn load_selects_files_and_skips_only_missing_ones() {
+        use crate::resources::test_dir::TempDir;
+        let [base, pack] = [(); 2].map(|()| TempDir::new().unwrap());
+        for (dir, bytes) in [(&base, b"base"), (&pack, b"pack")] {
+            let sounds = dir.0.join("assets/minecraft/sounds");
+            std::fs::create_dir_all(&sounds).unwrap();
+            std::fs::write(sounds.join("present.ogg"), bytes).unwrap();
+        }
+        std::fs::write(
+            base.0.join("assets/minecraft/sounds.json"),
+            r#"{"test": {"sounds": ["present", "absent"]}}"#,
+        )
+        .unwrap();
+        let roots = [&base, &pack].map(|dir| dir.0.clone());
+        let index = SoundsIndex::load(&crate::test_util::test_resources(&roots));
+        let chosen = index.choose("test", Some(0)).unwrap();
+        let bytes = chosen.content.read_all().unwrap();
+        assert_eq!(
+            *chosen.content.id(),
+            ResourceId::new("minecraft:sounds/present.ogg").unwrap()
+        );
+        assert_eq!(bytes, b"pack");
+        assert_eq!(index.events["test"].entries.len(), 1);
     }
 }
