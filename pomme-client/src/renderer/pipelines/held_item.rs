@@ -31,6 +31,16 @@ pub struct HeldHand<'a> {
     pub use_anim: Option<UseAnim>,
 }
 
+/// An item in a hand of the inventory's player preview (vanilla
+/// `ItemInHandLayer.submitArmWithItem` drawn under `ENTITY_IN_UI` light).
+pub struct PreviewHand<'a> {
+    pub item: &'a HeldItemInfo,
+    pub right_arm: bool,
+    pub in_use: bool,
+    /// The hand's transform, up to the item's display transform.
+    pub hand: Mat4,
+}
+
 /// A hand's first-person use animation (vanilla
 /// `FirstPersonHandsAndItemsRenderer`'s use-animation switch).
 #[derive(Clone, Copy)]
@@ -76,11 +86,54 @@ impl HandRenderSelection {
     };
 }
 
+/// One display context's transforms for each hand: the left hand tries its
+/// own key first, then the right's, and mirrors whichever it finds (vanilla
+/// `ItemTransform.apply`'s left-hand fix).
+struct HandDisplays {
+    right: DisplayResolver,
+    left: DisplayResolver,
+}
+
+const FIRST_PERSON_KEYS: [&[&str]; 2] = [
+    &["firstperson_righthand"],
+    &["firstperson_lefthand", "firstperson_righthand"],
+];
+const THIRD_PERSON_KEYS: [&[&str]; 2] = [
+    &["thirdperson_righthand"],
+    &["thirdperson_lefthand", "thirdperson_righthand"],
+];
+
+impl HandDisplays {
+    fn new(inputs: &ModelInputs, [right, left]: [&'static [&'static str]; 2]) -> Self {
+        Self {
+            right: DisplayResolver::new(inputs, right),
+            left: DisplayResolver::new(inputs, left),
+        }
+    }
+
+    fn resolve(
+        &self,
+        item: &HeldItemInfo,
+        in_use: bool,
+        default: DisplayTransform,
+        right_arm: bool,
+    ) -> DisplayTransform {
+        if right_arm {
+            self.right.resolve(&item.name, in_use, default)
+        } else {
+            self.left.resolve(&item.name, in_use, default).mirrored()
+        }
+    }
+}
+
 pub struct HeldItemPipeline {
     pipeline: rhi::backend::RenderPipeline,
     shared: ItemPipelineShared,
-    right_display: DisplayResolver,
-    left_display: DisplayResolver,
+    /// The player preview's own camera and instances, as first person draws
+    /// in the same frame.
+    preview: ItemPipelineShared,
+    first_person: HandDisplays,
+    third_person: HandDisplays,
 }
 
 impl HeldItemPipeline {
@@ -92,26 +145,25 @@ impl HeldItemPipeline {
         lightmap: &Lightmap,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, atlas, lightmap, "held_item");
+        let preview = ItemPipelineShared::new(device, atlas, lightmap, "preview_item");
         let pipeline = item_entity::create_pipeline(device, targets, shared.pipeline_layout);
         Self {
             pipeline,
             shared,
-            right_display: DisplayResolver::new(inputs, &["firstperson_righthand"]),
-            left_display: DisplayResolver::new(
-                inputs,
-                &["firstperson_lefthand", "firstperson_righthand"],
-            ),
+            preview,
+            first_person: HandDisplays::new(inputs, FIRST_PERSON_KEYS),
+            third_person: HandDisplays::new(inputs, THIRD_PERSON_KEYS),
         }
     }
 
     pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
+        self.preview.rebind_atlas(device, atlas);
     }
 
     pub(crate) fn reload_display(&mut self, inputs: &ModelInputs) {
-        self.right_display = DisplayResolver::new(inputs, &["firstperson_righthand"]);
-        self.left_display =
-            DisplayResolver::new(inputs, &["firstperson_lefthand", "firstperson_righthand"]);
+        self.first_person = HandDisplays::new(inputs, FIRST_PERSON_KEYS);
+        self.third_person = HandDisplays::new(inputs, THIRD_PERSON_KEYS);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -143,14 +195,9 @@ impl HeldItemPipeline {
                 continue;
             };
             let default = default_first_person(item.has_3d_model, hand.right_arm);
-            let using = hand.use_anim.is_some();
-            let display = if hand.right_arm {
-                self.right_display.resolve(&item.name, using, default)
-            } else {
-                self.left_display
-                    .resolve(&item.name, using, default)
-                    .mirrored()
-            };
+            let display =
+                self.first_person
+                    .resolve(item, hand.use_anim.is_some(), default, hand.right_arm);
             let invert = hand::arm_invert(hand.right_arm);
             let mut arm = match hand.use_anim {
                 Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert),
@@ -177,6 +224,47 @@ impl HeldItemPipeline {
         }
     }
 
+    /// Draws the preview's held items: `view_proj` is the preview's, and
+    /// `normal_basis` turns its space into the GUI view space vanilla lights.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_preview(
+        &mut self,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        view_proj: Mat4,
+        normal_basis: Mat3,
+        hands: &[PreviewHand<'_>],
+        meshes: &ItemEntityPipeline,
+    ) {
+        let uniform = CameraUniform::with_view_proj(view_proj).with_entity_in_ui_light();
+        self.preview.update_camera(frame, &uniform);
+        let tint_count = hands.iter().map(|hand| hand.item.item_tints.len()).sum();
+        self.preview
+            .begin_frame(device, frame, hands.len(), tint_count);
+        self.preview.bind(pass, frame, self.pipeline);
+        for hand in hands {
+            let item = hand.item;
+            let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
+                continue;
+            };
+            let default = default_third_person(item.has_3d_model);
+            let display = self
+                .third_person
+                .resolve(item, hand.in_use, default, hand.right_arm);
+            let instance = self.preview.push_item(
+                frame,
+                &(hand.hand * display.to_matrix()),
+                normal_basis,
+                LightLevels::FULL_BRIGHT.lane(),
+                &item.item_tints,
+                0,
+            );
+            pass.set_vertex_buffer(0, buffer);
+            pass.draw(vertex_count, 1, 0, instance);
+        }
+    }
+
     pub fn recreate_pipeline(
         &mut self,
         device: &rhi::backend::Device,
@@ -189,6 +277,7 @@ impl HeldItemPipeline {
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.pipeline.destroy(device);
         self.shared.destroy(device);
+        self.preview.destroy(device);
     }
 }
 
@@ -250,6 +339,24 @@ fn default_first_person(has_3d_model: bool, right_arm: bool) -> DisplayTransform
             rotation: Vec3::new(0.0, -90.0, 25.0),
             translation: Vec3::new(1.13, 3.2, 1.13) / 16.0,
             scale: Vec3::splat(0.68),
+        }
+    }
+}
+
+/// The fallback third-person right-hand display: `block/block.json`'s or
+/// `item/generated.json`'s.
+fn default_third_person(has_3d_model: bool) -> DisplayTransform {
+    if has_3d_model {
+        DisplayTransform {
+            rotation: Vec3::new(75.0, 45.0, 0.0),
+            translation: Vec3::new(0.0, 2.5, 0.0) / 16.0,
+            scale: Vec3::splat(0.375),
+        }
+    } else {
+        DisplayTransform {
+            rotation: Vec3::ZERO,
+            translation: Vec3::new(0.0, 3.0, 1.0) / 16.0,
+            scale: Vec3::splat(0.55),
         }
     }
 }

@@ -71,6 +71,32 @@ chat = "/damage @s 4 minecraft:mob_attack by @e[type=minecraft:armor_stand,limit
 [[step]]
 expect = { player = { health = 17.0 } }
 
+# The inventory's player holds a shield in each hand, arms forward.
+[[step]]
+chat = "/item replace entity @s weapon.offhand with minecraft:shield"
+
+[[step]]
+expect = { slot = 45, item = "shield" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "inventory" }
+
+# Up and left of the preview, so the player turns to show both shields.
+[[step]]
+cursor = [140, 60]
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "inventory"
+
+[[step]]
+close_menu = true
+
 [[step]]
 chat = "/kill @e[type=minecraft:armor_stand]"
 
