@@ -71,6 +71,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) glow_squid_ink: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) sonic_boom: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) snowflake: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) soul: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) sculk_soul: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -264,6 +266,12 @@ impl ParticleTypes {
         let snowflake = registry
             .register(resource_id!("minecraft:snowflake"), false)
             .map_err(registration_error)?;
+        let soul = registry
+            .register(resource_id!("minecraft:soul"), false)
+            .map_err(registration_error)?;
+        let sculk_soul = registry
+            .register(resource_id!("minecraft:sculk_soul"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -327,6 +335,8 @@ impl ParticleTypes {
             glow_squid_ink,
             sonic_boom,
             snowflake,
+            soul,
+            sculk_soul,
         })
     }
 }
