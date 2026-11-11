@@ -189,6 +189,7 @@ pub enum ServerParticleKind {
     Ash,
     WhiteAsh,
     Spit,
+    BubblePop,
 }
 
 impl ServerParticleKind {
@@ -222,6 +223,7 @@ impl ServerParticleKind {
             91 => Some(Self::Ash),
             99 => Some(Self::WhiteAsh),
             72 => Some(Self::Spit),
+            79 => Some(Self::BubblePop),
             _ => None,
         }
     }
