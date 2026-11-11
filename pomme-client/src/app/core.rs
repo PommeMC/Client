@@ -3759,6 +3759,9 @@ impl AppCore {
                         ServerParticleKind::Spit => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.spit))
                         }
+                        ServerParticleKind::BubblePop => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.bubble_pop))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
