@@ -918,6 +918,13 @@ impl GameState {
         )
     }
 
+    /// The action bar's text and age in ticks while it's up.
+    pub fn shown_action_bar(&self) -> Option<(&[crate::ui::text::TextSpan], u64)> {
+        let (spans, tick) = self.action_bar.as_ref()?;
+        let age = self.tick_count.wrapping_sub(*tick);
+        (age < crate::ui::hud::ACTION_BAR_TICKS).then_some((spans.as_slice(), age))
+    }
+
     /// A server dialog, or the confirm screen one raised, is the top screen.
     /// Vanilla runs no key mapping while a screen is up, and the screens under
     /// it neither draw nor take input.
@@ -3626,9 +3633,7 @@ pub fn update_game(
             game.player.inventory.offhand(),
             core.menu.main_hand_right(),
             game.tool_highlight_timer,
-            game.action_bar
-                .as_ref()
-                .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
+            game.shown_action_bar(),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
             &game.player.effects,
