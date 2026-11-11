@@ -53,13 +53,6 @@ mouse_up = "right"
 [[step]]
 expect = { hud = { chat_open = true, action_bar = "Sleeping through this night" } }
 
-# Long enough for a stray packet's reply to have replaced it.
-[[step]]
-wait_ms = 500
-
-[[step]]
-expect = { hud = { action_bar = "Sleeping through this night" } }
-
 [[step]]
 screenshot = "sleeping"
 

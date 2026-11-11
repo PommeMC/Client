@@ -918,9 +918,6 @@ impl GameState {
         )
     }
 
-    /// A server dialog, or the confirm screen one raised, is the top screen.
-    /// Vanilla runs no key mapping while a screen is up, and the screens under
-    /// it neither draw nor take input.
     /// The action bar's text and age in ticks while it's up.
     pub fn shown_action_bar(&self) -> Option<(&[crate::ui::text::TextSpan], u64)> {
         let (spans, tick) = self.action_bar.as_ref()?;
@@ -928,6 +925,9 @@ impl GameState {
         (age < crate::ui::hud::ACTION_BAR_TICKS).then_some((spans.as_slice(), age))
     }
 
+    /// A server dialog, or the confirm screen one raised, is the top screen.
+    /// Vanilla runs no key mapping while a screen is up, and the screens under
+    /// it neither draw nor take input.
     pub fn dialog_open(&self) -> bool {
         self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
     }
