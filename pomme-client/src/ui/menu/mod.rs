@@ -724,6 +724,9 @@ pub struct MainMenu {
     scroll_offset: f32,
     /// The cursor's last y while a list's scrollbar is held.
     scrollbar_drag: Option<f32>,
+    /// The furthest the open draggable list scrolls.
+    #[cfg(feature = "test-harness")]
+    scroll_max: f32,
     /// Which text field of the current form has keyboard focus (index within
     /// the form). Separate from `focus` (button/widget focus ring).
     focused_field: Option<u8>,
@@ -909,6 +912,8 @@ impl MainMenu {
             player_face: None,
             scroll_offset: 0.0,
             scrollbar_drag: None,
+            #[cfg(feature = "test-harness")]
+            scroll_max: 0.0,
             focused_field: None,
             last_field_click_time: Instant::now(),
             last_field_click: None,
@@ -1242,6 +1247,18 @@ impl MainMenu {
     pub fn set_display_mode(&mut self, display_mode: DisplayMode, key_bindings: &KeyBindings) {
         self.display_mode = display_mode;
         self.save_settings(key_bindings);
+    }
+
+    /// Where the open draggable list is scrolled: `top`, `end` or `middle`.
+    #[cfg(feature = "test-harness")]
+    pub fn list_scroll(&self) -> &'static str {
+        if self.scroll_offset <= 0.0 {
+            "top"
+        } else if self.scroll_offset >= self.scroll_max {
+            "end"
+        } else {
+            "middle"
+        }
     }
 
     pub fn main_hand_right(&self) -> bool {

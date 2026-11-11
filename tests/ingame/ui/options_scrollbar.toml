@@ -31,6 +31,9 @@ mouse_up = "left"
 wait_ms = 300
 
 [[step]]
+expect = { list = "top" }
+
+[[step]]
 screenshot = "top"
 
 [[step]]
@@ -50,6 +53,9 @@ wait_ms = 300
 
 [[step]]
 mouse_up = "left"
+
+[[step]]
+expect = { list = "end" }
 
 [[step]]
 screenshot = "dragged"

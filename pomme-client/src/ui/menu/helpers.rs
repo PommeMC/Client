@@ -1161,6 +1161,10 @@ impl MainMenu {
         min_thumb: f32,
     ) -> bool {
         let max_scroll = (total - h).max(0.0);
+        #[cfg(feature = "test-harness")]
+        {
+            self.scroll_max = max_scroll;
+        }
         let (x, y) = input.cursor;
         let over = max_scroll > 0.0
             && (track_x..=track_x + SCROLLBAR_W * gs).contains(&x)
