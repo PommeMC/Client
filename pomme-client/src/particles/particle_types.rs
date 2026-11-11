@@ -82,6 +82,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) ash: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) white_ash: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) spit: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) bubble_pop: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -308,6 +309,9 @@ impl ParticleTypes {
         let spit = registry
             .register(resource_id!("minecraft:spit"), true)
             .map_err(registration_error)?;
+        let bubble_pop = registry
+            .register(resource_id!("minecraft:bubble_pop"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -382,6 +386,7 @@ impl ParticleTypes {
             ash,
             white_ash,
             spit,
+            bubble_pop,
         })
     }
 }
