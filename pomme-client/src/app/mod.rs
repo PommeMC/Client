@@ -137,13 +137,6 @@ impl FramerateLimiter {
     }
 }
 
-/// The tail of every exit from a world or server.
-///
-/// Takes the connection by value and drops it before the server is asked to
-/// stop, in `Minecraft.disconnect`'s order. Dropping aborts the connection
-/// task, which closes the pipe on a runtime thread, so the server may see the
-/// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
-/// and persists every player still online before it saves the worlds.
 /// Vanilla `Minecraft.disconnectFromWorld`, for a player's own disconnect.
 fn disconnect(
     core: &mut AppCore,
@@ -157,6 +150,13 @@ fn disconnect(
     leave_world(core, gfx, panorama, connection, world, AfterSaving::Menu)
 }
 
+/// The tail of every exit from a world or server.
+///
+/// Takes the connection by value and drops it before the server is asked to
+/// stop, in `Minecraft.disconnect`'s order. Dropping aborts the connection
+/// task, which closes the pipe on a runtime thread, so the server may see the
+/// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
+/// and persists every player still online before it saves the worlds.
 fn leave_world(
     core: &mut AppCore,
     mut gfx: Gfx,
