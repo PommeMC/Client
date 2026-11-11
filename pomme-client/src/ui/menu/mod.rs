@@ -543,10 +543,6 @@ const COL_SEP: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 /// Tint of the "Pomme" wordmark, on the title screen and in the credits roll.
 const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
 
-const FIELD_BG: [f32; 4] = [0.06, 0.07, 0.14, 0.8];
-const FIELD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
-const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
-
 const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {

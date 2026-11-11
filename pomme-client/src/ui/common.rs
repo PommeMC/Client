@@ -312,6 +312,29 @@ pub(crate) fn set_clipboard(text: &str) -> bool {
 /// text (`EditBox.extractWidgetRenderState` -> `graphics.textHighlight`).
 pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// `EditBox`'s box: its field sprite, picked by focus alone.
+pub(crate) fn push_text_field_box(
+    elements: &mut Vec<MenuElement>,
+    rect: [f32; 4],
+    scale: f32,
+    focused: bool,
+) {
+    let [x, y, w, h] = rect;
+    elements.push(MenuElement::NineSlice {
+        x,
+        y,
+        w,
+        h,
+        sprite: if focused {
+            SpriteId::WidgetTextFieldHighlighted
+        } else {
+            SpriteId::WidgetTextField
+        },
+        border: scale,
+        tint: WHITE,
+    });
+}
+
 /// Selection highlight, display text, and caret for one text-field frame
 /// (`EditBox.renderWidget`): blue block behind the shown slice, then a
 /// `bar_w`-wide caret bar in insert mode or a trailing `_` glyph otherwise.

@@ -95,7 +95,7 @@ pub(super) fn push_button(
     hovered
 }
 
-/// Renders a `TextFieldState` (vanilla EditBox port): border, background, the
+/// Renders a `TextFieldState` (vanilla EditBox port): the field sprite, the
 /// horizontally-scrolled display window, the selection highlight, and the caret
 /// (1px bar in insert mode, trailing `_` glyph otherwise), blinking per
 /// `render_info`.
@@ -112,27 +112,7 @@ pub(super) fn push_text_field(
     focused: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
-    let border = if focused {
-        FIELD_BORDER_FOCUS
-    } else {
-        FIELD_BORDER
-    };
-    elements.push(MenuElement::Rect {
-        x: x - gs,
-        y: y - gs,
-        w: w + gs * 2.0,
-        h: h + gs * 2.0,
-        corner_radius: 0.0,
-        color: border,
-    });
-    elements.push(MenuElement::Rect {
-        x,
-        y,
-        w,
-        h,
-        corner_radius: 0.0,
-        color: FIELD_BG,
-    });
+    common::push_text_field_box(elements, [x, y, w, h], gs, focused);
 
     let pad = 4.0 * gs;
     let text_x = x + pad;
@@ -1584,5 +1564,36 @@ impl MainMenu {
             },
             choice,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_field_draws_the_edit_box_sprite_for_its_focus() {
+        let sprite = |focused| {
+            let mut elements = Vec::new();
+            let field = TextFieldState::new(32);
+            push_text_field(
+                &mut elements,
+                0.0,
+                0.0,
+                200.0,
+                20.0,
+                8.0,
+                1.0,
+                &field,
+                focused,
+                &|text, _| text.len() as f32,
+            );
+            match elements.first() {
+                Some(MenuElement::NineSlice { sprite, .. }) => *sprite,
+                _ => panic!("expected the field sprite first"),
+            }
+        };
+        assert_eq!(sprite(false), SpriteId::WidgetTextField);
+        assert_eq!(sprite(true), SpriteId::WidgetTextFieldHighlighted);
     }
 }
