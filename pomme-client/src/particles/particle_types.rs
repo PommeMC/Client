@@ -81,6 +81,7 @@ pub(crate) struct ParticleTypes {
     pub(crate) rain: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) ash: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) white_ash: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) spit: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -304,6 +305,9 @@ impl ParticleTypes {
         let white_ash = registry
             .register(resource_id!("minecraft:white_ash"), false)
             .map_err(registration_error)?;
+        let spit = registry
+            .register(resource_id!("minecraft:spit"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -377,6 +381,7 @@ impl ParticleTypes {
             rain,
             ash,
             white_ash,
+            spit,
         })
     }
 }
