@@ -29,8 +29,9 @@ use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
+use crate::player::item_cooldowns::ItemCooldowns;
 use crate::position::BlockPos;
-use crate::renderer::pipelines::held_item::{HandRenderSelection, UseAnim};
+use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
@@ -125,15 +126,59 @@ struct ActiveUse {
     /// Bundle entries left to drop, predicted like vanilla's local
     /// `removeOne`; `None` unless using a bundle.
     bundle: Option<usize>,
-    sound: SoundRef,
-    has_particles: bool,
-    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
-    texture: String,
+    /// A consumable's periodic sound and crumbs; `None` for other uses.
+    consume: Option<ConsumeEffects>,
     use_effects: UseEffects,
     duration: i32,
     /// Counts down from `duration`; vanilla lets it run negative until the
     /// server completes the use.
     remaining: i32,
+}
+
+/// Vanilla `Item.use` for an item that blocks attacks: held up until released
+/// (`getUseDuration`'s 72000 ticks). A swappable `equippable` swaps instead.
+fn block_use(hand: InteractionHand, stack: &ItemStackData) -> Option<ActiveUse> {
+    if swappable(stack).is_some() {
+        return None;
+    }
+    stack_component::<BlocksAttacks>(stack)?;
+    Some(ActiveUse::new(
+        hand,
+        stack,
+        ItemUseAnimation::BlockKind,
+        72000,
+    ))
+}
+
+impl ActiveUse {
+    /// A plain use of `stack` lasting `duration` ticks.
+    fn new(
+        hand: InteractionHand,
+        stack: &ItemStackData,
+        anim: ItemUseAnimation,
+        duration: i32,
+    ) -> Self {
+        Self {
+            hand,
+            kind: stack.kind,
+            anim,
+            bundle: None,
+            consume: None,
+            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            duration,
+            remaining: duration,
+        }
+    }
+}
+
+/// Vanilla `Consumable.emitParticlesAndSounds`'s inputs.
+struct ConsumeEffects {
+    sound: SoundRef,
+    /// Drinks play their sound quieter and lower.
+    drink: bool,
+    has_particles: bool,
+    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
+    texture: String,
 }
 
 pub struct InteractionState {
@@ -163,6 +208,7 @@ pub struct InteractionState {
     attack_strength_ticker: u32,
     /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
     last_item_in_main_hand: Option<ItemStackData>,
+    pub item_cooldowns: ItemCooldowns,
 }
 
 impl InteractionState {
@@ -196,6 +242,7 @@ impl InteractionState {
             o_attack_anim: 0.0,
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
+            item_cooldowns: ItemCooldowns::default(),
         }
     }
 
@@ -563,7 +610,7 @@ impl InteractionState {
         if cursor_captured && self.miss_time > 0 {
             self.miss_time -= 1;
         }
-        self.tick_attack_cooldown(held_stack);
+        self.tick_cooldowns(held_stack);
         self.update_swing();
     }
 
@@ -586,9 +633,9 @@ impl InteractionState {
     }
 
     /// Vanilla `Player.tick`: advance the attack cooldown, and reset it when
-    /// the main-hand item *type* changes; component or count changes only
-    /// refresh the cache.
-    fn tick_attack_cooldown(&mut self, held_stack: Option<&ItemStackData>) {
+    /// the main-hand item *type* changes (component or count changes only
+    /// refresh the cache); then count the item cooldowns down.
+    fn tick_cooldowns(&mut self, held_stack: Option<&ItemStackData>) {
         self.attack_strength_ticker = self.attack_strength_ticker.saturating_add(1);
         // Vanilla `ItemStack.matches`: same item, components, and count.
         let matches = same_item_same_components(held_stack, self.last_item_in_main_hand.as_ref())
@@ -604,6 +651,7 @@ impl InteractionState {
             }
             self.last_item_in_main_hand = held_stack.cloned();
         }
+        self.item_cooldowns.tick();
     }
 
     /// Vanilla `Player.getAttackStrengthScale(0.0)` (the HUD passes no
@@ -810,7 +858,7 @@ impl InteractionState {
                     chunks,
                     hit,
                     hand,
-                    held.place_block,
+                    self.placed_block(&held),
                     suppress_block_use,
                     player_pos,
                     player_aabb,
@@ -909,8 +957,8 @@ impl InteractionState {
     /// Vanilla `MultiPlayerGameMode.useItem` + `Item.use`: sends
     /// `ServerboundUseItem` for any held item (the server decides what it
     /// does) and predicts the result, beginning the local use timer when the
-    /// item is consumable and edible right now.
-    // TODO: item cooldowns, which make vanilla's `useItem` pass.
+    /// item is consumable and edible right now. An item on cooldown still
+    /// sends the packet but does nothing.
     #[allow(clippy::too_many_arguments)]
     fn use_item(
         &mut self,
@@ -933,28 +981,26 @@ impl InteractionState {
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
         }));
+        if self.item_cooldowns.is_on_cooldown(stack) {
+            return UseResult::Pass;
+        }
 
         // `BundleItem`: a 200-tick use. Its BUNDLE animation is the plain
         // swing pose, which `None` already draws.
         if crate::ui::bundle::is_bundle(stack) {
             if let Some(contents) = crate::ui::bundle::contents(stack) {
                 self.using_item = Some(ActiveUse {
-                    hand,
-                    kind: stack.kind,
-                    anim: ItemUseAnimation::None,
                     bundle: Some(contents.items.len()),
-                    sound: SoundRef::event("item.bundle.drop_contents"),
-                    has_particles: false,
-                    texture: format!("item/{}", item_resource_name(stack.kind)),
-                    use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-                    duration: 200,
-                    remaining: 200,
+                    ..ActiveUse::new(hand, stack, ItemUseAnimation::None, 200)
                 });
             }
             return UseResult::Success { swing: true };
         }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
+            if let Some(block) = block_use(hand, stack) {
+                self.using_item = Some(block);
+            }
             return item_use_result(stack, worn);
         };
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
@@ -967,25 +1013,22 @@ impl InteractionState {
         }
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
-        let active = ActiveUse {
-            hand,
-            kind: stack.kind,
-            anim: consumable.animation,
-            bundle: None,
+        let consume = ConsumeEffects {
             sound: SoundRef::resolve(&consumable.sound),
+            drink: consumable.animation == ItemUseAnimation::Drink,
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
-            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-            duration,
-            remaining: duration,
         };
         if duration > 0 {
-            self.using_item = Some(active);
+            self.using_item = Some(ActiveUse {
+                consume: Some(consume),
+                ..ActiveUse::new(hand, stack, consumable.animation, duration)
+            });
         } else {
             // Vanilla `Consumable.startConsuming`: a zero-duration consumable
             // skips the use timer and consumes on the spot (`onConsume`).
             emit_consume_effects(
-                &active,
+                &consume,
                 16,
                 audio,
                 effects.particles,
@@ -1009,6 +1052,18 @@ impl InteractionState {
         self.o_attack_anim = 0.0;
         self.attack_strength_ticker = 0;
         self.last_item_in_main_hand = None;
+        // The new `LocalPlayer` starts with no cooldowns.
+        self.item_cooldowns = ItemCooldowns::default();
+    }
+
+    /// The block `held` places, unless it's on cooldown: vanilla
+    /// `performUseItemOn` passes before `useOn` for an item on cooldown.
+    fn placed_block(&self, held: &HandItem) -> Option<BlockState> {
+        held.place_block.filter(|_| {
+            !held
+                .stack
+                .is_some_and(|s| self.item_cooldowns.is_on_cooldown(s))
+        })
     }
 
     /// Client `LivingEntity.onSyncedDataUpdated(DATA_LIVING_ENTITY_FLAGS)`:
@@ -1060,7 +1115,7 @@ impl InteractionState {
         if advance_swing {
             self.update_swing();
         }
-        self.tick_attack_cooldown(held_stack);
+        self.tick_cooldowns(held_stack);
     }
 
     /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
@@ -1118,12 +1173,12 @@ impl InteractionState {
         // `Consumable.shouldEmitParticlesAndSounds`.
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if active.bundle.is_none()
+        if let Some(consume) = &active.consume
             && elapsed > wait
             && active.remaining % CONSUME_EFFECTS_INTERVAL == 0
         {
             emit_consume_effects(
-                active,
+                consume,
                 5,
                 audio,
                 effects.particles,
@@ -1162,14 +1217,12 @@ impl InteractionState {
         eye_pos: DVec3,
         look: LookDirection,
     ) {
-        let Some(active) = self.using_item.take() else {
-            return;
-        };
-        // A bundle isn't a `Consumable`: finishing it plays nothing.
-        if active.bundle.is_some() {
-            return;
+        // Only a `Consumable` plays anything on finishing.
+        if let Some(active) = self.using_item.take()
+            && let Some(consume) = &active.consume
+        {
+            emit_consume_effects(consume, 16, audio, particles, player_pos, eye_pos, look);
         }
-        emit_consume_effects(&active, 16, audio, particles, player_pos, eye_pos, look);
     }
 
     /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
@@ -1178,6 +1231,12 @@ impl InteractionState {
         self.using_item
             .as_ref()
             .map_or(1.0, |a| a.use_effects.speed_multiplier)
+    }
+
+    /// Vanilla `LivingEntity.isUsingItem`.
+    #[cfg(feature = "test-harness")]
+    pub fn is_using_item(&self) -> bool {
+        self.using_item.is_some()
     }
 
     /// Vanilla `LocalPlayer.isSlowDueToUsingItem`, which gates sprinting.
@@ -1200,21 +1259,21 @@ impl InteractionState {
         hand_render_selection(main, off, using)
     }
 
-    /// First-person use-animation state for the held-item renderer, vanilla
-    /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless `hand`
-    /// is in an eat/drink use with ticks remaining.
+    /// First-person use-animation state for the held-item renderer: `None`
+    /// unless `hand` is in an eat, drink or block use with ticks remaining.
     pub fn use_animation(&self, hand: InteractionHand, partial_tick: f32) -> Option<UseAnim> {
         let active = self.using_item.as_ref()?;
-        if active.hand != hand
-            || active.remaining <= 0
-            || !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink)
-        {
+        if active.hand != hand || active.remaining <= 0 {
             return None;
         }
-        Some(UseAnim {
-            curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
-            duration: active.duration as f32,
-        })
+        match active.anim {
+            ItemUseAnimation::Eat | ItemUseAnimation::Drink => Some(UseAnim::Eat(EatAnim {
+                curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
+                duration: active.duration as f32,
+            })),
+            ItemUseAnimation::BlockKind => Some(UseAnim::Block),
+            _ => None,
+        }
     }
 
     /// Predicts placement locally for unambiguous single-state blocks,
@@ -1590,7 +1649,7 @@ fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData
 // eyes of ender, gliding fireworks, items on a stick) and the failures of
 // bows, crossbows, tridents and knowledge books.
 fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
-    if let Some(equippable) = stack_component::<Equippable>(stack).filter(|e| e.swappable) {
+    if let Some(equippable) = swappable(stack) {
         return equip_swap_result(&equippable, stack, worn);
     }
     if stack_component::<BlocksAttacks>(stack).is_some()
@@ -1609,6 +1668,11 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
         }
         _ => UseResult::Pass,
     }
+}
+
+/// The stack's `equippable`, if it swaps into its slot on use.
+fn swappable(stack: &ItemStackData) -> Option<Equippable> {
+    stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
@@ -1856,7 +1920,7 @@ pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
 
 /// The stack's component override if the server set one, else the item's
 /// default.
-fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
+pub(crate) fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
     stack
         .component_patch
         .get::<T>()
@@ -1869,7 +1933,7 @@ fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Op
 /// and again from the server's broadcast, doubling up for the eater exactly
 /// like vanilla (MC-98310).
 fn emit_consume_effects(
-    active: &ActiveUse,
+    consume: &ConsumeEffects,
     particle_count: u32,
     audio: &AudioEngine,
     particles: &mut ParticleStore,
@@ -1877,16 +1941,16 @@ fn emit_consume_effects(
     eye_pos: DVec3,
     look: LookDirection,
 ) {
-    if active.has_particles {
+    if consume.has_particles {
         particles.add_item_use_particles(
             particle_count,
-            &active.texture,
+            &consume.texture,
             eye_pos,
             look.x_rot_deg(),
             look.y_rot_deg(),
         );
     }
-    let (volume, pitch) = if matches!(active.anim, ItemUseAnimation::Drink) {
+    let (volume, pitch) = if consume.drink {
         (0.5, 0.9 + fastrand::f32() * 0.1)
     } else {
         (
@@ -1895,7 +1959,7 @@ fn emit_consume_effects(
         )
     };
     audio.play_world_sound(
-        &active.sound,
+        &consume.sound,
         CATEGORY_PLAYERS,
         Position::new(player_pos.x, player_pos.y, player_pos.z),
         volume,
@@ -2239,9 +2303,12 @@ mod tests {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
             bundle: None,
-            sound: SoundRef::event("entity.generic.eat"),
-            has_particles: true,
-            texture: "item/apple".to_string(),
+            consume: Some(ConsumeEffects {
+                sound: SoundRef::event("entity.generic.eat"),
+                drink: false,
+                has_particles: true,
+                texture: "item/apple".to_string(),
+            }),
             use_effects: UseEffects::default(),
             duration: 32,
             remaining: 12,
@@ -2256,6 +2323,45 @@ mod tests {
         state.update_swing();
         assert!(state.swing_progress(InteractionHand::OffHand, 1.0) > 0.0);
         assert_eq!(state.swing_progress(InteractionHand::MainHand, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_block_on_cooldown_places_nothing() {
+        let mut state = InteractionState::new();
+        let stone = ItemStackData::new(ItemKind::Stone, 1);
+        let held = HandItem {
+            stack: Some(&stone),
+            place_block: Some(BlockState::AIR),
+            worn: Worn::default(),
+        };
+        assert!(state.placed_block(&held).is_some());
+        state.item_cooldowns.set("minecraft:stone".into(), 20);
+        assert!(state.placed_block(&held).is_none());
+    }
+
+    #[test]
+    fn respawning_clears_item_cooldowns() {
+        let mut state = InteractionState::new();
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        state.item_cooldowns.set("minecraft:shield".into(), 100);
+        state.reset_player_transients_for_respawn();
+        assert!(!state.item_cooldowns.is_on_cooldown(&shield));
+    }
+
+    #[test]
+    fn a_raised_shield_blocks_in_its_hand() {
+        let mut state = InteractionState::new();
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        state.using_item = block_use(InteractionHand::OffHand, &shield);
+        assert!(matches!(
+            state.use_animation(InteractionHand::OffHand, 0.0),
+            Some(UseAnim::Block)
+        ));
+        assert!(
+            state
+                .use_animation(InteractionHand::MainHand, 0.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2331,6 +2437,20 @@ mod tests {
         assert_eq!(state.attack_strength_ticker, 0);
         assert!(state.last_item_in_main_hand.is_none());
         assert!(state.using_item.is_none());
+    }
+
+    #[test]
+    fn a_shield_is_held_up_and_nothing_else_is() {
+        let shield = ItemStackData::new(ItemKind::Shield, 1);
+        let use_ = block_use(InteractionHand::OffHand, &shield).expect("a shield blocks");
+        assert_eq!(use_.anim, ItemUseAnimation::BlockKind);
+        assert_eq!(
+            (use_.duration, use_.hand),
+            (72000, InteractionHand::OffHand)
+        );
+        assert!(use_.consume.is_none());
+        let apple = ItemStackData::new(ItemKind::Apple, 1);
+        assert!(block_use(InteractionHand::MainHand, &apple).is_none());
     }
 
     #[test]

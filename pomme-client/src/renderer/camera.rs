@@ -635,7 +635,8 @@ pub struct CameraUniform {
     fog_color: [f32; 4],
     /// xyz: the anchor as integers (vanilla `CameraBlockPos`); chunk.vert
     /// subtracts it from the absolute integer section origins. w: 1 under
-    /// the nether's directional light (`light.glsl`).
+    /// the nether's directional light, 2 under the GUI entity light
+    /// (`light.glsl`).
     camera_block: [i32; 4],
     /// xy: the environmental fog band (vanilla `environmentalStart/End`,
     /// spherical), layered by max() over the render-distance band in the .w
@@ -712,6 +713,13 @@ impl CameraUniform {
     /// Lights directional shading (`light.glsl`) as `cardinal_light` does.
     pub fn with_cardinal_light(mut self, cardinal_light: CardinalLightType) -> Self {
         self.camera_block[3] = i32::from(cardinal_light == CardinalLightType::Nether);
+        self
+    }
+
+    /// Lights directional shading (`light.glsl`) as an entity in a GUI box;
+    /// only the world-lit item shader reads it.
+    pub fn with_entity_in_ui_light(mut self) -> Self {
+        self.camera_block[3] = 2;
         self
     }
 

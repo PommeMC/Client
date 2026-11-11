@@ -2230,6 +2230,14 @@ pub enum MenuElement {
         item_tints: Vec<u32>,
         tint: [f32; 4],
     },
+    /// Where `group`'s cooldown overlay goes in the 16-unit slot at `(x, y)`;
+    /// the game screen swaps it for the overlay (`resolve_item_cooldowns`).
+    ItemCooldown {
+        x: f32,
+        y: f32,
+        scale: f32,
+        group: crate::player::item_cooldowns::CooldownGroup,
+    },
     McText {
         x: f32,
         y: f32,

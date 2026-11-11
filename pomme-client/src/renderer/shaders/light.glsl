@@ -6,6 +6,14 @@ vec2 level_light(vec3 normal, bool nether) {
     return vec2(dot(light0, normal), dot(light1, normal));
 }
 
+// `Lighting.Entry.ENTITY_IN_UI`: two GUI view-space lights (y down, z toward
+// the viewer) for an entity drawn in a GUI box.
+vec2 entity_in_ui_light(vec3 normal) {
+    vec3 light0 = normalize(vec3(0.2, -1.0, 1.0));
+    vec3 light1 = normalize(vec3(-0.2, -1.0, 0.0));
+    return vec2(dot(light0, normal), dot(light1, normal));
+}
+
 // `minecraft_mix_light_separate`'s factor.
 float mix_light(vec2 light) {
     vec2 value = max(vec2(0.0), light);

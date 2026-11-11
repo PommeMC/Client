@@ -1,0 +1,92 @@
+# Video Settings' scrollbar sits 8 right of its rows and drags the list:
+# held from near its top, moving the cursor down scrolls to the end.
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+# Video Settings...
+[[step]]
+cursor = [133, 115]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+expect = { list = "top" }
+
+[[step]]
+screenshot = "top"
+
+[[step]]
+cursor = [379, 50]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+cursor = [379, 120]
+
+[[step]]
+cursor = [379, 190]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { list = "end" }
+
+[[step]]
+screenshot = "dragged"
+
+# Done, then Done again on Options.
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }

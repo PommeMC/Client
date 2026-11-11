@@ -115,6 +115,9 @@ fn event(packet: PlayerPacket) -> Option<NetworkEvent> {
                 message,
             }
         }
+        PlayerPacket::Cooldown { group, duration } => {
+            NetworkEvent::ItemCooldown { group, duration }
+        }
     })
 }
 
