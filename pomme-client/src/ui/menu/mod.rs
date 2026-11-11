@@ -1479,9 +1479,9 @@ impl MainMenu {
     }
 
     /// The screen a player's own disconnect leaves them on: the title screen
-    /// after a singleplayer world, the server list after a server.
-    pub fn show_after_disconnect(&mut self, singleplayer: bool, key_bindings: &KeyBindings) {
-        let screen = if singleplayer {
+    /// `to_title`, else the server list.
+    pub fn show_after_disconnect(&mut self, to_title: bool, key_bindings: &KeyBindings) {
+        let screen = if to_title {
             Screen::Main
         } else {
             Screen::ServerList

@@ -137,16 +137,18 @@ impl FramerateLimiter {
     }
 }
 
-/// Vanilla `Minecraft.disconnectFromWorld`, for a player's own disconnect.
+/// Vanilla `Minecraft.disconnectFromWorld`, for a player's own disconnect, or
+/// `DeathScreen.exitToTitleScreen` with `to_title`.
 fn disconnect(
     core: &mut AppCore,
     gfx: Gfx,
     panorama: Panorama,
     connection: ConnectionHandle,
     world: Option<World>,
+    to_title: bool,
 ) -> AppPhase {
     core.menu
-        .show_after_disconnect(world.is_some(), &core.input.key_bindings);
+        .show_after_disconnect(to_title || world.is_some(), &core.input.key_bindings);
     leave_world(core, gfx, panorama, connection, world, AfterSaving::Menu)
 }
 
@@ -878,6 +880,8 @@ impl ApplicationHandler for App {
                                     .key_bindings
                                     .matches_key(Action::Close, code)
                             {
+                                // TODO: `ConnectScreen.shouldCloseOnEsc` is
+                                // false, so Escape shouldn't leave here.
                                 leave_world(
                                     &mut self.core,
                                     gfx,
@@ -1295,7 +1299,7 @@ impl ApplicationHandler for App {
                                 world,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
-                                disconnect(core, gfx, panorama, connection, world)
+                                disconnect(core, gfx, panorama, connection, world, false)
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
@@ -1349,9 +1353,15 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            GameUpdateResult::ManualDisconnect => {
-                                disconnect(core, gfx, Panorama::new(), connection, world)
-                            }
+                            result @ (GameUpdateResult::ManualDisconnect
+                            | GameUpdateResult::ExitToTitle) => disconnect(
+                                core,
+                                gfx,
+                                Panorama::new(),
+                                connection,
+                                world,
+                                matches!(result, GameUpdateResult::ExitToTitle),
+                            ),
                             GameUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
 
