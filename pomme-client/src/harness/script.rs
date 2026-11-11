@@ -92,6 +92,7 @@ enum Expect {
     Terrain(TerrainExpect),
     Distant(DistantExpect),
     Menu(MenuExpect),
+    List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -275,6 +276,12 @@ struct MenuExpect {
     tab: Option<String>,
     row: Option<usize>,
     search: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListExpect {
+    list: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -904,6 +911,10 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                     )
                 },
             )
+        }
+        Expect::List(ListExpect { list }) => {
+            let seen = core.menu.list_scroll();
+            ensure(seen == list, || format!("list is at the {seen}"))
         }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
             game.toasts.advancement_ids().any(|id| id == advancement),
