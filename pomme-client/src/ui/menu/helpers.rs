@@ -1144,6 +1144,47 @@ impl MainMenu {
         (row_cursor, in_list && input.clicked)
     }
 
+    /// `AbstractScrollArea.updateScrolling` and `mouseDragged`: a click on
+    /// the scrollbar at `track_x` grabs it, and while the button is held the
+    /// cursor's movement scrolls the list, to either end once it leaves the
+    /// list.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn drag_scrollbar(
+        &mut self,
+        input: &MenuInput,
+        track_x: f32,
+        top: f32,
+        h: f32,
+        total: f32,
+        gs: f32,
+        min_thumb: f32,
+    ) {
+        let max_scroll = (total - h).max(0.0);
+        let (x, y) = input.cursor;
+        if input.clicked {
+            let over =
+                (track_x..=track_x + SCROLLBAR_W * gs).contains(&x) && (top..top + h).contains(&y);
+            self.scrollbar_drag = (max_scroll > 0.0 && over).then_some(y);
+        }
+        let Some(last_y) = self.scrollbar_drag else {
+            return;
+        };
+        if !input.mouse_held {
+            self.scrollbar_drag = None;
+            return;
+        }
+        self.scroll_offset = if y < top {
+            0.0
+        } else if y > top + h {
+            max_scroll
+        } else {
+            let thumb_h = scroller_height(h, total, gs, min_thumb);
+            let scale = (max_scroll.max(gs) / (h - thumb_h)).max(1.0);
+            (self.scroll_offset + (y - last_y) * scale).clamp(0.0, max_scroll)
+        };
+        self.scrollbar_drag = Some(y);
+    }
+
     /// Opening either dropdown closes the other.
     pub(super) fn toggle_links(&mut self) {
         self.links_open = !self.links_open;
@@ -1419,7 +1460,7 @@ pub(crate) fn push_scrollbar(
         return;
     }
     let track_w = SCROLLBAR_W * gs;
-    let thumb_h = (h * h / total).clamp(min_thumb, (h - 8.0 * gs).max(min_thumb));
+    let thumb_h = scroller_height(h, total, gs, min_thumb);
     let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
     nine_slice(
         elements,
@@ -1439,6 +1480,11 @@ pub(crate) fn push_scrollbar(
         SpriteId::Scroller,
         gs,
     );
+}
+
+/// `AbstractScrollArea.scrollerHeight`.
+fn scroller_height(h: f32, total: f32, gs: f32, min_thumb: f32) -> f32 {
+    (h * h / total).clamp(min_thumb, (h - 8.0 * gs).max(min_thumb))
 }
 
 const CONFIRM_BTN_W: f32 = 150.0;

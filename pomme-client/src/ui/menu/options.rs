@@ -660,6 +660,7 @@ impl MainMenu {
         let cx = sw / 2.0;
         let label_x = cx - 168.0 * gs;
         let scrollbar_x = cx + 178.0 * gs;
+        self.drag_scrollbar(input, scrollbar_x, list_y, list_h, total_h, gs, 32.0 * gs);
         let reset_w = 50.0 * gs;
         let reset_x = scrollbar_x - reset_w - 10.0 * gs;
         let change_w = 75.0 * gs;
@@ -1359,13 +1360,25 @@ impl MainMenu {
             .map(|(i, row)| row_advance(i, row))
             .sum();
         let content_h = content_bottom - content_top;
-        let scrollable = header_footer && grid_h + content_pad > content_h;
+        let list_h = grid_h + content_pad;
+        let scrollable = header_footer && list_h > content_h;
+        // `AbstractSelectionList.scrollBarX`: 8 right of the 310-wide rows.
+        let scrollbar_x = cx + 163.0 * gs;
         if scrollable {
-            let max_scroll = (grid_h + content_pad - content_h).max(0.0);
+            let max_scroll = (list_h - content_h).max(0.0);
             if common::hit_test(cursor, [0.0, content_top, sw, content_h]) {
                 self.scroll_offset -= input.scroll_delta * 20.0 * gs;
             }
             self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
+            self.drag_scrollbar(
+                input,
+                scrollbar_x,
+                content_top,
+                content_h,
+                list_h,
+                gs,
+                32.0 * gs,
+            );
         } else {
             self.scroll_offset = 0.0;
         }
@@ -1708,30 +1721,16 @@ impl MainMenu {
         }
 
         if scrollable {
-            let max_scroll = (grid_h + content_pad - content_h).max(0.001);
-            let track_w = 6.0 * gs;
-            let track_x = sw - track_w - 2.0 * gs;
-            let thumb_frac = content_h / (grid_h + content_pad);
-            let thumb_h = (content_h * thumb_frac).max(8.0 * gs);
-            let thumb_y = content_top + (scroll / max_scroll) * (content_h - thumb_h);
-            elements.push(MenuElement::NineSlice {
-                x: track_x,
-                y: content_top,
-                w: track_w,
-                h: content_h,
-                sprite: SpriteId::ScrollerBackground,
-                border: 1.0 * gs,
-                tint: WHITE,
-            });
-            elements.push(MenuElement::NineSlice {
-                x: track_x,
-                y: thumb_y,
-                w: track_w,
-                h: thumb_h,
-                sprite: SpriteId::Scroller,
-                border: 1.0 * gs,
-                tint: WHITE,
-            });
+            push_scrollbar(
+                &mut elements,
+                scrollbar_x,
+                content_top,
+                content_h,
+                list_h,
+                scroll,
+                gs,
+                32.0 * gs,
+            );
         }
 
         let done_w = 200.0 * gs;
@@ -2431,6 +2430,37 @@ mod tests {
             &|_, _| 0.0,
             key_bindings,
         );
+    }
+
+    #[test]
+    fn dragging_the_scrollbar_scrolls_the_list() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-keybind-scrollbar-test", &mut key_bindings);
+        menu.set_screen(Screen::OptionsKeybinds, &key_bindings);
+        let mut mouse = |menu: &mut MainMenu, cursor, clicked, mouse_held| {
+            let input = MenuInput {
+                cursor,
+                clicked,
+                mouse_held,
+                ..MenuInput::default()
+            };
+            menu.build_options_keybinds(800.0, 600.0, &input, &|_, _| 0.0, &mut key_bindings);
+        };
+        // The track is 6 wide, 8 right of the 340-wide rows.
+        mouse(&mut menu, (581.0, 50.0), true, true);
+        mouse(&mut menu, (581.0, 80.0), false, true);
+        let dragged = menu.scroll_offset;
+        assert!(dragged >= 30.0, "scrolled {dragged}");
+        mouse(&mut menu, (581.0, 590.0), false, true);
+        let max = menu.scroll_offset;
+        assert!(max > dragged);
+        mouse(&mut menu, (581.0, 590.0), false, false);
+        mouse(&mut menu, (581.0, 50.0), false, false);
+        assert_eq!(menu.scroll_offset, max, "a released bar stays put");
+        // A click beside the track doesn't grab it.
+        mouse(&mut menu, (590.0, 50.0), true, true);
+        mouse(&mut menu, (590.0, 300.0), false, true);
+        assert_eq!(menu.scroll_offset, max);
     }
 
     #[test]
