@@ -562,7 +562,6 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
         let field_h = FIELD_H * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
@@ -581,27 +580,26 @@ impl MainMenu {
 
         let cx = screen_w / 2.0;
         let form_x = cx - form_w / 2.0;
-        let mut y = 20.0 * gs;
+        // `DirectJoinServerScreen.init` and `extractRenderState`; the buttons
+        // hang from `height / 4`.
+        let quarter = (screen_h / gs / 4.0).floor() * gs;
 
         elements.push(MenuElement::Text {
             x: cx,
-            y,
+            y: 20.0 * gs,
             text: "Direct Connection".into(),
             scale: fs,
             color: WHITE,
             centered: true,
         });
-        y += fs + 40.0 * gs;
-
         elements.push(MenuElement::Text {
-            x: form_x,
-            y,
+            x: form_x + gs,
+            y: 100.0 * gs,
             text: "Server Address".into(),
             scale: fs,
-            color: COL_DIM,
+            color: common::COL_DISABLED,
             centered: false,
         });
-        y += fs + 4.0 * gs;
 
         self.text_field(
             &mut elements,
@@ -609,14 +607,13 @@ impl MainMenu {
             0,
             input,
             form_x,
-            y,
+            116.0 * gs,
             form_w,
             field_h,
             fs,
             gs,
             text_width_fn,
         );
-        y += field_h + 28.0 * gs;
 
         let address = self.edit_address.value().to_string();
         let valid = is_valid_address(&address);
@@ -627,7 +624,7 @@ impl MainMenu {
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + 108.0 * gs,
             form_w,
             btn_h,
             gs,
@@ -649,13 +646,12 @@ impl MainMenu {
                 protocol: join_protocol(&self.ping_results.read(), &address, persisted),
             };
         }
-        y += btn_h + gap;
         if push_button(
             &mut elements,
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + 132.0 * gs,
             form_w,
             btn_h,
             gs,
@@ -667,14 +663,6 @@ impl MainMenu {
             self.set_screen(Screen::ServerList, key_bindings);
         }
 
-        push_bottom_text(
-            &mut elements,
-            screen_w,
-            screen_h,
-            gs,
-            &self.version,
-            text_width_fn,
-        );
         MainMenuResult {
             elements,
             action,
