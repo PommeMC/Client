@@ -1147,7 +1147,8 @@ impl MainMenu {
     /// `AbstractScrollArea.updateScrolling` and `mouseDragged`: a click on
     /// the scrollbar at `track_x` grabs it, and while the button is held the
     /// cursor's movement scrolls the list, to either end once it leaves the
-    /// list.
+    /// list. True when the cursor is over a scrollable bar, which takes the
+    /// pointer cursor (`extractScrollbar`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn drag_scrollbar(
         &mut self,
@@ -1158,31 +1159,31 @@ impl MainMenu {
         total: f32,
         gs: f32,
         min_thumb: f32,
-    ) {
+    ) -> bool {
         let max_scroll = (total - h).max(0.0);
         let (x, y) = input.cursor;
+        let over = max_scroll > 0.0
+            && (track_x..=track_x + SCROLLBAR_W * gs).contains(&x)
+            && (top..top + h).contains(&y);
         if input.clicked {
-            let over =
-                (track_x..=track_x + SCROLLBAR_W * gs).contains(&x) && (top..top + h).contains(&y);
-            self.scrollbar_drag = (max_scroll > 0.0 && over).then_some(y);
+            self.scrollbar_drag = over.then_some(y);
         }
-        let Some(last_y) = self.scrollbar_drag else {
-            return;
-        };
         if !input.mouse_held {
             self.scrollbar_drag = None;
-            return;
         }
-        self.scroll_offset = if y < top {
-            0.0
-        } else if y > top + h {
-            max_scroll
-        } else {
-            let thumb_h = scroller_height(h, total, gs, min_thumb);
-            let scale = (max_scroll.max(gs) / (h - thumb_h)).max(1.0);
-            (self.scroll_offset + (y - last_y) * scale).clamp(0.0, max_scroll)
-        };
-        self.scrollbar_drag = Some(y);
+        if let Some(last_y) = self.scrollbar_drag {
+            self.scroll_offset = if y < top {
+                0.0
+            } else if y > top + h {
+                max_scroll
+            } else {
+                let thumb_h = scroller_height(h, total, gs, min_thumb);
+                let scale = (max_scroll.max(gs) / (h - thumb_h)).max(1.0);
+                (self.scroll_offset + (y - last_y) * scale).clamp(0.0, max_scroll)
+            };
+            self.scrollbar_drag = Some(y);
+        }
+        over
     }
 
     /// Opening either dropdown closes the other.

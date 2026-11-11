@@ -660,7 +660,8 @@ impl MainMenu {
         let cx = sw / 2.0;
         let label_x = cx - 168.0 * gs;
         let scrollbar_x = cx + 178.0 * gs;
-        self.drag_scrollbar(input, scrollbar_x, list_y, list_h, total_h, gs, 32.0 * gs);
+        any_hovered |=
+            self.drag_scrollbar(input, scrollbar_x, list_y, list_h, total_h, gs, 32.0 * gs);
         let reset_w = 50.0 * gs;
         let reset_x = scrollbar_x - reset_w - 10.0 * gs;
         let change_w = 75.0 * gs;
@@ -1370,7 +1371,7 @@ impl MainMenu {
                 self.scroll_offset -= input.scroll_delta * 20.0 * gs;
             }
             self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
-            self.drag_scrollbar(
+            any_hovered |= self.drag_scrollbar(
                 input,
                 scrollbar_x,
                 content_top,
@@ -2444,9 +2445,13 @@ mod tests {
                 mouse_held,
                 ..MenuInput::default()
             };
-            menu.build_options_keybinds(800.0, 600.0, &input, &|_, _| 0.0, &mut key_bindings);
+            menu.build_options_keybinds(800.0, 600.0, &input, &|_, _| 0.0, &mut key_bindings)
+                .cursor_pointer
         };
-        // The track is 6 wide, 8 right of the 340-wide rows.
+        // The track is 6 wide, 8 right of the 340-wide rows, and takes the
+        // pointer cursor.
+        assert!(mouse(&mut menu, (581.0, 50.0), false, false));
+        assert!(!mouse(&mut menu, (590.0, 50.0), false, false));
         mouse(&mut menu, (581.0, 50.0), true, true);
         mouse(&mut menu, (581.0, 80.0), false, true);
         let dragged = menu.scroll_offset;
