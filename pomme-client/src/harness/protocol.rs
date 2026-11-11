@@ -450,6 +450,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
 pub struct PlayerInfo {
     pub health: f32,
     pub food: u32,
+    pub air: i32,
     pub level: i32,
     pub game_mode: u8,
     pub effects: Vec<&'static str>,
@@ -475,6 +476,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
     PlayerInfo {
         health: player.health,
         food: player.food,
+        air: player.air_supply,
         level: player.experience_level,
         game_mode: player.game_mode,
         effects: player.effects.names().collect(),

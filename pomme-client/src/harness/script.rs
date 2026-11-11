@@ -199,6 +199,7 @@ struct PlayerFields {
     /// Within half a health point.
     health: Option<f32>,
     food: Option<u32>,
+    air: Option<i32>,
     level: Option<i32>,
     game_mode: Option<u8>,
     /// An active effect, by registry path.
@@ -764,6 +765,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             ensure(
                 want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
                     && want.food.is_none_or(|f| seen.food == f)
+                    && want.air.is_none_or(|a| seen.air == a)
                     && want.level.is_none_or(|l| seen.level == l)
                     && want.game_mode.is_none_or(|m| seen.game_mode == m)
                     && want.effect.as_deref().is_none_or(has)
