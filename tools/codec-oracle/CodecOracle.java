@@ -33,6 +33,7 @@ import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
 import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
+import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
@@ -120,6 +121,8 @@ public final class CodecOracle {
                 new ServerboundMoveVehiclePacket(new Vec3(1.5, 64.0, -2.25), 90.0f, 10.0f, true));
         encode("paddle_boat", ServerboundPaddleBoatPacket.STREAM_CODEC::encode,
                 new ServerboundPaddleBoatPacket(true, false));
+        encode("cooldown/shield", ClientboundCooldownPacket.STREAM_CODEC::encode,
+                new ClientboundCooldownPacket(Identifier.withDefaultNamespace("shield"), 100));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());

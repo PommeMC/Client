@@ -94,6 +94,7 @@ enum Expect {
     Distant(DistantExpect),
     Menu(MenuExpect),
     Screen(ScreenExpect),
+    List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
 }
@@ -218,6 +219,7 @@ struct PlayerFields {
     y_rot: Option<f32>,
     spectating: Option<String>,
     post_effect: Option<String>,
+    using_item: Option<bool>,
 }
 
 /// The block state name the client holds at `at`, e.g. `air`.
@@ -285,6 +287,12 @@ struct MenuExpect {
     tab: Option<String>,
     row: Option<usize>,
     search: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListExpect {
+    list: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -830,7 +838,8 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                     && want
                         .post_effect
                         .as_ref()
-                        .is_none_or(|e| seen.post_effect == e),
+                        .is_none_or(|e| seen.post_effect == e)
+                    && want.using_item.is_none_or(|u| seen.using_item == u),
                 || format!("player is {seen:?}"),
             )
         }
@@ -945,6 +954,10 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                     )
                 },
             )
+        }
+        Expect::List(ListExpect { list }) => {
+            let seen = core.menu.list_scroll();
+            ensure(seen == list, || format!("list is at the {seen}"))
         }
         Expect::Advancement(AdvancementExpect { advancement }) => ensure(
             game.toasts.advancement_ids().any(|id| id == advancement),

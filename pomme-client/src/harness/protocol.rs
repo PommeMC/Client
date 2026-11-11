@@ -471,6 +471,7 @@ pub struct PlayerInfo {
     pub spectating: String,
     /// The spectator view effect drawn, by its vanilla id, empty for none.
     pub post_effect: &'static str,
+    pub using_item: bool,
 }
 
 pub fn player(game: &GameState) -> PlayerInfo {
@@ -496,6 +497,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
         post_effect: game
             .drawn_spectator_effect()
             .map_or("", |effect| effect.id()),
+        using_item: game.interaction.is_using_item(),
     }
 }
 

@@ -36,7 +36,9 @@ void main() {
     vec3 world_normal = normalize(normal_matrix * normal_packed.xyz);
 
     v_tex_coords = tex_coords;
-    v_light = mix_light(level_light(world_normal, camera_block.w != 0));
+    v_light = mix_light(camera_block.w == 2
+        ? entity_in_ui_light(world_normal)
+        : level_light(world_normal, camera_block.w == 1));
     v_tint = resolve_item_tint(tint_index, item_tint_base, item_tint_count);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;

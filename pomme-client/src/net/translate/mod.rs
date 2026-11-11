@@ -215,7 +215,8 @@
 //!   before the final byte of `login` and `respawn`
 //! - `container_set_slot` reads a signed-byte container id whose -1/-2
 //!   sentinels became `set_cursor_item`/`set_player_inventory`
-//! - `cooldown` carries an item registry id where 26.2 names a cooldown group
+//! - `cooldown` carries an item registry id where 26.2 names a cooldown group;
+//!   it becomes the item's id, the group of every item without `use_cooldown`
 //! - clientbound `set_carried_item` was renamed `set_held_slot` (identical byte
 //!   layout); login `game_profile` -> `login_finished` needs no alias (login
 //!   rewrites dispatch by id) but ends in a `strictErrorHandling` bool 1.21.2
@@ -372,8 +373,6 @@
 //!   which is 1.21.4's layout rather than 26.2's (native sessions and the
 //!   versions with an item grammar encode it with pomme's grammar instead; see
 //!   `net::item_codec`)
-//! - inbound `cooldown` carries an item registry id, where 26.2 names a
-//!   cooldown group
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};

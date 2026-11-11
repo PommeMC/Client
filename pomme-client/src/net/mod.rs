@@ -477,6 +477,11 @@ pub enum NetworkEvent {
     PlayerKnockback {
         delta: DVec3,
     },
+    /// Vanilla `ClientboundCooldownPacket`: a zero duration ends it.
+    ItemCooldown {
+        group: String,
+        duration: i32,
+    },
     EntityTeleported {
         id: i32,
         position: Position,

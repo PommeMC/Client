@@ -4,7 +4,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::pipelines::hand;
-use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
+use crate::renderer::pipelines::item_display::{DisplayKeys, DisplayResolver, DisplayTransform};
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline, ItemPipelineShared};
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::rhi;
@@ -31,10 +31,29 @@ pub struct HeldHand<'a> {
     pub use_anim: Option<UseAnim>,
 }
 
-/// First-person use-animation state (eat/drink), the inputs to vanilla
-/// `ItemInHandRenderer.applyEatTransform`.
+/// An item in a hand of the inventory's player preview (vanilla
+/// `ItemInHandLayer.submitArmWithItem` drawn under `ENTITY_IN_UI` light).
+pub struct PreviewHand<'a> {
+    pub item: &'a HeldItemInfo,
+    pub right_arm: bool,
+    pub in_use: bool,
+    /// The hand's transform, up to the item's display transform.
+    pub hand: Mat4,
+}
+
+/// A hand's first-person use animation (vanilla
+/// `FirstPersonHandsAndItemsRenderer`'s use-animation switch).
 #[derive(Clone, Copy)]
-pub struct UseAnim {
+pub enum UseAnim {
+    /// Eating or drinking.
+    Eat(EatAnim),
+    /// A shield held up: its blocking display, without the swing.
+    Block,
+}
+
+/// The inputs to vanilla `applyEatTransform`.
+#[derive(Clone, Copy)]
+pub struct EatAnim {
     /// Vanilla `useItemRemaining - partialTick + 1`.
     pub curr_usage_time: f32,
     pub duration: f32,
@@ -67,11 +86,27 @@ impl HandRenderSelection {
     };
 }
 
+/// One display context's keys for the right then the left hand: the left
+/// hand tries its own key first, then the right's, and mirrors whichever it
+/// finds (vanilla `ItemTransform.apply`'s left-hand fix).
+type HandKeys = [DisplayKeys; 2];
+
+const FIRST_PERSON_KEYS: HandKeys = [
+    &["firstperson_righthand"],
+    &["firstperson_lefthand", "firstperson_righthand"],
+];
+const THIRD_PERSON_KEYS: HandKeys = [
+    &["thirdperson_righthand"],
+    &["thirdperson_lefthand", "thirdperson_righthand"],
+];
+
 pub struct HeldItemPipeline {
     pipeline: rhi::backend::RenderPipeline,
     shared: ItemPipelineShared,
-    right_display: DisplayResolver,
-    left_display: DisplayResolver,
+    /// The player preview's own camera and instances, as first person draws
+    /// in the same frame.
+    preview: ItemPipelineShared,
+    display: DisplayResolver,
 }
 
 impl HeldItemPipeline {
@@ -83,26 +118,41 @@ impl HeldItemPipeline {
         lightmap: &Lightmap,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, atlas, lightmap, "held_item");
+        let preview = ItemPipelineShared::new(device, atlas, lightmap, "preview_item");
         let pipeline = item_entity::create_pipeline(device, targets, shared.pipeline_layout);
         Self {
             pipeline,
             shared,
-            right_display: DisplayResolver::new(inputs, &["firstperson_righthand"]),
-            left_display: DisplayResolver::new(
-                inputs,
-                &["firstperson_lefthand", "firstperson_righthand"],
-            ),
+            preview,
+            display: DisplayResolver::new(inputs),
         }
     }
 
     pub fn rebind_atlas(&mut self, device: &rhi::backend::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
+        self.preview.rebind_atlas(device, atlas);
     }
 
     pub(crate) fn reload_display(&mut self, inputs: &ModelInputs) {
-        self.right_display = DisplayResolver::new(inputs, &["firstperson_righthand"]);
-        self.left_display =
-            DisplayResolver::new(inputs, &["firstperson_lefthand", "firstperson_righthand"]);
+        self.display = DisplayResolver::new(inputs);
+    }
+
+    /// `item`'s display in one hand under `keys`, mirrored for the left.
+    fn hand_display(
+        &self,
+        keys: HandKeys,
+        item: &HeldItemInfo,
+        in_use: bool,
+        default: DisplayTransform,
+        right_arm: bool,
+    ) -> DisplayTransform {
+        if right_arm {
+            self.display.resolve(&item.name, in_use, keys[0], default)
+        } else {
+            self.display
+                .resolve(&item.name, in_use, keys[1], default)
+                .mirrored()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -134,14 +184,18 @@ impl HeldItemPipeline {
                 continue;
             };
             let default = default_first_person(item.has_3d_model, hand.right_arm);
-            let display = if hand.right_arm {
-                self.right_display.resolve(&item.name, default)
-            } else {
-                self.left_display.resolve(&item.name, default).mirrored()
-            };
+            let display = self.hand_display(
+                FIRST_PERSON_KEYS,
+                item,
+                hand.use_anim.is_some(),
+                default,
+                hand.right_arm,
+            );
             let invert = hand::arm_invert(hand.right_arm);
             let mut arm = match hand.use_anim {
-                Some(anim) => eat_item_matrix(anim, invert),
+                Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert),
+                Some(UseAnim::Block) if item.name == "shield" => item_arm_matrix(invert),
+                Some(UseAnim::Block) => item_arm_matrix(invert) * block_matrix(invert),
                 None => first_person_item_matrix(hand.swing_progress, invert),
             };
             // Vanilla `submitArmWithItem`'s crossbow branch: a charged one
@@ -164,6 +218,51 @@ impl HeldItemPipeline {
         }
     }
 
+    /// Draws the preview's held items: `view_proj` is the preview's, and
+    /// `normal_basis` turns its space into the GUI view space vanilla lights.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_preview(
+        &mut self,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        view_proj: Mat4,
+        normal_basis: Mat3,
+        hands: &[PreviewHand<'_>],
+        meshes: &ItemEntityPipeline,
+    ) {
+        let uniform = CameraUniform::with_view_proj(view_proj).with_entity_in_ui_light();
+        self.preview.update_camera(frame, &uniform);
+        let tint_count = hands.iter().map(|hand| hand.item.item_tints.len()).sum();
+        self.preview
+            .begin_frame(device, frame, hands.len(), tint_count);
+        self.preview.bind(pass, frame, self.pipeline);
+        for hand in hands {
+            let item = hand.item;
+            let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
+                continue;
+            };
+            let default = default_third_person(item.has_3d_model);
+            let display = self.hand_display(
+                THIRD_PERSON_KEYS,
+                item,
+                hand.in_use,
+                default,
+                hand.right_arm,
+            );
+            let instance = self.preview.push_item(
+                frame,
+                &(hand.hand * display.to_matrix()),
+                normal_basis,
+                LightLevels::FULL_BRIGHT.lane(),
+                &item.item_tints,
+                0,
+            );
+            pass.set_vertex_buffer(0, buffer);
+            pass.draw(vertex_count, 1, 0, instance);
+        }
+    }
+
     pub fn recreate_pipeline(
         &mut self,
         device: &rhi::backend::Device,
@@ -176,6 +275,7 @@ impl HeldItemPipeline {
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.pipeline.destroy(device);
         self.shared.destroy(device);
+        self.preview.destroy(device);
     }
 }
 
@@ -205,7 +305,7 @@ fn first_person_item_matrix(swing_progress: f32, invert: f32) -> Mat4 {
 
 // Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
 // (EAT/DRINK skip the usual pre-transform).
-fn eat_item_matrix(anim: UseAnim, invert: f32) -> Mat4 {
+fn eat_item_matrix(anim: EatAnim, invert: f32) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
     // The chew bob runs after the first 20% of the eat, oscillating every 4
     // ticks; the jiggle shoves the item into the mouth over the last bite.
@@ -241,6 +341,33 @@ fn default_first_person(has_3d_model: bool, right_arm: bool) -> DisplayTransform
     }
 }
 
+/// Vanilla `FirstPersonHandsAndItemsRenderer`'s `BLOCK` pose for an item
+/// other than a shield.
+fn block_matrix(invert: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(invert * -0.14142136, 0.08, 0.14142136))
+        * Mat4::from_rotation_x((-102.25f32).to_radians())
+        * Mat4::from_rotation_y((invert * 13.365f32).to_radians())
+        * Mat4::from_rotation_z((invert * 78.05f32).to_radians())
+}
+
+/// The fallback third-person right-hand display: `block/block.json`'s or
+/// `item/generated.json`'s.
+fn default_third_person(has_3d_model: bool) -> DisplayTransform {
+    if has_3d_model {
+        DisplayTransform {
+            rotation: Vec3::new(75.0, 45.0, 0.0),
+            translation: Vec3::new(0.0, 2.5, 0.0) / 16.0,
+            scale: Vec3::splat(0.375),
+        }
+    } else {
+        DisplayTransform {
+            rotation: Vec3::ZERO,
+            translation: Vec3::new(0.0, 3.0, 1.0) / 16.0,
+            scale: Vec3::splat(0.55),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +387,7 @@ mod tests {
                 "swing {swing}"
             );
         }
-        let anim = UseAnim {
+        let anim = EatAnim {
             curr_usage_time: 12.0,
             duration: 32.0,
         };

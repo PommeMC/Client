@@ -223,6 +223,33 @@ impl SkullKind {
     }
 }
 
+/// Vanilla `ShieldModel.createLayer`: the plate and its handle, on a 64x64
+/// texture, in the skull's literal y-up model space.
+pub fn bake_shield_model() -> BakedEntityModel {
+    let part = |name: &str, origin: [f32; 3], size: [f32; 3], tex_offset| EntityPart {
+        name: name.into(),
+        offset: Vec3::ZERO,
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::from(origin),
+            size: Vec3::from(size),
+            tex_offset,
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    };
+    bake_model(
+        vec![
+            part("plate", [-6.0, -11.0, -2.0], [12.0, 22.0, 1.0], (0, 0)),
+            part("handle", [-1.0, -3.0, -1.0], [2.0, 6.0, 6.0], (26, 0)),
+        ],
+        64,
+        64,
+    )
+    .with_convention(ModelConvention::BlockYUp)
+}
+
 /// Vanilla `SkullBlockRenderer.createModel`'s model for `kind`, posed as
 /// `setupAnim` leaves it at `animationPos` 0 (the item's), in literal y-up
 /// model space.

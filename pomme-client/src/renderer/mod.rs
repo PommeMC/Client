@@ -66,8 +66,9 @@ use crate::entity::components::{LookDirection, Position};
 use crate::physics::block_shape::LocalBox;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::renderer::entity_model::HumanoidArmPose;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
-use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand};
+use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand, PreviewHand, UseAnim};
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::resources::ResourceManager;
 use crate::ui::font::{FontOptions, FontSources};
@@ -201,7 +202,7 @@ enum RenderMode<'a> {
         overlay: Vec<MenuElement>,
         /// The main hand's then the offhand's, as for `held_items`.
         swing_progress: [f32; 2],
-        use_anim: [Option<pipelines::held_item::UseAnim>; 2],
+        use_anim: [Option<UseAnim>; 2],
         /// The main hand's then the offhand's item.
         held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
         main_hand_right: bool,
@@ -1630,7 +1631,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: [f32; 2],
-        use_anim: [Option<pipelines::held_item::UseAnim>; 2],
+        use_anim: [Option<UseAnim>; 2],
         held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
         hand_light: LightLevels,
@@ -2725,14 +2726,46 @@ impl Renderer {
                 {
                     pass.clear_depth(rect);
                     pass.set_scissor_rect(rect);
-                    self.skin_preview.draw_in_box(
+                    // Hands are main then off; arms are right then left.
+                    let arm_hand = |arm: usize| usize::from(*main_hand_right != (arm == 0));
+                    let arm_poses = [0, 1].map(|arm| {
+                        let hand = arm_hand(arm);
+                        HumanoidArmPose::for_hand(
+                            held_items[hand].is_some(),
+                            matches!(use_anim[hand], Some(UseAnim::Block)),
+                        )
+                    });
+                    let preview = self.skin_preview.draw_in_box(
                         &mut pass,
                         frame,
                         p,
                         sw,
                         sh,
                         &self.entity_renderer,
+                        arm_poses,
                     );
+                    let hands: Vec<_> = (0..2)
+                        .filter_map(|arm| {
+                            let hand = arm_hand(arm);
+                            Some(PreviewHand {
+                                item: held_items[hand].as_ref()?,
+                                right_arm: arm == 0,
+                                in_use: use_anim[hand].is_some(),
+                                hand: preview.hands[arm],
+                            })
+                        })
+                        .collect();
+                    if !hands.is_empty() {
+                        self.held_item_pipeline.draw_preview(
+                            &self.ctx.device,
+                            &mut pass,
+                            frame,
+                            preview.view_proj,
+                            preview.normal_basis,
+                            &hands,
+                            &self.item_entity_pipeline,
+                        );
+                    }
                     pass.set_scissor_rect(scissor);
                 }
 

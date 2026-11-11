@@ -2217,19 +2217,26 @@ fn translate_container_set_slot_767() {
     );
 }
 
-/// 767 `cooldown` item ids remap into the native registry space (azalea
-/// still decodes the item id form).
+/// A 767 `cooldown` item id becomes the item's cooldown group.
 #[test]
 fn translate_cooldown_767() {
+    let shield = registry_id(
+        pomme_protocol::RegistryTable::for_protocol(767).unwrap(),
+        pomme_protocol::ClientRegistry::Item,
+        "shield",
+    );
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(767, Direction::Clientbound, "cooldown"));
-    wire::write_varint(&mut old, 5); // item, unshifted below the divergence
+    wire::write_varint(&mut old, shield);
     wire::write_varint(&mut old, 100); // duration
 
-    let ClientboundGamePacket::Cooldown(p) = translate_and_decode(767, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.duration, 100);
+    assert_eq!(
+        translate_and_read(767, old, "cooldown", pomme_protocol::player::read),
+        pomme_protocol::player::PlayerPacket::Cooldown {
+            group: "minecraft:shield".into(),
+            duration: 100,
+        }
+    );
 }
 
 /// The clientbound `set_carried_item` -> `set_held_slot` rename alias.
