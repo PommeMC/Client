@@ -31,6 +31,7 @@ mod portal;
 mod reverse_portal;
 mod smoke;
 mod snowflake;
+mod spit;
 mod soul;
 mod squid_ink;
 mod sulfur_bubble;
@@ -78,6 +79,7 @@ use self::reverse_portal::ReversePortalParticleRegistration;
 pub(super) use self::smoke::SmokeParticleRegistration;
 use self::smoke::{LargeSmokeParticleRegistration, WhiteSmokeParticleRegistration};
 pub use self::smoke::{SmokeParticle, SmokeProvider};
+use self::spit::SpitParticleRegistration;
 use self::squid_ink::{GlowSquidInkParticleRegistration, SquidInkParticleRegistration};
 use self::sulfur_bubble::SulfurBubbleParticleRegistration;
 use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
@@ -307,4 +309,5 @@ pub(crate) fn register_builtin_providers(
     );
     resources.register_sprite_provider(Rc::clone(&types.ash), &AshParticleRegistration);
     resources.register_sprite_provider(Rc::clone(&types.white_ash), &WhiteAshParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.spit), &SpitParticleRegistration);
 }
