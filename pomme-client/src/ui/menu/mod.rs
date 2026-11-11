@@ -553,7 +553,6 @@ const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
-#[derive(Debug)]
 enum Screen {
     Main,
     Account,
@@ -1692,22 +1691,14 @@ impl MainMenu {
 
 #[cfg(feature = "test-harness")]
 impl MainMenu {
-    /// The open screen's name: `title` for the title screen, else the
-    /// screen's own in snake case (`server_list`, `direct_connect`).
-    pub(crate) fn harness_screen(&self) -> String {
-        if matches!(self.screen, Screen::Main) {
-            return "title".into();
+    /// The open screen's name, as the `screen` expect checks it.
+    pub(crate) fn harness_screen(&self) -> &'static str {
+        match self.screen {
+            Screen::Main => "title",
+            Screen::ServerList => "server_list",
+            Screen::DirectConnect => "direct_connect",
+            _ => "other",
         }
-        let name = format!("{:?}", self.screen);
-        let name = name.split('(').next().unwrap_or_default();
-        let mut snake = String::new();
-        for (i, c) in name.char_indices() {
-            if c.is_ascii_uppercase() && i > 0 {
-                snake.push('_');
-            }
-            snake.push(c.to_ascii_lowercase());
-        }
-        snake
     }
 
     pub(crate) fn harness_address(&self) -> &str {
