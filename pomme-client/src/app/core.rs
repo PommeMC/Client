@@ -3773,6 +3773,18 @@ impl AppCore {
                         ServerParticleKind::FallingNectar => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.falling_nectar,
                         )),
+                        ServerParticleKind::PauseMobGrowth => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.pause_mob_growth,
+                        )),
+                        ServerParticleKind::ResetMobGrowth => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.reset_mob_growth,
+                        )),
+                        ServerParticleKind::DustPlume => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.dust_plume))
+                        }
+                        ServerParticleKind::NoxiousGas => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.noxious_gas))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();

@@ -96,6 +96,10 @@ pub(crate) struct ParticleTypes {
     pub(crate) falling_dripstone_lava: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_dripstone_water: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) falling_nectar: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) pause_mob_growth: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) reset_mob_growth: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dust_plume: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) noxious_gas: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -364,6 +368,18 @@ impl ParticleTypes {
         let falling_nectar = registry
             .register(resource_id!("minecraft:falling_nectar"), false)
             .map_err(registration_error)?;
+        let pause_mob_growth = registry
+            .register(resource_id!("minecraft:pause_mob_growth"), false)
+            .map_err(registration_error)?;
+        let reset_mob_growth = registry
+            .register(resource_id!("minecraft:reset_mob_growth"), false)
+            .map_err(registration_error)?;
+        let dust_plume = registry
+            .register(resource_id!("minecraft:dust_plume"), false)
+            .map_err(registration_error)?;
+        let noxious_gas = registry
+            .register(resource_id!("minecraft:noxious_gas"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -452,6 +468,10 @@ impl ParticleTypes {
             falling_dripstone_lava,
             falling_dripstone_water,
             falling_nectar,
+            pause_mob_growth,
+            reset_mob_growth,
+            dust_plume,
+            noxious_gas,
         })
     }
 }

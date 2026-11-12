@@ -203,6 +203,10 @@ pub enum ServerParticleKind {
     FallingDripstoneLava,
     FallingDripstoneWater,
     FallingNectar,
+    PauseMobGrowth,
+    ResetMobGrowth,
+    DustPlume,
+    NoxiousGas,
 }
 
 impl ServerParticleKind {
@@ -252,6 +256,10 @@ impl ServerParticleKind {
             103 => Some(Self::FallingDripstoneLava),
             105 => Some(Self::FallingDripstoneWater),
             89 => Some(Self::FallingNectar),
+            57 => Some(Self::PauseMobGrowth),
+            58 => Some(Self::ResetMobGrowth),
+            114 => Some(Self::DustPlume),
+            5 => Some(Self::NoxiousGas),
             _ => None,
         }
     }

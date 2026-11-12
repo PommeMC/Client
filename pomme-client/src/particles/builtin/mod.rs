@@ -47,6 +47,9 @@ mod fly_straight_towards;
 mod vault_connection;
 mod dripstone_fall;
 mod nectar_fall;
+mod simple_vertical;
+mod dust_plume;
+mod noxious_gas;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -105,6 +108,11 @@ use self::vault_connection::VaultConnectionParticleRegistration;
 use self::fly_straight_towards::OminousSpawningParticleRegistration;
 use self::dripstone_fall::DripstoneFallParticleRegistration;
 use self::nectar_fall::NectarFallParticleRegistration;
+use self::simple_vertical::{
+    PauseMobGrowthParticleRegistration, ResetMobGrowthParticleRegistration,
+};
+use self::dust_plume::DustPlumeParticleRegistration;
+use self::noxious_gas::NoxiousGasParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -367,5 +375,19 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.falling_nectar),
         &NectarFallParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.pause_mob_growth),
+        &PauseMobGrowthParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.reset_mob_growth),
+        &ResetMobGrowthParticleRegistration,
+    );
+    resources
+        .register_sprite_provider(Rc::clone(&types.dust_plume), &DustPlumeParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.noxious_gas),
+        &NoxiousGasParticleRegistration,
     );
 }
