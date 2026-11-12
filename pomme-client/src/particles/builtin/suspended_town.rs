@@ -356,3 +356,38 @@ impl SpriteParticleRegistration<SimpleParticleType> for EggCrackParticleRegistra
         })
     }
 }
+
+pub struct DolphinSpeedProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for DolphinSpeedProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([0.3, 0.5, 1.0]);
+        particle.set_alpha(1.0_f32 - random.next_float() * 0.7_f32);
+        particle.set_lifetime(particle.get_lifetime() / 2);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct DolphinParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for DolphinParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(DolphinSpeedProvider {
+            sprites: sprite_set,
+        })
+    }
+}

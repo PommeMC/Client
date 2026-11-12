@@ -342,3 +342,86 @@ impl SpriteParticleRegistration<SimpleParticleType> for SporeBlossomAirParticleR
         })
     }
 }
+
+pub struct CrimsonSporeProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+fn crimson_gaussian(random: &RandomSource) -> f64 {
+    loop {
+        let x = 2.0 * random.next_double() - 1.0;
+        let y = 2.0 * random.next_double() - 1.0;
+        let squared = x * x + y * y;
+        if squared > 0.0 && squared < 1.0 {
+            return x * (-2.0 * squared.ln() / squared).sqrt();
+        }
+    }
+}
+
+impl ParticleProvider<SimpleParticleType> for CrimsonSporeProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let x = crimson_gaussian(random) * f64::from(1.0e-6_f32);
+        let y = crimson_gaussian(random) * f64::from(1.0e-4_f32);
+        let z = crimson_gaussian(random) * f64::from(1.0e-6_f32);
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedParticle::with_velocity(position, sprite, DVec3::new(x, y, z));
+        particle.set_color([0.9, 0.4, 0.5]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct CrimsonSporeParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for CrimsonSporeParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(CrimsonSporeProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct WarpedSporeProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for WarpedSporeProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let y = f64::from(random.next_float()) * -1.9 * f64::from(random.next_float()) * 0.1;
+        let sprite = self.sprites.get_random(random);
+        let mut particle =
+            SuspendedParticle::with_velocity(position, sprite, DVec3::new(0.0, y, 0.0));
+        particle.set_color([0.1, 0.1, 0.3]);
+        particle.set_size(0.001, 0.001);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct WarpedSporeParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for WarpedSporeParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(WarpedSporeProvider {
+            sprites: sprite_set,
+        })
+    }
+}
