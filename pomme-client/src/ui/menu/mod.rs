@@ -75,6 +75,8 @@ struct Settings {
     view_bobbing: bool,
     #[serde(default = "default_menu_background_blurriness")]
     menu_background_blurriness: u8,
+    #[serde(default = "default_chunk_fade")]
+    chunk_fade: u8,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
@@ -213,6 +215,20 @@ fn default_menu_background_blurriness() -> u8 {
     DEFAULT_MENU_BACKGROUND_BLURRINESS
 }
 
+/// Vanilla `chunkSectionFadeInTime`, in twentieths of a second: 0 (none) to
+/// 40, default 15 (0.75 s).
+const MAX_CHUNK_FADE: u8 = 40;
+const DEFAULT_CHUNK_FADE: u8 = 15;
+pub const DEFAULT_CHUNK_FADE_MS: u32 = chunk_fade_ms(DEFAULT_CHUNK_FADE);
+
+fn default_chunk_fade() -> u8 {
+    DEFAULT_CHUNK_FADE
+}
+
+const fn chunk_fade_ms(twentieths: u8) -> u32 {
+    twentieths as u32 * 50
+}
+
 /// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
 /// options.json would otherwise feed straight into a render or input curve.
 fn unit_range(value: f32) -> f32 {
@@ -274,6 +290,7 @@ impl Default for Settings {
             invert_mouse_y: false,
             view_bobbing: true,
             menu_background_blurriness: default_menu_background_blurriness(),
+            chunk_fade: default_chunk_fade(),
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
@@ -778,6 +795,8 @@ pub struct MainMenu {
     pub view_bobbing: bool,
     /// The Menu Background Blur radius (vanilla `MenuBlurRadius`), 0 for off.
     pub menu_background_blurriness: u8,
+    /// How long a section fades in, in twentieths of a second.
+    chunk_fade: u8,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
@@ -949,6 +968,7 @@ impl MainMenu {
             menu_background_blurriness: settings
                 .menu_background_blurriness
                 .min(MAX_MENU_BACKGROUND_BLURRINESS),
+            chunk_fade: settings.chunk_fade.min(MAX_CHUNK_FADE),
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
@@ -1208,6 +1228,7 @@ impl MainMenu {
                 invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 menu_background_blurriness: self.menu_background_blurriness,
+                chunk_fade: self.chunk_fade,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
@@ -1293,6 +1314,20 @@ impl MainMenu {
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
         self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
         self.settings_dirty = true;
+    }
+
+    fn set_chunk_fade(&mut self, twentieths: u8) {
+        self.chunk_fade = twentieths.min(MAX_CHUNK_FADE);
+        self.settings_dirty = true;
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn set_chunk_fade_secs(&mut self, secs: f32) {
+        self.set_chunk_fade((secs * 1000.0 / chunk_fade_ms(1) as f32).round() as u8);
+    }
+
+    pub fn chunk_fade_ms(&self) -> u32 {
+        chunk_fade_ms(self.chunk_fade)
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
@@ -1852,6 +1887,19 @@ mod tests {
             menu.menu_background_blurriness,
             MAX_MENU_BACKGROUND_BLURRINESS
         );
+    }
+
+    #[test]
+    fn chunk_fade_defaults_to_three_quarters_of_a_second_and_clamps_to_two() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("chunk_fade");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(chunk_fade_ms(legacy.chunk_fade), 750);
+
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("chunk-fade-clamp", &mut key_bindings);
+        menu.set_chunk_fade(42);
+        assert_eq!(menu.chunk_fade_ms(), 2000);
     }
 
     #[test]

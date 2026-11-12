@@ -151,6 +151,8 @@ pub struct OptionSet {
     /// arrow does; prefix `-` to deselect it.
     pub resource_pack: Option<String>,
     pub show_subtitles: Option<bool>,
+    /// Chunk Fade in seconds, 0 (none) to 2, in twentieths.
+    pub chunk_fade: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

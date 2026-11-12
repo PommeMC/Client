@@ -140,6 +140,7 @@ const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
+const CHUNK_FADE: &str = "Chunk Fade:";
 
 /// Vanilla `genericValueOrOffLabel`.
 fn menu_background_blur_label(radius: u8) -> String {
@@ -301,6 +302,22 @@ impl MainMenu {
         }
     }
 
+    /// Vanilla `chunkSectionFadeInTime`'s label and slider position.
+    fn chunk_fade_slider(&self) -> (String, f32) {
+        let label = if self.chunk_fade == 0 {
+            format!("{CHUNK_FADE} None")
+        } else {
+            format!(
+                "{CHUNK_FADE} {:.2} second(s)",
+                self.chunk_fade_ms() as f32 / 1000.0
+            )
+        };
+        (
+            label,
+            f32::from(self.chunk_fade) / f32::from(super::MAX_CHUNK_FADE),
+        )
+    }
+
     /// The Menu Background Blur slider's label and position.
     fn menu_background_blur_slider(&self) -> (String, f32) {
         let radius = self.menu_background_blurriness;
@@ -331,6 +348,7 @@ impl MainMenu {
             "FOV:" => 80.0,
             CHAT_DELAY => CHAT_DELAY_MAX_TENTHS as f32,
             MENU_BACKGROUND_BLUR => f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
+            CHUNK_FADE => f32::from(super::MAX_CHUNK_FADE),
             _ => return None,
         })
     }
@@ -409,6 +427,7 @@ impl MainMenu {
             "Entity Shadows: OFF"
         };
         let (blur_label, blur_frac) = self.menu_background_blur_slider();
+        let (fade_label, fade_frac) = self.chunk_fade_slider();
         let brightness = brightness_label(self.brightness);
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
@@ -432,7 +451,7 @@ impl MainMenu {
             OptRow::Pair("Weather Radius: 10", &shader_label),
             OptRow::Header("Preferences"),
             OptRow::Pair(autosave_label, vignette_label),
-            OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
+            OptRow::Pair(&attack_label, &fade_label),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0)
             / (self.render_distance_max() as f32 - 2.0))
@@ -452,6 +471,7 @@ impl MainMenu {
             ("Max Framerate:", mf_frac),
             (BRIGHTNESS, self.brightness),
             (MENU_BACKGROUND_BLUR, blur_frac),
+            (CHUNK_FADE, fade_frac),
         ];
         let disabled = &[
             "Fullscreen Resolution:",
@@ -472,8 +492,11 @@ impl MainMenu {
             "Texture Filtering:",
             "Max Anisotropy:",
             "Weather Radius:",
-            "Chunk Fade-in:",
         ];
+        let tooltips: &[(&str, &str)] = &[(
+            CHUNK_FADE,
+            "How long in seconds chunks should fade in when they're first rendered, if at all.",
+        )];
         self.build_options_grid(
             sw,
             sh,
@@ -485,7 +508,7 @@ impl MainMenu {
             sliders,
             disabled,
             true,
-            &[],
+            tooltips,
             text_width_fn,
             key_bindings,
         )
@@ -1446,6 +1469,11 @@ impl MainMenu {
                 let enabled = option_enabled(label, disabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let hovered = enabled && hit;
+                // Vanilla keys tooltips off `isHovered`, which ignores `active`
+                // (`AbstractWidget.extractTooltipForNextRenderPass`).
+                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
+                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
+                }
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
@@ -1516,11 +1544,6 @@ impl MainMenu {
                     &label_scroll,
                 );
                 any_hovered |= hovered;
-                // Vanilla keys tooltips off `isHovered`, which ignores `active`
-                // (`AbstractWidget.extractTooltipForNextRenderPass`).
-                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
-                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
-                }
                 if (clicked && hovered) || (focused && ctx.activate) {
                     any_clicked = true;
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {
@@ -1689,6 +1712,7 @@ impl MainMenu {
                 MENU_BACKGROUND_BLUR => {
                     self.set_menu_background_blurriness((v * span).round() as u8)
                 }
+                CHUNK_FADE => self.set_chunk_fade((v * span).round() as u8),
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
                 BRIGHTNESS => self.brightness = v,

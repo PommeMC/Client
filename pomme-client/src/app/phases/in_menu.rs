@@ -143,6 +143,7 @@ pub fn update_menu(
     gfx.renderer.set_vsync(core.menu.vsync);
     gfx.renderer
         .set_menu_blur_radius(core.menu.menu_background_blurriness);
+    gfx.renderer.set_chunk_fade_ms(core.menu.chunk_fade_ms());
 
     apply_resource_pack_options(core, &mut gfx.renderer, None);
     core.apply_font_options(&mut gfx.renderer);

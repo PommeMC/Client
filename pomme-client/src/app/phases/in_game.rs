@@ -3035,6 +3035,7 @@ pub fn update_game(
     gfx.renderer.set_vsync(core.menu.vsync);
     gfx.renderer
         .set_menu_blur_radius(core.menu.menu_background_blurriness);
+    gfx.renderer.set_chunk_fade_ms(core.menu.chunk_fade_ms());
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
