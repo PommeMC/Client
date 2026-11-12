@@ -1,0 +1,26 @@
+# New chunks fade in over the Chunk Fade time, except within 16 blocks of the
+# camera, which shows at once and blends to the fade by 32.
+
+[[step]]
+option = { chunk_fade = 2.0 }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+chat = "/tp @s 600 -60 600 0 30"
+
+[[step]]
+wait_ms = 400
+
+[[step]]
+screenshot = "fading"
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "faded"
+
+[[step]]
+option = { chunk_fade = 0.75 }

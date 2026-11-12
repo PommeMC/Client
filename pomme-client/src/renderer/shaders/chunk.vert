@@ -17,7 +17,7 @@ layout(location = 6) in float in_visibility;
 
 layout(location = 0) out vec2 v_sprite_uv;
 layout(location = 1) out vec3 v_color;
-layout(location = 3) flat out float v_visibility;
+layout(location = 3) out float v_visibility;
 layout(location = 4) out vec3 v_fog_color;
 layout(location = 5) out float v_fog;
 layout(location = 6) flat out uint v_sprite;
@@ -28,7 +28,14 @@ void main() {
     gl_Position = view_proj * vec4(rel, 1.0);
     v_sprite_uv = unpack_sprite_uv(in_uv);
     v_color = terrain_vertex_color(in_light_tint, in_uv);
-    v_visibility = in_visibility;
+    // Vanilla `terrain.vsh`: fully visible within 16 blocks, the section's
+    // fade by 32.
+    const float FULLY_VISIBLE_RANGE = 16.0;
+    v_visibility = mix(
+        1.0,
+        in_visibility,
+        clamp((length(rel) - FULLY_VISIBLE_RANGE) / FULLY_VISIBLE_RANGE, 0.0, 1.0)
+    );
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_sprite = in_sprite & ((1u << SPRITE_BITS) - 1u);

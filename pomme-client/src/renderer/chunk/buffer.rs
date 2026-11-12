@@ -92,8 +92,7 @@ const MIN_SEGMENT: u32 = 64;
 /// written while they do.
 const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
 
-/// Columns within this squared X/Z distance of the camera render opaque
-/// immediately and never fade in; `cull.comp` has the same.
+/// Vanilla `LevelRenderer.compileSections`' `isNearby` distance, squared.
 const NEARBY_DIST_SQ: f32 = 768.0;
 /// A camera move this far, squared, re-sorts the draw lists front to back.
 const SORT_RECAM_SQ: f64 = 64.0;
