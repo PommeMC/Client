@@ -3726,6 +3726,30 @@ impl AppCore {
                         ServerParticleKind::BubblePop => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.bubble_pop))
                         }
+                        ServerParticleKind::CrimsonSpore => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.crimson_spore))
+                        }
+                        ServerParticleKind::WarpedSpore => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.warped_spore))
+                        }
+                        ServerParticleKind::Dolphin => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.dolphin))
+                        }
+                        ServerParticleKind::Glow => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.glow))
+                        }
+                        ServerParticleKind::Firefly => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.firefly))
+                        }
+                        ServerParticleKind::Nautilus => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.nautilus))
+                        }
+                        ServerParticleKind::VaultConnection => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.vault_connection,
+                        )),
+                        ServerParticleKind::OminousSpawning => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.ominous_spawning,
+                        )),
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();

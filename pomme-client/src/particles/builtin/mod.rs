@@ -42,6 +42,9 @@ mod terrain;
 mod totem;
 mod water_drop;
 mod white_ash;
+mod firefly;
+mod fly_straight_towards;
+mod vault_connection;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -91,6 +94,13 @@ use self::terrain::{DustPillarProvider, TerrainProvider};
 use self::totem::TotemParticleRegistration;
 use self::water_drop::SplashParticleRegistration;
 use self::white_ash::WhiteAshParticleRegistration;
+use self::suspended::{CrimsonSporeParticleRegistration, WarpedSporeParticleRegistration};
+use self::suspended_town::DolphinParticleRegistration;
+use self::glow::GlowParticleRegistration;
+use self::firefly::FireflyParticleRegistration;
+use self::fly_towards_position::NautilusParticleRegistration;
+use self::vault_connection::VaultConnectionParticleRegistration;
+use self::fly_straight_towards::OminousSpawningParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -314,4 +324,24 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(Rc::clone(&types.spit), &SpitParticleRegistration);
     resources
         .register_sprite_provider(Rc::clone(&types.bubble_pop), &BubblePopParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.crimson_spore),
+        &CrimsonSporeParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.warped_spore),
+        &WarpedSporeParticleRegistration,
+    );
+    resources.register_sprite_provider(Rc::clone(&types.dolphin), &DolphinParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.glow), &GlowParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.firefly), &FireflyParticleRegistration);
+    resources.register_sprite_provider(Rc::clone(&types.nautilus), &NautilusParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.vault_connection),
+        &VaultConnectionParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.ominous_spawning),
+        &OminousSpawningParticleRegistration,
+    );
 }

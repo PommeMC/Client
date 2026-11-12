@@ -190,6 +190,14 @@ pub enum ServerParticleKind {
     WhiteAsh,
     Spit,
     BubblePop,
+    CrimsonSpore,
+    WarpedSpore,
+    Dolphin,
+    Glow,
+    Firefly,
+    Nautilus,
+    VaultConnection,
+    OminousSpawning,
 }
 
 impl ServerParticleKind {
@@ -226,6 +234,14 @@ impl ServerParticleKind {
             99 => Some(Self::WhiteAsh),
             72 => Some(Self::Spit),
             79 => Some(Self::BubblePop),
+            92 => Some(Self::CrimsonSpore),
+            93 => Some(Self::WarpedSpore),
+            83 => Some(Self::Dolphin),
+            107 => Some(Self::Glow),
+            123 => Some(Self::Firefly),
+            82 => Some(Self::Nautilus),
+            117 => Some(Self::VaultConnection),
+            119 => Some(Self::OminousSpawning),
             _ => None,
         }
     }

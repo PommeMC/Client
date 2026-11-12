@@ -83,6 +83,14 @@ pub(crate) struct ParticleTypes {
     pub(crate) white_ash: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) spit: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) bubble_pop: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) crimson_spore: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) warped_spore: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dolphin: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) glow: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) firefly: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) nautilus: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) vault_connection: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) ominous_spawning: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -312,6 +320,30 @@ impl ParticleTypes {
         let bubble_pop = registry
             .register(resource_id!("minecraft:bubble_pop"), false)
             .map_err(registration_error)?;
+        let crimson_spore = registry
+            .register(resource_id!("minecraft:crimson_spore"), false)
+            .map_err(registration_error)?;
+        let warped_spore = registry
+            .register(resource_id!("minecraft:warped_spore"), false)
+            .map_err(registration_error)?;
+        let dolphin = registry
+            .register(resource_id!("minecraft:dolphin"), false)
+            .map_err(registration_error)?;
+        let glow = registry
+            .register(resource_id!("minecraft:glow"), true)
+            .map_err(registration_error)?;
+        let firefly = registry
+            .register(resource_id!("minecraft:firefly"), false)
+            .map_err(registration_error)?;
+        let nautilus = registry
+            .register(resource_id!("minecraft:nautilus"), false)
+            .map_err(registration_error)?;
+        let vault_connection = registry
+            .register(resource_id!("minecraft:vault_connection"), true)
+            .map_err(registration_error)?;
+        let ominous_spawning = registry
+            .register(resource_id!("minecraft:ominous_spawning"), true)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -387,6 +419,14 @@ impl ParticleTypes {
             white_ash,
             spit,
             bubble_pop,
+            crimson_spore,
+            warped_spore,
+            dolphin,
+            glow,
+            firefly,
+            nautilus,
+            vault_connection,
+            ominous_spawning,
         })
     }
 }
