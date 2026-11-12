@@ -543,7 +543,9 @@ impl App {
         };
         // A script or a benchmark runs without input and isn't idle.
         let attended = !(self.core.test_window || self.chunk_bench.is_some() || benchmarking);
-        let idle = attended.then(|| {
+        let limits_afk =
+            self.core.menu.inactivity_fps_limit == crate::ui::menu::InactivityFpsLimit::Afk;
+        let idle = (attended && limits_afk).then(|| {
             self.last_input
                 .max(self.core.input.gamepad_used_at())
                 .elapsed()
@@ -552,13 +554,10 @@ impl App {
     }
 }
 
-/// Vanilla `FramerateLimitTracker.getFramerateLimit` with the Inactivity FPS
-/// Limit at its default, AFK: 10 fps iconified or after ten minutes without
-/// input (`idle`), the Max Framerate setting capped at 30 after one minute,
-/// 60 in the menus outside a level, and otherwise the setting, `None` at its
-/// uncapped top.
-// TODO: the Inactivity FPS Limit option is a stub; `Minimized` skips the AFK
-// limits.
+/// Vanilla `FramerateLimitTracker.getFramerateLimit`: 10 fps iconified or
+/// after ten minutes without input (`idle`, `None` where AFK doesn't limit),
+/// the Max Framerate setting capped at 30 after one minute, 60 in the menus
+/// outside a level, and otherwise the setting, `None` at its uncapped top.
 fn framerate_limit(
     iconified: bool,
     idle: Option<Duration>,

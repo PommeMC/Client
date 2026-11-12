@@ -89,6 +89,8 @@ struct Settings {
     vsync: bool,
     #[serde(default = "default_max_framerate")]
     max_framerate: u32,
+    #[serde(default)]
+    inactivity_fps_limit: InactivityFpsLimit,
     #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
@@ -164,6 +166,42 @@ fn default_max_framerate() -> u32 {
 /// Top of the Max Framerate slider, where the cap is disabled (matching
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
+
+/// Vanilla `InactivityFpsLimit`: when the frame rate drops for an unattended
+/// window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InactivityFpsLimit {
+    Minimized,
+    #[default]
+    Afk,
+}
+
+impl InactivityFpsLimit {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Minimized => Self::Afk,
+            Self::Afk => Self::Minimized,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimized => "Minimized",
+            Self::Afk => "AFK",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Minimized => "Limits framerate only when the game window is minimized.",
+            Self::Afk => {
+                "Limits framerate to 30 when the game is not getting any player input for more \
+                 than a minute. Further limits it to 10 after 9 more minutes."
+            }
+        }
+    }
+}
 
 const CHUNK_DETAIL_MIN: u32 = 8;
 /// Top of the Chunk Detail slider, where every column meshes at full detail.
@@ -297,6 +335,7 @@ impl Default for Settings {
             entity_shadows: true,
             vsync: true,
             max_framerate: 120,
+            inactivity_fps_limit: InactivityFpsLimit::default(),
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -803,6 +842,7 @@ pub struct MainMenu {
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub inactivity_fps_limit: InactivityFpsLimit,
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
@@ -975,6 +1015,7 @@ impl MainMenu {
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            inactivity_fps_limit: settings.inactivity_fps_limit,
             debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
@@ -1235,6 +1276,7 @@ impl MainMenu {
                 entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
+                inactivity_fps_limit: self.inactivity_fps_limit,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,
@@ -1983,6 +2025,26 @@ mod tests {
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.invert_mouse_x);
         assert!(loaded.invert_mouse_y);
+    }
+
+    #[test]
+    fn inactivity_fps_limit_defaults_to_afk_and_round_trips() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("inactivity_fps_limit");
+        let loaded: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Afk);
+
+        let settings = Settings {
+            inactivity_fps_limit: InactivityFpsLimit::Afk.cycle(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""inactivity_fps_limit":"minimized""#));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Minimized);
     }
 
     #[test]
