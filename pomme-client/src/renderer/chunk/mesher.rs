@@ -1155,15 +1155,12 @@ impl MeshDispatcher {
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
     /// shared handles to their light data.
     fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
-        let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
             block_state_table: self.render_view.block_state_table(),
-            chunks: chunks_needed
-                .iter()
-                .map(|p| (*p, chunk_store.get_chunk(p)))
+            chunks: chunk::column_neighborhood(pos)
+                .map(|p| (p, chunk_store.get_chunk(&p)))
                 .collect(),
-            light: chunks_needed
-                .iter()
+            light: chunk::column_neighborhood(pos)
                 .filter_map(|p| {
                     chunk_store
                         .light_data
