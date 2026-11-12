@@ -1,0 +1,89 @@
+# Air and drowning are the server's: with water breathing the air stays full
+# and no drowning damage lands, and without it the air counts down as the
+# server sends it, one hit takes 2 health, and the air refills on leaving the
+# water.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+# So the hit's 2 health stays off.
+[[step]]
+chat = "/gamerule natural_health_regeneration false"
+
+[[step]]
+chat = "/forceload add 139 139 141 141"
+
+[[step]]
+chat = "/tp @s 140.5 -60 140.5 0 0"
+
+[[step]]
+expect = { player = { position = [140.5, -60.0, 140.5] } }
+
+[[step]]
+chat = "/fill 139 -61 139 141 -57 141 minecraft:glass hollow"
+
+[[step]]
+expect = { block = "glass", at = [140, -57, 140] }
+
+[[step]]
+chat = "/fill 140 -60 140 140 -58 140 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [140, -58, 140] }
+
+[[step]]
+chat = "/effect give @s minecraft:water_breathing 60 0 true"
+
+[[step]]
+expect = { player = { effect = "water_breathing" } }
+
+# Past the 320 ticks that empty the air and deal the first hit.
+[[step]]
+wait_ms = 17000
+
+[[step]]
+expect = { player = { health = 20.0, air = 300 } }
+
+[[step]]
+chat = "/effect clear @s"
+
+[[step]]
+expect = { player = { air = 260 } }
+
+[[step]]
+screenshot = "air_bubbles"
+
+# The air runs out and the first hit lands 280 ticks on.
+[[step]]
+expect = { player = { health = 18.0 } }
+timeout_ms = 20000
+
+[[step]]
+chat = "/tp @s 140.5 -56 140.5 0 0"
+
+[[step]]
+expect = { player = { air = 300, health = 18.0 } }
+
+[[step]]
+chat = "/fill 139 -61 139 141 -57 141 minecraft:air"
+
+[[step]]
+chat = "/fill 139 -61 139 141 -61 141 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [140, -61, 140] }
+
+[[step]]
+chat = "/forceload remove 139 139 141 141"
+
+[[step]]
+chat = "/gamerule natural_health_regeneration true"
+
+[[step]]
+chat = "/effect give @s minecraft:instant_health 1 0 true"
+
+[[step]]
+expect = { player = { health = 20.0 } }
