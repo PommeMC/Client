@@ -6,8 +6,8 @@ use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::section::{BitStorage, PalettedContainer, Section, Strategy, ceil_log2};
 use thiserror::Error;
 
-use super::block_entity::StoredBlockEntity;
-use crate::position::{BlockPos, ChunkPos};
+use super::block_entity::BlockEntities;
+use crate::position::ChunkPos;
 use crate::world::block::BlockStateTable;
 use crate::world::light::DataLayer;
 
@@ -503,7 +503,7 @@ pub struct ChunkStore {
     height: u32,
     min_y: i32,
     pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
-    pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
+    pub block_entities: BlockEntities,
 }
 
 /// The 128-chunk max extended-view-distance servers allow; server
@@ -525,7 +525,7 @@ impl ChunkStore {
             height,
             min_y,
             light_data: std::collections::HashMap::new(),
-            block_entities: std::collections::HashMap::new(),
+            block_entities: BlockEntities::default(),
         }
     }
 
@@ -609,10 +609,7 @@ impl ChunkStore {
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.light_data.remove(&(pos.x, pos.z));
         self.grid.remove(*pos);
-        let cx = pos.x;
-        let cz = pos.z;
-        self.block_entities
-            .retain(|bp, _| bp.x.div_euclid(16) != cx || bp.z.div_euclid(16) != cz);
+        self.block_entities.remove_column(*pos);
     }
 
     pub fn set_center(&mut self, pos: ChunkPos) {

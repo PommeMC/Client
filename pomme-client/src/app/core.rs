@@ -2922,9 +2922,7 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
-                    game.chunk_store.block_entities.retain(|p, _| {
-                        p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
-                    });
+                    game.chunk_store.block_entities.remove_column(chunk_pos);
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
                         if kind == azalea_registry::builtin::BlockEntityKind::Piston {

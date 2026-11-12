@@ -1671,12 +1671,12 @@ impl GameState {
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }
-        let mut bumped: Vec<ChunkPos> = Vec::new();
+        let mut bumped = HashSet::new();
         for &(x, z) in &dirty.columns {
             self.keep_column(ChunkPos::new(x, z));
             for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
-                if self.chunk_store.get_chunk(&p).is_some() && !bumped.contains(&p) {
-                    bumped.push(p);
+                if self.chunk_store.get_chunk(&p).is_some() {
+                    bumped.insert(p);
                 }
             }
         }
@@ -5082,7 +5082,7 @@ pub fn update_game(
             .map_or(*game.player.position, |entity| *entity.position);
         game.chunk_store
             .block_entities
-            .iter()
+            .near(camera, 64.0)
             .filter_map(|(&pos, be)| {
                 let texts = be.sign.as_deref()?;
                 let center = pos.center();
@@ -5116,7 +5116,7 @@ pub fn update_game(
         let mut renders: Vec<(bool, crate::renderer::BlockEntityRenderInfo)> = game
             .chunk_store
             .block_entities
-            .iter()
+            .near(eye, 64.0)
             .filter_map(|(pos, be)| {
                 let center = glam::DVec3::new(
                     f64::from(pos.x) + 0.5,

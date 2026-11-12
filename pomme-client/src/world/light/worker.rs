@@ -23,7 +23,7 @@ use crate::world::block::BlockStateTable;
 use crate::world::chunk::{Chunk, ChunkLightData, ChunkStore};
 
 /// How long the game thread waits for a block edit's light before it draws
-/// the frame without it.
+/// the frame without it; the light then lands in the frame it is ready for.
 const EDIT_WAIT: Duration = Duration::from_millis(2);
 
 /// The thread only ends early by panicking; the game goes down with it.
@@ -247,7 +247,9 @@ impl LightWorker {
         while self.awaited.is_some() {
             match self.rx.recv_deadline(deadline) {
                 Ok(report) => apply(self, report),
-                Err(RecvTimeoutError::Timeout) => break,
+                // Behind a join's chunks the light is frames away, and waiting
+                // again would stall every one of them.
+                Err(RecvTimeoutError::Timeout) => self.awaited = None,
                 Err(RecvTimeoutError::Disconnected) => panic!("{THREAD_GONE}"),
             }
         }
@@ -377,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_is_awaited_until_a_report_covers_it() {
+    fn an_edit_is_awaited_for_one_frame() {
         let (mut worker, _messages, reports) = worker();
         let mut store = ChunkStore::new(2);
         let mut out = LightDirty::default();
@@ -385,12 +387,13 @@ mod tests {
         worker.block_dirty(1, 0, 0);
         assert_eq!(worker.awaited, Some(2));
 
-        reports.send(report(1, (0, 0))).unwrap();
-        worker.poll(&mut store, &mut out);
-        assert_eq!(worker.awaited, Some(2));
-
         reports.send(report(2, (0, 0))).unwrap();
         worker.poll(&mut store, &mut out);
-        assert_eq!(worker.awaited, None);
+        assert_eq!(worker.awaited, None, "a report covered it");
+
+        worker.block_dirty(2, 0, 0);
+        reports.send(report(2, (0, 0))).unwrap();
+        worker.poll(&mut store, &mut out);
+        assert_eq!(worker.awaited, None, "the wait ran out");
     }
 }
