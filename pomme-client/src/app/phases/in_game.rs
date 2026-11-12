@@ -1616,7 +1616,9 @@ impl GameState {
     #[cfg(feature = "test-harness")]
     pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
         self.mesh_columns
-            .first_unmeshed(self.chunk_store.loaded_positions())
+            .first_unmeshed(self.chunk_store.loaded_positions(), |pos| {
+                neighbourhood_lit(&self.chunk_store, &self.light_engine, pos)
+            })
     }
 
     /// Forgets every column's scheduling state, for a new level or dispatcher.
@@ -1790,16 +1792,12 @@ impl GameState {
             camera_block.y,
             camera_block.z,
         ));
-        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
-            self.chunk_store.get_chunk(&p).is_some()
-                && self.light_engine.light_on_in_column((p.x, p.z))
-        });
         let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
         let compiled = self
             .compiled
             .get(&column)
             .is_some_and(|mask| mask & section_bit(section) != 0);
-        neighbourhood_lit && compiled
+        neighbourhood_lit(&self.chunk_store, &self.light_engine, column) && compiled
     }
 
     /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
@@ -1953,15 +1951,11 @@ impl GameState {
     /// Publishes every loaded column's dirty sections to the mesh workers,
     /// re-meshing a whole column when the player's movement changes its LOD.
     /// Like vanilla, every section in render distance meshes regardless of
-    /// visibility (occlusion gates only drawing), and the queue orders the
-    /// backlog nearest-first. Runs every frame, publishing only when the work
-    /// or the camera's 8-block bucket changed.
+    /// visibility (occlusion gates only drawing), once its neighbour columns
+    /// are loaded and lit, and the queue orders the backlog nearest-first.
+    /// Runs every frame, publishing only when the work or the camera's
+    /// 8-block bucket changed.
     pub fn rescan_mesh_jobs(&mut self, chunk_detail: u32) {
-        // TODO: vanilla won't schedule a section's first compile until its
-        // 3x3 column neighbourhood is loaded and lit
-        // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
-        // we mesh against missing neighbours as air and repair the borders
-        // when their light marks the column dirty.
         let loaded: Vec<ChunkPos> = self.chunk_store.loaded_positions().collect();
         let player_chunk = self.player_chunk();
         let camera = *self.player.position;
@@ -1972,12 +1966,25 @@ impl GameState {
             section_mask(self.chunk_store.section_count()),
             |pos| crate::app::core::chunk_lod(pos, player_chunk, chunk_detail),
             |pos| dispatcher.claimed_generation(pos),
+            |pos| neighbourhood_lit(&self.chunk_store, &self.light_engine, pos),
         );
         if let Some(requests) = requests {
             self.mesh_dispatcher
                 .publish(&self.chunk_store, camera, requests);
         }
     }
+}
+
+/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: every column around
+/// `column` is loaded with its light applied. `column` itself is asked too:
+/// its light arrives with the chunk in vanilla and a moment after it here.
+fn neighbourhood_lit(
+    chunk_store: &ChunkStore,
+    light_engine: &crate::world::light::LightWorker,
+    column: ChunkPos,
+) -> bool {
+    crate::world::chunk::column_neighborhood(column)
+        .all(|p| chunk_store.get_chunk(&p).is_some() && light_engine.light_on_in_column((p.x, p.z)))
 }
 
 /// The bits for several section indices.
