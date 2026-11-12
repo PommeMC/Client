@@ -320,6 +320,9 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
     if let Some(show) = options.show_subtitles {
         core.menu.show_subtitles = show;
     }
+    if let Some(limit) = options.inactivity_fps_limit {
+        core.menu.inactivity_fps_limit = limit;
+    }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
 }

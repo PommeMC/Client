@@ -159,7 +159,7 @@ fn face_cover(data: &BlockStateData, direction: Direction) -> FaceCover {
         }
         // TODO: masks are only dumped for useShapeForLightOcclusion states, so
         // other partial occlusion shapes (fence posts, chests) count as empty.
-        None if data.outline_boxes().is_none() => FaceCover::Full,
+        None if data.occludes_neighbor_faces() => FaceCover::Full,
         None => FaceCover::Empty,
     }
 }

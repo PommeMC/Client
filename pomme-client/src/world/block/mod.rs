@@ -1865,14 +1865,18 @@ mod tests {
     #[test]
     fn full_occluders_hide_their_neighbours_faces() {
         let block_state_table = BlockStateTable::native();
-        let occludes = |name| {
-            block_state_table
-                .block_state_data(block_state_table.first_state_of(name).unwrap())
-                .occludes_neighbor_faces()
+        let data = |name| {
+            block_state_table.block_state_data(block_state_table.first_state_of(name).unwrap())
         };
-        // Grass's extra overlay quads and mud's lower collision don't matter.
+        let occludes = |name| data(name).occludes_neighbor_faces();
+        // Grass's extra overlay quads and mud's lower collision don't matter,
+        // to the per-block skip or to each face's cull.
         for name in ["stone", "grass_block", "mud", "soul_sand"] {
             assert!(occludes(name), "{name}");
+            for direction in model::Direction::VALUES {
+                let cover = data(name).render().face_cover(direction);
+                assert_eq!(cover, FaceCover::Full, "{name} {direction:?}");
+            }
         }
         for name in ["air", "glass", "oak_leaves", "oak_slab", "dirt_path"] {
             assert!(!occludes(name), "{name}");

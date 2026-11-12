@@ -4,6 +4,10 @@
 # TODO: the throttle itself isn't reached here; a script's window is never
 # idle or minimised.
 
+# Settings outlive a run, so start from the default.
+[[step]]
+option = { inactivity_fps_limit = "afk" }
+
 [[step]]
 press = { action = "key.menu" }
 
@@ -34,7 +38,7 @@ mouse_up = "left"
 wait_ms = 300
 
 [[step]]
-cursor = [133, 118]
+cursor_to_button = "Reduce fps when: AFK"
 
 [[step]]
 wait_ms = 100
@@ -48,6 +52,12 @@ mouse_down = "left"
 [[step]]
 mouse_up = "left"
 
+[[step]]
+wait_ms = 100
+
+[[step]]
+cursor_to_button = "Reduce fps when: Minimized"
+
 # Off the button, so its tooltip doesn't cover the value.
 [[step]]
 cursor = [2, 2]
@@ -59,7 +69,7 @@ wait_ms = 100
 screenshot = "minimized"
 
 [[step]]
-cursor = [133, 118]
+cursor_to_button = "Reduce fps when: Minimized"
 
 [[step]]
 mouse_down = "left"
@@ -69,6 +79,9 @@ mouse_up = "left"
 
 [[step]]
 wait_ms = 100
+
+[[step]]
+cursor_to_button = "Reduce fps when: AFK"
 
 [[step]]
 screenshot = "afk_again"

@@ -1640,14 +1640,18 @@ impl Renderer {
             .is_some_and(|distant| distant.buffers.has_column(x, z))
     }
 
-    /// Whether distant terrain out to `chunks` draws this frame: on, and
-    /// the vanilla terrain path drawing (not a shader pack's, nor the
-    /// top-down benchmark view).
+    /// Whether the vanilla terrain path draws, not a shader pack's: distant
+    /// terrain's GPU state is only worth holding while it does.
+    pub fn distant_terrain_path(&self) -> bool {
+        self.shader_pack.is_none() && self.chunk_buffers.format() == TerrainFormat::Vanilla
+    }
+
+    /// Whether distant terrain out to `chunks` draws this frame: on, the
+    /// vanilla terrain path drawing, and not the top-down benchmark view.
     fn distant_draws(&self, chunks: u32) -> bool {
         chunks > 0
             && self.distant.is_some()
-            && self.shader_pack.is_none()
-            && self.chunk_buffers.format() == TerrainFormat::Vanilla
+            && self.distant_terrain_path()
             && self.camera.top_down().is_none()
     }
 

@@ -1713,13 +1713,27 @@ impl GameState {
     /// mesh and upload a column's player-edited sections on the spot so the
     /// edit shows the same frame. (Vanilla defaults to NONE/async, but
     /// pomme's async round-trip is several frames, which leaves a broken
-    /// block visibly lingering after its crack overlay completes.)
+    /// block visibly lingering after its crack overlay completes.) A section
+    /// never compiled waits for its neighbours with the async meshes.
+    // TODO: vanilla's edit lights before it compiles; here the light lands
+    // in the next `update_light` and remeshes the sections again.
     pub fn mesh_sections_edit_now(
         &mut self,
         renderer: &mut Renderer,
         col: ChunkPos,
         sections: std::ops::Range<i32>,
     ) {
+        let may_mesh_now =
+            self.mesh_columns
+                .may_mesh_edit_now(col, section_bits(sections.clone()), || {
+                    neighbourhood_lit(&self.chunk_store, &self.light_engine, col)
+                });
+        if !may_mesh_now {
+            for si in sections {
+                self.enqueue_section_edit(col, si);
+            }
+            return;
+        }
         // Older async results for these sections are rejected by the
         // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
         let mesh = self
@@ -5290,9 +5304,9 @@ pub fn update_game(
         }
         list
     };
-    // Off without sky light (see `renderer::distant`'s TODO); capturing
-    // stops with it.
-    let distant_terrain = if game.light_engine.has_sky() {
+    // Off without sky light (see `renderer::distant`'s TODO) or under a
+    // shader pack; capturing stops with it.
+    let distant_terrain = if game.light_engine.has_sky() && gfx.renderer.distant_terrain_path() {
         core.menu.distant_terrain
     } else {
         0

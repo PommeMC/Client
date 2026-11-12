@@ -589,6 +589,7 @@ fn is_user_input(event: &WindowEvent) -> bool {
             | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::Touch(_)
+            | WindowEvent::DroppedFile(_)
     )
 }
 

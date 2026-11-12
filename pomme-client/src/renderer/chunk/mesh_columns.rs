@@ -95,6 +95,19 @@ impl MeshColumns {
         })
     }
 
+    /// Whether a player's edit to `sections` of `pos` may mesh at once: the
+    /// same gate as [`ColumnMeta::schedulable`], which vanilla applies to
+    /// edits too.
+    pub fn may_mesh_edit_now(
+        &self,
+        pos: ChunkPos,
+        sections: u32,
+        has_all_neighbors: impl FnOnce() -> bool,
+    ) -> bool {
+        let compiled = self.get(pos).map_or(0, |meta| meta.compiled_sections);
+        sections & !compiled == 0 || has_all_neighbors()
+    }
+
     /// Which load of `pos` the columns are tracking, if any.
     pub fn incarnation(&self, pos: ChunkPos) -> Option<u64> {
         self.get(pos).map(|meta| meta.incarnation)
@@ -253,6 +266,9 @@ mod tests {
             assert_eq!(columns.first_unmeshed([pos], |_| false), None);
             assert_eq!(columns.first_unmeshed([pos], |_| true), Some(pos));
         }
+        // Nor may a player's edit mesh it on the spot.
+        assert!(!columns.may_mesh_edit_now(pos, 1 << 5, || false));
+        assert!(columns.may_mesh_edit_now(pos, 1 << 5, || true));
         // A neighbour's light marks the column again.
         columns.mark(pos, FULL, false);
         let first = ask(&mut columns, true);
@@ -260,6 +276,7 @@ mod tests {
         columns.meshed(pos, first[0].content_gen, FULL);
 
         // Once meshed, a section recompiles whatever its neighbours.
+        assert!(columns.may_mesh_edit_now(pos, 1 << 5, || false));
         columns.mark(pos, 1 << 5, true);
         let edit = ask(&mut columns, false);
         assert_eq!(edit[0].sections, 5..6);
