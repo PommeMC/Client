@@ -100,6 +100,11 @@ pub(crate) struct ParticleTypes {
     pub(crate) reset_mob_growth: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) dust_plume: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) noxious_gas: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) cherry_leaves: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) pale_oak_leaves: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) firework: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) sculk_charge_pop: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) fishing: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -380,6 +385,21 @@ impl ParticleTypes {
         let noxious_gas = registry
             .register(resource_id!("minecraft:noxious_gas"), false)
             .map_err(registration_error)?;
+        let cherry_leaves = registry
+            .register(resource_id!("minecraft:cherry_leaves"), false)
+            .map_err(registration_error)?;
+        let pale_oak_leaves = registry
+            .register(resource_id!("minecraft:pale_oak_leaves"), false)
+            .map_err(registration_error)?;
+        let firework = registry
+            .register(resource_id!("minecraft:firework"), false)
+            .map_err(registration_error)?;
+        let sculk_charge_pop = registry
+            .register(resource_id!("minecraft:sculk_charge_pop"), true)
+            .map_err(registration_error)?;
+        let fishing = registry
+            .register(resource_id!("minecraft:fishing"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -472,6 +492,11 @@ impl ParticleTypes {
             reset_mob_growth,
             dust_plume,
             noxious_gas,
+            cherry_leaves,
+            pale_oak_leaves,
+            firework,
+            sculk_charge_pop,
+            fishing,
         })
     }
 }
