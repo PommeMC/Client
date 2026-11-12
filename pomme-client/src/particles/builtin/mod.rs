@@ -45,6 +45,8 @@ mod white_ash;
 mod firefly;
 mod fly_straight_towards;
 mod vault_connection;
+mod dripstone_fall;
+mod nectar_fall;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -101,6 +103,8 @@ use self::firefly::FireflyParticleRegistration;
 use self::fly_towards_position::NautilusParticleRegistration;
 use self::vault_connection::VaultConnectionParticleRegistration;
 use self::fly_straight_towards::OminousSpawningParticleRegistration;
+use self::dripstone_fall::DripstoneFallParticleRegistration;
+use self::nectar_fall::NectarFallParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -343,5 +347,25 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.ominous_spawning),
         &OminousSpawningParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_dripstone_lava),
+        &DripHangParticleRegistration::lava(Rc::clone(&types.falling_dripstone_lava)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.dripping_dripstone_water),
+        &DripHangParticleRegistration::water(Rc::clone(&types.falling_dripstone_water)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_dripstone_lava),
+        &DripstoneFallParticleRegistration::lava(Rc::clone(&types.landing_lava)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_dripstone_water),
+        &DripstoneFallParticleRegistration::water(Rc::clone(&types.splash)),
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.falling_nectar),
+        &NectarFallParticleRegistration,
     );
 }

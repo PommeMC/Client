@@ -91,6 +91,11 @@ pub(crate) struct ParticleTypes {
     pub(crate) nautilus: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) vault_connection: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) ominous_spawning: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dripping_dripstone_lava: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) dripping_dripstone_water: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_dripstone_lava: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_dripstone_water: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) falling_nectar: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -344,6 +349,21 @@ impl ParticleTypes {
         let ominous_spawning = registry
             .register(resource_id!("minecraft:ominous_spawning"), true)
             .map_err(registration_error)?;
+        let dripping_dripstone_lava = registry
+            .register(resource_id!("minecraft:dripping_dripstone_lava"), false)
+            .map_err(registration_error)?;
+        let dripping_dripstone_water = registry
+            .register(resource_id!("minecraft:dripping_dripstone_water"), false)
+            .map_err(registration_error)?;
+        let falling_dripstone_lava = registry
+            .register(resource_id!("minecraft:falling_dripstone_lava"), false)
+            .map_err(registration_error)?;
+        let falling_dripstone_water = registry
+            .register(resource_id!("minecraft:falling_dripstone_water"), false)
+            .map_err(registration_error)?;
+        let falling_nectar = registry
+            .register(resource_id!("minecraft:falling_nectar"), false)
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -427,6 +447,11 @@ impl ParticleTypes {
             nautilus,
             vault_connection,
             ominous_spawning,
+            dripping_dripstone_lava,
+            dripping_dripstone_water,
+            falling_dripstone_lava,
+            falling_dripstone_water,
+            falling_nectar,
         })
     }
 }

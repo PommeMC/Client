@@ -3750,6 +3750,29 @@ impl AppCore {
                         ServerParticleKind::OminousSpawning => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.ominous_spawning,
                         )),
+                        ServerParticleKind::DrippingDripstoneLava => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.dripping_dripstone_lava,
+                            ))
+                        }
+                        ServerParticleKind::DrippingDripstoneWater => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.dripping_dripstone_water,
+                            ))
+                        }
+                        ServerParticleKind::FallingDripstoneLava => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.falling_dripstone_lava,
+                            ))
+                        }
+                        ServerParticleKind::FallingDripstoneWater => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.falling_dripstone_water,
+                            ))
+                        }
+                        ServerParticleKind::FallingNectar => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.falling_nectar,
+                        )),
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();

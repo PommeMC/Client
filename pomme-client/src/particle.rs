@@ -198,6 +198,11 @@ pub enum ServerParticleKind {
     Nautilus,
     VaultConnection,
     OminousSpawning,
+    DrippingDripstoneLava,
+    DrippingDripstoneWater,
+    FallingDripstoneLava,
+    FallingDripstoneWater,
+    FallingNectar,
 }
 
 impl ServerParticleKind {
@@ -242,6 +247,11 @@ impl ServerParticleKind {
             82 => Some(Self::Nautilus),
             117 => Some(Self::VaultConnection),
             119 => Some(Self::OminousSpawning),
+            102 => Some(Self::DrippingDripstoneLava),
+            104 => Some(Self::DrippingDripstoneWater),
+            103 => Some(Self::FallingDripstoneLava),
+            105 => Some(Self::FallingDripstoneWater),
+            89 => Some(Self::FallingNectar),
             _ => None,
         }
     }
