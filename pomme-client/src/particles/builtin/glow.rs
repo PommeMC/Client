@@ -463,3 +463,51 @@ impl SpriteParticleRegistration<SimpleParticleType> for ElectricSparkParticleReg
         })
     }
 }
+
+pub struct GlowSquidProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for GlowSquidProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let x = 0.5 - random.next_double();
+        let z = 0.5 - random.next_double();
+        let mut particle = GlowParticle::new(
+            position,
+            DVec3::new(x, auxiliary.y, z),
+            Rc::clone(&self.sprites),
+        );
+        particle.set_color(if random.next_boolean() {
+            [0.6, 1.0, 0.8]
+        } else {
+            [0.08, 0.4, 0.4]
+        });
+        particle.velocity.y *= f64::from(0.2_f32);
+        if auxiliary.x == 0.0 && auxiliary.z == 0.0 {
+            particle.velocity.x *= f64::from(0.1_f32);
+            particle.velocity.z *= f64::from(0.1_f32);
+        }
+        particle.set_lifetime((8.0 / (random.next_double() * 0.8 + 0.2)) as u32);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct GlowParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for GlowParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(GlowSquidProvider {
+            sprites: sprite_set,
+        })
+    }
+}

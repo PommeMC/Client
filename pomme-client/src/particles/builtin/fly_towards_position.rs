@@ -312,3 +312,36 @@ impl SpriteParticleRegistration<SimpleParticleType> for EnchantParticleRegistrat
         Rc::new(EnchantProvider::new(sprite_set))
     }
 }
+
+pub struct NautilusProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for NautilusProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        Some(Rc::new(RefCell::new(FlyTowardsPositionParticle::new(
+            position, auxiliary, sprite,
+        ))))
+    }
+}
+
+pub(in crate::particles) struct NautilusParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for NautilusParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(NautilusProvider {
+            sprites: sprite_set,
+        })
+    }
+}
