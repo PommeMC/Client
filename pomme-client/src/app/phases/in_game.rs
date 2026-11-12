@@ -1674,7 +1674,7 @@ impl GameState {
         let mut bumped = HashSet::new();
         for &(x, z) in &dirty.columns {
             self.keep_column(ChunkPos::new(x, z));
-            for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
+            for p in crate::world::chunk::column_neighborhood(ChunkPos::new(x, z)) {
                 if self.chunk_store.get_chunk(&p).is_some() {
                     bumped.insert(p);
                 }
