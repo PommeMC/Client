@@ -48,6 +48,7 @@ pub struct WorldTextPipeline {
     depth_tested_pipeline: rhi::backend::RenderPipeline,
     see_through_pipeline: rhi::backend::RenderPipeline,
     pipeline_layout: rhi::backend::PipelineLayout,
+    camera_layout: rhi::backend::BindGroupLayout,
     font_layout: rhi::backend::BindGroupLayout,
     camera_sets: Vec<rhi::backend::BindGroup>,
     camera_buffers: Vec<rhi::backend::Buffer>,
@@ -116,6 +117,7 @@ impl WorldTextPipeline {
             depth_tested_pipeline,
             see_through_pipeline,
             pipeline_layout,
+            camera_layout,
             font_layout,
             camera_sets,
             camera_buffers,
@@ -212,6 +214,11 @@ impl WorldTextPipeline {
         util::destroy_buffers(device, &mut self.vertex_buffers);
         self.depth_tested_pipeline.destroy(device);
         self.see_through_pipeline.destroy(device);
+        self.pipeline_layout.destroy(device);
+        util::destroy_bind_groups(device, self.camera_sets.drain(..));
+        self.font_set.destroy(device);
+        self.camera_layout.destroy(device);
+        self.font_layout.destroy(device);
     }
 }
 
