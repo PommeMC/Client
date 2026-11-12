@@ -1,5 +1,11 @@
-# Video Settings' Chunk Fade slider: 0.75 seconds by default, None once
-# dragged to its left end.
+# Video Settings' Chunk Fade slider: 0.75 seconds by default, with its
+# tooltip when hovered, and None once dragged to its left end.
+# TODO: nothing here fails without the option; only compare.py against
+# vanilla's screenshots shows it.
+
+# Settings outlive a run, so start from the default.
+[[step]]
+option = { chunk_fade = 0.75 }
 
 [[step]]
 press = { action = "key.menu" }
@@ -35,6 +41,12 @@ scroll = -40
 
 [[step]]
 expect = { list = "end" }
+
+[[step]]
+cursor = [330, 194]
+
+[[step]]
+wait_ms = 100
 
 [[step]]
 screenshot = "default"

@@ -1066,6 +1066,7 @@ mod tests {
                 distant_terrain: None,
                 resource_pack: None,
                 show_subtitles: None,
+                chunk_fade: None,
             }))
         );
         assert_eq!(

@@ -493,6 +493,10 @@ impl MainMenu {
             "Max Anisotropy:",
             "Weather Radius:",
         ];
+        let tooltips: &[(&str, &str)] = &[(
+            CHUNK_FADE,
+            "How long in seconds chunks should fade in when they're first rendered, if at all.",
+        )];
         self.build_options_grid(
             sw,
             sh,
@@ -504,7 +508,7 @@ impl MainMenu {
             sliders,
             disabled,
             true,
-            &[],
+            tooltips,
             text_width_fn,
             key_bindings,
         )
@@ -1465,6 +1469,11 @@ impl MainMenu {
                 let enabled = option_enabled(label, disabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let hovered = enabled && hit;
+                // Vanilla keys tooltips off `isHovered`, which ignores `active`
+                // (`AbstractWidget.extractTooltipForNextRenderPass`).
+                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
+                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
+                }
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
@@ -1535,11 +1544,6 @@ impl MainMenu {
                     &label_scroll,
                 );
                 any_hovered |= hovered;
-                // Vanilla keys tooltips off `isHovered`, which ignores `active`
-                // (`AbstractWidget.extractTooltipForNextRenderPass`).
-                if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
-                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
-                }
                 if (clicked && hovered) || (focused && ctx.activate) {
                     any_clicked = true;
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {

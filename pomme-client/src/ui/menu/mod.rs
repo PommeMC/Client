@@ -1321,6 +1321,11 @@ impl MainMenu {
         self.settings_dirty = true;
     }
 
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn set_chunk_fade_secs(&mut self, secs: f32) {
+        self.set_chunk_fade((secs * 1000.0 / chunk_fade_ms(1) as f32).round() as u8);
+    }
+
     pub fn chunk_fade_ms(&self) -> u32 {
         chunk_fade_ms(self.chunk_fade)
     }
