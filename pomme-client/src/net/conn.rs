@@ -51,13 +51,33 @@ impl RawReader {
     // TODO: no maximum frame length, so a hostile length prefix buffers without
     // bound. Inherited from azalea's framing; cap it if framing moves here.
     pub async fn read(&mut self) -> Result<Box<[u8]>, Box<ReadPacketError>> {
-        read_raw_packet(
+        let frame = read_raw_packet(
             &mut self.stream,
             &mut self.buffer,
             self.compression_threshold,
             &mut self.dec_cipher,
         )
-        .await
+        .await?;
+        self.compact();
+        Ok(frame)
+    }
+
+    /// Drops the frames already handed out. The framing only empties the
+    /// buffer when a read ends on a frame boundary, which a burst rarely
+    /// does, so a join's chunks would otherwise all stay in it.
+    fn compact(&mut self) {
+        /// Below this the buffer isn't worth moving.
+        const MIN: usize = 64 * 1024;
+
+        let consumed = self.buffer.position() as usize;
+        let bytes = self.buffer.get_mut();
+        // Only once the consumed part outweighs the rest, so the moves stay
+        // linear in the bytes read.
+        if consumed >= MIN && consumed >= bytes.len() - consumed {
+            bytes.drain(..consumed);
+            bytes.shrink_to(2 * bytes.len().max(MIN));
+            self.buffer.set_position(0);
+        }
     }
 }
 
@@ -194,6 +214,27 @@ mod tests {
 
     fn status_request() -> ServerboundStatusPacket {
         ServerboundStatusPacket::StatusRequest(ServerboundStatusRequest {})
+    }
+
+    #[test]
+    fn compacting_drops_the_frames_already_read() {
+        let (mut conn, ..) = conn_and_wire();
+        let reader = &mut conn.reader;
+        let unread = [7u8; 10];
+        let read = 1 << 20;
+
+        reader.buffer = Cursor::new([vec![0; read], unread.to_vec()].concat());
+        reader.buffer.set_position(read as u64);
+        reader.compact();
+        assert_eq!(reader.buffer.position(), 0);
+        assert_eq!(reader.buffer.get_ref()[..], unread);
+        assert!(reader.buffer.get_ref().capacity() < read);
+
+        // Too little read to be worth moving the rest.
+        reader.buffer = Cursor::new(vec![0; read]);
+        reader.buffer.set_position(1000);
+        reader.compact();
+        assert_eq!(reader.buffer.position(), 1000);
     }
 
     async fn recv(conn: &mut Conn) -> ServerboundStatusPacket {
