@@ -206,6 +206,11 @@ pub enum ServerParticleKind {
     PauseMobGrowth,
     ResetMobGrowth,
     DustPlume,
+    CherryLeaves,
+    PaleOakLeaves,
+    Firework,
+    SculkChargePop,
+    Fishing,
     NoxiousGas,
 }
 
@@ -260,6 +265,11 @@ impl ServerParticleKind {
             58 => Some(Self::ResetMobGrowth),
             114 => Some(Self::DustPlume),
             5 => Some(Self::NoxiousGas),
+            41 => Some(Self::CherryLeaves),
+            42 => Some(Self::PaleOakLeaves),
+            37 => Some(Self::Firework),
+            46 => Some(Self::SculkChargePop),
+            38 => Some(Self::Fishing),
             _ => None,
         }
     }

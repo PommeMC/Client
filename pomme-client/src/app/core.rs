@@ -3645,6 +3645,21 @@ impl AppCore {
                     count,
                 } => {
                     let options = match kind {
+                        ServerParticleKind::CherryLeaves => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.cherry_leaves))
+                        }
+                        ServerParticleKind::PaleOakLeaves => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.pale_oak_leaves))
+                        }
+                        ServerParticleKind::Firework => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.firework))
+                        }
+                        ServerParticleKind::SculkChargePop => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sculk_charge_pop))
+                        }
+                        ServerParticleKind::Fishing => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.fishing))
+                        }
                         ServerParticleKind::EndRod => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.end_rod))
                         }
