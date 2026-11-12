@@ -1964,6 +1964,22 @@ fn mesh_chunk_snapshot(
                         by += step;
                         continue;
                     }
+                    // [`section_hidden`] for one block: all its quads are culled,
+                    // which is most of what lies underground.
+                    if lod == 0
+                        && registry.hidden_when_enclosed(state)
+                        && Direction::VALUES.iter().all(|direction| {
+                            let [dx, dy, dz] = direction.offset();
+                            registry.occludes_neighbor(at(
+                                local_x + dx,
+                                by - section_y + dy,
+                                local_z + dz,
+                            ))
+                        })
+                    {
+                        by += step;
+                        continue;
+                    }
 
                     // Section-local base (matching the origin buffer.rs derives), so
                     // vertex positions never pass through absolute f32 world space.
