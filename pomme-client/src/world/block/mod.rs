@@ -16,6 +16,7 @@ mod condition;
 pub mod json_bundle;
 pub mod model;
 pub mod render_assets;
+mod render_props;
 pub mod sound;
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,7 @@ use azalea_block::BlockState;
 pub use block_registry::{Block, BlockData};
 pub(crate) use block_state_table::BlockStateTable;
 use glam::{DVec3, dvec3};
+pub(crate) use render_props::{FaceCover, MeshKind, RenderProps};
 
 use crate::physics::block_shape::LocalBox;
 use crate::position::BlockPos;
@@ -229,6 +231,7 @@ pub(crate) struct BlockStateData {
     push_reaction: PushReaction,
     /// Vanilla `hasBlockEntity`: the block is an `EntityBlock`.
     has_block_entity: bool,
+    render: RenderProps,
 }
 
 impl BlockStateData {
@@ -268,29 +271,19 @@ impl BlockStateData {
         matches!(self.id, "water" | "lava")
     }
 
-    /// Vanilla `skipRendering` against a neighbour of its own kind across
-    /// `direction`: `HalfTransparentBlock`, `LiquidBlock` and powder snow on
-    /// every side, mangrove roots only above and below.
+    pub(crate) fn render(&self) -> RenderProps {
+        self.render
+    }
+
+    /// [`RenderProps::culls_same`].
     pub(crate) fn culls_same(&self, direction: model::Direction) -> bool {
-        match self.id {
-            "mangrove_roots" => matches!(direction, model::Direction::Up | model::Direction::Down),
-            id => {
-                self.is_fluid_block()
-                    || matches!(
-                        id,
-                        "glass"
-                            | "tinted_glass"
-                            | "ice"
-                            | "frosted_ice"
-                            | "blue_ice"
-                            | "slime_block"
-                            | "honey_block"
-                            | "powder_snow"
-                    )
-                    || id.ends_with("_stained_glass")
-                    || id.ends_with("copper_grate")
-            }
-        }
+        self.render.culls_same(direction)
+    }
+
+    /// Fills in [`Self::render`], which reads the rest of the entry.
+    fn with_render_props(mut self) -> Self {
+        self.render = RenderProps::of(&self);
+        self
     }
 
     /// `getRenderShape() == RenderShape.INVISIBLE`: the blocks overriding it.
@@ -880,7 +873,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                 use_shape_for_light_occlusion: state_entry.u.get(i) != 0,
                 face_occlusion: face_indices[i].map(&mut tuple),
             };
-            table.push(BlockStateData {
+            let data = BlockStateData {
                 id: name,
                 properties,
                 shape,
@@ -908,7 +901,9 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockStateData> {
                 light,
                 push_reaction,
                 has_block_entity,
-            });
+                render: RenderProps::UNSET,
+            };
+            table.push(data.with_render_props());
         }
     }
 
@@ -1870,14 +1865,18 @@ mod tests {
     #[test]
     fn full_occluders_hide_their_neighbours_faces() {
         let block_state_table = BlockStateTable::native();
-        let occludes = |name| {
-            block_state_table
-                .block_state_data(block_state_table.first_state_of(name).unwrap())
-                .occludes_neighbor_faces()
+        let data = |name| {
+            block_state_table.block_state_data(block_state_table.first_state_of(name).unwrap())
         };
-        // Grass's extra overlay quads and mud's lower collision don't matter.
+        let occludes = |name| data(name).occludes_neighbor_faces();
+        // Grass's extra overlay quads and mud's lower collision don't matter,
+        // to the per-block skip or to each face's cull.
         for name in ["stone", "grass_block", "mud", "soul_sand"] {
             assert!(occludes(name), "{name}");
+            for direction in model::Direction::VALUES {
+                let cover = data(name).render().face_cover(direction);
+                assert_eq!(cover, FaceCover::Full, "{name} {direction:?}");
+            }
         }
         for name in ["air", "glass", "oak_leaves", "oak_slab", "dirt_path"] {
             assert!(!occludes(name), "{name}");

@@ -45,6 +45,13 @@ chunk-bench rd="16" *args: openal
 chunk-bench-windowed rd="16" *args: openal
     @cargo run --release -p pomme-client -- --chunk-bench {{ rd }} {{ args }}
 
+# Records a CPU profile of the release client with samply (`cargo install
+# samply`) and opens it in the browser, e.g. `just profile --chunk-bench 32
+# --headless` or `just profile --cpu-bench mesh`.
+profile *args: openal
+    @cargo build --profile samply -p pomme-client --features cpu-bench
+    @samply record -- target/samply/pomme-client {{ args }}
+
 client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 

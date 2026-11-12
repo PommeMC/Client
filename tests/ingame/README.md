@@ -161,6 +161,8 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # (chunks, 0 for off),
                                               # show_subtitles, chunk_fade
                                               # (seconds),
+                                              # inactivity_fps_limit
+                                              # (minimized or afk),
                                               # shader_pack (a name in
                                               # fixtures/shaderpacks, "" for
                                               # none) and resource_pack (a name

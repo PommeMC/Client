@@ -56,6 +56,8 @@ pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
     occluded: bool,
+    /// Vanilla `FramerateLimitTracker.latestInputTime`.
+    last_input: Instant,
     /// In the background on a phone; the loop sleeps instead of polling.
     suspended: bool,
     fps_limiter: FramerateLimiter,
@@ -269,6 +271,7 @@ impl App {
             installed_window: None,
             core,
             occluded: false,
+            last_input: Instant::now(),
             suspended: true,
             #[cfg(mobile)]
             soft_keyboard: false,
@@ -518,18 +521,61 @@ impl App {
         self.phase.get().world_has_pointer()
     }
 
-    /// The effective framerate cap, or `None` for uncapped, matching vanilla
-    /// `FramerateLimitTracker`: occluded/iconified → 10, the title/menu (no
-    /// world) → 60, otherwise the Max Framerate setting (uncapped at its top).
-    fn effective_framerate_limit(&self) -> Option<u32> {
-        if self.occluded {
-            Some(10)
-        } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
-            Some(60)
-        } else {
-            let max = self.core.menu.max_framerate;
-            (max < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max)
-        }
+    /// The effective framerate cap, or `None` for uncapped
+    /// ([`framerate_limit`]).
+    fn effective_framerate_limit(&mut self) -> Option<u32> {
+        let unfocused = self.core.unfocused_since.is_some();
+        // Vanilla `FramerateLimitTracker.getThrottleReason`: iconified, or
+        // unfocused in exclusive fullscreen. An occluded window draws for
+        // nobody either.
+        let iconified = self.occluded
+            || self.phase.gfx_mut().is_some_and(|gfx| {
+                gfx.window.is_minimized() == Some(true)
+                    || unfocused
+                        && matches!(
+                            gfx.window.fullscreen(),
+                            Some(winit::window::Fullscreen::Exclusive(_))
+                        )
+            });
+        let (in_level, benchmarking) = match self.phase.get() {
+            AppPhase::InGame { game, .. } => (true, game.chunk_load_bench.is_some()),
+            _ => (false, false),
+        };
+        // A script or a benchmark runs without input and isn't idle.
+        let attended = !(self.core.test_window || self.chunk_bench.is_some() || benchmarking);
+        let limits_afk =
+            self.core.menu.inactivity_fps_limit == crate::ui::menu::InactivityFpsLimit::Afk;
+        let idle = (attended && limits_afk).then(|| {
+            self.last_input
+                .max(self.core.input.gamepad_used_at())
+                .elapsed()
+        });
+        framerate_limit(iconified, idle, in_level, self.core.menu.max_framerate)
+    }
+}
+
+/// Vanilla `FramerateLimitTracker.getFramerateLimit`: 10 fps iconified or
+/// after ten minutes without input (`idle`, `None` where AFK doesn't limit),
+/// the Max Framerate setting capped at 30 after one minute, 60 in the menus
+/// outside a level, and otherwise the setting, `None` at its uncapped top.
+fn framerate_limit(
+    iconified: bool,
+    idle: Option<Duration>,
+    in_level: bool,
+    max_framerate: u32,
+) -> Option<u32> {
+    const AFK: Duration = Duration::from_secs(60);
+    const LONG_AFK: Duration = Duration::from_secs(600);
+
+    let idle = idle.unwrap_or_default();
+    if iconified || idle > LONG_AFK {
+        Some(10)
+    } else if idle > AFK {
+        Some(max_framerate.min(30))
+    } else if !in_level {
+        Some(60)
+    } else {
+        (max_framerate < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max_framerate)
     }
 }
 
@@ -543,6 +589,7 @@ fn is_user_input(event: &WindowEvent) -> bool {
             | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::Touch(_)
+            | WindowEvent::DroppedFile(_)
     )
 }
 
@@ -767,6 +814,14 @@ impl ApplicationHandler for App {
         // mouse and keys passing over it mustn't steer a script.
         if self.core.test_window && is_user_input(&event) {
             return;
+        }
+        // Vanilla `MouseHandler.handleAccumulatedMovement` counts the mouse
+        // moving only while the window is active.
+        if is_user_input(&event)
+            && (self.core.unfocused_since.is_none()
+                || !matches!(event, WindowEvent::CursorMoved { .. }))
+        {
+            self.last_input = Instant::now();
         }
         let binding_capture = self.core.menu.binding_capture_active()
             && self.core.unfocused_since.is_none()
@@ -1451,6 +1506,7 @@ impl ApplicationHandler for App {
             && self.world_has_pointer()
         {
             self.core.input.on_mouse_motion(delta);
+            self.last_input = Instant::now();
         }
     }
 
@@ -1492,5 +1548,30 @@ impl ApplicationHandler for App {
         } else {
             winit::event_loop::ControlFlow::Wait
         });
+    }
+}
+
+#[cfg(test)]
+mod framerate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn follows_vanillas_throttle_order() {
+        let secs = |s| Some(Duration::from_secs(s));
+        let unlimited = crate::ui::menu::MAX_FRAMERATE_UNLIMITED;
+
+        assert_eq!(framerate_limit(false, secs(0), true, 120), Some(120));
+        assert_eq!(framerate_limit(false, secs(0), true, unlimited), None);
+        assert_eq!(framerate_limit(false, secs(0), false, 120), Some(60));
+
+        assert_eq!(framerate_limit(false, secs(60), true, 120), Some(120));
+        assert_eq!(framerate_limit(false, secs(61), true, 120), Some(30));
+        assert_eq!(framerate_limit(false, secs(61), true, 20), Some(20));
+        assert_eq!(framerate_limit(false, secs(61), true, unlimited), Some(30));
+        assert_eq!(framerate_limit(false, secs(61), false, 120), Some(30));
+        assert_eq!(framerate_limit(false, secs(601), true, 120), Some(10));
+
+        assert_eq!(framerate_limit(true, secs(0), true, unlimited), Some(10));
+        assert_eq!(framerate_limit(false, None, true, 120), Some(120));
     }
 }

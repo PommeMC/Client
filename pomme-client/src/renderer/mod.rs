@@ -268,6 +268,13 @@ pub struct RenderTimings {
     pub present_ms: f32,
 }
 
+/// Distant terrain's GPU state, there only while the option draws: its
+/// arenas and pipelines run to several hundred megabytes.
+struct Distant {
+    buffers: distant::gpu::DistantBuffers,
+    pipeline: pipelines::distant::DistantPipeline,
+}
+
 pub struct Renderer {
     ctx: rhi::backend::Context,
     swapchain: rhi::backend::Swapchain,
@@ -318,8 +325,12 @@ pub struct Renderer {
     /// What the selected pack reads about the player's surroundings.
     pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
-    distant_buffers: distant::gpu::DistantBuffers,
-    distant_pipeline: pipelines::distant::DistantPipeline,
+    distant: Option<Distant>,
+    /// Each drawn column's compiled sections and bottom section, and what the
+    /// occlusion graph last showed: the bounds distant terrain starts from
+    /// when it turns on.
+    distant_columns: HashMap<ChunkPos, (u32, i32)>,
+    chunk_visibility: Arc<HashMap<ChunkPos, u32>>,
     frames: rhi::backend::Frames,
     gpu_timer: Option<rhi::backend::GpuTimer>,
     screenshot: screenshot::ScreenshotCapture,
@@ -563,14 +574,6 @@ impl Renderer {
         );
 
         let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
-        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device, ctx.indirect_draw);
-        let distant_pipeline = pipelines::distant::DistantPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            &lightmap,
-            &distant_buffers,
-            ctx.indirect_draw.fragment_stores,
-        );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -646,8 +649,9 @@ impl Renderer {
             gui_item_atlas,
             font_options,
             chunk_buffers,
-            distant_buffers,
-            distant_pipeline,
+            distant: None,
+            distant_columns: HashMap::new(),
+            chunk_visibility: Arc::default(),
             frames,
             gpu_timer,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
@@ -1107,7 +1111,9 @@ impl Renderer {
             self.vsync,
         )?;
         // Its targets read the old swapchain's depth.
-        self.distant_pipeline.drop_targets(&self.ctx.device);
+        if let Some(distant) = &mut self.distant {
+            distant.pipeline.drop_targets(&self.ctx.device);
+        }
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -1123,7 +1129,9 @@ impl Renderer {
             self.chunk_pipeline.destroy(&self.ctx.device);
             self.chunk_pipeline =
                 ChunkPipeline::new(&self.ctx.device, targets, &self.atlas, &self.lightmap);
-            self.distant_pipeline.rebuild(&self.ctx.device, targets);
+            if let Some(distant) = &mut self.distant {
+                distant.pipeline.rebuild(&self.ctx.device, targets);
+            }
 
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1483,7 +1491,10 @@ impl Renderer {
     /// chunk buffer store, which omits occluded sections from the GPU cull,
     /// and to the distant bounds, which follow what it draws.
     pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
-        self.distant_buffers.set_visibility(&self.ctx.device, &vis);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.set_visibility(&self.ctx.device, &vis);
+        }
+        self.chunk_visibility = vis.clone();
         self.chunk_buffers.set_chunk_visibility(vis);
     }
 
@@ -1535,7 +1546,9 @@ impl Renderer {
         &mut self,
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
     ) {
-        self.distant_buffers.upload(updates);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.upload(updates);
+        }
     }
 
     /// The distant sections the last frame's traversal asked for, and those
@@ -1546,42 +1559,99 @@ impl Renderer {
         Vec<distant::section::SectionKey>,
         Vec<distant::section::SectionKey>,
     ) {
-        self.distant_buffers.take_requests()
+        self.distant
+            .as_mut()
+            .map(|distant| distant.buffers.take_requests())
+            .unwrap_or_default()
     }
 
-    /// Where distant terrain draws from and how far; `None` for not at all.
+    /// Where distant terrain draws from and how far; `None` for not at all,
+    /// which frees its GPU state until it next draws.
     pub(crate) fn set_distant_view(&mut self, view: Option<distant::gpu::View>) {
-        self.distant_buffers.set_view(view);
+        let Some(view) = view else {
+            if self.distant.is_some() {
+                self.wait_for_all_frames();
+                self.destroy_distant();
+            }
+            return;
+        };
+        let distant = match self.distant.take() {
+            Some(distant) => distant,
+            None => self.create_distant(),
+        };
+        self.distant.insert(distant).buffers.set_view(Some(view));
+    }
+
+    fn create_distant(&self) -> Distant {
+        let device = &self.ctx.device;
+        let mut buffers = distant::gpu::DistantBuffers::new(device, self.ctx.indirect_draw);
+        let pipeline = pipelines::distant::DistantPipeline::new(
+            device,
+            self.swapchain.targets(),
+            &self.lightmap,
+            &buffers,
+            self.ctx.indirect_draw.fragment_stores,
+        );
+        for (&pos, &(sections, min_section)) in &self.distant_columns {
+            buffers.set_column_sections(device, pos, sections, min_section);
+        }
+        buffers.set_visibility(device, &self.chunk_visibility);
+        Distant { buffers, pipeline }
+    }
+
+    fn destroy_distant(&mut self) {
+        if let Some(mut distant) = self.distant.take() {
+            distant.buffers.destroy(&self.ctx.device);
+            distant.pipeline.destroy(&self.ctx.device);
+        }
     }
 
     /// Which of column `pos`'s sections draw (a bit per section from
     /// `min_section` up), where distant terrain gives way to them.
     pub fn set_distant_column_sections(&mut self, pos: ChunkPos, sections: u32, min_section: i32) {
-        self.distant_buffers
-            .set_column_sections(&self.ctx.device, pos, sections, min_section);
+        if sections == 0 {
+            self.distant_columns.remove(&pos);
+        } else {
+            self.distant_columns.insert(pos, (sections, min_section));
+        }
+        if let Some(distant) = &mut self.distant {
+            distant
+                .buffers
+                .set_column_sections(&self.ctx.device, pos, sections, min_section);
+        }
     }
 
     /// Drops all distant terrain and forgets every loaded chunk, for a new
     /// level.
     pub fn reset_distant(&mut self) {
-        self.wait_for_all_frames();
-        self.distant_buffers.clear();
-        self.distant_buffers.clear_bounds();
+        self.distant_columns.clear();
+        if let Some(distant) = &mut self.distant {
+            self.frames.wait_all(&self.ctx.device);
+            distant.buffers.clear();
+            distant.buffers.clear_bounds();
+        }
     }
 
     /// Whether distant terrain is uploaded at block column `x`/`z`.
     #[cfg(feature = "test-harness")]
     pub fn has_distant_column(&self, x: i32, z: i32) -> bool {
-        self.distant_buffers.has_column(x, z)
+        self.distant
+            .as_ref()
+            .is_some_and(|distant| distant.buffers.has_column(x, z))
     }
 
-    /// Whether distant terrain out to `chunks` draws this frame: on, and
-    /// the vanilla terrain path drawing (not a shader pack's, nor the
-    /// top-down benchmark view).
+    /// Whether the vanilla terrain path draws, not a shader pack's: distant
+    /// terrain's GPU state is only worth holding while it does.
+    pub fn distant_terrain_path(&self) -> bool {
+        self.shader_pack.is_none() && self.chunk_buffers.format() == TerrainFormat::Vanilla
+    }
+
+    /// Whether distant terrain out to `chunks` draws this frame: on, the
+    /// vanilla terrain path drawing, and not the top-down benchmark view.
     fn distant_draws(&self, chunks: u32) -> bool {
         chunks > 0
-            && self.shader_pack.is_none()
-            && self.chunk_buffers.format() == TerrainFormat::Vanilla
+            && self.distant.is_some()
+            && self.distant_terrain_path()
             && self.camera.top_down().is_none()
     }
 
@@ -2091,7 +2161,9 @@ impl Renderer {
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
-        self.distant_buffers.begin_frame(&self.ctx.device, frame);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.begin_frame(&self.ctx.device, frame);
+        }
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -2117,7 +2189,9 @@ impl Renderer {
             let (fog_distance, haze_scale) = self.distant_fog(render_distance, distant_terrain);
             let uniform =
                 CameraUniform::new(&self.camera, sky, fog_distance, eyes_in_water, haze_scale);
-            self.distant_pipeline.update_camera(frame, &uniform);
+            if let Some(distant) = &mut self.distant {
+                distant.pipeline.update_camera(frame, &uniform);
+            }
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.block_outline_pipeline.update_camera(frame, &uniform);
@@ -2141,8 +2215,10 @@ impl Renderer {
             timer.begin_frame(&encoder, frame);
         }
         self.atlas.record_animation_upload(&encoder, frame);
-        self.distant_buffers.record_model_upload(&encoder, frame);
-        self.distant_buffers.record_uploads(&encoder, frame);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.record_model_upload(&encoder, frame);
+            distant.buffers.record_uploads(&encoder, frame);
+        }
         self.lightmap.record(&self.ctx.device, &encoder);
         self.gpu_stamp(&encoder, frame, "uploads");
 
@@ -2463,22 +2539,23 @@ impl Renderer {
                     self.gpu_stamp(&encoder, frame, "terrain");
 
                     let eye = self.camera_render_position();
-                    let distant = self.distant_draws(*distant_terrain);
-                    if distant {
-                        self.distant_buffers.update_roots(eye);
+                    let draws = self.distant_draws(*distant_terrain);
+                    let mut distant = self.distant.as_mut().filter(|_| draws);
+                    if let Some(distant) = &mut distant {
+                        distant.buffers.update_roots(eye);
                     }
                     // Distant terrain draws after the chunks' solid and cutout
                     // passes: bounded by their depth, into its own image, then
                     // laid into the frame. Nothing to traverse means nothing
                     // to draw or request.
-                    if distant && self.distant_buffers.top_count() > 0 {
+                    if let Some(distant) = distant.filter(|d| d.buffers.top_count() > 0) {
                         let extent = self.swapchain.extent;
                         pass.end();
-                        self.distant_pipeline.render(
+                        distant.pipeline.render(
                             &self.ctx.device,
                             &encoder,
                             frame,
-                            &mut self.distant_buffers,
+                            &mut distant.buffers,
                             &self.camera,
                             eye,
                             *render_distance,
@@ -2494,7 +2571,7 @@ impl Renderer {
                                 rhi::LoadOp::Load,
                             ),
                         );
-                        self.distant_pipeline.composite(
+                        distant.pipeline.composite(
                             &mut pass,
                             frame,
                             &self.camera,
@@ -3229,8 +3306,7 @@ impl Drop for Renderer {
         }
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
-        self.distant_buffers.destroy(&self.ctx.device);
-        self.distant_pipeline.destroy(&self.ctx.device);
+        self.destroy_distant();
         self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);

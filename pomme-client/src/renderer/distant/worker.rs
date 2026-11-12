@@ -113,6 +113,12 @@ fn next(captures: &Mutex<CaptureQueue>) -> Option<(Arc<str>, Capture)> {
 /// since the renderer's requests are what's on screen.
 enum Job {
     Colors(Arc<DistantColors>),
+    /// The renderer's distant state starts over with the option turned on:
+    /// it holds no sections, models or tints. Updates carry the reset they
+    /// follow, so a batch meshed for the state before is dropped.
+    RendererReset(u32),
+    /// The option turned off: nothing more to mesh until it's back.
+    RendererGone,
     View(View),
     /// Sections the renderer wants meshed, and kept meshed as they change.
     Request(Vec<SectionKey>),
@@ -146,6 +152,7 @@ pub(crate) struct DistantUpdate {
     pub sections: Vec<BuiltSection>,
     pub tiles: Vec<ModelTile>,
     pub tints: Option<Vec<u32>>,
+    reset: u32,
 }
 
 /// The game's handle on the thread. Dropping it lets the thread finish
@@ -166,6 +173,8 @@ pub(crate) struct DistantTerrain {
     /// Counts the folders switched from, so captures taken under one never
     /// land in the next.
     generation: u32,
+    /// Counts the times the option turned on ([`Job::RendererReset`]).
+    resets: u32,
 }
 
 impl DistantTerrain {
@@ -197,6 +206,7 @@ impl DistantTerrain {
             cache_root,
             cache: None,
             generation: 0,
+            resets: 0,
         }
     }
 
@@ -281,7 +291,9 @@ impl DistantTerrain {
     /// caller can hand over the columns lit while it was off.
     pub fn set_view(&mut self, dimension: &str, x: f64, z: f64, chunks: u32) -> bool {
         if chunks == 0 {
-            self.view = None;
+            if self.view.take().is_some() {
+                let _ = self.jobs.send(Job::RendererGone);
+            }
             return false;
         }
         let turned_on = self.view.is_none();
@@ -296,6 +308,10 @@ impl DistantTerrain {
                 && last.radius == view.radius
                 && (last.x - x).hypot(last.z - z) < VIEW_STEP
         });
+        if turned_on {
+            self.resets += 1;
+            let _ = self.jobs.send(Job::RendererReset(self.resets));
+        }
         if !unchanged {
             self.view = Some(view.clone());
             let _ = self.jobs.send(Job::View(view));
@@ -312,7 +328,9 @@ impl DistantTerrain {
     }
 
     pub fn drain(&self) -> impl Iterator<Item = DistantUpdate> + '_ {
-        self.updates.try_iter()
+        self.updates
+            .try_iter()
+            .filter(|update| update.reset == self.resets)
     }
 }
 
@@ -529,6 +547,8 @@ struct Worker {
     meshed: HashSet<SectionKey>,
     /// Whether the renderer has the current colours' biome tints.
     tints_sent: bool,
+    /// The renderer's last [`Job::RendererReset`].
+    reset: u32,
 }
 
 impl Worker {
@@ -550,6 +570,7 @@ impl Worker {
             dirty: HashMap::new(),
             meshed: HashSet::new(),
             tints_sent: false,
+            reset: 0,
         }
     }
 
@@ -645,6 +666,14 @@ impl Worker {
                 self.tints_sent = false;
                 self.remesh_all();
             }
+            Some(Job::RendererReset(reset)) => {
+                self.reset = reset;
+                self.models = ModelFactory::new();
+                self.tints_sent = false;
+                self.meshed.clear();
+                self.dirty.clear();
+            }
+            Some(Job::RendererGone) => self.view = None,
             Some(Job::View(view)) => {
                 if self
                     .view
@@ -730,6 +759,7 @@ impl Worker {
             sections,
             tiles: self.models.take_tiles(),
             tints: (!std::mem::replace(&mut self.tints_sent, true)).then(|| self.colors.tint_lut()),
+            reset: self.reset,
         });
     }
 }

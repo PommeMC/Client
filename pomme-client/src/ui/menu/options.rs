@@ -141,6 +141,7 @@ const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
 const CHUNK_FADE: &str = "Chunk Fade:";
+const INACTIVITY_FPS_LIMIT: &str = "Reduce fps when:";
 
 /// Vanilla `genericValueOrOffLabel`.
 fn menu_background_blur_label(radius: u8) -> String {
@@ -406,6 +407,10 @@ impl MainMenu {
             "VSync: OFF"
         };
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
+        let inactivity_label = format!(
+            "{INACTIVITY_FPS_LIMIT} {}",
+            self.inactivity_fps_limit.label()
+        );
         let shader_label = format!(
             "Shader Pack: {}",
             self.shader_pack.as_deref().unwrap_or("OFF")
@@ -433,7 +438,7 @@ impl MainMenu {
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
             OptRow::Pair(&mf, vsync_label),
-            OptRow::Pair("Inactivity FPS Limit: 1 minute", &gui_label),
+            OptRow::Pair(&inactivity_label, &gui_label),
             OptRow::Pair(fullscreen_label, "Exclusive Fullscreen: OFF"),
             OptRow::Pair(&brightness, "Graphics Backend: Default"),
             OptRow::Header("Quality"),
@@ -475,7 +480,6 @@ impl MainMenu {
         ];
         let disabled = &[
             "Fullscreen Resolution:",
-            "Inactivity FPS Limit:",
             "Exclusive Fullscreen:",
             "Graphics Backend:",
             "Graphics:",
@@ -493,10 +497,13 @@ impl MainMenu {
             "Max Anisotropy:",
             "Weather Radius:",
         ];
-        let tooltips: &[(&str, &str)] = &[(
-            CHUNK_FADE,
-            "How long in seconds chunks should fade in when they're first rendered, if at all.",
-        )];
+        let tooltips: &[(&str, &str)] = &[
+            (INACTIVITY_FPS_LIMIT, self.inactivity_fps_limit.tooltip()),
+            (
+                CHUNK_FADE,
+                "How long in seconds chunks should fade in when they're first rendered, if at all.",
+            ),
+        ];
         self.build_options_grid(
             sw,
             sh,
@@ -1573,6 +1580,10 @@ impl MainMenu {
                     if label.starts_with("Shader Pack:") {
                         self.shader_pack =
                             next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
+                        self.save_settings(key_bindings);
+                    }
+                    if label.starts_with(INACTIVITY_FPS_LIMIT) {
+                        self.inactivity_fps_limit = self.inactivity_fps_limit.cycle();
                         self.save_settings(key_bindings);
                     }
                     if label.starts_with("Attack Indicator:") {

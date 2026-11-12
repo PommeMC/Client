@@ -153,6 +153,8 @@ pub struct OptionSet {
     pub show_subtitles: Option<bool>,
     /// Chunk Fade in seconds, 0 (none) to 2, in twentieths.
     pub chunk_fade: Option<f32>,
+    /// Reduce fps when: `minimized` or `afk`.
+    pub inactivity_fps_limit: Option<crate::ui::menu::InactivityFpsLimit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]

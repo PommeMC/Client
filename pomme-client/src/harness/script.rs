@@ -1067,6 +1067,7 @@ mod tests {
                 resource_pack: None,
                 show_subtitles: None,
                 chunk_fade: None,
+                inactivity_fps_limit: None,
             }))
         );
         assert_eq!(

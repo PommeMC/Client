@@ -210,9 +210,71 @@ const ADV_CULL_MIN_DIST_SQ: f64 = 3600.0;
 
 /// BFS node: the faces this section was entered from (`source`) and the cone of
 /// travel directions taken to reach it (`cone`, for backtrack prevention).
+#[derive(Clone, Copy)]
 struct Node {
     source: u8,
     cone: u8,
+}
+
+/// The walk's nodes and each column's visible sections, in grids over the
+/// render distance around the camera. The walk reads and writes a node per
+/// step and per ray-march sample, which made a map of them its main cost.
+struct WalkGrid {
+    /// The grid's lowest column.
+    corner: (i32, i32),
+    /// Columns along each side.
+    side: i32,
+    section_count: i32,
+    nodes: Vec<Option<Node>>,
+    visible: Vec<u32>,
+}
+
+impl WalkGrid {
+    fn new(cam_col: ChunkPos, render_distance: i32, section_count: i32) -> Self {
+        let side = 2 * render_distance + 1;
+        let columns = (side * side) as usize;
+        Self {
+            corner: (cam_col.x - render_distance, cam_col.z - render_distance),
+            side,
+            section_count,
+            nodes: vec![None; columns * section_count as usize],
+            visible: vec![0; columns],
+        }
+    }
+
+    /// The section's slot in `nodes`, or `None` outside the grid.
+    fn section(&self, (x, si, z): (i32, i32, i32)) -> Option<usize> {
+        let (dx, dz) = (x - self.corner.0, z - self.corner.1);
+        let inside = (0..self.side).contains(&dx)
+            && (0..self.side).contains(&dz)
+            && (0..self.section_count).contains(&si);
+        inside.then(|| ((dx * self.side + dz) * self.section_count + si) as usize)
+    }
+
+    fn reached(&self, section: (i32, i32, i32)) -> bool {
+        self.section(section)
+            .is_some_and(|slot| self.nodes[slot].is_some())
+    }
+
+    /// Reaches the section at `slot` from the camera, visible from then on.
+    fn insert(&mut self, slot: usize, node: Node) {
+        self.nodes[slot] = Some(node);
+        let sections = self.section_count as usize;
+        self.visible[slot / sections] |= 1 << (slot % sections);
+    }
+
+    fn into_visible(self) -> HashMap<ChunkPos, u32> {
+        let Self { corner, side, .. } = self;
+        self.visible
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, mask)| mask != 0)
+            .map(|(column, mask)| {
+                let (dx, dz) = (column as i32 / side, column as i32 % side);
+                (ChunkPos::new(corner.0 + dx, corner.1 + dz), mask)
+            })
+            .collect()
+    }
 }
 
 /// Vanilla's `SectionOcclusionGraph` walk: flood the section grid outward from
@@ -232,8 +294,7 @@ pub fn compute_visible_mask(
     section_count: i32,
     render_distance: i32,
 ) -> HashMap<ChunkPos, u32> {
-    let mut visible: HashMap<ChunkPos, u32> = HashMap::new();
-    let mut nodes: HashMap<(i32, i32, i32), Node> = HashMap::new();
+    let mut grid = WalkGrid::new(cam_col, render_distance, section_count);
     let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
 
     let cam_center = DVec3::new(
@@ -245,12 +306,13 @@ pub fn compute_visible_mask(
     let world_max_y = (min_y + section_count * 16) as f64;
 
     let start = (cam_col.x, cam_si.clamp(0, section_count - 1), cam_col.z);
-    nodes.insert(start, Node { source: 0, cone: 0 });
+    let start_slot = grid.section(start).expect("the camera is in the grid");
+    grid.insert(start_slot, Node { source: 0, cone: 0 });
     queue.push_back(start);
-    visible.insert(ChunkPos::new(start.0, start.2), 1u32 << start.1);
 
     while let Some((x, si, z)) = queue.pop_front() {
-        let Node { source, cone } = nodes[&(x, si, z)];
+        let slot = grid.section((x, si, z)).expect("queued from the grid");
+        let Node { source, cone } = grid.nodes[slot].expect("queued once reached");
         let vis = section_vis
             .get(&(ChunkPos::new(x, z), si))
             .copied()
@@ -277,7 +339,7 @@ pub fn compute_visible_mask(
             // blocked, so don't propagate.
             if distant
                 && ray_occluded(
-                    &nodes,
+                    &grid,
                     eye,
                     cam_center,
                     face,
@@ -290,30 +352,26 @@ pub fn compute_visible_mask(
                 continue;
             }
             let (dx, dy, dz) = face.offset();
-            let (nx, nsi, nz) = (x + dx, si + dy, z + dz);
-            if nsi < 0 || nsi >= section_count {
+            let next = (x + dx, si + dy, z + dz);
+            // Outside the world's height or the render distance.
+            let Some(next_slot) = grid.section(next) else {
                 continue;
-            }
-            if (nx - cam_col.x).abs() > render_distance || (nz - cam_col.z).abs() > render_distance
-            {
-                continue;
-            }
-            if let Some(existing) = nodes.get_mut(&(nx, nsi, nz)) {
+            };
+            if let Some(existing) = &mut grid.nodes[next_slot] {
                 existing.source |= face.bit();
                 continue;
             }
-            nodes.insert(
-                (nx, nsi, nz),
+            grid.insert(
+                next_slot,
                 Node {
                     source: face.bit(),
                     cone: cone | face.bit(),
                 },
             );
-            *visible.entry(ChunkPos::new(nx, nz)).or_insert(0) |= 1u32 << nsi;
-            queue.push_back((nx, nsi, nz));
+            queue.push_back(next);
         }
     }
-    visible
+    grid.into_visible()
 }
 
 /// Step from the distant section's corner facing the camera toward the camera
@@ -321,7 +379,7 @@ pub fn compute_visible_mask(
 /// hasn't reached (occluded or unloaded), the line of sight is blocked.
 #[allow(clippy::too_many_arguments)]
 fn ray_occluded(
-    nodes: &HashMap<(i32, i32, i32), Node>,
+    grid: &WalkGrid,
     eye: DVec3,
     cam_center: DVec3,
     face: Face,
@@ -352,7 +410,7 @@ fn ray_occluded(
         let cx = (check.x / 16.0).floor() as i32;
         let csi = ((check.y - min_y as f64) / 16.0).floor() as i32;
         let cz = (check.z / 16.0).floor() as i32;
-        if !nodes.contains_key(&(cx, csi, cz)) {
+        if !grid.reached((cx, csi, cz)) {
             return true;
         }
     }
