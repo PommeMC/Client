@@ -30,7 +30,6 @@ pub(crate) enum FaceCover {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RenderProps {
     pub(crate) mesh_kind: MeshKind,
-    /// Vanilla `Properties.emissiveRendering`.
     pub(crate) emissive_rendering: bool,
     /// Whether vanilla `getShadeBrightness` gives 0.2 rather than 1.0.
     shades: bool,
@@ -63,7 +62,6 @@ impl RenderProps {
         }
     }
 
-    /// Vanilla `getShadeBrightness`.
     pub(crate) fn shade_brightness(self) -> f32 {
         if self.shades { 0.2 } else { 1.0 }
     }
