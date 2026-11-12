@@ -113,6 +113,9 @@ fn next(captures: &Mutex<CaptureQueue>) -> Option<(Arc<str>, Capture)> {
 /// since the renderer's requests are what's on screen.
 enum Job {
     Colors(Arc<DistantColors>),
+    /// The renderer's distant state starts over with the option turned on:
+    /// it holds no sections, models or tints.
+    RendererReset,
     View(View),
     /// Sections the renderer wants meshed, and kept meshed as they change.
     Request(Vec<SectionKey>),
@@ -296,6 +299,9 @@ impl DistantTerrain {
                 && last.radius == view.radius
                 && (last.x - x).hypot(last.z - z) < VIEW_STEP
         });
+        if turned_on {
+            let _ = self.jobs.send(Job::RendererReset);
+        }
         if !unchanged {
             self.view = Some(view.clone());
             let _ = self.jobs.send(Job::View(view));
@@ -644,6 +650,12 @@ impl Worker {
                 self.colors = colors;
                 self.tints_sent = false;
                 self.remesh_all();
+            }
+            Some(Job::RendererReset) => {
+                self.models = ModelFactory::new();
+                self.tints_sent = false;
+                self.meshed.clear();
+                self.dirty.clear();
             }
             Some(Job::View(view)) => {
                 if self
