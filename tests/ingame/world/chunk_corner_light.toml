@@ -1,6 +1,8 @@
 # A sealed room around the corner where four chunks meet: in the dark, the
 # floor tiles at the corner shade like the rest, as their smooth lighting reads
 # the diagonal column's light too.
+# TODO: nothing here fails without that; only compare.py against vanilla's
+# screenshot shows it, until the harness can check a face's light.
 
 [[step]]
 wait_ms = 2000
