@@ -1990,7 +1990,11 @@ pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
 pub enum GameUpdateResult {
     None,
     ManualDisconnect,
-    Disconnected { reason: String },
+    /// The death screen's Title Screen, which skips the server list.
+    ExitToTitle,
+    Disconnected {
+        reason: String,
+    },
 }
 
 enum ResultKind {
@@ -5436,7 +5440,7 @@ pub fn update_game(
             core.send_respawn(connection, game);
         }
         DeathAction::TitleScreen => {
-            return GameUpdateResult::ManualDisconnect;
+            return GameUpdateResult::ExitToTitle;
         }
         DeathAction::ShowConfirm => {
             game.death_confirm = true;

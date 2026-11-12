@@ -980,8 +980,8 @@ impl InputState {
     pub fn key_mods(&self) -> crate::ui::text_edit::KeyMods {
         let state = self.modifiers.state();
         crate::ui::text_edit::KeyMods {
-            shift: state.shift_key(),
-            ctrl: state.control_key(),
+            shift: self.shift_held(),
+            ctrl: self.ctrl_held(),
             alt: state.alt_key(),
             super_key: state.super_key(),
         }

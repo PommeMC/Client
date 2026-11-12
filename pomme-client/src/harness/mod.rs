@@ -2,6 +2,7 @@
 //! scripts and a localhost socket that drive the client through the same
 //! paths as its UI, for in-game integration tests.
 
+pub(crate) mod buttons;
 mod exec;
 mod protocol;
 mod script;
@@ -54,6 +55,7 @@ impl Harness {
 
     /// Runs once per frame, after the phase update.
     pub fn tick(&mut self, core: &mut AppCore, phase: &mut AppPhase) {
+        buttons::end_frame();
         if let Some(socket) = &self.socket {
             for (command, reply) in socket.try_iter() {
                 match exec::run(&command, core, phase) {

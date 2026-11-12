@@ -97,7 +97,9 @@ a test exercises the real code.
 ## Writing a script
 
 A script is a list of `[[step]]` tables, run in order once the client is in
-game. Each step has exactly one action:
+game. After it leaves the game (the pause menu's Disconnect), only steps that
+work on the title screens may follow: waits, screenshots, input, `cursor_to_button`
+and `screen` checks. Each step has exactly one action:
 
 ```toml
 [[step]]
@@ -130,6 +132,9 @@ hover = { slot = 36 }                         # creative item tab: hotbar slot
                                               # the target's centre
 [[step]]
 cursor = [2, 2]                               # cursor to a point, GUI px
+[[step]]
+cursor_to_button = "Disconnect"               # cursor to the middle of the
+                                              # button with this label
 
 [[step]]
 scroll = -2                                   # mouse wheel over the open
@@ -219,6 +224,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space nearer than the eviction frontier, or while another arena fits), and no two of the chunk arenas' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free, and `terrain = "evicted"` for far columns waiting for room with the eye's own column drawn |
 | Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
 | The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none), `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) and `using_item` (an item held in use, such as a raised shield) |
+| The screen outside a world | `screen` (`title`, `server_list`, `direct_connect`), optional `address` (the Direct Connection field) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `sign` (the sign editor), `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | A scrolling list | `list`: where an options screen's or Key Binds' list sits, `top`, `end` or `middle` (other lists don't report it yet) |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom), `tab_list` (every listed player as `{ name, game_mode? }`, in tab order), `chat_open` and `action_bar` (`""` when none shows) |
@@ -246,4 +252,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).

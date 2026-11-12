@@ -146,6 +146,9 @@ struct Settings {
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
     japanese_glyph_variants: bool,
+    /// The Direct Connect address, as it was when the screen last closed.
+    #[serde(default)]
+    last_server: String,
 }
 
 fn default_fov() -> u32 {
@@ -306,6 +309,7 @@ impl Default for Settings {
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
+            last_server: String::new(),
         }
     }
 }
@@ -883,7 +887,7 @@ impl MainMenu {
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
-            last_mp_ip: String::new(),
+            last_mp_ip: settings.last_server,
             ping_results,
             ping_generation: Default::default(),
             access_token,
@@ -1239,6 +1243,7 @@ impl MainMenu {
                 chat: self.chat_options,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
+                last_server: self.last_mp_ip.clone(),
             },
         )
         .is_err();
@@ -1473,6 +1478,17 @@ impl MainMenu {
             .collect()
     }
 
+    /// The screen a player's own disconnect leaves them on: the title screen
+    /// `to_title`, else the server list.
+    pub fn show_after_disconnect(&mut self, to_title: bool, key_bindings: &KeyBindings) {
+        let screen = if to_title {
+            Screen::Main
+        } else {
+            Screen::ServerList
+        };
+        self.set_screen(screen, key_bindings);
+    }
+
     pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
         self.set_screen(Screen::Disconnected(reason), key_bindings);
     }
@@ -1670,6 +1686,23 @@ impl MainMenu {
         self.ping_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.ping_results.write().clear();
+    }
+}
+
+#[cfg(feature = "test-harness")]
+impl MainMenu {
+    /// The open screen's name, as the `screen` expect checks it.
+    pub(crate) fn harness_screen(&self) -> &'static str {
+        match self.screen {
+            Screen::Main => "title",
+            Screen::ServerList => "server_list",
+            Screen::DirectConnect => "direct_connect",
+            _ => "other",
+        }
+    }
+
+    pub(crate) fn harness_address(&self) -> &str {
+        self.edit_address.value()
     }
 }
 
