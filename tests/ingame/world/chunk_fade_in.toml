@@ -1,0 +1,35 @@
+# New chunks fade in over the Chunk Fade time, except within 16 blocks of the
+# camera, which shows at once and blends to the fade by 32. Looking straight
+# down from 20 blocks up puts the ground in that blend while it fades.
+# TODO: nothing here fails without the blend; only compare.py against
+# vanilla's screenshots shows it.
+
+[[step]]
+option = { chunk_fade = 2.0 }
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+chat = "/tp @s 600 -40 600 0 90"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "fading"
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "faded"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+option = { chunk_fade = 0.75 }

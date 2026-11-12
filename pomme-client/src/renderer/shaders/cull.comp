@@ -2,9 +2,6 @@
 
 layout(local_size_x = 64) in;
 
-// Vanilla's near radius, as `chunk/buffer.rs` has it.
-const float NEARBY_DIST_SQ = 768.0;
-
 struct ChunkMeta {
     vec3 aabb_min;
     // The section's arena: its draw count and where its draws start.
@@ -142,13 +139,11 @@ void main() {
 
     ivec3 cam = ivec3(cam_x, cam_y, cam_z);
     vec3 frac = vec3(frac_x, frac_y, frac_z);
-    // Near columns appear at once; the rest ramp in from their upload.
+    // Vanilla `RenderSection.getVisibility`; `chunk.vert` keeps what's near
+    // the camera fully visible.
     float visibility = 1.0;
     if (m.uploaded_ms != 0u && fade_ms != 0u) {
-        vec2 center = vec2(m.origin.xz - cam.xz) - frac.xz + 8.0;
-        if (dot(center, center) >= NEARBY_DIST_SQ) {
-            visibility = min(float(now_ms - m.uploaded_ms) / float(fade_ms), 1.0);
-        }
+        visibility = min(float(now_ms - m.uploaded_ms) / float(fade_ms), 1.0);
     }
     chunks[idx].visibility = floatBitsToUint(visibility);
 
