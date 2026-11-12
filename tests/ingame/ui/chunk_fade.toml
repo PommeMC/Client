@@ -1,0 +1,97 @@
+# Video Settings' Chunk Fade slider: 0.75 seconds by default, None once
+# dragged to its left end.
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+# Video Settings...
+[[step]]
+cursor = [133, 115]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+scroll = -40
+
+[[step]]
+expect = { list = "end" }
+
+[[step]]
+screenshot = "default"
+
+[[step]]
+cursor = [300, 194]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+cursor = [200, 194]
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+# Off the slider, so neither client draws it hovered.
+[[step]]
+cursor = [2, 2]
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+screenshot = "none"
+
+# Done, then Done again on Options.
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+

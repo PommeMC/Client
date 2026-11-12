@@ -766,6 +766,10 @@ impl Renderer {
         self.menu_blur_radius = radius;
     }
 
+    pub fn set_chunk_fade_ms(&mut self, fade_ms: u32) {
+        self.chunk_buffers.set_fade_ms(fade_ms);
+    }
+
     /// Vanilla `GuiRenderer.draw`: draws `elements` up to the first blur
     /// marker, then blurs the frame there (`processBlurEffect`). The blur is
     /// written back over the frame for `BlurBackground`, and only kept as the
