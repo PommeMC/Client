@@ -118,6 +118,7 @@ pub struct InputState {
     weak_rumble_effect: Option<Effect>,
     strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
+    gamepad_used_at: std::time::Instant,
     recent_actions: HashMap<Action, bool>,
     touch_actions_down: HashSet<Action>,
     /// Touch taps' releases, held back until the presses have been read.
@@ -235,6 +236,7 @@ impl InputState {
             weak_rumble_effect: weak_effect,
             strong_rumble_effect: strong_effect,
             active_gamepad_id: None,
+            gamepad_used_at: std::time::Instant::now(),
             recent_actions: HashMap::new(),
             touch_actions_down: HashSet::new(),
             tap_releases: Vec::new(),
@@ -436,8 +438,22 @@ impl InputState {
         false
     }
 
+    /// When a gamepad button was last pressed or a stick pushed past half
+    /// way, which rules out a resting stick's drift. Pomme-only: vanilla has
+    /// no gamepad to count as input for its AFK frame limit.
+    pub fn gamepad_used_at(&self) -> std::time::Instant {
+        self.gamepad_used_at
+    }
+
     pub fn on_gamepad_event(&mut self, event: &gilrs::Event) {
         self.active_gamepad_id = Some(event.id);
+        if match event.event {
+            gilrs::EventType::ButtonPressed(..) => true,
+            gilrs::EventType::AxisChanged(_, value, _) => value.abs() > 0.5,
+            _ => false,
+        } {
+            self.gamepad_used_at = std::time::Instant::now();
+        }
 
         if let gilrs::EventType::ButtonReleased(button, _) = event.event {
             self.binding_gamepad_buttons_down
@@ -980,8 +996,8 @@ impl InputState {
     pub fn key_mods(&self) -> crate::ui::text_edit::KeyMods {
         let state = self.modifiers.state();
         crate::ui::text_edit::KeyMods {
-            shift: state.shift_key(),
-            ctrl: state.control_key(),
+            shift: self.shift_held(),
+            ctrl: self.ctrl_held(),
             alt: state.alt_key(),
             super_key: state.super_key(),
         }

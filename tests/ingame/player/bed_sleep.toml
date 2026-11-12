@@ -1,0 +1,79 @@
+# Right-clicking a bed at night with an item in hand puts the player in it,
+# with the server's "Sleeping through this night" on the action bar until the
+# night is skipped.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/difficulty peaceful"
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:iron_axe"
+
+[[step]]
+expect = { slot = 36, item = "iron_axe" }
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+chat = "/setblock 64 -60 4 minecraft:red_bed[facing=south,part=foot]"
+
+[[step]]
+chat = "/setblock 64 -60 5 minecraft:red_bed[facing=south,part=head]"
+
+[[step]]
+expect = { block = "red_bed", at = [64, -60, 5] }
+
+[[step]]
+chat = "/tp @s 64.5 -60 2.5 0 0"
+
+[[step]]
+expect = { player = { position = [64.5, -60.0, 2.5] } }
+
+[[step]]
+look_at = [64.5, -59.5, 4.5]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { hud = { chat_open = true, action_bar = "Sleeping through this night" } }
+
+[[step]]
+screenshot = "sleeping"
+
+# One sleeper skips the night after 100 ticks and wakes.
+[[step]]
+wait_ms = 6000
+
+[[step]]
+expect = { hud = { chat_open = false } }
+
+[[step]]
+chat = "/setblock 64 -60 5 minecraft:air"
+
+[[step]]
+chat = "/setblock 64 -60 4 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [64, -60, 4] }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/difficulty easy"

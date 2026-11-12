@@ -918,6 +918,13 @@ impl GameState {
         )
     }
 
+    /// The action bar's text and age in ticks while it's up.
+    pub fn shown_action_bar(&self) -> Option<(&[crate::ui::text::TextSpan], u64)> {
+        let (spans, tick) = self.action_bar.as_ref()?;
+        let age = self.tick_count.wrapping_sub(*tick);
+        (age < crate::ui::hud::ACTION_BAR_TICKS).then_some((spans.as_slice(), age))
+    }
+
     /// A server dialog, or the confirm screen one raised, is the top screen.
     /// Vanilla runs no key mapping while a screen is up, and the screens under
     /// it neither draw nor take input.
@@ -1609,7 +1616,9 @@ impl GameState {
     #[cfg(feature = "test-harness")]
     pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
         self.mesh_columns
-            .first_unmeshed(self.chunk_store.loaded_positions())
+            .first_unmeshed(self.chunk_store.loaded_positions(), |pos| {
+                neighbourhood_lit(&self.chunk_store, &self.light_engine, pos)
+            })
     }
 
     /// Forgets every column's scheduling state, for a new level or dispatcher.
@@ -1662,12 +1671,12 @@ impl GameState {
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }
-        let mut bumped: Vec<ChunkPos> = Vec::new();
+        let mut bumped = HashSet::new();
         for &(x, z) in &dirty.columns {
             self.keep_column(ChunkPos::new(x, z));
-            for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
-                if self.chunk_store.get_chunk(&p).is_some() && !bumped.contains(&p) {
-                    bumped.push(p);
+            for p in crate::world::chunk::column_neighborhood(ChunkPos::new(x, z)) {
+                if self.chunk_store.get_chunk(&p).is_some() {
+                    bumped.insert(p);
                 }
             }
         }
@@ -1704,13 +1713,27 @@ impl GameState {
     /// mesh and upload a column's player-edited sections on the spot so the
     /// edit shows the same frame. (Vanilla defaults to NONE/async, but
     /// pomme's async round-trip is several frames, which leaves a broken
-    /// block visibly lingering after its crack overlay completes.)
+    /// block visibly lingering after its crack overlay completes.) A section
+    /// never compiled waits for its neighbours with the async meshes.
+    // TODO: vanilla's edit lights before it compiles; here the light lands
+    // in the next `update_light` and remeshes the sections again.
     pub fn mesh_sections_edit_now(
         &mut self,
         renderer: &mut Renderer,
         col: ChunkPos,
         sections: std::ops::Range<i32>,
     ) {
+        let may_mesh_now =
+            self.mesh_columns
+                .may_mesh_edit_now(col, section_bits(sections.clone()), || {
+                    neighbourhood_lit(&self.chunk_store, &self.light_engine, col)
+                });
+        if !may_mesh_now {
+            for si in sections {
+                self.enqueue_section_edit(col, si);
+            }
+            return;
+        }
         // Older async results for these sections are rejected by the
         // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
         let mesh = self
@@ -1783,16 +1806,12 @@ impl GameState {
             camera_block.y,
             camera_block.z,
         ));
-        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
-            self.chunk_store.get_chunk(&p).is_some()
-                && self.light_engine.light_on_in_column((p.x, p.z))
-        });
         let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
         let compiled = self
             .compiled
             .get(&column)
             .is_some_and(|mask| mask & section_bit(section) != 0);
-        neighbourhood_lit && compiled
+        neighbourhood_lit(&self.chunk_store, &self.light_engine, column) && compiled
     }
 
     /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
@@ -1946,15 +1965,11 @@ impl GameState {
     /// Publishes every loaded column's dirty sections to the mesh workers,
     /// re-meshing a whole column when the player's movement changes its LOD.
     /// Like vanilla, every section in render distance meshes regardless of
-    /// visibility (occlusion gates only drawing), and the queue orders the
-    /// backlog nearest-first. Runs every frame, publishing only when the work
-    /// or the camera's 8-block bucket changed.
+    /// visibility (occlusion gates only drawing), once its neighbour columns
+    /// are loaded and lit, and the queue orders the backlog nearest-first.
+    /// Runs every frame, publishing only when the work or the camera's
+    /// 8-block bucket changed.
     pub fn rescan_mesh_jobs(&mut self, chunk_detail: u32) {
-        // TODO: vanilla won't schedule a section's first compile until its
-        // 3x3 column neighbourhood is loaded and lit
-        // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
-        // we mesh against missing neighbours as air and repair the borders
-        // when their light marks the column dirty.
         let loaded: Vec<ChunkPos> = self.chunk_store.loaded_positions().collect();
         let player_chunk = self.player_chunk();
         let camera = *self.player.position;
@@ -1965,12 +1980,25 @@ impl GameState {
             section_mask(self.chunk_store.section_count()),
             |pos| crate::app::core::chunk_lod(pos, player_chunk, chunk_detail),
             |pos| dispatcher.claimed_generation(pos),
+            |pos| neighbourhood_lit(&self.chunk_store, &self.light_engine, pos),
         );
         if let Some(requests) = requests {
             self.mesh_dispatcher
                 .publish(&self.chunk_store, camera, requests);
         }
     }
+}
+
+/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: every column around
+/// `column` is loaded with its light applied. `column` itself is asked too:
+/// its light arrives with the chunk in vanilla and a moment after it here.
+fn neighbourhood_lit(
+    chunk_store: &ChunkStore,
+    light_engine: &crate::world::light::LightWorker,
+    column: ChunkPos,
+) -> bool {
+    crate::world::chunk::column_neighborhood(column)
+        .all(|p| chunk_store.get_chunk(&p).is_some() && light_engine.light_on_in_column((p.x, p.z)))
 }
 
 /// The bits for several section indices.
@@ -1983,7 +2011,11 @@ pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
 pub enum GameUpdateResult {
     None,
     ManualDisconnect,
-    Disconnected { reason: String },
+    /// The death screen's Title Screen, which skips the server list.
+    ExitToTitle,
+    Disconnected {
+        reason: String,
+    },
 }
 
 enum ResultKind {
@@ -3024,6 +3056,7 @@ pub fn update_game(
     gfx.renderer.set_vsync(core.menu.vsync);
     gfx.renderer
         .set_menu_blur_radius(core.menu.menu_background_blurriness);
+    gfx.renderer.set_chunk_fade_ms(core.menu.chunk_fade_ms());
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
@@ -3626,9 +3659,7 @@ pub fn update_game(
             game.player.inventory.offhand(),
             core.menu.main_hand_right(),
             game.tool_highlight_timer,
-            game.action_bar
-                .as_ref()
-                .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
+            game.shown_action_bar(),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
             &game.player.effects,
@@ -5065,7 +5096,7 @@ pub fn update_game(
             .map_or(*game.player.position, |entity| *entity.position);
         game.chunk_store
             .block_entities
-            .iter()
+            .near(camera, 64.0)
             .filter_map(|(&pos, be)| {
                 let texts = be.sign.as_deref()?;
                 let center = pos.center();
@@ -5099,7 +5130,7 @@ pub fn update_game(
         let mut renders: Vec<(bool, crate::renderer::BlockEntityRenderInfo)> = game
             .chunk_store
             .block_entities
-            .iter()
+            .near(eye, 64.0)
             .filter_map(|(pos, be)| {
                 let center = glam::DVec3::new(
                     f64::from(pos.x) + 0.5,
@@ -5273,9 +5304,9 @@ pub fn update_game(
         }
         list
     };
-    // Off without sky light (see `renderer::distant`'s TODO); capturing
-    // stops with it.
-    let distant_terrain = if game.light_engine.has_sky() {
+    // Off without sky light (see `renderer::distant`'s TODO) or under a
+    // shader pack; capturing stops with it.
+    let distant_terrain = if game.light_engine.has_sky() && gfx.renderer.distant_terrain_path() {
         core.menu.distant_terrain
     } else {
         0
@@ -5431,7 +5462,7 @@ pub fn update_game(
             core.send_respawn(connection, game);
         }
         DeathAction::TitleScreen => {
-            return GameUpdateResult::ManualDisconnect;
+            return GameUpdateResult::ExitToTitle;
         }
         DeathAction::ShowConfirm => {
             game.death_confirm = true;

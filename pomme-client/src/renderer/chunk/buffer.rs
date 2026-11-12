@@ -95,8 +95,6 @@ const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
 /// Columns within this squared X/Z distance of the camera render opaque
 /// immediately and never fade in; `cull.comp` has the same.
 const NEARBY_DIST_SQ: f32 = 768.0;
-/// How long a section fades in, as `cull.comp`'s `FADE_MS`.
-const FADE_MS: u32 = 1000;
 /// A camera move this far, squared, re-sorts the draw lists front to back.
 const SORT_RECAM_SQ: f64 = 64.0;
 
@@ -132,9 +130,9 @@ fn fade_from(shown: bool, bare_ms: Option<u32>, now_ms: u32) -> u32 {
 }
 
 /// Whether a section uploaded at `uploaded_ms` has faded in to vanilla's 0.3
-/// (`LevelExtractor.CHUNK_VISIBILITY_THRESHOLD`) by `now_ms`.
-fn block_entities_faded_in(uploaded_ms: u32, now_ms: u32) -> bool {
-    uploaded_ms == 0 || now_ms.saturating_sub(uploaded_ms) * 10 >= FADE_MS * 3
+/// (`LevelExtractor.CHUNK_VISIBILITY_THRESHOLD`) by `now_ms`, over `fade_ms`.
+fn block_entities_faded_in(uploaded_ms: u32, now_ms: u32, fade_ms: u32) -> bool {
+    uploaded_ms == 0 || now_ms.saturating_sub(uploaded_ms) * 10 >= fade_ms * 3
 }
 
 /// The column `eye` is in.
@@ -344,7 +342,9 @@ struct FrustumData {
     now_ms: u32,
     /// Whether the columns' occlusion masks apply.
     use_visibility: u32,
-    _pad: [u32; 3],
+    /// How long a section fades in.
+    fade_ms: u32,
+    _pad: [u32; 2],
     /// Per arena, where its segment starts and how many sections it holds,
     /// four to a row as std140 lays `uint` arrays out.
     arena_base: [[u32; 4]; MAX_ARENAS / 4],
@@ -1433,6 +1433,8 @@ pub struct ChunkBufferStore {
     /// Sections uploaded before the first cull appear at once; later ones
     /// fade in.
     fade_enabled: bool,
+    /// How long a section fades in (vanilla `chunkSectionFadeInTime`).
+    fade_ms: u32,
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
     last_draw_count: u32,
@@ -1554,6 +1556,7 @@ impl ChunkBufferStore {
             compute_layout,
             cull_layout,
             fade_enabled: false,
+            fade_ms: crate::ui::menu::DEFAULT_CHUNK_FADE_MS,
             last_draw_count: 0,
             last_index_count: 0,
             frame_seq: 0,
@@ -2676,7 +2679,12 @@ impl ChunkBufferStore {
             .and_then(|column| column.sections.iter().find(|s| s.section_index == section))
             .map(|s| s.uploaded_ms)
             .or_else(|| self.bare_upload_ms(pos, section));
-        visible && uploaded_ms.is_none_or(|ms| block_entities_faded_in(ms, self.now_ms()))
+        visible
+            && uploaded_ms.is_none_or(|ms| block_entities_faded_in(ms, self.now_ms(), self.fade_ms))
+    }
+
+    pub fn set_fade_ms(&mut self, fade_ms: u32) {
+        self.fade_ms = fade_ms;
     }
 
     /// Push the CPU visibility graph's per-column visible-section masks.
@@ -2709,7 +2717,8 @@ impl ChunkBufferStore {
             frac: (eye - anchor).as_vec3().to_array(),
             now_ms: self.now_ms(),
             use_visibility: u32::from(use_visibility),
-            _pad: [0; 3],
+            fade_ms: self.fade_ms,
+            _pad: [0; 2],
             arena_base: [[0; 4]; MAX_ARENAS / 4],
             arena_len: [[0; 4]; MAX_ARENAS / 4],
         };
@@ -3365,9 +3374,10 @@ mod tests {
 
     #[test]
     fn block_entities_wait_for_their_section_to_fade_to_three_tenths() {
-        assert!(block_entities_faded_in(0, 5));
-        assert!(!block_entities_faded_in(1000, 1299));
-        assert!(block_entities_faded_in(1000, 1300));
+        assert!(block_entities_faded_in(0, 5, 1000));
+        assert!(!block_entities_faded_in(1000, 1299, 1000));
+        assert!(block_entities_faded_in(1000, 1300, 1000));
+        assert!(block_entities_faded_in(1000, 1000, 0));
     }
 
     #[test]

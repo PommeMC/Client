@@ -1,0 +1,45 @@
+# A sealed room around the corner where four chunks meet: in the dark, the
+# floor tiles at the corner shade like the rest, as their smooth lighting reads
+# the diagonal column's light too.
+# TODO: nothing here fails without that; only compare.py against vanilla's
+# screenshot shows it, until the harness can check a face's light.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/fill -3 -61 -3 2 -56 2 minecraft:stone hollow"
+
+[[step]]
+expect = { block = "stone", at = [0, -61, 0] }
+
+[[step]]
+chat = "/tp @s 1.5 -60 1.5"
+
+[[step]]
+expect = { player = { position = [1.5, -60.0, 1.5] } }
+
+[[step]]
+look_at = [0.0, -61.0, 0.0]
+
+# Light settles and the room remeshes.
+[[step]]
+wait_ms = 2000
+
+[[step]]
+screenshot = "corner"
+
+[[step]]
+chat = "/fill -3 -60 -3 2 -56 2 minecraft:air"
+
+[[step]]
+chat = "/fill -3 -61 -3 2 -61 2 minecraft:grass_block"
+
+[[step]]
+expect = { block = "grass_block", at = [0, -61, 0] }

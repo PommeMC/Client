@@ -99,6 +99,27 @@ wait_ms = 500
 [[step]]
 screenshot = "off"
 
+# Back on: its state was freed with the option, and comes back whole.
+[[step]]
+option = { distant_terrain = 32 }
+
+[[step]]
+look_at = [1.5, -40.0, 1.5]
+
+[[step]]
+expect = { distant_terrain = { at = [1, 1] } }
+timeout_ms = 20000
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+screenshot = "on_again"
+
+[[step]]
+option = { distant_terrain = 0 }
+
 [[step]]
 chat = "/tp @s 1.5 -50 8.5"
 

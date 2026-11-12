@@ -20,6 +20,9 @@ pub enum Outcome {
 }
 
 pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outcome {
+    if runs_anywhere(command) {
+        return run_anywhere(command, core, phase);
+    }
     let name = phase_name(phase);
     let AppPhase::InGame {
         gfx,
@@ -28,13 +31,9 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         ..
     } = phase
     else {
-        return Outcome::Done(match command {
-            Command::Status => Ok(json!(name)),
-            _ => Err(format!("not in game ({name})")),
-        });
+        return Outcome::Done(Err(format!("not in game ({name})")));
     };
     Outcome::Done(match command {
-        Command::Status => Ok(json!(name)),
         Command::Chat { text } => {
             connection.packet_tx.send_chat(text.clone());
             Ok(Value::Null)
@@ -75,14 +74,6 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
         Command::Hud => to_value(protocol::hud(game)),
         Command::Sounds => to_value(core.audio.recent_sounds()),
         Command::Block { at } => Ok(json!(protocol::block(game, *at))),
-        Command::Press(press) => press_key(core, game, press),
-        Command::KeyDown(key) | Command::KeyUp(key) => {
-            keyboard_key(&key.action, &key.key).map(|code| {
-                core.input
-                    .hold_key(code, matches!(command, Command::KeyDown(_)));
-                Value::Null
-            })
-        }
         Command::Bind(bind) => bind_keys(core, bind),
         Command::Option(options) => set_options(core, options).inspect(|_| {
             if options.resource_pack.is_some() {
@@ -108,19 +99,6 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             Ok(Value::Null)
         }
         Command::Hover(target) => hover(core, gfx, game, target),
-        Command::Modifiers(modifiers) => {
-            core.input.hold_harness_shift(modifiers.shift);
-            Ok(Value::Null)
-        }
-        Command::Cursor { at } => {
-            let gs = gui_scale(core, gfx);
-            core.input.on_cursor_moved(at[0] * gs, at[1] * gs);
-            Ok(Value::Null)
-        }
-        Command::Text { text } => {
-            core.input.type_text(text.clone());
-            Ok(Value::Null)
-        }
         Command::Scroll { y } => {
             if game.gui_open() || game.options_from_game {
                 core.input.on_menu_scroll_xy(0.0, *y);
@@ -137,6 +115,72 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             gfx.renderer.reset_camera(eye, look);
             Ok(Value::Null)
         }
+        Command::Advancements => Ok(json!(game.toasts.advancement_ids().collect::<Vec<_>>())),
+        Command::ChatLog => Ok(json!(game.chat.message_texts().collect::<Vec<_>>())),
+        _ => unreachable!("runs_anywhere lists the commands run_anywhere runs"),
+    })
+}
+
+/// Whether `command` works outside a world too, on the menu: status, input
+/// and screenshots.
+pub fn runs_anywhere(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Status
+            | Command::Press(_)
+            | Command::KeyDown(_)
+            | Command::KeyUp(_)
+            | Command::Modifiers(_)
+            | Command::Cursor { .. }
+            | Command::CursorToButton { .. }
+            | Command::Text { .. }
+            | Command::MouseDown { .. }
+            | Command::MouseUp { .. }
+            | Command::Screenshot { .. }
+    )
+}
+
+fn run_anywhere(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outcome {
+    Outcome::Done(match command {
+        Command::Status => Ok(json!(phase_name(phase))),
+        Command::Press(press) => keyboard_key(&press.action, &press.key).map(|code| {
+            // On the menu every key goes to the open screen.
+            let to_screen = match phase {
+                AppPhase::InGame { game, .. } => game.wants_text_input(),
+                _ => true,
+            };
+            core.input.press_key(code, press.ctrl, to_screen);
+            Value::Null
+        }),
+        Command::KeyDown(key) | Command::KeyUp(key) => {
+            keyboard_key(&key.action, &key.key).map(|code| {
+                core.input
+                    .hold_key(code, matches!(command, Command::KeyDown(_)));
+                Value::Null
+            })
+        }
+        Command::Modifiers(modifiers) => {
+            core.input.hold_harness_shift(modifiers.shift);
+            Ok(Value::Null)
+        }
+        Command::Cursor { at } => phase
+            .gfx_mut()
+            .ok_or_else(|| "no window yet".to_owned())
+            .map(|gfx| {
+                let gs = gui_scale(core, gfx);
+                core.input.on_cursor_moved(at[0] * gs, at[1] * gs);
+                Value::Null
+            }),
+        Command::CursorToButton { label } => super::buttons::find(label)
+            .ok_or_else(|| format!("no button {label:?} on screen"))
+            .map(|[x, y, w, h]| {
+                core.input.on_cursor_moved(x + w / 2.0, y + h / 2.0);
+                Value::Null
+            }),
+        Command::Text { text } => {
+            core.input.type_text(text.clone());
+            Ok(Value::Null)
+        }
         Command::MouseDown { button } | Command::MouseUp { button } => {
             let state = if matches!(command, Command::MouseDown { .. }) {
                 winit::event::ElementState::Pressed
@@ -146,9 +190,10 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             core.input.on_mouse_button((*button).into(), state);
             Ok(Value::Null)
         }
-        Command::Advancements => Ok(json!(game.toasts.advancement_ids().collect::<Vec<_>>())),
-        Command::ChatLog => Ok(json!(game.chat.message_texts().collect::<Vec<_>>())),
         Command::Screenshot { path } => {
+            let Some(gfx) = phase.gfx_mut() else {
+                return Outcome::Done(Err("no window yet".into()));
+            };
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
@@ -157,6 +202,7 @@ pub fn run(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> Outco
             gfx.renderer.request_screenshot_to(path.clone());
             return Outcome::Screenshot(path.clone());
         }
+        _ => unreachable!("runs_anywhere lists the commands run here"),
     })
 }
 
@@ -199,18 +245,6 @@ fn action(id: &str) -> Result<Action, String> {
 
 fn input_key(id: &str) -> Result<InputKey, String> {
     InputKey::from_input_id(id).map_err(|e| e.to_string())
-}
-
-/// A binding's default key, or a physical key, through the real key path.
-fn press_key(
-    core: &mut AppCore,
-    game: &crate::app::phases::in_game::GameState,
-    press: &protocol::Press,
-) -> Result<Value, String> {
-    let code = keyboard_key(&press.action, &press.key)?;
-    core.input
-        .press_key(code, press.ctrl, game.wants_text_input());
-    Ok(Value::Null)
 }
 
 /// The keyboard key a binding `action` defaults to, or the physical `key`.
@@ -280,8 +314,14 @@ fn set_options(core: &mut AppCore, options: &protocol::OptionSet) -> Result<Valu
             .ok_or_else(|| format!("no resource pack {name} in resourcepacks/"))?;
         core.menu.toggle_resource_pack(id, enable);
     }
+    if let Some(secs) = options.chunk_fade {
+        core.menu.set_chunk_fade_secs(secs);
+    }
     if let Some(show) = options.show_subtitles {
         core.menu.show_subtitles = show;
+    }
+    if let Some(limit) = options.inactivity_fps_limit {
+        core.menu.inactivity_fps_limit = limit;
     }
     core.menu.save_options(&core.input.key_bindings);
     Ok(Value::Null)
