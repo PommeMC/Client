@@ -50,6 +50,10 @@ mod nectar_fall;
 mod simple_vertical;
 mod dust_plume;
 mod noxious_gas;
+mod falling_leaves;
+mod firework_spark;
+mod sculk_charge_pop;
+mod wake;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -113,11 +117,27 @@ use self::simple_vertical::{
 };
 use self::dust_plume::DustPlumeParticleRegistration;
 use self::noxious_gas::NoxiousGasParticleRegistration;
+use self::falling_leaves::{CherryParticleRegistration, PaleOakParticleRegistration};
+use self::firework_spark::SparkParticleRegistration;
+use self::sculk_charge_pop::SculkChargePopParticleRegistration;
+use self::wake::WakeParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
     resources: &mut MappedParticleResources,
 ) {
+    resources
+        .register_sprite_provider(Rc::clone(&types.cherry_leaves), &CherryParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.pale_oak_leaves),
+        &PaleOakParticleRegistration,
+    );
+    resources.register_sprite_provider(Rc::clone(&types.firework), &SparkParticleRegistration);
+    resources.register_sprite_provider(
+        Rc::clone(&types.sculk_charge_pop),
+        &SculkChargePopParticleRegistration,
+    );
+    resources.register_sprite_provider(Rc::clone(&types.fishing), &WakeParticleRegistration);
     resources.register_sprite_provider(
         Rc::clone(&types.totem_of_undying),
         &TotemParticleRegistration,
