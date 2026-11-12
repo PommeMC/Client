@@ -812,6 +812,36 @@ mod tests {
     }
 
     #[test]
+    fn a_dug_block_publishes_its_light_in_the_same_run() {
+        let table = BlockStateTable::native();
+        let chunks = ChunkStore::with_origin_chunk();
+        let origin = crate::position::ChunkPos::new(0, 0);
+        let mut world = LightWorld::new(table, chunks.min_y());
+        world.insert((0, 0), chunks.get_chunk(&origin).unwrap());
+        let mut engine =
+            LevelLightEngine::new(chunks.section_count() as u32 * 16, chunks.min_y(), false);
+        let mut light_data = LightMap::default();
+        engine.on_chunk_loaded(&world, (0, 0), &mut light_data);
+        engine.queue_task(LightTask::ApplyLight {
+            pos: (0, 0),
+            sky: Vec::new(),
+            block: Vec::new(),
+            enable: true,
+        });
+        let mut set = |x, state| {
+            let (old, empty_flip) = chunks.set_block_state_tracked(x, 8, 8, state, table);
+            engine.on_block_changed(&world, LightPos::new(x, 8, 8), old, state, empty_flip);
+            engine.run(&world, &mut light_data, &mut LightDirty::default());
+        };
+        set(8, find_state("torch", &[]));
+        set(9, find_state("stone", &[]));
+        set(9, BlockState::AIR);
+
+        let column = light_data.get_mut((0, 0)).unwrap();
+        assert_eq!(column.get_block_light(9, 8, 8), 13);
+    }
+
+    #[test]
     fn light_property_change_detection() {
         let _world = TestWorld::new();
         let air = BlockState::AIR;
