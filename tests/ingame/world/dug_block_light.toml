@@ -1,0 +1,84 @@
+# A block dug out of a torch-lit wall takes the light around it at once, not
+# only after a later change nearby sends the light along.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+deterministic = true
+
+[[step]]
+chat = "/fill 6 -61 -2 16 -54 9 minecraft:stone hollow"
+
+[[step]]
+chat = "/fill 7 -60 5 15 -55 6 minecraft:stone"
+
+[[step]]
+chat = "/setblock 11 -60 2 minecraft:torch"
+
+[[step]]
+expect = { block = "torch", at = [11, -60, 2] }
+
+[[step]]
+chat = "/tp @s 11.5 -60 0.5"
+
+[[step]]
+expect = { player = { position = [11.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [11.5, -58.5, 5.0]
+
+# Hides chat, so only the world differs between the shots.
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { block = "air", at = [11, -59, 5] }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "dug"
+
+# A change behind the camera relights its section, which carries any light
+# still held back.
+[[step]]
+chat = "/setblock 11 -58 -1 minecraft:cobblestone"
+
+[[step]]
+expect = { block = "cobblestone", at = [11, -58, -1] }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "relit"
+
+[[step]]
+match_screenshots = ["dug", "relit"]
+max_differing_pixels = 500
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+chat = "/fill 6 -61 -2 16 -54 9 minecraft:air"
+
+[[step]]
+chat = "/fill 6 -61 -2 16 -61 9 minecraft:grass_block"
