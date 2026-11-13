@@ -54,8 +54,9 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
-        let cursor = input.cursor;
-        let clicked = input.clicked;
+        let beneath = self.input_beneath_dropdown(input);
+        let cursor = beneath.cursor;
+        let clicked = beneath.clicked;
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
 
@@ -310,8 +311,8 @@ impl MainMenu {
         self.push_links_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [links_x, extras_y, icon_size, icon_size],
             drop_right - links_w,
@@ -322,8 +323,8 @@ impl MainMenu {
         self.push_theme_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [theme_x, extras_y, icon_size, icon_size],
             drop_right - theme_w,

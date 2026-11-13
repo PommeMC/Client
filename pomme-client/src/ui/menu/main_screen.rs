@@ -36,8 +36,9 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
-        let cursor = input.cursor;
-        let clicked = input.clicked;
+        let beneath = self.input_beneath_dropdown(input);
+        let cursor = beneath.cursor;
+        let clicked = beneath.clicked;
 
         let mut elements = vec![MenuElement::BlurBackdrop];
         let mut action = MenuAction::None;
@@ -429,8 +430,8 @@ impl MainMenu {
         self.push_links_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [links_x, icon_area_y, icon_size, icon_size],
             links_x,
@@ -443,8 +444,8 @@ impl MainMenu {
         self.push_theme_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [theme_x, icon_area_y, icon_size, icon_size],
             theme_x + icon_size - theme_w,
