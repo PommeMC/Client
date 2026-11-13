@@ -656,20 +656,19 @@ impl MainMenu {
 
         // Tab bar across the top.
         let tab_h = TAB_BAR_H * gs;
-        let bar_w = screen_w.min(TAB_BAR_MAX_W * gs) - TAB_BAR_MARGIN * gs;
-        let tab_w = bar_w / 3.0;
-        // Vanilla `MenuTabBar`: `roundToward((width - tabsWidth) / 2, 2)`.
-        let gui_w = common::gui_size(screen_w, gs);
-        let tabs_w = gui_w.min(TAB_BAR_MAX_W) - TAB_BAR_MARGIN;
-        let bar_x = (((gui_w - tabs_w) / 2.0).floor() / 2.0).ceil() * 2.0 * gs;
-        for (i, (tab, label)) in [
+        // Vanilla `MenuTabBar.arrangeElements`, rounding with `Mth.roundToward(.., 2)`.
+        let tabs = [
             (CreateTab::Game, "Game"),
             (CreateTab::World, "World"),
             (CreateTab::More, "More"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ];
+        let even = |v: f32| (v.floor() / 2.0).ceil() * 2.0 * gs;
+        let gui_w = common::gui_size(screen_w, gs);
+        let tabs_w = gui_w.min(TAB_BAR_MAX_W) - TAB_BAR_MARGIN;
+        let tab_w = even(tabs_w / tabs.len() as f32);
+        let bar_x = even((gui_w - tabs_w) / 2.0);
+        let tabs_end = bar_x + tabs.len() as f32 * tab_w;
+        for (i, (tab, label)) in tabs.into_iter().enumerate() {
             let x = bar_x + tab_w * i as f32;
             let active = self.create.tab == tab;
             let hovered = common::hit_test(cursor, [x, 0.0, tab_w, tab_h]);
@@ -721,7 +720,7 @@ impl MainMenu {
             }
         }
         // The header separator runs either side of the tabs, not under them.
-        for (x, w) in [(0.0, bar_x), (bar_x + bar_w, screen_w - bar_x - bar_w)] {
+        for (x, w) in [(0.0, bar_x), (tabs_end, screen_w - tabs_end)] {
             elements.push(MenuElement::Image {
                 x,
                 y: tab_h - SEP_H * gs,

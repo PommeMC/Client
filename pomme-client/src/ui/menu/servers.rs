@@ -953,6 +953,13 @@ impl MainMenu {
             } else {
                 f.on_click(pos, input.shift, inner_w, &wf);
             }
+        } else if cfg!(mobile) && input.clicked && self.focused_field == Some(field_idx) {
+            // Pomme-only: a tap off the field hides the soft keyboard. Vanilla
+            // keeps focus through a click on empty space.
+            // TODO: a clicked button takes focus in vanilla; Pomme's buttons
+            // can't hold it yet, so the field keeps it on desktop.
+            self.unfocus_current_field();
+            self.focused_field = None;
         } else if self.focused_field == Some(field_idx) && input.mouse_held && !input.clicked {
             let f = self.field_mut(target);
             let pos = f.pos_from_click(rel_x, inner_w, &wf);
