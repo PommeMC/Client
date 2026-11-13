@@ -114,6 +114,8 @@ pub enum Mouse {
     Left,
     Right,
     Middle,
+    Back,
+    Forward,
 }
 
 impl From<Mouse> for winit::event::MouseButton {
@@ -122,6 +124,8 @@ impl From<Mouse> for winit::event::MouseButton {
             Mouse::Left => Self::Left,
             Mouse::Right => Self::Right,
             Mouse::Middle => Self::Middle,
+            Mouse::Back => Self::Back,
+            Mouse::Forward => Self::Forward,
         }
     }
 }
