@@ -40,10 +40,41 @@ fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedTe
         .map(|name| name.name.clone())
 }
 
-/// Vanilla `this.height / 4` in a screen, in framebuffer px: the GUI-scaled
-/// height rounds up (`Window.calculateScale`), the quarter down.
+/// Vanilla `Window.getGuiScaledWidth` and `getGuiScaledHeight`: `px` in GUI
+/// units, rounded up (`Window.calculateScale`).
+pub fn gui_size(px: f32, gs: f32) -> f32 {
+    (px / gs).ceil()
+}
+
+/// Vanilla `this.width / 2` in a screen, in framebuffer px.
+pub fn gui_half_width(screen_w: f32, gs: f32) -> f32 {
+    (gui_size(screen_w, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 2` in a screen, in framebuffer px.
+pub fn gui_half_height(screen_h: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 4` in a screen, in framebuffer px.
 pub fn gui_quarter_height(screen_h: f32, gs: f32) -> f32 {
-    ((screen_h / gs).ceil() / 4.0).floor() * gs
+    (gui_size(screen_h, gs) / 4.0).floor() * gs
+}
+
+/// Vanilla `FrameLayout.alignInDimension`: an element `len` GUI px long
+/// placed `align` of the way along `px`, in framebuffer px.
+pub fn gui_aligned(px: f32, len: f32, gs: f32, align: f32) -> f32 {
+    ((gui_size(px, gs) - len) * align).floor() * gs
+}
+
+/// Vanilla `(this.width - w) / 2`, or the same along the height.
+pub fn gui_centered(px: f32, len: f32, gs: f32) -> f32 {
+    gui_aligned(px, len, gs, 0.5)
+}
+
+/// Vanilla `guiHeight() - n`, in framebuffer px.
+pub fn gui_from_bottom(screen_h: f32, n: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) - n) * gs
 }
 
 pub fn item_display_name(data: &ItemStackData) -> String {
@@ -1217,6 +1248,21 @@ mod tests {
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
     use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn screen_positions_round_in_gui_units() {
+        use super::{
+            gui_aligned, gui_centered, gui_from_bottom, gui_half_width, gui_quarter_height,
+        };
+        // 1280x721 at scale 3 is 427x241 GUI px, both rounded up.
+        assert_eq!(gui_half_width(1280.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_half_width(1281.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_quarter_height(721.0, 3.0), 60.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 200.0, 3.0), 113.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 15.0, 3.0), 206.0 * 3.0);
+        assert_eq!(gui_aligned(721.0, 100.0, 3.0, 0.25), 35.0 * 3.0);
+        assert_eq!(gui_from_bottom(721.0, 22.0, 3.0), 219.0 * 3.0);
+    }
 
     #[test]
     fn a_cooldown_covers_its_remaining_share_from_the_bottom() {

@@ -901,7 +901,7 @@ pub(super) fn push_screen_chrome(
     let fs = common::FONT_SIZE * gs;
     let chrome = push_chrome_frame(elements, sw, sh, gs, HEADER_FOOTER_H);
     elements.push(MenuElement::Text {
-        x: sw / 2.0,
+        x: common::gui_half_width(sw, gs),
         y: (chrome.header_h - fs) / 2.0,
         text: title.into(),
         scale: fs,
@@ -1521,10 +1521,12 @@ impl MainMenu {
         let row_pad = 16.0 * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
+        // `ConfirmScreen` centres its layout with `FrameLayout.centerInRectangle`.
+        let row_x = common::gui_centered(screen_w, 2.0 * CONFIRM_BTN_W + BTN_GAP, gs);
 
         let column_h = (fs + spacing) * 2.0 + row_pad + btn_h;
-        let mut y = (screen_h - column_h) / 2.0;
+        let mut y = common::gui_centered(screen_h, column_h / gs, gs);
 
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
@@ -1544,7 +1546,7 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut choice = None;
-        for (i, (label, x)) in [(yes, cx - btn_w - gap / 2.0), ("Cancel", cx + gap / 2.0)]
+        for (i, (label, x)) in [(yes, row_x), ("Cancel", row_x + btn_w + gap)]
             .into_iter()
             .enumerate()
         {

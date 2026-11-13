@@ -159,10 +159,10 @@ impl MainMenu {
         // Narrower than usual where the row wouldn't fit the window.
         let btn_w = ((screen_w - (n + 1.0) * gap) / n).min(ACCOUNT_BTN_W * gs);
         let spacing = 8.0 * gs;
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         let code_h = code.as_ref().map_or(0.0, |_| code_fs + spacing);
         let column_h = (fs + spacing) * lines.len() as f32 + code_h + 2.0 * spacing + btn_h;
-        let mut y = (screen_h - column_h) / 2.0;
+        let mut y = common::gui_centered(screen_h, column_h / gs, gs);
 
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
@@ -193,7 +193,7 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut pressed = None;
-        let row_x = cx - (n * btn_w + (n - 1.0) * gap) / 2.0;
+        let row_x = common::gui_centered(screen_w, (n * btn_w + (n - 1.0) * gap) / gs, gs);
         for (i, label) in buttons.into_iter().enumerate() {
             let x = row_x + (i as f32) * (btn_w + gap);
             if push_button_f(

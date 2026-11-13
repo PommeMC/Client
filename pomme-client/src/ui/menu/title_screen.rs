@@ -67,9 +67,9 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
 
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         // `int topPos = this.height / 4 + 48`.
-        let base = screen_h / 4.0 + 48.0 * gs;
+        let base = common::gui_quarter_height(screen_h, gs) + 48.0 * gs;
         let col_x = cx - COL_W / 2.0 * gs;
         let col_w = COL_W * gs;
 
@@ -92,7 +92,11 @@ impl MainMenu {
 
         self.push_splash(
             &mut elements,
-            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs),
+            // `SplashRenderer` centres on float `screenWidth / 2.0f`.
+            (
+                common::gui_size(screen_w, gs) * gs / 2.0 + SPLASH_WIDTH_OFFSET * gs,
+                SPLASH_HEIGHT_OFFSET * gs,
+            ),
             gs,
             &text_width_fn,
             true,

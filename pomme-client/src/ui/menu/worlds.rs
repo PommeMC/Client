@@ -83,7 +83,7 @@ impl MainMenu {
         let playable = crate::singleplayer::AVAILABLE;
 
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: 8.0 * gs,
             text: "Select World".into(),
             scale: fs,
@@ -92,7 +92,7 @@ impl MainMenu {
         });
 
         let search_w = SEARCH_W * gs;
-        let search_x = screen_w / 2.0 - search_w / 2.0;
+        let search_x = common::gui_centered(screen_w, SEARCH_W, gs);
         let search_y = 21.0 * gs;
         let field_h = FIELD_H * gs;
         self.text_field(
@@ -146,7 +146,8 @@ impl MainMenu {
         let total_content = list_pad * 2.0 + visible.len() as f32 * entry_h;
         self.scroll_region(input, [0.0, list_top, screen_w, list_h], total_content, gs);
 
-        let list_left = screen_w / 2.0 - row_w / 2.0;
+        // Vanilla `getRowLeft`: `width / 2 - getRowWidth() / 2`.
+        let list_left = common::gui_half_width(screen_w, gs) - row_w / 2.0;
 
         elements.push(MenuElement::ScissorPush {
             x: 0.0,
@@ -277,7 +278,7 @@ impl MainMenu {
         let narrow_w = NARROW_BTN_W * gs;
         let col_gap = FOOTER_COL_GAP * gs;
         let grid_w = narrow_w * 4.0 + col_gap * 3.0;
-        let grid_x = (screen_w - grid_w) / 2.0;
+        let grid_x = common::gui_centered(screen_w, grid_w / gs, gs);
         let row1_y = list_bottom + (footer_h - (btn_h * 2.0 + gap)) / 2.0;
         let row2_y = row1_y + btn_h + gap;
         let col = |n: f32| grid_x + (narrow_w + col_gap) * n;
@@ -612,7 +613,7 @@ impl MainMenu {
         let row_gap = ROW_GAP * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
 
         if input.escape {
             self.leave_create_world(key_bindings);
@@ -658,7 +659,10 @@ impl MainMenu {
         let tab_h = TAB_BAR_H * gs;
         let bar_w = screen_w.min(TAB_BAR_MAX_W * gs) - TAB_BAR_MARGIN * gs;
         let tab_w = bar_w / 3.0;
-        let bar_x = (screen_w - bar_w) / 2.0;
+        // Vanilla `MenuTabBar`: `roundToward((width - tabsWidth) / 2, 2)`.
+        let gui_w = common::gui_size(screen_w, gs);
+        let tabs_w = gui_w.min(TAB_BAR_MAX_W) - TAB_BAR_MARGIN;
+        let bar_x = (((gui_w - tabs_w) / 2.0).floor() / 2.0).ceil() * 2.0 * gs;
         for (i, (tab, label)) in [
             (CreateTab::Game, "Game"),
             (CreateTab::World, "World"),
@@ -1063,7 +1067,7 @@ impl MainMenu {
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         let form_x = cx - form_w / 2.0;
         let button = |elements: &mut Vec<MenuElement>,
                       hovered: &mut bool,
@@ -1088,7 +1092,7 @@ impl MainMenu {
 
         // Spacer, label, field, five buttons, spacer, Save row.
         let column_h = spacer * 2.0 + fs + field_h + btn_h * 6.0 + spacing * 8.0;
-        let mut y = (screen_h - column_h) / 2.0 + spacer + spacing;
+        let mut y = common::gui_centered(screen_h, column_h / gs, gs) + spacer + spacing;
 
         self.labelled_field(
             &mut elements,

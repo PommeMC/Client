@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
-use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
+use super::common::{self, FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::app::input::{Action, KeyBindings};
 use crate::entity::wrap_degrees;
 use crate::mob_effect::ActiveMobEffects;
@@ -521,8 +521,8 @@ const XP_BAR_H: f32 = 5.0;
 /// The hotbar sprite's top-left corner.
 fn hotbar_origin(screen_w: f32, screen_h: f32, gs: f32) -> (f32, f32) {
     (
-        (screen_w / 2.0 - HOTBAR_W * gs / 2.0).round(),
-        (screen_h - HOTBAR_H * gs).round(),
+        common::gui_centered(screen_w, HOTBAR_W, gs),
+        common::gui_from_bottom(screen_h, HOTBAR_H, gs),
     )
 }
 
@@ -684,12 +684,12 @@ pub fn build_hud(
     attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
-    let cx = screen_w / 2.0;
-    let cy = screen_h / 2.0;
+    let cx = common::gui_half_width(screen_w, gs);
+    let cy = common::gui_half_height(screen_h, gs);
 
     // TODO: vanilla also hides it for the F3 3D-crosshair entry.
     if first_person && (game_mode != 3 || spectator_crosshair) {
-        build_crosshair(elements, cx, cy, gs, attack);
+        build_crosshair(elements, screen_w, screen_h, cx, cy, gs, attack);
     }
 
     // The bar geometry also anchors the status rows and XP bar below.
@@ -735,7 +735,7 @@ pub fn build_hud(
             let (sprite, sprite_x, item_x) = offhand_slot(cx, gs, main_hand_right);
             elements.push(MenuElement::Image {
                 x: sprite_x,
-                y: (screen_h - 23.0 * gs).round(),
+                y: common::gui_from_bottom(screen_h, 23.0, gs),
                 w: 29.0 * gs,
                 h: 24.0 * gs,
                 sprite,
@@ -750,7 +750,7 @@ pub fn build_hud(
     // sprite). Spectators get the SpectatorGui hotbar instead
     // (`extractHotbarAndDecorations`).
     if game_mode != 3 && attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
-        let y = (screen_h - 20.0 * gs).round();
+        let y = common::gui_from_bottom(screen_h, 20.0, gs);
         let x = if main_hand_right {
             (cx + (91.0 + 6.0) * gs).round()
         } else {
@@ -798,7 +798,7 @@ pub fn build_hud(
         for span in &mut spans {
             span.color[3] *= alpha;
         }
-        let mut y = screen_h - 59.0 * gs;
+        let mut y = common::gui_from_bottom(screen_h, 59.0, gs);
         if game_mode == 1 {
             y += 14.0 * gs;
         }
@@ -818,7 +818,7 @@ pub fn build_hud(
         elements.push(MenuElement::McText {
             x: cx,
             // Vanilla translates to height - 68 and draws at local y -4.
-            y: screen_h - 72.0 * gs,
+            y: common::gui_from_bottom(screen_h, 72.0, gs),
             spans,
             scale: FONT_SIZE * gs,
             centered: true,
@@ -1118,7 +1118,7 @@ fn build_boss_bars(
 ) {
     const BAR_WIDTH: f32 = 182.0;
     const BAR_HEIGHT: f32 = 5.0;
-    let x = (screen_w / 2.0 - 91.0 * gs).round();
+    let x = common::gui_half_width(screen_w, gs) - 91.0 * gs;
     let w = BAR_WIDTH * gs;
     let h = BAR_HEIGHT * gs;
     let mut y_units = 12.0;
@@ -1157,7 +1157,7 @@ fn build_boss_bars(
             elements.push(MenuElement::ScissorPop);
         }
         elements.push(MenuElement::McText {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: ((y_units - 9.0) * gs).round(),
             spans: bar.name.clone(),
             scale: FONT_SIZE * gs,
@@ -1165,7 +1165,7 @@ fn build_boss_bars(
             shadow: true,
         });
         y_units += 10.0 + 9.0;
-        if y_units >= screen_h / gs / 3.0 {
+        if y_units >= (common::gui_size(screen_h, gs) / 3.0).floor() {
             break;
         }
     }
@@ -1208,7 +1208,7 @@ fn build_scoreboard(
 
     let line_h = 9.0 * gs;
     let height = rows.len() as f32 * line_h;
-    let bottom = screen_h / 2.0 + height / 3.0;
+    let bottom = common::gui_half_height(screen_h, gs) + height / 3.0;
     let header_y = bottom - height;
     let left = screen_w - width - 3.0 * gs;
     let right = screen_w - 1.0 * gs;
@@ -1284,7 +1284,7 @@ pub fn build_saving_indicator(
     elements.push(MenuElement::McText {
         x: (screen_w - w - 5.0 * gs).round(),
         // Vanilla `guiHeight - lineHeight(9) - 5`.
-        y: (screen_h - 14.0 * gs).round(),
+        y: common::gui_from_bottom(screen_h, 14.0, gs),
         spans: vec![span],
         scale: fs,
         centered: false,
@@ -1407,14 +1407,16 @@ fn build_locator_dots(
 /// (`RenderPipelines.CROSSHAIR`).
 fn build_crosshair(
     elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
     cx: f32,
     cy: f32,
     gs: f32,
     attack: &AttackIndicatorState,
 ) {
     elements.push(MenuElement::ImageInvert {
-        x: (cx - 15.0 * gs / 2.0).round(),
-        y: (cy - 15.0 * gs / 2.0).round(),
+        x: common::gui_centered(screen_w, 15.0, gs),
+        y: common::gui_centered(screen_h, 15.0, gs),
         w: 15.0 * gs,
         h: 15.0 * gs,
         sprite: SpriteId::Crosshair,
