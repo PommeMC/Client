@@ -21,11 +21,27 @@ struct ColumnMeta {
     edited_sections: u32,
     /// The LOD the column was last scheduled at.
     lod: Option<u32>,
+    /// The sections a mesh has come back for since the column loaded.
+    compiled_sections: u32,
 }
 
 impl ColumnMeta {
     fn holds(&self, pos: ChunkPos) -> bool {
         self.generation != 0 && self.pos == pos
+    }
+
+    /// The dirty sections that may mesh now. Vanilla `LevelExtractor.extract`
+    /// leaves a section's first compile until its neighbour columns are
+    /// loaded and lit (`SectionUpdateTracker.hasAllNeighbors`), so nothing
+    /// meshes against a missing neighbour and again when it arrives; sections
+    /// compiled before recompile either way.
+    fn schedulable(&self, has_all_neighbors: impl FnOnce() -> bool) -> u32 {
+        let dirty = self.dirty_sections;
+        if dirty & !self.compiled_sections != 0 && !has_all_neighbors() {
+            dirty & self.compiled_sections
+        } else {
+            dirty
+        }
     }
 }
 
@@ -65,12 +81,31 @@ impl MeshColumns {
     }
 
     /// The first of `loaded` not meshed yet, or with sections waiting to
-    /// mesh again.
+    /// mesh again. Sections held back for their neighbours
+    /// ([`ColumnMeta::schedulable`]) aren't waiting on a mesh.
     #[cfg(feature = "test-harness")]
-    pub fn first_unmeshed(&self, loaded: impl IntoIterator<Item = ChunkPos>) -> Option<ChunkPos> {
-        loaded
-            .into_iter()
-            .find(|&pos| self.get(pos).is_none_or(|meta| meta.dirty_sections != 0))
+    pub fn first_unmeshed(
+        &self,
+        loaded: impl IntoIterator<Item = ChunkPos>,
+        has_all_neighbors: impl Fn(ChunkPos) -> bool,
+    ) -> Option<ChunkPos> {
+        loaded.into_iter().find(|&pos| {
+            self.get(pos)
+                .is_none_or(|meta| meta.schedulable(|| has_all_neighbors(pos)) != 0)
+        })
+    }
+
+    /// Whether a player's edit to `sections` of `pos` may mesh at once: the
+    /// same gate as [`ColumnMeta::schedulable`], which vanilla applies to
+    /// edits too.
+    pub fn may_mesh_edit_now(
+        &self,
+        pos: ChunkPos,
+        sections: u32,
+        has_all_neighbors: impl FnOnce() -> bool,
+    ) -> bool {
+        let compiled = self.get(pos).map_or(0, |meta| meta.compiled_sections);
+        sections & !compiled == 0 || has_all_neighbors()
     }
 
     /// Which load of `pos` the columns are tracking, if any.
@@ -130,7 +165,11 @@ impl MeshColumns {
     /// column has been marked again since `generation` was asked for.
     pub fn meshed(&mut self, pos: ChunkPos, generation: u64, sections: u32) {
         let meta = self.meta.get_mut(pos);
-        if meta.holds(pos) && meta.generation == generation {
+        if !meta.holds(pos) {
+            return;
+        }
+        meta.compiled_sections |= sections;
+        if meta.generation == generation {
             meta.dirty_sections &= !sections;
             meta.edited_sections &= meta.dirty_sections;
         }
@@ -140,7 +179,8 @@ impl MeshColumns {
     /// since the last call and the camera stayed in its 8-block bucket.
     /// Columns whose LOD (`lod`) moved since they were scheduled remesh
     /// whole (`full`); columns whose newest generation a worker already took
-    /// (`claimed`) are left to it.
+    /// (`claimed`) are left to it; sections never meshed wait for
+    /// `has_all_neighbors` ([`ColumnMeta::schedulable`]).
     pub fn requests(
         &mut self,
         loaded: &[ChunkPos],
@@ -148,6 +188,7 @@ impl MeshColumns {
         full: u32,
         lod: impl Fn(ChunkPos) -> u32,
         claimed: impl Fn(ChunkPos) -> u64,
+        has_all_neighbors: impl Fn(ChunkPos) -> bool,
     ) -> Option<Vec<MeshRequest>> {
         for &pos in loaded {
             if self
@@ -175,18 +216,21 @@ impl MeshColumns {
             if !meta.holds(pos) || meta.dirty_sections == 0 || taken >= meta.generation {
                 continue;
             }
+            let dirty = meta.schedulable(|| has_all_neighbors(pos));
+            if dirty == 0 {
+                continue;
+            }
             let column_lod = lod(pos);
             meta.lod = Some(column_lod);
             // One job per column: a sparse dirty set meshes the clean sections
             // between its first and last dirty one too.
-            let dirty = meta.dirty_sections;
             requests.push(MeshRequest {
                 pos,
                 lod: column_lod,
                 incarnation: meta.incarnation,
                 content_gen: meta.generation,
                 sections: dirty.trailing_zeros() as i32..32 - dirty.leading_zeros() as i32,
-                recompile: meta.edited_sections == dirty,
+                recompile: meta.edited_sections & dirty == dirty,
             });
         }
         Some(requests)
@@ -202,8 +246,41 @@ mod tests {
 
     fn requests(columns: &mut MeshColumns, loaded: &[ChunkPos], lod: u32) -> Vec<MeshRequest> {
         columns
-            .requests(loaded, CAMERA, FULL, |_| lod, |_| 0)
+            .requests(loaded, CAMERA, FULL, |_| lod, |_| 0, |_| true)
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_first_mesh_waits_for_the_neighbours() {
+        let pos = ChunkPos::new(0, 0);
+        let mut columns = MeshColumns::default();
+        let ask = |columns: &mut MeshColumns, neighbours: bool| {
+            columns
+                .requests(&[pos], CAMERA, FULL, |_| 0, |_| 0, |_| neighbours)
+                .unwrap_or_default()
+        };
+        columns.mark(pos, FULL, false);
+        assert!(ask(&mut columns, false).is_empty());
+        #[cfg(feature = "test-harness")]
+        {
+            assert_eq!(columns.first_unmeshed([pos], |_| false), None);
+            assert_eq!(columns.first_unmeshed([pos], |_| true), Some(pos));
+        }
+        // Nor may a player's edit mesh it on the spot.
+        assert!(!columns.may_mesh_edit_now(pos, 1 << 5, || false));
+        assert!(columns.may_mesh_edit_now(pos, 1 << 5, || true));
+        // A neighbour's light marks the column again.
+        columns.mark(pos, FULL, false);
+        let first = ask(&mut columns, true);
+        assert_eq!(first[0].sections, 0..24);
+        columns.meshed(pos, first[0].content_gen, FULL);
+
+        // Once meshed, a section recompiles whatever its neighbours.
+        assert!(columns.may_mesh_edit_now(pos, 1 << 5, || false));
+        columns.mark(pos, 1 << 5, true);
+        let edit = ask(&mut columns, false);
+        assert_eq!(edit[0].sections, 5..6);
+        assert!(edit[0].recompile);
     }
 
     #[test]
@@ -217,7 +294,7 @@ mod tests {
         assert!(!first[0].recompile);
         assert!(
             columns
-                .requests(&[pos], CAMERA, FULL, |_| 0, |_| 0)
+                .requests(&[pos], CAMERA, FULL, |_| 0, |_| 0, |_| true)
                 .is_none(),
             "nothing changed and the camera stayed put"
         );
@@ -250,7 +327,7 @@ mod tests {
         let generation = requests(&mut columns, &[pos], 0)[0].content_gen;
         columns.mark(pos, 1, false);
         let newer = columns
-            .requests(&[pos], CAMERA, FULL, |_| 0, |_| generation + 1)
+            .requests(&[pos], CAMERA, FULL, |_| 0, |_| generation + 1, |_| true)
             .unwrap();
         assert!(newer.is_empty(), "a worker took the newest generation");
     }

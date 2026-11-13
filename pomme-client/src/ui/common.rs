@@ -936,6 +936,14 @@ pub enum WidgetLabel<'a> {
 }
 
 impl WidgetLabel<'_> {
+    #[cfg(feature = "test-harness")]
+    fn text(&self) -> String {
+        match self {
+            Self::Text(text, _) => (*text).to_owned(),
+            Self::Spans(spans) => crate::ui::text::span_text(spans),
+        }
+    }
+
     /// Plain text recoloured to the inactive text colour.
     fn disabled(self) -> Self {
         match self {
@@ -1090,6 +1098,8 @@ pub fn push_button_label(
     scroll: Option<&LabelScroll<'_>>,
 ) -> bool {
     let hovered = enabled && hit_test(cursor, [x, y, w, h]);
+    #[cfg(feature = "test-harness")]
+    crate::harness::buttons::note(&label.text(), [x, y, w, h]);
 
     let sprite = if !enabled {
         SpriteId::ButtonDisabled

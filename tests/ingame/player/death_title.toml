@@ -1,0 +1,52 @@
+# The death screen's Title Screen leaves a server for the title screen, not
+# the server list.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/kill @s"
+
+[[step]]
+expect = { player = { health = 0 } }
+
+# The death screen's buttons wait a second before they work.
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor_to_button = "Title Screen"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+# So do the confirm's.
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "confirm"
+
+[[step]]
+cursor_to_button = "Title Screen"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "title" }
+
+[[step]]
+screenshot = "title"

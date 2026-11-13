@@ -27,9 +27,6 @@ pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
 const SLEEPING_EYE_HEIGHT: f32 = 0.2;
 // Entity.checkInsideBlocks passes the float literal through AABB's double API.
 const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
-const DROWN_DAMAGE_THRESHOLD: i32 = -20;
-const DROWN_DAMAGE: f32 = 2.0;
-const AIR_RECOVERY_RATE: i32 = 4;
 
 // TODO: migrate the remaining raw `game_mode == N` checks to shared constants
 // or an enum.
@@ -325,6 +322,7 @@ pub struct LocalPlayer {
     pub invisible: bool,
     /// The physical SWIMMING pose, chosen by `Player.updatePlayerPose`.
     pub swimming_pose: bool,
+    /// `Entity.DATA_AIR_SUPPLY_ID`, as the server last sent it.
     pub air_supply: i32,
     /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
     /// portal overlay while standing in a nether portal.
@@ -667,19 +665,6 @@ impl LocalPlayer {
 
     pub fn eye_pos(&self) -> Position {
         self.position + dvec3(0.0, f64::from(self.eye_height), 0.0)
-    }
-
-    // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
-    pub fn tick_air_supply(&mut self) {
-        if self.eyes_in_water {
-            self.air_supply -= 1;
-            if self.air_supply <= DROWN_DAMAGE_THRESHOLD {
-                self.air_supply = 0;
-                self.health = (self.health - DROWN_DAMAGE).max(0.0);
-            }
-        } else if self.air_supply < MAX_AIR_SUPPLY {
-            self.air_supply = (self.air_supply + AIR_RECOVERY_RATE).min(MAX_AIR_SUPPLY);
-        }
     }
 
     pub fn update_water_state(

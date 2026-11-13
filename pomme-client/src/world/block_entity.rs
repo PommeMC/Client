@@ -4,7 +4,7 @@ use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use crate::chat_component::{Component, list_elements};
-use crate::position::BlockPos;
+use crate::position::{BlockPos, ChunkPos};
 use crate::world::block::BlockStateData;
 
 #[derive(Clone)]
@@ -75,7 +75,7 @@ fn is_synthesized(kind: BlockEntityKind) -> bool {
 /// `BlockEntity` from the state the same way); a position whose block is no
 /// longer a block entity drops its stale entry.
 pub fn sync_block_entity(
-    map: &mut HashMap<BlockPos, StoredBlockEntity>,
+    map: &mut BlockEntities,
     pos: BlockPos,
     block_state_data: &BlockStateData,
 ) {
@@ -88,6 +88,59 @@ pub fn sync_block_entity(
         // A synthesized entry is also stale when the block swaps directly to a
         // different block-entity block (e.g. /setblock chest -> sign).
         map.remove(&pos);
+    }
+}
+
+/// A level's block entities by column, as vanilla `LevelChunk.blockEntities`
+/// holds them: a column loads and unloads without a pass over the rest, and
+/// a frame lists only the columns around the camera.
+#[derive(Default)]
+pub struct BlockEntities {
+    columns: HashMap<ChunkPos, HashMap<BlockPos, StoredBlockEntity>>,
+}
+
+impl BlockEntities {
+    pub fn get(&self, pos: &BlockPos) -> Option<&StoredBlockEntity> {
+        self.columns.get(&ChunkPos::containing(*pos))?.get(pos)
+    }
+
+    pub fn get_mut(&mut self, pos: &BlockPos) -> Option<&mut StoredBlockEntity> {
+        self.columns
+            .get_mut(&ChunkPos::containing(*pos))?
+            .get_mut(pos)
+    }
+
+    pub fn insert(&mut self, pos: BlockPos, entity: StoredBlockEntity) {
+        self.columns
+            .entry(ChunkPos::containing(pos))
+            .or_default()
+            .insert(pos, entity);
+    }
+
+    pub fn remove(&mut self, pos: &BlockPos) {
+        if let Some(column) = self.columns.get_mut(&ChunkPos::containing(*pos)) {
+            column.remove(pos);
+        }
+    }
+
+    pub fn remove_column(&mut self, column: ChunkPos) {
+        self.columns.remove(&column);
+    }
+
+    /// The block entities of every column within `blocks` of `center` on X
+    /// and Z: a superset of those within `blocks` of it.
+    pub fn near(
+        &self,
+        center: glam::DVec3,
+        blocks: f64,
+    ) -> impl Iterator<Item = (&BlockPos, &StoredBlockEntity)> {
+        let chunks = move |at: f64| {
+            ((at - blocks).floor() as i32 >> 4)..=((at + blocks).floor() as i32 >> 4)
+        };
+        chunks(center.x)
+            .flat_map(move |x| chunks(center.z).map(move |z| ChunkPos::new(x, z)))
+            .filter_map(|column| self.columns.get(&column))
+            .flatten()
     }
 }
 
@@ -481,12 +534,41 @@ mod tests {
     #[test]
     fn a_placed_sign_gets_an_empty_entry_until_its_data_arrives() {
         let table = crate::world::block::BlockStateTable::native();
-        let mut map = HashMap::new();
+        let mut map = BlockEntities::default();
         let pos = BlockPos::new(0, 0, 0);
         let state = table.find_state("oak_sign", &[("rotation", "0")]);
         sync_block_entity(&mut map, pos, table.block_state_data(state));
-        let entry = &map[&pos];
+        let entry = map.get(&pos).unwrap();
         assert_eq!(entry.kind, BlockEntityKind::Sign);
         assert!(entry.sign.is_some());
+    }
+
+    #[test]
+    fn block_entities_are_found_and_dropped_by_column() {
+        let entity = || StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::default());
+        let (here, next_column, far) = (
+            BlockPos::new(-1, 70, 15),
+            BlockPos::new(0, 70, 15),
+            BlockPos::new(200, 70, 0),
+        );
+        let mut map = BlockEntities::default();
+        for pos in [here, next_column, far] {
+            map.insert(pos, entity());
+        }
+        let near = |map: &BlockEntities| {
+            let mut found: Vec<BlockPos> = map
+                .near(glam::DVec3::new(0.5, 70.0, 0.5), 64.0)
+                .map(|(pos, _)| *pos)
+                .collect();
+            found.sort_by_key(|pos| pos.x);
+            found
+        };
+        assert_eq!(near(&map), [here, next_column]);
+
+        map.remove_column(ChunkPos::containing(here));
+        assert_eq!(near(&map), [next_column]);
+        assert!(map.get(&here).is_none() && map.get(&far).is_some());
+        map.remove(&next_column);
+        assert!(near(&map).is_empty());
     }
 }

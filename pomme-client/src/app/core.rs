@@ -2922,9 +2922,7 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
-                    game.chunk_store.block_entities.retain(|p, _| {
-                        p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
-                    });
+                    game.chunk_store.block_entities.remove_column(chunk_pos);
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
                         if kind == azalea_registry::builtin::BlockEntityKind::Piston {
@@ -3356,17 +3354,21 @@ impl AppCore {
                             game.silent_entities.remove(&id);
                         }
                     }
-                    if let crate::entity::MetaValue::Byte(flags) = value {
-                        if id == game.player.entity_id {
-                            match index {
-                                0 => game.player.sync_shared_flags(flags),
-                                8 => game.interaction.sync_using_item_flag(flags & 1 != 0),
-                                _ => {}
+                    if id == game.player.entity_id {
+                        use crate::entity::MetaValue::{Byte, Int};
+                        match (index, &value) {
+                            (0, Byte(flags)) => game.player.sync_shared_flags(*flags),
+                            (1, Int(air)) => game.player.air_supply = *air,
+                            (8, Byte(flags)) => {
+                                game.interaction.sync_using_item_flag(flags & 1 != 0)
                             }
+                            _ => {}
                         }
-                        if index == 0 {
-                            game.item_entity_store.set_shared_flags(id, flags);
-                        }
+                    }
+                    if index == 0
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        game.item_entity_store.set_shared_flags(id, flags);
                     }
                     game.entity_store.apply_entity_data(id, index, value);
                 }

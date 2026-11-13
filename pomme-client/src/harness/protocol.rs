@@ -64,6 +64,10 @@ pub enum Command {
     Cursor {
         at: [f32; 2],
     },
+    /// Moves the cursor to the middle of the button labelled `label`.
+    CursorToButton {
+        label: String,
+    },
     /// Turns the mouse wheel `y` lines (positive scrolls up) over the open
     /// screen.
     Scroll {
@@ -147,6 +151,10 @@ pub struct OptionSet {
     /// arrow does; prefix `-` to deselect it.
     pub resource_pack: Option<String>,
     pub show_subtitles: Option<bool>,
+    /// Chunk Fade in seconds, 0 (none) to 2, in twentieths.
+    pub chunk_fade: Option<f32>,
+    /// Reduce fps when: `minimized` or `afk`.
+    pub inactivity_fps_limit: Option<crate::ui::menu::InactivityFpsLimit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -450,6 +458,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
 pub struct PlayerInfo {
     pub health: f32,
     pub food: u32,
+    pub air: i32,
     pub level: i32,
     pub game_mode: u8,
     pub effects: Vec<&'static str>,
@@ -475,6 +484,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
     PlayerInfo {
         health: player.health,
         food: player.food,
+        air: player.air_supply,
         level: player.experience_level,
         game_mode: player.game_mode,
         effects: player.effects.names().collect(),
@@ -510,6 +520,8 @@ pub struct HudInfo {
     /// The listed players, in the tab overlay's order.
     pub tab_list: Vec<TabEntryInfo>,
     pub chat_open: bool,
+    /// The action bar while it shows.
+    pub action_bar: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -567,6 +579,7 @@ pub fn hud(game: &GameState) -> HudInfo {
             })
             .collect(),
         chat_open: game.chat.is_open(),
+        action_bar: game.shown_action_bar().map(|(spans, _)| span_text(spans)),
     }
 }
 

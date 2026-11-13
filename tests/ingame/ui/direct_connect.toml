@@ -1,0 +1,103 @@
+# Disconnecting from a server lands on the server list, and Direct Connection
+# keeps its address when the screen is closed with escape.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+cursor_to_button = "Disconnect"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "server_list" }
+
+[[step]]
+cursor_to_button = "Direct Connection"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "direct_connect" }
+
+# Two addresses in turn, so one kept from an earlier run can't pass for
+# both.
+[[step]]
+press = { key = "key.keyboard.a", ctrl = true }
+
+[[step]]
+text = "first.example.net"
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+expect = { screen = "server_list" }
+
+[[step]]
+cursor_to_button = "Direct Connection"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+screenshot = "first_reopened"
+
+[[step]]
+expect = { screen = "direct_connect", address = "first.example.net" }
+
+[[step]]
+press = { key = "key.keyboard.a", ctrl = true }
+
+[[step]]
+text = "second.example.net"
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+expect = { screen = "server_list" }
+
+[[step]]
+cursor_to_button = "Direct Connection"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "direct_connect", address = "second.example.net" }
+
+[[step]]
+screenshot = "reopened"

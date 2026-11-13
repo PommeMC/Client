@@ -75,6 +75,8 @@ struct Settings {
     view_bobbing: bool,
     #[serde(default = "default_menu_background_blurriness")]
     menu_background_blurriness: u8,
+    #[serde(default = "default_chunk_fade")]
+    chunk_fade: u8,
     #[serde(default)]
     show_subtitles: bool,
     #[serde(default = "default_true")]
@@ -87,6 +89,8 @@ struct Settings {
     vsync: bool,
     #[serde(default = "default_max_framerate")]
     max_framerate: u32,
+    #[serde(default)]
+    inactivity_fps_limit: InactivityFpsLimit,
     #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
@@ -146,6 +150,9 @@ struct Settings {
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
     japanese_glyph_variants: bool,
+    /// The Direct Connect address, as it was when the screen last closed.
+    #[serde(default)]
+    last_server: String,
 }
 
 fn default_fov() -> u32 {
@@ -159,6 +166,42 @@ fn default_max_framerate() -> u32 {
 /// Top of the Max Framerate slider, where the cap is disabled (matching
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
+
+/// Vanilla `InactivityFpsLimit`: when the frame rate drops for an unattended
+/// window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InactivityFpsLimit {
+    Minimized,
+    #[default]
+    Afk,
+}
+
+impl InactivityFpsLimit {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Minimized => Self::Afk,
+            Self::Afk => Self::Minimized,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimized => "Minimized",
+            Self::Afk => "AFK",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Minimized => "Limits framerate only when the game window is minimized.",
+            Self::Afk => {
+                "Limits framerate to 30 when the game is not getting any player input for more \
+                 than a minute. Further limits it to 10 after 9 more minutes."
+            }
+        }
+    }
+}
 
 const CHUNK_DETAIL_MIN: u32 = 8;
 /// Top of the Chunk Detail slider, where every column meshes at full detail.
@@ -208,6 +251,20 @@ pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
 
 fn default_menu_background_blurriness() -> u8 {
     DEFAULT_MENU_BACKGROUND_BLURRINESS
+}
+
+/// Vanilla `chunkSectionFadeInTime`, in twentieths of a second: 0 (none) to
+/// 40, default 15 (0.75 s).
+const MAX_CHUNK_FADE: u8 = 40;
+const DEFAULT_CHUNK_FADE: u8 = 15;
+pub const DEFAULT_CHUNK_FADE_MS: u32 = chunk_fade_ms(DEFAULT_CHUNK_FADE);
+
+fn default_chunk_fade() -> u8 {
+    DEFAULT_CHUNK_FADE
+}
+
+const fn chunk_fade_ms(twentieths: u8) -> u32 {
+    twentieths as u32 * 50
 }
 
 /// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
@@ -271,12 +328,14 @@ impl Default for Settings {
             invert_mouse_y: false,
             view_bobbing: true,
             menu_background_blurriness: default_menu_background_blurriness(),
+            chunk_fade: default_chunk_fade(),
             show_subtitles: false,
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
             vsync: true,
             max_framerate: 120,
+            inactivity_fps_limit: InactivityFpsLimit::default(),
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -306,6 +365,7 @@ impl Default for Settings {
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
+            last_server: String::new(),
         }
     }
 }
@@ -770,12 +830,15 @@ pub struct MainMenu {
     pub view_bobbing: bool,
     /// The Menu Background Blur radius (vanilla `MenuBlurRadius`), 0 for off.
     pub menu_background_blurriness: u8,
+    /// How long a section fades in, in twentieths of a second.
+    chunk_fade: u8,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub inactivity_fps_limit: InactivityFpsLimit,
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
@@ -879,7 +942,7 @@ impl MainMenu {
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
-            last_mp_ip: String::new(),
+            last_mp_ip: settings.last_server,
             ping_results,
             ping_generation: Default::default(),
             access_token,
@@ -941,12 +1004,14 @@ impl MainMenu {
             menu_background_blurriness: settings
                 .menu_background_blurriness
                 .min(MAX_MENU_BACKGROUND_BLURRINESS),
+            chunk_fade: settings.chunk_fade.min(MAX_CHUNK_FADE),
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            inactivity_fps_limit: settings.inactivity_fps_limit,
             debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
@@ -1200,12 +1265,14 @@ impl MainMenu {
                 invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 menu_background_blurriness: self.menu_background_blurriness,
+                chunk_fade: self.chunk_fade,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
+                inactivity_fps_limit: self.inactivity_fps_limit,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,
@@ -1235,6 +1302,7 @@ impl MainMenu {
                 chat: self.chat_options,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
+                last_server: self.last_mp_ip.clone(),
             },
         )
         .is_err();
@@ -1284,6 +1352,20 @@ impl MainMenu {
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
         self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
         self.settings_dirty = true;
+    }
+
+    fn set_chunk_fade(&mut self, twentieths: u8) {
+        self.chunk_fade = twentieths.min(MAX_CHUNK_FADE);
+        self.settings_dirty = true;
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn set_chunk_fade_secs(&mut self, secs: f32) {
+        self.set_chunk_fade((secs * 1000.0 / chunk_fade_ms(1) as f32).round() as u8);
+    }
+
+    pub fn chunk_fade_ms(&self) -> u32 {
+        chunk_fade_ms(self.chunk_fade)
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
@@ -1467,6 +1549,17 @@ impl MainMenu {
             .iter()
             .map(|(uuid, rgba)| (uuid.clone(), rgba.clone(), 8))
             .collect()
+    }
+
+    /// The screen a player's own disconnect leaves them on: the title screen
+    /// `to_title`, else the server list.
+    pub fn show_after_disconnect(&mut self, to_title: bool, key_bindings: &KeyBindings) {
+        let screen = if to_title {
+            Screen::Main
+        } else {
+            Screen::ServerList
+        };
+        self.set_screen(screen, key_bindings);
     }
 
     pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
@@ -1669,6 +1762,23 @@ impl MainMenu {
     }
 }
 
+#[cfg(feature = "test-harness")]
+impl MainMenu {
+    /// The open screen's name, as the `screen` expect checks it.
+    pub(crate) fn harness_screen(&self) -> &'static str {
+        match self.screen {
+            Screen::Main => "title",
+            Screen::ServerList => "server_list",
+            Screen::DirectConnect => "direct_connect",
+            _ => "other",
+        }
+    }
+
+    pub(crate) fn harness_address(&self) -> &str {
+        self.edit_address.value()
+    }
+}
+
 /// With a `dir` that doesn't exist, settings and the server list fall back
 /// to defaults and a settings save silently fails instead of writing.
 #[cfg(test)]
@@ -1818,6 +1928,19 @@ mod tests {
     }
 
     #[test]
+    fn chunk_fade_defaults_to_three_quarters_of_a_second_and_clamps_to_two() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("chunk_fade");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(chunk_fade_ms(legacy.chunk_fade), 750);
+
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("chunk-fade-clamp", &mut key_bindings);
+        menu.set_chunk_fade(42);
+        assert_eq!(menu.chunk_fade_ms(), 2000);
+    }
+
+    #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
         let mut legacy = serde_json::to_value(Settings::default()).unwrap();
         legacy
@@ -1898,6 +2021,26 @@ mod tests {
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.invert_mouse_x);
         assert!(loaded.invert_mouse_y);
+    }
+
+    #[test]
+    fn inactivity_fps_limit_defaults_to_afk_and_round_trips() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("inactivity_fps_limit");
+        let loaded: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Afk);
+
+        let settings = Settings {
+            inactivity_fps_limit: InactivityFpsLimit::Afk.cycle(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""inactivity_fps_limit":"minimized""#));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Minimized);
     }
 
     #[test]

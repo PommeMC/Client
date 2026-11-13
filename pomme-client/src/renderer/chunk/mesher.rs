@@ -10,9 +10,13 @@ use crate::position::ChunkPos;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::resources::{ResourceId, resource_id};
 use crate::shaderpack::block_ids::{BlockIds, PackBlockIds};
-use crate::world::block::model::{CardinalLighting, Direction, face_positions, face_uvs};
+use crate::world::block::model::{
+    CardinalLighting, Direction, direction_from_positions, face_positions, face_uvs,
+};
 use crate::world::block::render_assets::{BlockRenderView, OwnedBlockRenderView, Tint};
-use crate::world::block::{BlockStateData, BlockStateTable, FaceMask, FluidKind};
+use crate::world::block::{
+    BlockStateData, BlockStateTable, FaceCover, FaceMask, FluidKind, MeshKind,
+};
 use crate::world::chunk;
 use crate::world::chunk::{ChunkRing, ChunkStore, SectionBlocks};
 
@@ -608,8 +612,13 @@ fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z:
     }
 }
 
+/// `(f * 255.0).round() as u8`, without the libm call `round` compiles to.
 fn to_u8(f: f32) -> u8 {
-    (f * 255.0).round() as u8
+    let scaled = f * 255.0;
+    let whole = scaled as i32;
+    whole
+        .saturating_add(i32::from(scaled - whole as f32 >= 0.5))
+        .clamp(0, 255) as u8
 }
 
 struct SimplexNoise {
@@ -1155,15 +1164,12 @@ impl MeshDispatcher {
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
     /// shared handles to their light data.
     fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
-        let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
             block_state_table: self.render_view.block_state_table(),
-            chunks: chunks_needed
-                .iter()
-                .map(|p| (*p, chunk_store.get_chunk(p)))
+            chunks: chunk::column_neighborhood(pos)
+                .map(|p| (p, chunk_store.get_chunk(&p)))
                 .collect(),
-            light: chunks_needed
-                .iter()
+            light: chunk::column_neighborhood(pos)
                 .filter_map(|p| {
                     chunk_store
                         .light_data
@@ -1491,11 +1497,11 @@ impl GridBox {
     }
 
     fn index(&self, cell: [i32; 3]) -> Option<usize> {
-        let [x, y, z]: [i32; 3] = std::array::from_fn(|i| cell[i] - self.min[i]);
-        let inside = (0..self.size[0]).contains(&x)
-            && (0..self.size[1]).contains(&y)
-            && (0..self.size[2]).contains(&z);
-        inside.then(|| ((x * self.size[2] + z) * self.size[1] + y) as usize)
+        // Unsigned, so one compare per axis also rejects cells below `min`.
+        let [x, y, z]: [u32; 3] = std::array::from_fn(|i| cell[i].wrapping_sub(self.min[i]) as u32);
+        let [size_x, size_y, size_z] = self.size.map(|size| size as u32);
+        let inside = (x < size_x) & (y < size_y) & (z < size_z);
+        inside.then(|| ((x * size_z + z) * size_y + y) as usize)
     }
 }
 
@@ -1574,27 +1580,66 @@ impl BlockSlice {
         let mut states = vec![azalea_block::BlockState::AIR; blocks.len()];
         let [min_x, min_y_box, min_z] = blocks.min;
         let [size_x, size_y, size_z] = blocks.size;
+        let y_end = min_y_box + size_y;
         for (chunk_pos, chunk) in chunks {
             let Some(chunk) = chunk else { continue };
             let chunk = chunk.read();
             let span = |chunk_min: i32, box_min: i32, box_size: i32| {
                 chunk_min.max(box_min)..(chunk_min + 16).min(box_min + box_size)
             };
-            for y in min_y_box..min_y_box + size_y {
-                // Out-of-range Y stays air.
-                let Some(section) = chunk.section(y, min_y) else {
+            // One section's rows at a time, each a run of the box's Y-innermost
+            // layout.
+            let mut y = min_y_box;
+            while y < y_end {
+                let run_end = (min_y + ((y - min_y).div_euclid(16) + 1) * 16).min(y_end);
+                let rows = y..run_end;
+                y = run_end;
+                // Out-of-range Y stays air, as does an all-air section.
+                let Some(section) = chunk.section(rows.start, min_y) else {
                     continue;
                 };
                 let single = section.single_block_state();
+                if single == Some(azalea_block::BlockState::AIR) {
+                    continue;
+                }
                 for x in span(chunk_pos.x * 16, min_x, size_x) {
                     for z in span(chunk_pos.z * 16, min_z, size_z) {
-                        let state = single.unwrap_or_else(|| chunk.block_state(x, y, z, min_y));
-                        states[blocks.index([x, y, z]).expect("span lies inside the box")] = state;
+                        let base = blocks
+                            .index([x, rows.start, z])
+                            .expect("span lies inside the box");
+                        let run = &mut states[base..base + rows.len()];
+                        let Some(state) = single else {
+                            let (lx, lz) = ((x & 15) as u32, (z & 15) as u32);
+                            for (cell, y) in run.iter_mut().zip(rows.clone()) {
+                                *cell = section.get_block_state(
+                                    lx,
+                                    (y - min_y).rem_euclid(16) as u32,
+                                    lz,
+                                );
+                            }
+                            continue;
+                        };
+                        run.fill(state);
                     }
                 }
             }
         }
         Self { blocks, states }
+    }
+
+    /// Reads around the section whose minimum corner is `origin`, in
+    /// section-relative coordinates from -1 to 16 on each axis: the section
+    /// and its one-block border, all inside the box.
+    fn section_reader(&self, origin: [i32; 3]) -> impl Fn(i32, i32, i32) -> BlockState + '_ {
+        let [_, size_y, size_z] = self.blocks.size;
+        let base = self
+            .blocks
+            .index(origin)
+            .expect("the section lies inside the box") as i32;
+        move |x, y, z| {
+            debug_assert!([x, y, z].iter().all(|c| (-1..=16).contains(c)));
+            self.states[(base + (x * size_z + z) * size_y + y) as usize]
+        }
     }
 
     fn get(&self, x: i32, y: i32, z: i32) -> Option<azalea_block::BlockState> {
@@ -1606,9 +1651,14 @@ impl ChunkStoreSnapshot {
     /// Whether the block at `pos` draws its face toward `direction`
     /// ([`should_render_face`] against the neighbour there).
     fn face_shown(&self, pos: [i32; 3], direction: Direction) -> bool {
+        self.face_shown_of(self.state_data(pos), pos, direction)
+    }
+
+    /// [`Self::face_shown`] for a caller that already holds the block's data.
+    fn face_shown_of(&self, data: &BlockStateData, pos: [i32; 3], direction: Direction) -> bool {
         let offset = direction.offset();
         let neighbour = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]];
-        should_render_face(self.state_data(pos), self.state_data(neighbour), direction)
+        should_render_face(data, self.state_data(neighbour), direction)
     }
 }
 
@@ -1845,6 +1895,7 @@ fn mesh_chunk_snapshot(
         by_start..by_end,
     )));
     let snapshot = &*snapshot;
+    let slice = snapshot.blocks.as_ref().expect("built above");
 
     // One section at a time, so a worker holds one sink's buffers, not a
     // column's.
@@ -1857,21 +1908,19 @@ fn mesh_chunk_snapshot(
     };
     for si in range.clone() {
         let section_y = min_y + si * 16;
+        let at = slice.section_reader([world_x, section_y, world_z]);
         if lod > 0 {
             // LOD > 0 (distant): treat as fully see-through. Cave culling is a
             // near-field win; the long-range pass is deferred.
             visibility.push((si, VisibilitySet::all()));
         } else {
-            let at = |x: i32, y: i32, z: i32| {
-                snapshot.get_block_state(world_x + x, section_y + y, world_z + z)
-            };
             visibility.push((
                 si,
                 compute_visibility(|x, y, z| {
                     registry.is_opaque_full_cube(at(x as i32, y as i32, z as i32))
                 }),
             ));
-            if section_hidden(registry, at) {
+            if section_hidden(registry, &at) {
                 continue;
             }
         }
@@ -1884,16 +1933,23 @@ fn mesh_chunk_snapshot(
 
                 let mut by = section_y;
                 while by < section_y + 16 {
-                    let mut state = snapshot.get_block_state(bx, by, bz);
-                    let mut kind =
-                        classify_block(snapshot.block_state_table.block_state_data(state));
+                    let mut state = at(local_x, by - section_y, local_z);
+                    let mut kind = snapshot
+                        .block_state_table
+                        .block_state_data(state)
+                        .render()
+                        .mesh_kind;
                     // Checks for non air block in the cube region to represent the area if the
                     // picked block is air
-                    if lod > 0 && matches!(kind, BlockKind::Air) {
+                    if lod > 0 && matches!(kind, MeshKind::Air) {
                         for try_y in (by + 1)..(by + step) {
-                            let s = snapshot.get_block_state(bx, try_y, bz);
-                            let k = classify_block(snapshot.block_state_table.block_state_data(s));
-                            if !matches!(k, BlockKind::Air) {
+                            let s = at(local_x, try_y - section_y, local_z);
+                            let k = snapshot
+                                .block_state_table
+                                .block_state_data(s)
+                                .render()
+                                .mesh_kind;
+                            if !matches!(k, MeshKind::Air) {
                                 state = s;
                                 kind = k;
                                 break;
@@ -1901,7 +1957,23 @@ fn mesh_chunk_snapshot(
                         }
                     }
 
-                    if matches!(kind, BlockKind::Air) {
+                    if matches!(kind, MeshKind::Air) {
+                        by += step;
+                        continue;
+                    }
+                    // [`section_hidden`] for one block: all its quads are culled,
+                    // which is most of what lies underground.
+                    if lod == 0
+                        && registry.hidden_when_enclosed(state)
+                        && Direction::VALUES.iter().all(|direction| {
+                            let [dx, dy, dz] = direction.offset();
+                            registry.occludes_neighbor(at(
+                                local_x + dx,
+                                by - section_y + dy,
+                                local_z + dz,
+                            ))
+                        })
+                    {
                         by += step;
                         continue;
                     }
@@ -1921,13 +1993,13 @@ fn mesh_chunk_snapshot(
                         (glam::Vec3::from(block_pos) + model_offset.as_vec3()).to_array();
 
                     let first_vertex = sink.vertices.len();
-                    let fluid = matches!(kind, BlockKind::Water | BlockKind::Lava);
+                    let fluid = matches!(kind, MeshKind::Water | MeshKind::Lava);
                     if lod > 0 {
                         emit_lod_cube(
                             &mut sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
                             step,
                         );
-                    } else if let BlockKind::Water | BlockKind::Lava = kind {
+                    } else if let MeshKind::Water | MeshKind::Lava = kind {
                         emit_fluid(
                             &mut sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by,
                             bz,
@@ -2053,19 +2125,20 @@ fn smooth_lighting(
 
 /// One quad's vertex light, through [`block_lighter`]: smooth, or flat from
 /// its culled neighbour ([`neighbour_light`]).
+#[allow(clippy::too_many_arguments)]
 fn quad_light(
     snapshot: &ChunkStoreSnapshot,
     smooth: bool,
     [bx, by, bz]: [i32; 3],
     positions: &[[f32; 3]; 4],
+    direction: Option<Direction>,
     shade_face: Option<Direction>,
     cullface: Option<Direction>,
     emission: u8,
 ) -> [VertexLight; 4] {
     let quad = block_lighter::Quad {
         positions,
-        direction: crate::world::block::model::direction_from_positions(positions)
-            .unwrap_or(Direction::Up),
+        direction: direction.unwrap_or(Direction::Up),
         shade_face,
         emission,
     };
@@ -2102,21 +2175,32 @@ fn emit_quads<'q>(
         .next()
         .is_some_and(|quad| quad.ambient_occlusion);
     let smooth = smooth_lighting(snapshot, state, first_ao);
+    let data = snapshot.block_state_table.block_state_data(state);
+    // A block's quads nearly all share one tint, and each costs a biome blend.
+    let mut last_tint = (Tint::None, PACKED_WHITE_SHIFTED);
     for quad in quads {
         if quad
             .cullface
-            .is_some_and(|cullface| !snapshot.face_shown([bx, by, bz], cullface))
+            .is_some_and(|cullface| !snapshot.face_shown_of(data, [bx, by, bz], cullface))
         {
             continue;
         }
 
         let region = uv_map.region(quad.texture);
-        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
+        if quad.tint != last_tint.0 {
+            last_tint = (
+                quad.tint,
+                tint_color(quad.tint, snapshot, state, bx, by, bz),
+            );
+        }
+        let tint = last_tint.1;
+        let direction = direction_from_positions(&quad.positions);
         let lights = quad_light(
             snapshot,
             smooth,
             [bx, by, bz],
             &quad.positions,
+            direction,
             quad.shade_face,
             quad.cullface,
             quad.emission,
@@ -2125,6 +2209,7 @@ fn emit_quads<'q>(
             sink,
             block_pos,
             &quad.positions,
+            direction,
             &quad.uvs,
             lights,
             region,
@@ -2147,9 +2232,10 @@ fn emit_cube_faces(
 ) {
     let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
     let smooth = smooth_lighting(snapshot, state, true);
+    let data = snapshot.block_state_table.block_state_data(state);
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
-        if !snapshot.face_shown([bx, by, bz], *dir) {
+        if !snapshot.face_shown_of(data, [bx, by, bz], *dir) {
             continue;
         }
 
@@ -2163,11 +2249,13 @@ fn emit_cube_faces(
         };
         let region = uv_map.get_region(face_tex);
         let (positions, uvs) = cube_face_geometry(*dir);
+        let direction = direction_from_positions(&positions);
         let lights = quad_light(
             snapshot,
             smooth,
             [bx, by, bz],
             &positions,
+            direction,
             Some(*dir),
             Some(*dir),
             0,
@@ -2179,6 +2267,7 @@ fn emit_cube_faces(
                 sink,
                 block_pos,
                 &positions,
+                direction,
                 &uvs,
                 lights,
                 region,
@@ -2189,6 +2278,7 @@ fn emit_cube_faces(
                 sink,
                 block_pos,
                 &positions,
+                direction,
                 &uvs,
                 lights,
                 overlay_region,
@@ -2202,31 +2292,10 @@ fn emit_cube_faces(
             } else {
                 PACKED_WHITE_SHIFTED
             };
-            emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
+            emit_face(
+                sink, block_pos, &positions, direction, &uvs, lights, region, face_tint,
+            );
         }
-    }
-}
-
-enum BlockKind {
-    Air,
-    Water,
-    Lava,
-    Solid,
-}
-
-fn classify_block(block_state_data: &BlockStateData) -> BlockKind {
-    if block_state_data.is_air() {
-        return BlockKind::Air;
-    }
-    match block_state_data.id() {
-        "cave_air" | "void_air" | "light" | "barrier" | "structure_void" | "moving_piston" => {
-            BlockKind::Air
-        }
-        "water" | "bubble_column" => BlockKind::Water,
-        "lava" => BlockKind::Lava,
-        // Drawn by the block-entity pipeline; nothing to mesh.
-        id if crate::world::block_entity::rendered_kind(id).is_some() => BlockKind::Air,
-        _ => BlockKind::Solid,
     }
 }
 
@@ -2247,24 +2316,16 @@ enum FaceShape {
 }
 
 fn face_occlusion_shape(block_state_data: &BlockStateData, direction: Direction) -> FaceShape {
-    if block_state_data.is_air() || !block_state_data.light_props().can_occlude {
-        return FaceShape::Empty;
-    }
-    match block_state_data.light_props().face_occlusion {
-        Some(masks) => {
-            let mask = &masks[direction as usize];
-            if mask.iter().all(|&row| row == 0xFFFF) {
-                FaceShape::Full
-            } else if mask.iter().all(|&row| row == 0) {
-                FaceShape::Empty
-            } else {
-                FaceShape::Mask(mask)
-            }
+    match block_state_data.render().face_cover(direction) {
+        FaceCover::Full => FaceShape::Full,
+        FaceCover::Empty => FaceShape::Empty,
+        FaceCover::Partial => {
+            let masks = block_state_data
+                .light_props()
+                .face_occlusion
+                .expect("a partial cover comes from the masks");
+            FaceShape::Mask(&masks[direction as usize])
         }
-        // TODO: masks are only dumped for useShapeForLightOcclusion states, so
-        // other partial occlusion shapes (fence posts, chests) count as empty.
-        None if block_state_data.outline_boxes().is_none() => FaceShape::Full,
-        None => FaceShape::Empty,
     }
 }
 
@@ -2426,12 +2487,17 @@ fn block_face_tex_tint(
     by: i32,
     bz: i32,
 ) -> (AtlasRegion, u32) {
-    match classify_block(snapshot.block_state_table.block_state_data(state)) {
-        BlockKind::Water => (
+    match snapshot
+        .block_state_table
+        .block_state_data(state)
+        .render()
+        .mesh_kind
+    {
+        MeshKind::Water => (
             uv_map.get_region("water_still"),
             pack_tint_shifted(snapshot.water_tint(bx, by, bz)),
         ),
-        BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
+        MeshKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
         _ => {
             if let Some(textures) = registry.get_textures(state) {
                 let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
@@ -2454,7 +2520,7 @@ fn block_face_tex_tint(
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid(
     sink: &mut MeshSink,
-    kind: BlockKind,
+    kind: MeshKind,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
@@ -2477,7 +2543,7 @@ fn emit_fluid(
         water,
         ..
     } = sink;
-    let indices = if matches!(kind, BlockKind::Water) {
+    let indices = if matches!(kind, MeshKind::Water) {
         water
     } else {
         solid
@@ -2536,7 +2602,15 @@ fn emit_fluid(
                 positions[3][1] = north_east;
 
                 emit_face_into(
-                    vertices, indices, block_pos, &positions, &uvs, light, region, tint,
+                    vertices,
+                    indices,
+                    block_pos,
+                    &positions,
+                    direction_from_positions(&positions),
+                    &uvs,
+                    light,
+                    region,
+                    tint,
                 );
 
                 // TODO: gate on `FluidState.shouldRenderBackwardUpFace`.
@@ -2547,6 +2621,7 @@ fn emit_fluid(
                     indices,
                     block_pos,
                     &rev_positions,
+                    direction_from_positions(&rev_positions),
                     &rev_uvs,
                     light,
                     region,
@@ -2590,7 +2665,15 @@ fn emit_fluid(
         }
 
         emit_face_into(
-            vertices, indices, block_pos, &positions, &uvs, light, region, tint,
+            vertices,
+            indices,
+            block_pos,
+            &positions,
+            direction_from_positions(&positions),
+            &uvs,
+            light,
+            region,
+            tint,
         );
     }
 }
@@ -2611,8 +2694,8 @@ fn emit_lod_cube(
     let block_state_table = snapshot.block_state_table;
     let block_state_data = block_state_table.block_state_data(state);
     let is_fluid = matches!(
-        classify_block(block_state_data),
-        BlockKind::Water | BlockKind::Lava
+        block_state_data.render().mesh_kind,
+        MeshKind::Water | MeshKind::Lava
     );
     // We have to do this otherwise there becomes a visible seam at the LOD border
     let fluid_top = if is_fluid {
@@ -2638,8 +2721,11 @@ fn emit_lod_cube(
         }
         if is_fluid
             && matches!(
-                classify_block(block_state_table.block_state_data(neighbor)),
-                BlockKind::Water | BlockKind::Lava
+                block_state_table
+                    .block_state_data(neighbor)
+                    .render()
+                    .mesh_kind,
+                MeshKind::Water | MeshKind::Lava
             )
         {
             continue;
@@ -2749,6 +2835,7 @@ fn emit_face(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
+    direction: Option<Direction>,
     uvs: &[[f32; 2]; 4],
     lights: [VertexLight; 4],
     region: AtlasRegion,
@@ -2763,7 +2850,7 @@ fn emit_face(
     } = sink;
     let indices = if opaque { solid } else { cutout };
     emit_face_into(
-        vertices, indices, block_pos, positions, uvs, lights, region, tint,
+        vertices, indices, block_pos, positions, direction, uvs, lights, region, tint,
     );
 }
 
@@ -2773,15 +2860,14 @@ fn emit_face_into(
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
+    direction: Option<Direction>,
     uvs: &[[f32; 2]; 4],
     lights: [VertexLight; 4],
     region: AtlasRegion,
     tint: u32,
 ) {
     let base = vertices.len() as u32;
-    let face = face_code(crate::world::block::model::direction_from_positions(
-        positions,
-    ));
+    let face = face_code(direction);
     for i in 0..4 {
         vertices.push(TerrainVertex {
             entity: 0,
@@ -3085,5 +3171,41 @@ mod poll_order_tests {
         let recompiles = vec![(5.0, "r5")];
         let initial = vec![(2.0, "i2"), (1.0, "i1")];
         assert_eq!(poll_order(recompiles, initial), ["i1", "i2", "r5"]);
+    }
+}
+
+#[cfg(test)]
+mod to_u8_tests {
+    use super::to_u8;
+
+    #[test]
+    fn rounds_as_round_does() {
+        let reference = |f: f32| (f * 255.0).round() as u8;
+        let near = |f: f32| {
+            [
+                f32::from_bits(f.to_bits() - 1),
+                f,
+                f32::from_bits(f.to_bits() + 1),
+            ]
+        };
+        // Every channel value and every half step between them, each with its
+        // neighbouring floats.
+        for half_steps in 1..=520 {
+            for f in near(half_steps as f32 / 510.0) {
+                assert_eq!(to_u8(f), reference(f), "{f}");
+                assert_eq!(to_u8(-f), reference(-f), "-{f}");
+            }
+        }
+        for f in [
+            0.0,
+            -0.0,
+            1.0e9,
+            -1.0e9,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            assert_eq!(to_u8(f), reference(f), "{f}");
+        }
     }
 }

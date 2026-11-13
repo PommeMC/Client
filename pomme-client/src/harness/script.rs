@@ -55,6 +55,7 @@ struct StepFile {
     chunk_arenas: Option<protocol::ChunkArenas>,
     hover: Option<protocol::Hover>,
     cursor: Option<[f32; 2]>,
+    cursor_to_button: Option<String>,
     scroll: Option<f32>,
     text: Option<String>,
     wait_ms: Option<u64>,
@@ -92,6 +93,7 @@ enum Expect {
     Terrain(TerrainExpect),
     Distant(DistantExpect),
     Menu(MenuExpect),
+    Screen(ScreenExpect),
     List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -184,6 +186,8 @@ struct HudFields {
     /// Every listed player, in the tab overlay's order.
     tab_list: Option<Vec<TabEntryExpect>>,
     chat_open: Option<bool>,
+    /// The action bar's text; `""` when none shows.
+    action_bar: Option<String>,
 }
 
 /// A tab list player; `game_mode` is checked when given.
@@ -200,6 +204,7 @@ struct PlayerFields {
     /// Within half a health point.
     health: Option<f32>,
     food: Option<u32>,
+    air: Option<i32>,
     level: Option<i32>,
     game_mode: Option<u8>,
     /// An active effect, by registry path.
@@ -265,6 +270,15 @@ struct DistantAt {
     gone: bool,
 }
 
+/// The screen open outside a world (`title`, `server_list`,
+/// `direct_connect`), and optionally the Direct Connect address field's text.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenExpect {
+    screen: String,
+    address: Option<String>,
+}
+
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
 /// `creative`, `pause` or `none`, and optionally its title.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -306,6 +320,17 @@ enum Step {
     /// within [`MATCH_TOLERANCE`], but for at most this many pixels.
     MatchScreenshots([String; 2], usize),
     Expect(Expect, Duration),
+}
+
+impl Step {
+    /// Whether the step works outside a world, once a script has left it.
+    fn runs_anywhere(&self) -> bool {
+        match self {
+            Step::Run(command) => exec::runs_anywhere(command),
+            Step::Wait(_) | Step::Screenshot(_) | Step::Expect(Expect::Screen(_), _) => true,
+            _ => false,
+        }
+    }
 }
 
 impl StepFile {
@@ -368,6 +393,9 @@ impl StepFile {
         }
         if let Some(at) = self.cursor {
             steps.push(Step::Run(Command::Cursor { at }));
+        }
+        if let Some(label) = self.cursor_to_button {
+            steps.push(Step::Run(Command::CursorToButton { label }));
         }
         if let Some(y) = self.scroll {
             steps.push(Step::Run(Command::Scroll { y }));
@@ -531,12 +559,20 @@ impl Script {
         if !matches!(phase, AppPhase::InGame { .. }) {
             let joined = self.next > 0 || self.step_started.is_some();
             if joined {
-                return Some(self.fail(format!("left the game ({})", exec::phase_name(phase))));
-            }
-            if self.started.elapsed() > JOIN_TIMEOUT {
+                match self.steps.get(self.next) {
+                    None => return Some(self.finish(true)),
+                    Some(step) if step.runs_anywhere() => {}
+                    Some(_) => {
+                        return Some(
+                            self.fail(format!("left the game ({})", exec::phase_name(phase))),
+                        );
+                    }
+                }
+            } else if self.started.elapsed() > JOIN_TIMEOUT {
                 return Some(self.fail("timed out joining".into()));
+            } else {
+                return None;
             }
-            return None;
         }
         let Some(step) = self.steps.get(self.next) else {
             return Some(self.finish(true));
@@ -682,10 +718,20 @@ impl Script {
 
 /// Whether `expect` holds now; the error describes what was seen instead.
 fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String> {
+    if let Expect::Screen(ScreenExpect { screen, address }) = expect {
+        let (seen, field) = (core.menu.harness_screen(), core.menu.harness_address());
+        return ensure(
+            matches!(phase, AppPhase::InMenu { .. })
+                && seen == *screen
+                && address.as_ref().is_none_or(|address| address == field),
+            || format!("{} on {seen}, address {field:?}", exec::phase_name(phase)),
+        );
+    }
     let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
     match expect {
+        Expect::Screen(_) => unreachable!("checked before the in-game gate"),
         Expect::Slot(SlotExpect {
             slot,
             item,
@@ -771,6 +817,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             ensure(
                 want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
                     && want.food.is_none_or(|f| seen.food == f)
+                    && want.air.is_none_or(|a| seen.air == a)
                     && want.level.is_none_or(|l| seen.level == l)
                     && want.game_mode.is_none_or(|m| seen.game_mode == m)
                     && want.effect.as_deref().is_none_or(has)
@@ -829,7 +876,11 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                                     && want.game_mode.is_none_or(|m| m == seen.game_mode)
                             })
                     })
-                    && want.chat_open.is_none_or(|open| open == seen.chat_open),
+                    && want.chat_open.is_none_or(|open| open == seen.chat_open)
+                    && want
+                        .action_bar
+                        .as_ref()
+                        .is_none_or(|t| *t == shown(&seen.action_bar)),
                 || format!("hud is {seen:?}"),
             )
         }
@@ -1017,6 +1068,8 @@ mod tests {
                 distant_terrain: None,
                 resource_pack: None,
                 show_subtitles: None,
+                chunk_fade: None,
+                inactivity_fps_limit: None,
             }))
         );
         assert_eq!(

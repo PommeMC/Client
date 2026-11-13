@@ -169,8 +169,8 @@ impl BlockStateTable {
 
     /// Unknown state ids use a solid, unlit fallback.
     pub(crate) fn block_state_data(self, state: BlockState) -> &'static BlockStateData {
-        static UNKNOWN: std::sync::LazyLock<BlockStateData> =
-            std::sync::LazyLock::new(|| BlockStateData {
+        static UNKNOWN: std::sync::LazyLock<BlockStateData> = std::sync::LazyLock::new(|| {
+            BlockStateData {
                 id: "unknown",
                 properties: PropMap::from_pairs(Vec::new()),
                 shape: None,
@@ -190,7 +190,10 @@ impl BlockStateTable {
                 light: BEDROCK_LIGHT,
                 push_reaction: PushReaction::Normal,
                 has_block_entity: false,
-            });
+                render: super::RenderProps::UNSET,
+            }
+            .with_render_props()
+        });
         self.table
             .get(u32::from(state) as usize)
             .unwrap_or(&UNKNOWN)
