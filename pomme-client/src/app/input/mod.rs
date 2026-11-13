@@ -78,8 +78,8 @@ pub struct InputState {
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    /// A container screen (inventory, chest, creative) is open: it consumes
-    /// hotbar digits and the drop/swap keys, like vanilla screens do.
+    /// A screen (a container, the pause menu, the death screen) is open: it
+    /// consumes hotbar digits and the drop/swap keys, like vanilla screens do.
     pub menu_capture: bool,
     /// The player is a spectator: digits drive the spectator menu instead of
     /// the carried slot, and middle click is `key.spectatorHotbar`.
