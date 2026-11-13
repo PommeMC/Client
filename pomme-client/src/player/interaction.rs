@@ -862,6 +862,7 @@ impl InteractionState {
                     suppress_block_use,
                     player_pos,
                     player_aabb,
+                    look,
                     dirty_chunks,
                 ),
                 None => UseResult::Pass,
@@ -901,6 +902,7 @@ impl InteractionState {
         suppress_block_use: bool,
         player_pos: DVec3,
         player_aabb: Aabb,
+        look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> UseResult {
         self.seq += 1;
@@ -949,6 +951,7 @@ impl InteractionState {
             chunks,
             player_pos,
             player_aabb,
+            look,
             dirty_chunks,
         );
         UseResult::Success { swing: true }
@@ -1291,12 +1294,22 @@ impl InteractionState {
         chunks: &ChunkStore,
         player_pos: DVec3,
         player_aabb: Aabb,
+        look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
-        let Some(state) = place_block else {
+        let Some(mut state) = place_block else {
             return;
         };
         let pos = hit.block_pos.relative(hit.face);
+        if let Some(wall) = wall_torch(block_state_table.block_state_data(state).id()) {
+            let directions = nearest_looking_directions(look, hit.face);
+            let Some(placed) =
+                torch_placement(block_state_table, chunks, pos, state, wall, directions)
+            else {
+                return;
+            };
+            state = placed;
+        }
 
         // Only predict into an empty cell; replacing grass/water isn't handled yet.
         if !block_state_table
@@ -2207,6 +2220,115 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
     );
 }
 
+/// The wall block of a single-state torch's `StandingAndWallBlockItem`.
+fn wall_torch(standing: &str) -> Option<&'static str> {
+    match standing {
+        "torch" => Some("wall_torch"),
+        "soul_torch" => Some("soul_wall_torch"),
+        "copper_torch" => Some("copper_wall_torch"),
+        _ => None,
+    }
+}
+
+/// Vanilla `Direction.orderedByNearest`: the six directions, the one the
+/// player looks most along first.
+fn ordered_by_nearest(look: LookDirection) -> [Direction; 6] {
+    use crate::physics::movement::{mth_cos, mth_sin};
+    let pitch = look.x_rot_rad();
+    let yaw = -look.y_rot_rad();
+    let (pitch_sin, pitch_cos) = (mth_sin(pitch), mth_cos(pitch));
+    let (yaw_sin, yaw_cos) = (mth_sin(yaw), mth_cos(yaw));
+    let (x_pos, y_pos, z_pos) = (yaw_sin > 0.0, pitch_sin < 0.0, yaw_cos > 0.0);
+    let x_yaw = if x_pos { yaw_sin } else { -yaw_sin };
+    let y_mag = if y_pos { -pitch_sin } else { pitch_sin };
+    let z_yaw = if z_pos { yaw_cos } else { -yaw_cos };
+    let (x_mag, z_mag) = (x_yaw * pitch_cos, z_yaw * pitch_cos);
+    let axis_x = if x_pos {
+        Direction::East
+    } else {
+        Direction::West
+    };
+    let axis_y = if y_pos {
+        Direction::Up
+    } else {
+        Direction::Down
+    };
+    let axis_z = if z_pos {
+        Direction::South
+    } else {
+        Direction::North
+    };
+    let [a, b, c] = if x_yaw > z_yaw {
+        if y_mag > x_mag {
+            [axis_y, axis_x, axis_z]
+        } else if z_mag > y_mag {
+            [axis_x, axis_z, axis_y]
+        } else {
+            [axis_x, axis_y, axis_z]
+        }
+    } else if y_mag > z_mag {
+        [axis_y, axis_z, axis_x]
+    } else if x_mag > y_mag {
+        [axis_z, axis_x, axis_y]
+    } else {
+        [axis_z, axis_y, axis_x]
+    };
+    [a, b, c, c.opposite(), b.opposite(), a.opposite()]
+}
+
+/// Vanilla `BlockPlaceContext.getNearestLookingDirections` for a click that
+/// doesn't replace its block: toward the clicked face first.
+fn nearest_looking_directions(look: LookDirection, clicked: Direction) -> [Direction; 6] {
+    let mut directions = ordered_by_nearest(look);
+    let first = directions
+        .iter()
+        .position(|&d| d == clicked.opposite())
+        .unwrap_or(0);
+    directions[..=first].rotate_right(1);
+    directions
+}
+
+/// Vanilla `StandingAndWallBlockItem.getPlacementState` for a torch, with
+/// `WallTorchBlock.getStateForPlacement` and both torches' `canSurvive`.
+/// `None` skips the prediction: where vanilla places nothing, where the
+/// table lacks face sturdiness, and where a standing torch would rest on a
+/// block whose centre support (`canSupportCenter`) the tables don't record.
+fn torch_placement(
+    table: BlockStateTable,
+    chunks: &ChunkStore,
+    pos: BlockPos,
+    standing: BlockState,
+    wall: &str,
+    directions: [Direction; 6],
+) -> Option<BlockState> {
+    let at = |p: BlockPos| table.block_state_data(chunks.get_block_state(p.x, p.y, p.z));
+    let mut wall_state = None;
+    for &direction in directions.iter().filter(|d| d.axis() != 1) {
+        let facing = direction.opposite();
+        if at(pos.relative(direction)).is_full_face_sturdy(facing)? {
+            wall_state = table.state_with(wall, &[("facing", facing.name())]);
+            break;
+        }
+    }
+    for direction in directions {
+        match direction {
+            Direction::Up => {}
+            Direction::Down => {
+                let below = at(pos.relative(Direction::Down));
+                if below.is_full_face_sturdy(Direction::Up)? {
+                    return Some(standing);
+                }
+                if below.has_collision() {
+                    return None;
+                }
+            }
+            _ if wall_state.is_some() => return wall_state,
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use glam::dvec3;
@@ -2503,6 +2625,80 @@ mod tests {
         assert!(same_item_same_components(None, None));
     }
 
+    /// Torch placement at (1, 64, 1), with stone behind it to the north
+    /// and `below` under it.
+    fn place_torch(below: &str, clicked: Direction, look: LookDirection) -> Option<BlockState> {
+        let table = BlockRegistry::native().block_state_table();
+        let chunks = ChunkStore::with_origin_chunk();
+        let state = |name| table.first_state_of(name).expect("state");
+        chunks.set_block_state(1, 64, 0, state("stone"), table);
+        chunks.set_block_state(1, 63, 1, state(below), table);
+        let directions = nearest_looking_directions(look, clicked);
+        torch_placement(
+            table,
+            &chunks,
+            BlockPos::new(1, 64, 1),
+            state("torch"),
+            "wall_torch",
+            directions,
+        )
+    }
+
+    /// The wall torch on the stone `place_torch` puts to the north.
+    fn south_wall_torch() -> Option<BlockState> {
+        BlockRegistry::native()
+            .block_state_table()
+            .state_with("wall_torch", &[("facing", "south")])
+    }
+
+    #[test]
+    fn directions_order_by_where_the_player_looks() {
+        use Direction::*;
+        assert_eq!(ordered_by_nearest(LookDirection::new(0.0, 0.0))[0], South);
+        assert_eq!(
+            ordered_by_nearest(LookDirection::new(180.0, 10.0))[0],
+            North
+        );
+        assert_eq!(ordered_by_nearest(LookDirection::new(90.0, 0.0))[0], West);
+        assert_eq!(ordered_by_nearest(LookDirection::new(0.0, 80.0))[0], Down);
+        // The clicked face's opposite leads, the rest keep their order.
+        let looking = nearest_looking_directions(LookDirection::new(0.0, 80.0), North);
+        assert_eq!(looking[..2], [South, Down]);
+    }
+
+    #[test]
+    fn a_torch_on_a_wall_predicts_the_wall_torch() {
+        // Clicking the wall's south face, even looking down at the floor.
+        for pitch in [10.0, 80.0] {
+            let look = LookDirection::new(180.0, pitch);
+            assert_eq!(
+                place_torch("stone", Direction::South, look),
+                south_wall_torch()
+            );
+        }
+        // Clicking the floor stands it up.
+        let down = LookDirection::new(180.0, 80.0);
+        assert_eq!(
+            place_torch("stone", Direction::Up, down),
+            BlockRegistry::native()
+                .block_state_table()
+                .first_state_of("torch")
+        );
+    }
+
+    #[test]
+    fn a_torch_with_unknown_support_predicts_nothing() {
+        let down = LookDirection::new(0.0, 80.0);
+        // A fence top supports a torch's centre, which the tables don't say.
+        assert_eq!(place_torch("oak_fence", Direction::Up, down), None);
+    }
+
+    #[test]
+    fn a_torch_with_nothing_below_falls_back_to_the_wall() {
+        let look = LookDirection::new(0.0, 80.0);
+        assert_eq!(place_torch("air", Direction::Up, look), south_wall_torch());
+    }
+
     #[test]
     fn a_bed_ends_the_click_after_its_one_packet() {
         use crate::net::sender::Outbound;
@@ -2533,6 +2729,7 @@ mod tests {
             false,
             dvec3(1.5, 64.0, -0.5),
             Aabb::new(dvec3(1.2, 64.0, -0.8), dvec3(1.8, 65.8, -0.2)),
+            LookDirection::new(0.0, 0.0),
             &mut Vec::new(),
         );
         assert_eq!(result, UseResult::Success { swing: false });
