@@ -1,0 +1,20 @@
+# A server dialog's single and multi-line text inputs draw the edit box's
+# field sprites.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = '/dialog show @s {type:"minecraft:notice",title:"Inputs",inputs:[{type:"minecraft:text",key:"name",label:"Name",initial:"Steve"},{type:"minecraft:text",key:"notes",label:"Notes",multiline:{max_lines:3}}]}'
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "inputs"
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+wait_ms = 500
