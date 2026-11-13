@@ -318,7 +318,6 @@ pub struct GameState {
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
-    pub advanced_item_tooltips: bool,
     /// F1 (vanilla `hideGui`): the HUD, chat, and overlays don't render.
     pub hide_gui: bool,
     /// A chord fired while F3 was held, so releasing F3 must not toggle the
@@ -658,7 +657,6 @@ impl GameState {
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
-            advanced_item_tooltips: false,
             hide_gui: false,
             f3_chord_consumed: false,
             debug_overlay_pending: false,
@@ -1366,8 +1364,7 @@ impl GameState {
                 true
             }
             _ if bindings.matches(Action::DebugAdvancedTooltips, &input) => {
-                self.advanced_item_tooltips = !self.advanced_item_tooltips;
-                self.debug_feedback(if self.advanced_item_tooltips {
+                self.debug_feedback(if menu.toggle_advanced_item_tooltips(bindings) {
                     "Advanced tooltips: shown"
                 } else {
                     "Advanced tooltips: hidden"
@@ -2192,7 +2189,7 @@ pub(crate) fn build_server_screens(
                         .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
                 ),
                 tick,
-                advanced_tooltips: game.advanced_item_tooltips,
+                advanced_tooltips: core.menu.advanced_item_tooltips,
             },
             &|t, s| gfx.renderer.menu_text_width(t, s),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
@@ -3719,7 +3716,7 @@ pub fn update_game(
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
-                advanced_item_tooltips: game.advanced_item_tooltips,
+                advanced_item_tooltips: core.menu.advanced_item_tooltips,
                 key_bindings: &core.input.key_bindings,
                 text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
                 spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
@@ -4561,7 +4558,7 @@ pub fn update_game(
             let lines = crate::ui::chat::stack_tooltip_lines(
                 stack,
                 &game.registries,
-                game.advanced_item_tooltips,
+                core.menu.advanced_item_tooltips,
             );
             if !lines.is_empty() {
                 crate::ui::common::push_tooltip_lines(
@@ -4622,7 +4619,7 @@ pub fn update_game(
             &game.player.inventory,
             &game.registries,
             gs,
-            game.advanced_item_tooltips,
+            core.menu.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
             core.input.shift_held(),

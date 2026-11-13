@@ -1,0 +1,50 @@
+# F3+H turns on advanced tooltips, which name the item's id under it; the
+# setting is saved, so the script turns it back off for the scripts after it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+key_down = { action = "key.debug.modifier" }
+
+[[step]]
+press = { action = "key.debug.showAdvancedTooltips" }
+
+[[step]]
+key_up = { action = "key.debug.modifier" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative", tab = "building_blocks" }
+
+[[step]]
+hover = { catalog = 0 }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "advanced"
+
+[[step]]
+close_menu = true
+
+[[step]]
+key_down = { action = "key.debug.modifier" }
+
+[[step]]
+press = { action = "key.debug.showAdvancedTooltips" }
+
+[[step]]
+key_up = { action = "key.debug.modifier" }
+
+[[step]]
+chat = "/gamemode survival"

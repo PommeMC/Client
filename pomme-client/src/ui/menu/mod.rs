@@ -79,6 +79,8 @@ struct Settings {
     chunk_fade: u8,
     #[serde(default)]
     show_subtitles: bool,
+    #[serde(default)]
+    advanced_item_tooltips: bool,
     #[serde(default = "default_true")]
     vignette: bool,
     #[serde(default = "default_true")]
@@ -330,6 +332,7 @@ impl Default for Settings {
             menu_background_blurriness: default_menu_background_blurriness(),
             chunk_fade: default_chunk_fade(),
             show_subtitles: false,
+            advanced_item_tooltips: false,
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
@@ -836,6 +839,8 @@ pub struct MainMenu {
     /// How long a section fades in, in twentieths of a second.
     chunk_fade: u8,
     pub show_subtitles: bool,
+    /// Vanilla `Options.advancedItemTooltips`.
+    pub advanced_item_tooltips: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
@@ -1010,6 +1015,7 @@ impl MainMenu {
                 .min(MAX_MENU_BACKGROUND_BLURRINESS),
             chunk_fade: settings.chunk_fade.min(MAX_CHUNK_FADE),
             show_subtitles: settings.show_subtitles,
+            advanced_item_tooltips: settings.advanced_item_tooltips,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
@@ -1271,6 +1277,7 @@ impl MainMenu {
                 menu_background_blurriness: self.menu_background_blurriness,
                 chunk_fade: self.chunk_fade,
                 show_subtitles: self.show_subtitles,
+                advanced_item_tooltips: self.advanced_item_tooltips,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
@@ -1370,6 +1377,14 @@ impl MainMenu {
 
     pub fn chunk_fade_ms(&self) -> u32 {
         chunk_fade_ms(self.chunk_fade)
+    }
+
+    /// F3+H: vanilla flips `advancedItemTooltips` and saves the options.
+    pub fn toggle_advanced_item_tooltips(&mut self, key_bindings: &KeyBindings) -> bool {
+        self.advanced_item_tooltips = !self.advanced_item_tooltips;
+        self.settings_dirty = true;
+        self.save_options(key_bindings);
+        self.advanced_item_tooltips
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
@@ -1845,6 +1860,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn advanced_tooltips_survive_a_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("pomme-advanced-tooltips-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        assert!(!menu.advanced_item_tooltips);
+        assert!(menu.toggle_advanced_item_tooltips(&key_bindings));
+        let menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        assert!(menu.advanced_item_tooltips);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
