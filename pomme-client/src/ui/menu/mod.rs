@@ -761,6 +761,9 @@ pub struct MainMenu {
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
+    /// The open title-screen dropdown's list as last drawn, which the
+    /// buttons under it don't see the cursor through.
+    dropdown_rect: Option<[f32; 4]>,
     /// Return target for Language/Accessibility, which open from both the
     /// title-screen icon row and the Options grid, and for Chat Settings,
     /// which also open from chat.
@@ -961,6 +964,7 @@ impl MainMenu {
             rt,
             links_open: false,
             theme_open: false,
+            dropdown_rect: None,
             settings_back: Screen::Options,
             theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
@@ -1806,6 +1810,42 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_list_takes_the_clicks_over_the_buttons_beneath_it() {
+        let mut key_bindings = KeyBindings::default();
+        let width = |text: &str, scale: f32| text.len() as f32 * scale * 0.75;
+        for theme in [
+            PanoramaTheme::Java,
+            PanoramaTheme::Pomme,
+            PanoramaTheme::Bedrock,
+        ] {
+            let open_menu = |key_bindings: &mut KeyBindings| {
+                let mut menu = test_menu("pomme-theme-list-click-test", key_bindings);
+                menu.theme = theme;
+                menu.toggle_theme();
+                menu.build(854.0, 480.0, &MenuInput::default(), key_bindings, width);
+                menu
+            };
+            let [x, y, w, h] = open_menu(&mut key_bindings)
+                .dropdown_rect
+                .expect("the open list is drawn");
+            for (i, j) in (1..10).flat_map(|i| (1..10).map(move |j| (i, j))) {
+                let mut menu = open_menu(&mut key_bindings);
+                let click = MenuInput {
+                    cursor: (x + w * i as f32 / 10.0, y + h * j as f32 / 10.0),
+                    clicked: true,
+                    ..Default::default()
+                };
+                let result = menu.build(854.0, 480.0, &click, &mut key_bindings, width);
+                assert!(
+                    !matches!(result.action, MenuAction::Quit)
+                        && matches!(menu.screen, Screen::Main),
+                    "{theme:?}: a click at ({i}, {j}) in the list reached a button beneath",
+                );
+            }
+        }
+    }
 
     #[test]
     fn options_save_as_their_screen_closes() {

@@ -643,7 +643,8 @@ impl DropdownStyle {
 
     /// Draws an open list with its bottom edge at `drop_bottom` and returns
     /// the row clicked this frame. Clears `open` on a row click or a click
-    /// away; `anchor` is the toggling icon, so clicking it doesn't count.
+    /// away, else records the list in `drawn`; `anchor` is the toggling icon,
+    /// so clicking it doesn't count.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_list(
         &self,
@@ -652,6 +653,7 @@ impl DropdownStyle {
         cursor: (f32, f32),
         clicked: bool,
         open: &mut bool,
+        drawn: &mut Option<[f32; 4]>,
         anchor: [f32; 4],
         drop_x: f32,
         drop_bottom: f32,
@@ -685,6 +687,8 @@ impl DropdownStyle {
         let outside = !common::hit_test(cursor, list) && !common::hit_test(cursor, anchor);
         if picked.is_some() || (clicked && outside) {
             *open = false;
+        } else {
+            *drawn = Some(list);
         }
         picked
     }
@@ -1181,6 +1185,27 @@ impl MainMenu {
         self.links_open = false;
     }
 
+    /// The title screen's input for everything but its dropdowns: no cursor
+    /// or click over last frame's open list, so picking a row can't also
+    /// press the button beneath it. Pomme-only: vanilla's title screen has
+    /// no dropdowns.
+    pub(super) fn input_beneath_dropdown(&mut self, input: &MenuInput) -> MenuInput {
+        let covered = self
+            .dropdown_rect
+            .take()
+            .is_some_and(|rect| common::hit_test(input.cursor, rect));
+        MenuInput {
+            cursor: if covered {
+                (f32::NEG_INFINITY, f32::NEG_INFINITY)
+            } else {
+                input.cursor
+            },
+            clicked: input.clicked && !covered,
+            mouse_held: input.mouse_held && !covered,
+            ..Default::default()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_links_dropdown(
         &mut self,
@@ -1207,6 +1232,7 @@ impl MainMenu {
             cursor,
             clicked,
             &mut self.links_open,
+            &mut self.dropdown_rect,
             anchor,
             drop_x,
             drop_bottom,
@@ -1260,6 +1286,7 @@ impl MainMenu {
             cursor,
             clicked,
             &mut self.theme_open,
+            &mut self.dropdown_rect,
             anchor,
             drop_x,
             drop_bottom,
