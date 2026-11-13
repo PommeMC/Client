@@ -105,6 +105,8 @@ pub(crate) struct ParticleTypes {
     pub(crate) firework: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) sculk_charge_pop: Rc<ParticleType<SimpleParticleType>>,
     pub(crate) fishing: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) trial_spawner_detection: Rc<ParticleType<SimpleParticleType>>,
+    pub(crate) trial_spawner_detection_ominous: Rc<ParticleType<SimpleParticleType>>,
 }
 
 impl ParticleTypes {
@@ -400,6 +402,15 @@ impl ParticleTypes {
         let fishing = registry
             .register(resource_id!("minecraft:fishing"), false)
             .map_err(registration_error)?;
+        let trial_spawner_detection = registry
+            .register(resource_id!("minecraft:trial_spawner_detection"), true)
+            .map_err(registration_error)?;
+        let trial_spawner_detection_ominous = registry
+            .register(
+                resource_id!("minecraft:trial_spawner_detection_ominous"),
+                true,
+            )
+            .map_err(registration_error)?;
         registry.freeze();
         Ok(Self {
             registry,
@@ -497,6 +508,8 @@ impl ParticleTypes {
             firework,
             sculk_charge_pop,
             fishing,
+            trial_spawner_detection,
+            trial_spawner_detection_ominous,
         })
     }
 }

@@ -54,6 +54,7 @@ mod falling_leaves;
 mod firework_spark;
 mod sculk_charge_pop;
 mod wake;
+mod trial_spawner_detection;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
@@ -121,6 +122,7 @@ use self::falling_leaves::{CherryParticleRegistration, PaleOakParticleRegistrati
 use self::firework_spark::SparkParticleRegistration;
 use self::sculk_charge_pop::SculkChargePopParticleRegistration;
 use self::wake::WakeParticleRegistration;
+use self::trial_spawner_detection::TrialSpawnerDetectionParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,
@@ -409,5 +411,13 @@ pub(crate) fn register_builtin_providers(
     resources.register_sprite_provider(
         Rc::clone(&types.noxious_gas),
         &NoxiousGasParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.trial_spawner_detection),
+        &TrialSpawnerDetectionParticleRegistration,
+    );
+    resources.register_sprite_provider(
+        Rc::clone(&types.trial_spawner_detection_ominous),
+        &TrialSpawnerDetectionParticleRegistration,
     );
 }

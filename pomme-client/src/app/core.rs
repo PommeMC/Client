@@ -3800,6 +3800,12 @@ impl AppCore {
                         ServerParticleKind::NoxiousGas => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.noxious_gas))
                         }
+                        ServerParticleKind::TrialSpawnerDetection => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.trial_spawner_detection),
+                        ),
+                        ServerParticleKind::TrialSpawnerDetectionOminous => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.trial_spawner_detection_ominous),
+                        ),
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
