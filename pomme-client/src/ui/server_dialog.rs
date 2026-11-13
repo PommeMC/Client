@@ -1777,17 +1777,6 @@ impl Draw<'_> {
         });
     }
 
-    fn fill(&mut self, rect: [f32; 4], color: [f32; 4]) {
-        self.elements.push(MenuElement::Rect {
-            x: rect[0] * self.gs,
-            y: rect[1] * self.gs,
-            w: rect[2] * self.gs,
-            h: rect[3] * self.gs,
-            corner_radius: 0.0,
-            color,
-        });
-    }
-
     /// `AbstractButton`: the nine-sliced button sprite with its label centred.
     fn button(&mut self, rect: [f32; 4], label: &Component, highlighted: bool) {
         let gs = self.gs;
@@ -1873,18 +1862,8 @@ impl Draw<'_> {
         }
     }
 
-    /// The `widget/text_field` border and its black fill.
-    fn field_border(&mut self, rect: [f32; 4], focused: bool) {
-        let border = if focused {
-            common::WHITE
-        } else {
-            common::rgb(0xa0a0a0)
-        };
-        self.fill(rect, border);
-        self.fill(
-            [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 2.0, rect[3] - 2.0],
-            [0.0, 0.0, 0.0, 1.0],
-        );
+    fn field_box(&mut self, rect: [f32; 4], focused: bool) {
+        common::push_text_field_box(self.elements, rect.map(|v| v * self.gs), self.gs, focused);
     }
 
     /// A field's shown slice, with its selection and caret, in `EditBox`'s
@@ -1918,7 +1897,7 @@ impl Draw<'_> {
     /// `EditBox`: the bordered field with its scrolled text and caret.
     fn edit_box(&mut self, rect: [f32; 4], field: &TextFieldState, focused: bool, m: &Measure) {
         let gs = self.gs;
-        self.field_border(rect, focused);
+        self.field_box(rect, focused);
         let fs = common::FONT_SIZE * gs;
         let wf = |text: &str| (m.text)(text, fs);
         // `EditBox.updateTextPosition` / `getInnerWidth`.
@@ -1941,7 +1920,7 @@ impl Draw<'_> {
     /// with the caret, the selection and the area's own scrollbar.
     fn text_area(&mut self, rect: [f32; 4], field: &MultilineField, focused: bool, m: &Measure) {
         let gs = self.gs;
-        self.field_border(rect, focused);
+        self.field_box(rect, focused);
         let fs = common::FONT_SIZE * gs;
         let wf = |text: &str| (m.text)(text, fs);
         let line_h = LINE_H * gs;

@@ -2626,20 +2626,7 @@ fn render_search(
     let inner_w = (SEARCH_W - 8.0) * scale;
     let wf = |s: &str| text_width_fn(s, fs);
 
-    elements.push(MenuElement::NineSlice {
-        x,
-        y,
-        w,
-        h,
-        // `EditBox` picks its sprite by focus alone.
-        sprite: if state.search_focused {
-            SpriteId::WidgetTextFieldHighlighted
-        } else {
-            SpriteId::WidgetTextField
-        },
-        border: scale,
-        tint: WHITE,
-    });
+    super::common::push_text_field_box(elements, [x, y, w, h], scale, state.search_focused);
 
     let info = state.search.render_info(inner_w, state.search_focused, &wf);
     let shown = &state.search.value()[info.display_start..info.display_end];
