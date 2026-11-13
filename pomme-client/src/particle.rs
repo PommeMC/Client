@@ -212,6 +212,8 @@ pub enum ServerParticleKind {
     SculkChargePop,
     Fishing,
     NoxiousGas,
+    TrialSpawnerDetection,
+    TrialSpawnerDetectionOminous,
 }
 
 impl ServerParticleKind {
@@ -268,6 +270,8 @@ impl ServerParticleKind {
             37 => Some(Self::Firework),
             46 => Some(Self::SculkChargePop),
             38 => Some(Self::Fishing),
+            115 => Some(Self::TrialSpawnerDetection),
+            116 => Some(Self::TrialSpawnerDetectionOminous),
             _ => None,
         }
     }
