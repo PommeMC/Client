@@ -28,10 +28,8 @@ use crate::world::block::BlockStateTable;
 /// drops, and open bugs marked `TODO:`. A gap must still fail on every version
 /// it names, so a fix forces its entry out.
 const KNOWN_GAPS: &[Gap] = &[
-    // TODO: one 26.3 registry element doesn't decode; `update_recipes`
-    // is dropped (see `translate_update_recipes_777`).
+    // TODO: one 26.3 registry element doesn't decode.
     gap("26.3", "26.3", "registry_data", "an element"),
-    gap("26.3", "26.3", "update_recipes", "dropped"),
     gap("1.20.1", "1.21.1", "recipe", "no native equivalent"),
     gap(
         "1.20.1",

@@ -368,3 +368,104 @@ fn recipe_packets_remap_26_3_concrete_item_ids() {
             .is_some()
     );
 }
+
+#[test]
+fn recipe_book_add_from_26_3_drops_only_recipes_built_on_its_new_items() {
+    let translation = TranslationSession::for_protocol(777).expect("26.3 translation");
+    let wire = RegistryTable::for_protocol(777).expect("26.3 registries");
+    let native = RegistryTable::native();
+    let wire_id = |reg, name| wire.id_of(reg, name).expect("26.3 id");
+    let native_id = |reg, name| native.id_of(reg, name).expect("native id");
+    let poplar = wire_id(ClientRegistry::Item, "poplar_planks");
+    assert_eq!(native.id_of(ClientRegistry::Item, "poplar_planks"), None);
+    let diamond = wire_id(ClientRegistry::Item, "diamond");
+
+    // A shapeless recipe from `ingredients` to `result`, with one crafting
+    // requirement listing `ingredients`.
+    let entry = |out: &mut Vec<u8>, display: u32, ingredients: &[u32], result: u32| {
+        wire::write_varint(out, display);
+        wire::write_varint(
+            out,
+            wire_id(ClientRegistry::RecipeDisplay, "crafting_shapeless"),
+        );
+        wire::write_varint(out, 1);
+        wire::write_varint(out, wire_id(ClientRegistry::SlotDisplay, "tag"));
+        wire::write_varint(out, ingredients.len() as u32 + 1);
+        ingredients
+            .iter()
+            .for_each(|&item| wire::write_varint(out, item));
+        wire::write_varint(out, wire_id(ClientRegistry::SlotDisplay, "item"));
+        wire::write_varint(out, result);
+        wire::write_varint(out, wire_id(ClientRegistry::SlotDisplay, "empty"));
+        wire::write_varint(out, 0); // no group
+        wire::write_varint(out, 0); // category
+        out.push(1);
+        wire::write_varint(out, 1);
+        wire::write_varint(out, ingredients.len() as u32 + 1);
+        ingredients
+            .iter()
+            .for_each(|&item| wire::write_varint(out, item));
+        out.push(0); // flags
+    };
+    let wire_packets = PacketTable::for_protocol(777).expect("26.3 packets");
+    let mut add = Vec::new();
+    wire::write_varint(
+        &mut add,
+        required_id(
+            wire_packets,
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        ),
+    );
+    wire::write_varint(&mut add, 2);
+    entry(&mut add, 1, &[poplar, diamond], diamond);
+    entry(&mut add, 2, &[diamond], poplar);
+    add.push(1); // replace
+
+    let translated = translation
+        .translate_game_frame(add.into_boxed_slice())
+        .expect("the packet survives its 26.3-only recipe");
+    let native_diamond = native_id(ClientRegistry::Item, "diamond");
+    let native_item = native_id(ClientRegistry::SlotDisplay, "item");
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        ),
+    );
+    wire::write_varint(&mut expected, 1);
+    wire::write_varint(&mut expected, 1);
+    wire::write_varint(
+        &mut expected,
+        native_id(ClientRegistry::RecipeDisplay, "crafting_shapeless"),
+    );
+    wire::write_varint(&mut expected, 1);
+    // The ingredient list without poplar planks.
+    wire::write_varint(
+        &mut expected,
+        native_id(ClientRegistry::SlotDisplay, "composite"),
+    );
+    wire::write_varint(&mut expected, 1);
+    wire::write_varint(&mut expected, native_item);
+    wire::write_varint(&mut expected, native_diamond);
+    wire::write_varint(&mut expected, native_item);
+    wire::write_varint(&mut expected, native_diamond);
+    wire::write_varint(
+        &mut expected,
+        native_id(ClientRegistry::SlotDisplay, "empty"),
+    );
+    wire::write_varint(&mut expected, 0);
+    wire::write_varint(&mut expected, 0);
+    expected.push(1);
+    wire::write_varint(&mut expected, 1);
+    wire::write_varint(&mut expected, 2);
+    wire::write_varint(&mut expected, native_diamond);
+    expected.push(0);
+    expected.push(1);
+    assert_eq!(&*translated, &expected);
+}

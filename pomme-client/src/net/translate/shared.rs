@@ -775,22 +775,40 @@ pub(super) fn write_substitute_parser(out: &mut Vec<u8>, parser: &str) -> Option
 
 /// Normalizes one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
 /// id, or count + 1 then that many concrete item ids) into native item-id
-/// space. Named tags keep their resource id; direct holders must be remapped.
+/// space. Named tags keep their resource id; direct holders are remapped,
+/// and those with no native item dropped. Whether any holder is left.
 pub(super) fn translate_item_holder_set(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
-) -> Option<()> {
+) -> Option<bool> {
     let encoded = var_u32(cur)?;
-    wire::write_varint(out, encoded);
     if encoded == 0 {
-        return copy_utf(cur, out);
+        wire::write_varint(out, 0);
+        copy_utf(cur, out)?;
+        return Some(true);
     }
-    for _ in 1..encoded {
-        let item = var_u32(cur)?;
-        wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    let items = native_items(cur, encoded - 1, remaps)?;
+    wire::write_varint(out, items.len() as u32 + 1);
+    for &item in &items {
+        wire::write_varint(out, item);
     }
-    Some(())
+    Some(!items.is_empty())
+}
+
+/// Reads `count` item ids and keeps the ones with a native item.
+pub(super) fn native_items(
+    cur: &mut Cursor<&[u8]>,
+    count: u32,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u32>> {
+    let mut items = Vec::new();
+    for _ in 0..count {
+        if let Some(item) = remaps.remap(ClientRegistry::Item, var_u32(cur)?) {
+            items.push(item);
+        }
+    }
+    Some(items)
 }
 
 /// The byte range of one varint, advancing past it.

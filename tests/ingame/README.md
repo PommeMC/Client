@@ -223,6 +223,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A dropped item | `item_entity`, optional `count` |
 | An advancement | `advancement` (id) |
 | A chat line | `chat` (text it contains) |
+| The recipe book | `recipes = { at_least = n }`: at least `n` recipes known |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | A biome | `biome` (name, e.g. `swamp`), `at` |
 | Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space nearer than the eviction frontier, or while another arena fits), and no two of the chunk arenas' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free, and `terrain = "evicted"` for far columns waiting for room with the eye's own column drawn |

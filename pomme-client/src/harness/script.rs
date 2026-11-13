@@ -97,6 +97,7 @@ enum Expect {
     List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
+    Recipes(RecipesExpect),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -308,6 +309,19 @@ struct AdvancementExpect {
 #[serde(deny_unknown_fields)]
 struct ChatExpect {
     chat: String,
+}
+
+/// The recipe book knows at least `at_least` recipes.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipesExpect {
+    recipes: AtLeast,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AtLeast {
+    at_least: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -977,6 +991,12 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                 .any(|line| line.contains(chat.as_str())),
             || format!("no chat line containing {chat:?}"),
         ),
+        Expect::Recipes(RecipesExpect {
+            recipes: AtLeast { at_least },
+        }) => {
+            let known = game.recipe_book.known_in_vanilla_order().len();
+            ensure(known >= *at_least, || format!("{known} recipes known"))
+        }
     }
 }
 
