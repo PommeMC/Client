@@ -357,6 +357,21 @@ impl LevelLightEngine {
             self.apply_task(task, world, out);
         }
         self.run_light_updates(world, light_data, out);
+        // Vanilla publishes before its increase pass and runs every frame, so
+        // the increases go out the next frame. This thread runs only when told
+        // something, so it runs again now rather than hold them until then.
+        if self.has_unpublished() {
+            self.run_light_updates(world, light_data, out);
+        }
+    }
+
+    /// Whether the last run changed sections after publishing them.
+    fn has_unpublished(&self) -> bool {
+        !self.block.storage.changed_sections.is_empty()
+            || self
+                .sky
+                .as_ref()
+                .is_some_and(|sky| !sky.storage.changed_sections.is_empty())
     }
 
     fn apply_task(&mut self, task: LightTask, world: &LightWorld, out: &mut LightDirty) {
@@ -794,6 +809,36 @@ mod tests {
         assert_eq!(sky_level(&engine, 8, 10, 8), 14);
         assert_eq!(sky_level(&engine, 8, 9, 8), 13);
         assert_eq!(sky_level(&engine, 8, 5, 8), 9);
+    }
+
+    #[test]
+    fn a_dug_block_publishes_its_light_in_the_same_run() {
+        let table = BlockStateTable::native();
+        let chunks = ChunkStore::with_origin_chunk();
+        let origin = crate::position::ChunkPos::new(0, 0);
+        let mut world = LightWorld::new(table, chunks.min_y());
+        world.insert((0, 0), chunks.get_chunk(&origin).unwrap());
+        let mut engine =
+            LevelLightEngine::new(chunks.section_count() as u32 * 16, chunks.min_y(), false);
+        let mut light_data = LightMap::default();
+        engine.on_chunk_loaded(&world, (0, 0), &mut light_data);
+        engine.queue_task(LightTask::ApplyLight {
+            pos: (0, 0),
+            sky: Vec::new(),
+            block: Vec::new(),
+            enable: true,
+        });
+        let mut set = |x, state| {
+            let (old, empty_flip) = chunks.set_block_state_tracked(x, 8, 8, state, table);
+            engine.on_block_changed(&world, LightPos::new(x, 8, 8), old, state, empty_flip);
+            engine.run(&world, &mut light_data, &mut LightDirty::default());
+        };
+        set(8, find_state("torch", &[]));
+        set(9, find_state("stone", &[]));
+        set(9, BlockState::AIR);
+
+        let column = light_data.get_mut((0, 0)).unwrap();
+        assert_eq!(column.get_block_light(9, 8, 8), 13);
     }
 
     #[test]

@@ -200,7 +200,6 @@ pub fn tick(
         cos_y_rot,
     );
 
-    player.tick_air_supply();
     stop_flying_on_ground(player);
 
     // `Player.updatePlayerPose` runs after movement, so the new pose applies

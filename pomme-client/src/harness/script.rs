@@ -186,6 +186,8 @@ struct HudFields {
     /// Every listed player, in the tab overlay's order.
     tab_list: Option<Vec<TabEntryExpect>>,
     chat_open: Option<bool>,
+    /// The action bar's text; `""` when none shows.
+    action_bar: Option<String>,
 }
 
 /// A tab list player; `game_mode` is checked when given.
@@ -202,6 +204,7 @@ struct PlayerFields {
     /// Within half a health point.
     health: Option<f32>,
     food: Option<u32>,
+    air: Option<i32>,
     level: Option<i32>,
     game_mode: Option<u8>,
     /// An active effect, by registry path.
@@ -814,6 +817,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             ensure(
                 want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
                     && want.food.is_none_or(|f| seen.food == f)
+                    && want.air.is_none_or(|a| seen.air == a)
                     && want.level.is_none_or(|l| seen.level == l)
                     && want.game_mode.is_none_or(|m| seen.game_mode == m)
                     && want.effect.as_deref().is_none_or(has)
@@ -872,7 +876,11 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                                     && want.game_mode.is_none_or(|m| m == seen.game_mode)
                             })
                     })
-                    && want.chat_open.is_none_or(|open| open == seen.chat_open),
+                    && want.chat_open.is_none_or(|open| open == seen.chat_open)
+                    && want
+                        .action_bar
+                        .as_ref()
+                        .is_none_or(|t| *t == shown(&seen.action_bar)),
                 || format!("hud is {seen:?}"),
             )
         }
@@ -1060,6 +1068,8 @@ mod tests {
                 distant_terrain: None,
                 resource_pack: None,
                 show_subtitles: None,
+                chunk_fade: None,
+                inactivity_fps_limit: None,
             }))
         );
         assert_eq!(

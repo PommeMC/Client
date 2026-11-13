@@ -9,7 +9,7 @@ layout(early_fragment_tests) in;
 
 layout(location = 0) in vec2 v_sprite_uv;
 layout(location = 1) in vec3 v_color;
-layout(location = 3) flat in float v_visibility;
+layout(location = 3) in float v_visibility;
 layout(location = 4) in vec3 v_fog_color;
 layout(location = 5) in float v_fog;
 layout(location = 6) flat in uint v_sprite;

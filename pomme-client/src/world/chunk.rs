@@ -6,34 +6,18 @@ use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::section::{BitStorage, PalettedContainer, Section, Strategy, ceil_log2};
 use thiserror::Error;
 
-use super::block_entity::StoredBlockEntity;
-use crate::position::{BlockPos, ChunkPos};
+use super::block_entity::BlockEntities;
+use crate::position::ChunkPos;
 use crate::world::block::BlockStateTable;
 use crate::world::light::DataLayer;
 
 pub(crate) const OVERWORLD_HEIGHT: u32 = 384;
 pub(crate) const OVERWORLD_MIN_Y: i32 = -64;
 
-/// `pos` and its four axis-neighbor chunks. This is both the neighborhood a
-/// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the
-/// set that must re-mesh when `pos` changes. Add the diagonals here when the
-/// corner-sample TODO(chunk-light) lands, so the mesh snapshot and the re-mesh
-/// set stay in sync (vanilla's `enableChunkLight` dirties the full 3x3 via
-/// `setSectionRangeDirty`).
-pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
-    [
-        pos,
-        ChunkPos::new(pos.x - 1, pos.z),
-        ChunkPos::new(pos.x + 1, pos.z),
-        ChunkPos::new(pos.x, pos.z - 1),
-        ChunkPos::new(pos.x, pos.z + 1),
-    ]
-}
-
 /// `pos` and the eight columns around it: what vanilla requires to be loaded
 /// and lit before a section in the middle one may first compile
-/// (`SectionUpdateTracker.hasAllNeighbors`). The smaller set a mesh samples is
-/// `mesh_neighborhood`.
+/// (`SectionUpdateTracker.hasAllNeighbors`), and what a mesh samples, corner
+/// columns included (`RenderSectionRegion`).
 pub(crate) fn column_neighborhood(pos: ChunkPos) -> impl Iterator<Item = ChunkPos> {
     (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| ChunkPos::new(pos.x + dx, pos.z + dz)))
 }
@@ -503,7 +487,7 @@ pub struct ChunkStore {
     height: u32,
     min_y: i32,
     pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
-    pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
+    pub block_entities: BlockEntities,
 }
 
 /// The 128-chunk max extended-view-distance servers allow; server
@@ -525,7 +509,7 @@ impl ChunkStore {
             height,
             min_y,
             light_data: std::collections::HashMap::new(),
-            block_entities: std::collections::HashMap::new(),
+            block_entities: BlockEntities::default(),
         }
     }
 
@@ -609,10 +593,7 @@ impl ChunkStore {
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.light_data.remove(&(pos.x, pos.z));
         self.grid.remove(*pos);
-        let cx = pos.x;
-        let cz = pos.z;
-        self.block_entities
-            .retain(|bp, _| bp.x.div_euclid(16) != cx || bp.z.div_euclid(16) != cz);
+        self.block_entities.remove_column(*pos);
     }
 
     pub fn set_center(&mut self, pos: ChunkPos) {

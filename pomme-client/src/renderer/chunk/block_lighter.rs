@@ -141,7 +141,7 @@ pub(super) fn light_coords_of(
     world: &impl LightSource,
     at: [i32; 3],
 ) -> LightLevels {
-    if emissive_rendering(data) {
+    if data.render().emissive_rendering {
         return LightLevels::FULL_BRIGHT;
     }
     let levels = world.levels(at);
@@ -150,38 +150,6 @@ pub(super) fn light_coords_of(
         LightLevels::new(levels.sky(), emission)
     } else {
         levels
-    }
-}
-
-/// Vanilla `Properties.emissiveRendering` predicates (`Blocks`): magma blocks,
-/// and sculk sensors while active.
-pub(super) fn emissive_rendering(data: &BlockStateData) -> bool {
-    match data.id() {
-        "magma_block" => true,
-        "sculk_sensor" | "calibrated_sculk_sensor" => {
-            data.properties().get("sculk_sensor_phase") == Some("active")
-        }
-        _ => false,
-    }
-}
-
-/// Vanilla `getShadeBrightness`: 0.2 for a full collision cube, with the
-/// blocks that override it.
-pub(super) fn shade_brightness(data: &BlockStateData) -> f32 {
-    let id = data.id();
-    match id {
-        "barrier" | "light" | "structure_void" | "glass" | "tinted_glass" => 1.0,
-        _ if id.ends_with("stained_glass") || id.ends_with("copper_grate") => 1.0,
-        "mud" | "soul_sand" => 0.2,
-        "snow" => {
-            if data.properties().get("layers") == Some("8") {
-                0.2
-            } else {
-                1.0
-            }
-        }
-        _ if is_collision_shape_full_block(data) => 0.2,
-        _ => 1.0,
     }
 }
 
@@ -538,7 +506,7 @@ pub(super) fn ambient_occlusion(
     let sample = |at: [i32; 3]| {
         (
             light_coords(world, at),
-            shade_brightness(world.state_data(at)),
+            world.state_data(at).render().shade_brightness(),
         )
     };
     let edges = corner.map(|c| sample(offset(base, c)));
@@ -563,7 +531,7 @@ pub(super) fn ambient_occlusion(
         pos
     };
     let light_center = light_coords(world, center);
-    let shade_center = shade_brightness(world.state_data(base));
+    let shade_center = world.state_data(base).render().shade_brightness();
 
     // Vanilla's vertices 0..3: edges (3, 0), (2, 0), (2, 1), (3, 1) and the
     // diagonal between each pair.
@@ -776,12 +744,18 @@ mod tests {
                 .table
                 .block_state_data(world.table.find_state(name, props))
         };
-        assert_eq!(shade_brightness(data("stone", &[])), 0.2);
-        assert_eq!(shade_brightness(data("glass", &[])), 1.0);
-        assert_eq!(shade_brightness(data("air", &[])), 1.0);
-        assert_eq!(shade_brightness(data("snow", &[("layers", "8")])), 0.2);
-        assert_eq!(shade_brightness(data("snow", &[("layers", "1")])), 1.0);
-        assert_eq!(shade_brightness(data("soul_sand", &[])), 0.2);
+        assert_eq!(data("stone", &[]).render().shade_brightness(), 0.2);
+        assert_eq!(data("glass", &[]).render().shade_brightness(), 1.0);
+        assert_eq!(data("air", &[]).render().shade_brightness(), 1.0);
+        assert_eq!(
+            data("snow", &[("layers", "8")]).render().shade_brightness(),
+            0.2
+        );
+        assert_eq!(
+            data("snow", &[("layers", "1")]).render().shade_brightness(),
+            1.0
+        );
+        assert_eq!(data("soul_sand", &[]).render().shade_brightness(), 0.2);
     }
 
     #[test]
