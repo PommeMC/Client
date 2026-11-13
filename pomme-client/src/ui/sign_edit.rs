@@ -7,7 +7,7 @@ use winit::keyboard::KeyCode;
 
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
-use crate::ui::common::{FIELD_SELECTION, FONT_SIZE, WHITE, push_button, rgb};
+use crate::ui::common::{FIELD_SELECTION, FONT_SIZE, WHITE, gui_quarter_height, push_button, rgb};
 use crate::ui::container::push_transparent_background;
 use crate::ui::text_edit::{SystemClipboard, TextFieldHelper, TextInputEvent, caret_visible};
 use crate::world::block_entity::{SignBlock, SignText};
@@ -177,7 +177,7 @@ impl SignEditState {
             elements,
             cursor,
             (screen_w - btn_w) / 2.0,
-            (screen_h / gs / 4.0).floor() * gs + 144.0 * gs,
+            gui_quarter_height(screen_h, gs) + 144.0 * gs,
             btn_w,
             btn_h,
             gs,

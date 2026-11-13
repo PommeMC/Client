@@ -19,9 +19,11 @@ pub const LINE_HEIGHT: i32 = 9;
 pub const BTN_H: f32 = 20.0;
 /// `Tooltip.create` splits at this width.
 pub const TOOLTIP_WRAP: f32 = 170.0;
-/// Vanilla's inactive-widget text colour, `0xA0A0A0`
+/// Vanilla `CommonColors.LIGHT_GRAY`.
+pub const LIGHT_GRAY: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+/// Vanilla's inactive-widget text colour
 /// (`AbstractWidget.WithInactiveMessage.defaultInactiveMessage`).
-pub const COL_DISABLED: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+pub const COL_DISABLED: [f32; 4] = LIGHT_GRAY;
 pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
@@ -36,6 +38,12 @@ fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedTe
     }
     data.get_component::<ItemName>()
         .map(|name| name.name.clone())
+}
+
+/// Vanilla `this.height / 4` in a screen, in framebuffer px: the GUI-scaled
+/// height rounds up (`Window.calculateScale`), the quarter down.
+pub fn gui_quarter_height(screen_h: f32, gs: f32) -> f32 {
+    ((screen_h / gs).ceil() / 4.0).floor() * gs
 }
 
 pub fn item_display_name(data: &ItemStackData) -> String {

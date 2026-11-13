@@ -580,9 +580,8 @@ impl MainMenu {
 
         let cx = screen_w / 2.0;
         let form_x = cx - form_w / 2.0;
-        // `DirectJoinServerScreen.init` and `extractRenderState`; the buttons
-        // hang from `height / 4`.
-        let quarter = (screen_h / gs / 4.0).floor() * gs;
+        // `DirectJoinServerScreen.init` and `extractRenderState`.
+        let quarter = common::gui_quarter_height(screen_h, gs);
 
         elements.push(MenuElement::Text {
             x: cx,
@@ -597,7 +596,7 @@ impl MainMenu {
             y: 100.0 * gs,
             text: "Server Address".into(),
             scale: fs,
-            color: common::COL_DISABLED,
+            color: common::LIGHT_GRAY,
             centered: false,
         });
 
