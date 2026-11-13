@@ -1,0 +1,72 @@
+# A torch placed on a wall is predicted as a wall torch, as the server
+# places it: while the server's reply is held back, the client's own
+# prediction already sits on the wall.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/fill -43 -60 -42 -37 -57 -38 minecraft:air"
+
+[[step]]
+chat = "/fill -43 -60 -42 -37 -57 -42 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [-37, -57, -42] }
+
+[[step]]
+chat = "/give @s minecraft:torch 4"
+
+[[step]]
+expect = { slot = 36, item = "torch", count = 4 }
+
+[[step]]
+press = { key = "key.keyboard.1" }
+
+[[step]]
+chat = "/tp @s -39.5 -60 -38.5 180 0"
+
+[[step]]
+expect = { player = { position = [-39.5, -60.0, -38.5] } }
+
+[[step]]
+look_at = [-39.5, -58.5, -41.0]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hold_packets = true
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { block = "wall_torch", at = [-40, -59, -41] }
+
+[[step]]
+hold_packets = false
+
+[[step]]
+expect = { block = "wall_torch", at = [-40, -59, -41] }
+
+[[step]]
+screenshot = "wall"
+
+[[step]]
+chat = "/fill -43 -60 -42 -37 -57 -38 minecraft:air"
+
+[[step]]
+chat = "/clear @s"
