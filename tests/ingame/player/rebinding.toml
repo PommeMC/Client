@@ -1,5 +1,6 @@
 # A rebound key binding follows its new key: drop moved to J throws from J
-# and no longer from Q, and a key bound to two actions fires both.
+# and no longer from Q, a key bound to two actions fires both, and a hotbar
+# slot on a mouse side button selects from it.
 
 [[step]]
 wait_ms = 2000
@@ -63,8 +64,58 @@ expect = { slot = 37, item = "dirt", count = 2 }
 [[step]]
 expect = { slot = 36, item = "stone", count = 4 }
 
+# Slot 1 on the back button: behind the pause menu it selects nothing, so J
+# drops dirt; out of it, J drops stone again.
+[[step]]
+bind = { action = "key.drop", keys = ["key.keyboard.j"] }
+
+[[step]]
+bind = { action = "key.hotbar.1", keys = ["key.mouse.4"] }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+mouse_down = "back"
+
+[[step]]
+mouse_up = "back"
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+press = { key = "key.keyboard.j" }
+
+[[step]]
+expect = { slot = 37, item = "dirt", count = 1 }
+
+[[step]]
+mouse_down = "back"
+
+[[step]]
+mouse_up = "back"
+
+[[step]]
+press = { key = "key.keyboard.j" }
+
+[[step]]
+expect = { slot = 36, item = "stone", count = 3 }
+
+[[step]]
+expect = { slot = 37, item = "dirt", count = 1 }
+
 [[step]]
 bind = { action = "key.drop" }
+
+[[step]]
+bind = { action = "key.hotbar.1" }
 
 [[step]]
 bind = { action = "key.hotbar.2" }

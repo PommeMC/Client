@@ -3272,7 +3272,7 @@ pub fn update_game(
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
-    core.input.menu_capture = game.gui_open() || game.death_screen_open;
+    core.input.menu_capture = game.paused || game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));

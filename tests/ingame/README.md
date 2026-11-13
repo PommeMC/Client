@@ -121,7 +121,8 @@ look_at = [0.5, -58.5, 4.0]                   # turn to face a point
 modifiers = { shift = true }                  # held for the clicks and presses
                                               # that follow; {} releases
 [[step]]
-mouse_down = "left"                           # or mouse_up; left, right, middle
+mouse_down = "left"                           # or mouse_up; left, right, middle,
+                                              # back, forward
 
 [[step]]
 hover = { slot = 36 }                         # creative item tab: hotbar slot
