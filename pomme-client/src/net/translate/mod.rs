@@ -54,6 +54,9 @@
 //! - the `tag` slot display carries a `HolderSet` rather than a tag id, and
 //!   26.3 routes every ingredient through it (`recipe_book_add`,
 //!   `place_ghost_recipe`, `update_recipes`)
+//! - TODO: recipes, stonecutter options and fuels built on an item 26.2 doesn't
+//!   have (poplar wood, wool stairs, cushions) are dropped, and such items
+//!   leave the ingredient lists they appear in
 //! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
 //!   which pomme never sends (it only steers the server's new destroy-progress
 //!   level events, 2019/2020, which drop client-side); `sign_update` reordered

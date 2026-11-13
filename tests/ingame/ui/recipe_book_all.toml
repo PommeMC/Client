@@ -1,0 +1,21 @@
+# Every recipe unlocked at once reaches the recipe book in one packet; on
+# 26.3, recipes built on items 26.2 lacks drop out of it without taking the
+# rest along (`just ingame-test --version 26.3 ui/recipe_book_all`).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/recipe take @s *"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/recipe give @s *"
+
+[[step]]
+expect = { recipes = { at_least = 1500 } }
+
+[[step]]
+chat = "/recipe take @s *"
