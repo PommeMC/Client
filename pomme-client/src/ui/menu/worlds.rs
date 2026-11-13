@@ -146,8 +146,7 @@ impl MainMenu {
         let total_content = list_pad * 2.0 + visible.len() as f32 * entry_h;
         self.scroll_region(input, [0.0, list_top, screen_w, list_h], total_content, gs);
 
-        // Vanilla `getRowLeft`: `width / 2 - getRowWidth() / 2`.
-        let list_left = common::gui_half_width(screen_w, gs) - row_w / 2.0;
+        let list_left = common::gui_row_left(screen_w, WORLD_ROW_W, gs);
 
         elements.push(MenuElement::ScissorPush {
             x: 0.0,

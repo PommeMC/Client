@@ -51,6 +51,16 @@ pub fn gui_half_width(screen_w: f32, gs: f32) -> f32 {
     (gui_size(screen_w, gs) / 2.0).floor() * gs
 }
 
+/// Vanilla `(float)this.width / 2.0f`, unrounded.
+pub fn gui_float_half_width(screen_w: f32, gs: f32) -> f32 {
+    gui_size(screen_w, gs) * gs / 2.0
+}
+
+/// Vanilla `AbstractSelectionList.getRowLeft` for a full-width list.
+pub fn gui_row_left(screen_w: f32, row_w: f32, gs: f32) -> f32 {
+    gui_half_width(screen_w, gs) - (row_w / 2.0).floor() * gs
+}
+
 /// Vanilla `this.height / 2` in a screen, in framebuffer px.
 pub fn gui_half_height(screen_h: f32, gs: f32) -> f32 {
     (gui_size(screen_h, gs) / 2.0).floor() * gs

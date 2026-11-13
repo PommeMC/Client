@@ -92,9 +92,8 @@ impl MainMenu {
 
         self.push_splash(
             &mut elements,
-            // `SplashRenderer` centres on float `screenWidth / 2.0f`.
             (
-                common::gui_size(screen_w, gs) * gs / 2.0 + SPLASH_WIDTH_OFFSET * gs,
+                common::gui_float_half_width(screen_w, gs) + SPLASH_WIDTH_OFFSET * gs,
                 SPLASH_HEIGHT_OFFSET * gs,
             ),
             gs,

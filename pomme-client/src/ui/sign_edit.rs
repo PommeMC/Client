@@ -8,8 +8,8 @@ use winit::keyboard::KeyCode;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::{
-    FIELD_SELECTION, FONT_SIZE, WHITE, gui_centered, gui_half_width, gui_quarter_height, gui_size,
-    push_button, rgb,
+    FIELD_SELECTION, FONT_SIZE, WHITE, gui_centered, gui_float_half_width, gui_half_width,
+    gui_quarter_height, push_button, rgb,
 };
 use crate::ui::container::push_transparent_background;
 use crate::ui::text_edit::{SystemClipboard, TextFieldHelper, TextInputEvent, caret_visible};
@@ -117,8 +117,7 @@ impl SignEditState {
         } else {
             (90.0, 0.9765628)
         };
-        // Vanilla takes the float `(float)width / 2.0f` here, not `width / 2`.
-        let origin = (gui_size(screen_w, gs) * gs / 2.0, y_offset * gs);
+        let origin = (gui_float_half_width(screen_w, gs), y_offset * gs);
         self.push_background(elements, origin, gs);
 
         // `extractSignText`, in text units scaled by `getSignTextScale`.

@@ -67,8 +67,7 @@ impl MainMenu {
         }
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
 
-        // `AbstractSelectionList.getRowLeft`: `width / 2 - getRowWidth() / 2`.
-        let list_left = common::gui_half_width(screen_w, gs) - (ROW_W / 2.0).floor() * gs;
+        let list_left = common::gui_row_left(screen_w, ROW_W, gs);
         let ping_results = self.ping_results.read().clone();
 
         // Persist pinged protocols for joins before a ping completes.
