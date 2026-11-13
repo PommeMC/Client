@@ -41,7 +41,7 @@ impl MainMenu {
         // windows with a fixed GUI scale. 220 = content width; 280 keeps it ~1.27:1.
         let content_h = (screen_h - 80.0 * gs).clamp(60.0 * gs, 280.0 * gs);
         let content_x = common::gui_centered(screen_w, content_w / gs, gs);
-        let content_y = (screen_h - content_h) / 2.0; // = 40*gs -> vertical centering
+        let content_y = common::gui_centered(screen_h, content_h / gs, gs);
 
         // Background frame = content plus the 8px border on every side.
         let panel_x = content_x - border;

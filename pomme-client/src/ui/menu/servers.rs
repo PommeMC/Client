@@ -1063,7 +1063,6 @@ impl MainMenu {
         });
         let reason_h = lines.len() as f32 * line_h;
         let total_h = line_h + reason_h + btn_h + 4.0 * text_pad + 2.0 * btn_pad;
-        // `FrameLayout.centerInRectangle` truncates to whole gui units.
         let top = common::gui_centered(screen_h, total_h / gs, gs);
         let cx = common::gui_half_width(screen_w, gs);
 
