@@ -1,0 +1,98 @@
+# Blockstates with uvlock keep their texture aligned to the world as the
+# model turns: birch stairs in every facing and half, set into a birch planks
+# floor, continue the planks' grain and seams from above and from the side.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill -2 -60 -2 9 -60 5 minecraft:birch_planks"
+
+[[step]]
+chat = "/setblock 0 -60 0 minecraft:birch_stairs[facing=east,half=bottom]"
+
+[[step]]
+chat = "/setblock 2 -60 0 minecraft:birch_stairs[facing=south,half=bottom]"
+
+[[step]]
+chat = "/setblock 4 -60 0 minecraft:birch_stairs[facing=west,half=bottom]"
+
+[[step]]
+chat = "/setblock 6 -60 0 minecraft:birch_stairs[facing=north,half=bottom]"
+
+[[step]]
+chat = "/setblock 0 -60 3 minecraft:birch_stairs[facing=east,half=top]"
+
+[[step]]
+chat = "/setblock 2 -60 3 minecraft:birch_stairs[facing=south,half=top]"
+
+[[step]]
+chat = "/setblock 4 -60 3 minecraft:birch_stairs[facing=west,half=top]"
+
+[[step]]
+chat = "/setblock 6 -60 3 minecraft:birch_stairs[facing=north,half=top]"
+
+[[step]]
+expect = { block = "birch_stairs", at = [6, -60, 3] }
+
+[[step]]
+chat = "/tp @s 3.5 -54 1.5 0 90"
+
+[[step]]
+expect = { player = { position = [3.5, -54.0, 1.5] } }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "above"
+
+# The south row's sides, from the south: the upside-down stairs' faces
+# against the planks beside them.
+[[step]]
+chat = "/tp @s 3.5 -59.5 9.5 180 10"
+
+[[step]]
+expect = { player = { position = [3.5, -59.5, 9.5] } }
+
+[[step]]
+chat = "/fill -2 -60 4 9 -60 5 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [9, -60, 5] }
+
+[[step]]
+expect = { terrain = "settled" }
+timeout_ms = 30000
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "side"
+
+[[step]]
+chat = "/fill -2 -60 -2 9 -60 5 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [6, -60, 3] }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/gamerule advance_time true"

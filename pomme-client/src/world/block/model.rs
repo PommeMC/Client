@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::io::{self, Read};
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -367,36 +368,6 @@ impl Direction {
         }
     }
 
-    fn rotate_y(self, degrees: i32) -> Self {
-        let steps = degrees.rem_euclid(360) / 90;
-        let mut d = self;
-        for _ in 0..steps {
-            d = match d {
-                Direction::North => Direction::East,
-                Direction::East => Direction::South,
-                Direction::South => Direction::West,
-                Direction::West => Direction::North,
-                other => other,
-            };
-        }
-        d
-    }
-
-    fn rotate_x(self, degrees: i32) -> Self {
-        let steps = degrees.rem_euclid(360) / 90;
-        let mut d = self;
-        for _ in 0..steps {
-            d = match d {
-                Direction::North => Direction::Down,
-                Direction::Down => Direction::South,
-                Direction::South => Direction::Up,
-                Direction::Up => Direction::North,
-                other => other,
-            };
-        }
-        d
-    }
-
     /// The default table's shade, for the item paths that bake it in; terrain
     /// looks its dimension's table up at mesh time instead.
     pub(crate) fn shade_light(&self) -> f32 {
@@ -693,7 +664,13 @@ pub fn bake_all_models(
                 return Some(Arc::clone(baked));
             }
             let resolved = resolve_model(&model_ref.model, inputs, &mut model_cache);
-            let mut baked = bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)?;
+            let mut baked = bake_resolved_model(
+                &resolved,
+                model_ref.x,
+                model_ref.y,
+                model_ref.uvlock,
+                Tint::None,
+            )?;
             apply_block_tints(&mut baked, block_name);
             let baked = Arc::new(baked);
             shared.insert(key, Arc::clone(&baked));
@@ -979,7 +956,7 @@ pub fn bake_item_models(
                 item_tints.extend(part_tints);
                 break;
             }
-            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, Tint::None) else {
+            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, false, Tint::None) else {
                 continue;
             };
             for quad in &mut baked.quads {
@@ -1085,8 +1062,7 @@ pub fn bake_item_models(
         let base = resolve_model(base, inputs, &mut model_cache);
         // `SkullSpecialRenderer`'s transformation: translate (0.5, 0, 0.5),
         // then 180 degrees about x.
-        let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-            * Mat4::from_rotation_x(std::f32::consts::PI);
+        let item = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5)) * Mat4::from_rotation_x(PI);
         let model = bake_entity_item_model(
             &bake_skull_model(kind),
             item,
@@ -1246,7 +1222,7 @@ fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
     let pose = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
         * Mat4::from_rotation_y(1.0821041)
         * Mat4::from_rotation_x(3.2375858)
-        * Mat4::from_rotation_y(-std::f32::consts::PI / 8.0)
+        * Mat4::from_rotation_y(-PI / 8.0)
         * Mat4::from_rotation_x(2.3561945);
     let transform = |x: f32, y: f32, z: f32| {
         pose.transform_vector3(Vec3::new(x, y, z).normalize())
@@ -1256,8 +1232,7 @@ fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
 }
 
 fn items_flat_lights() -> ([f32; 3], [f32; 3]) {
-    let pose =
-        Mat4::from_rotation_y(-std::f32::consts::PI / 8.0) * Mat4::from_rotation_x(2.3561945);
+    let pose = Mat4::from_rotation_y(-PI / 8.0) * Mat4::from_rotation_x(2.3561945);
     let transform = |x: f32, y: f32, z: f32| {
         pose.transform_vector3(Vec3::new(x, y, z).normalize())
             .to_array()
@@ -1936,11 +1911,13 @@ fn bake_resolved_model(
     resolved: &ResolvedModel,
     rot_x: i32,
     rot_y: i32,
+    uvlock: bool,
     tint: super::render_assets::Tint,
 ) -> Option<BakedModel> {
     if resolved.elements.is_empty() {
         return None;
     }
+    let rotation = (rot_x != 0 || rot_y != 0).then(|| model_rotation(rot_x, rot_y));
 
     let mut quads = Vec::new();
 
@@ -1971,6 +1948,9 @@ fn bake_resolved_model(
 
             let positions = face_positions(dir, from, to);
             let mut uvs = face_uvs(dir, from, to, face_def.uv.as_ref(), face_def.rotation);
+            if uvlock && let Some(rotation) = rotation {
+                lock_uvs(&mut uvs, rotation, dir);
+            }
 
             let mut positions = apply_element_rotation(positions, &element.rotation);
 
@@ -1981,9 +1961,9 @@ fn bake_resolved_model(
                 super::render_assets::Tint::None
             };
 
-            if rot_x != 0 || rot_y != 0 {
-                positions = rotate_positions(positions, rot_x, rot_y);
-                cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+            if let Some(rotation) = rotation {
+                positions = rotate_positions(positions, rotation);
+                cullface = cullface.map(|d| rotate_direction(d, rotation));
             }
             if element.rotation.is_none()
                 && let Some(facing) = direction_from_positions(&positions)
@@ -2213,20 +2193,50 @@ fn recalculate_winding(positions: &mut [[f32; 3]; 4], uvs: &mut [[f32; 2]; 4], f
     }
 }
 
-/// A blockstate's `x` then `y` rotation, in exact quarter turns about the
-/// block centre (vanilla's are only ever multiples of 90), so corners on the
-/// block's edge stay exactly on it.
-fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
-    let quarter_turns = |degrees: i32| degrees.rem_euclid(360) / 90;
-    for pos in &mut positions {
-        for _ in 0..quarter_turns(rot_x) {
-            *pos = [pos[0], pos[2], 1.0 - pos[1]];
-        }
-        for _ in 0..quarter_turns(rot_y) {
-            *pos = [1.0 - pos[2], pos[1], pos[0]];
-        }
+/// Vanilla `Quadrant.fromXYAngles(x, y).transformation()`, X first, each
+/// quarter turn -90 degrees. Rounded, as the group's matrices are exact, so
+/// corners on the block's edge stay on it.
+fn model_rotation(rot_x: i32, rot_y: i32) -> Mat3 {
+    let angle = |degrees: i32| -FRAC_PI_2 * (degrees.rem_euclid(360) / 90) as f32;
+    let matrix = Mat3::from_rotation_y(angle(rot_y)) * Mat3::from_rotation_x(angle(rot_x));
+    Mat3::from_cols_array(&matrix.to_cols_array().map(f32::round))
+}
+
+/// Vanilla `Direction.rotate`.
+fn rotate_direction(direction: Direction, rotation: Mat3) -> Direction {
+    let [x, y, z] = direction.offset().map(|c| c as f32);
+    Direction::approximate_nearest((rotation * Vec3::new(x, y, z)).as_dvec3())
+}
+
+/// Vanilla `BlockMath.VANILLA_UV_TRANSFORM_LOCAL_TO_GLOBAL`.
+fn uv_local_to_global(face: Direction) -> Mat3 {
+    match face {
+        Direction::South => Mat3::IDENTITY,
+        Direction::East => Mat3::from_quat(Quat::from_rotation_y(FRAC_PI_2)),
+        Direction::West => Mat3::from_quat(Quat::from_rotation_y(-FRAC_PI_2)),
+        Direction::North => Mat3::from_quat(Quat::from_rotation_y(PI)),
+        Direction::Up => Mat3::from_quat(Quat::from_rotation_x(-FRAC_PI_2)),
+        Direction::Down => Mat3::from_quat(Quat::from_rotation_x(FRAC_PI_2)),
     }
-    positions
+}
+
+/// Vanilla `uvlock`: `FaceBakery.bakeVertex` moves each UV through the
+/// inverse of `BlockMath.getFaceTransformation`, keeping the texture aligned
+/// to the world as the model turns.
+fn lock_uvs(uvs: &mut [[f32; 2]; 4], rotation: Mat3, face: Direction) {
+    let face_action = rotation * uv_local_to_global(face);
+    let normal = face_action * Vec3::Z;
+    let new_side = Direction::approximate_nearest(normal.as_dvec3());
+    let uv_transform = (uv_local_to_global(new_side).inverse() * face_action).inverse();
+    for uv in uvs {
+        let moved = uv_transform * Vec3::new(uv[0] - 0.5, uv[1] - 0.5, 0.0);
+        *uv = [moved.x + 0.5, moved.y + 0.5];
+    }
+}
+
+/// A blockstate's rotation about the block centre.
+fn rotate_positions(positions: [[f32; 3]; 4], rotation: Mat3) -> [[f32; 3]; 4] {
+    positions.map(|p| (rotation * (Vec3::from(p) - 0.5) + 0.5).to_array())
 }
 
 fn build_face_textures(
@@ -2621,9 +2631,83 @@ mod tests {
             ground_transform: Mat4::IDENTITY,
         };
 
-        let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
+        let baked = bake_resolved_model(&resolved, 0, 270, false, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 1);
         assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
+    }
+
+    /// A box with every face on default UVs.
+    fn uvlock_box(from: [f32; 3], to: [f32; 3]) -> ResolvedModel {
+        let face = || FaceDef {
+            uv: None,
+            texture: "all".to_string(),
+            cullface: None,
+            rotation: None,
+            tint_index: None,
+        };
+        ResolvedModel {
+            textures: HashMap::from([("all".to_string(), "block/birch_planks".to_string())]),
+            elements: vec![ElementDef {
+                from,
+                to,
+                rotation: None,
+                faces: Direction::VALUES
+                    .iter()
+                    .map(|d| (d.name().to_string(), face()))
+                    .collect(),
+                shade: true,
+                light_emission: 0,
+            }],
+            ambient_occlusion: true,
+            gui_transform: DisplayTransform::IDENTITY,
+            gui_light: GuiLight::default(),
+            ground_transform: Mat4::IDENTITY,
+        }
+    }
+
+    /// A quad's facing and its vertices as (position, uv) pairs, rounded so
+    /// float noise compares equal.
+    type FaceUvs = (Direction, Vec<([i32; 3], [i32; 2])>);
+
+    fn baked_uvs(model: &ResolvedModel, x: i32, y: i32, uvlock: bool) -> Vec<FaceUvs> {
+        let round = |v: f32| (v * 1024.0).round() as i32;
+        let mut faces: Vec<_> = bake_resolved_model(model, x, y, uvlock, Tint::None)
+            .unwrap()
+            .quads
+            .iter()
+            .map(|quad| {
+                let mut vertices: Vec<_> = quad
+                    .positions
+                    .iter()
+                    .zip(quad.uvs)
+                    .map(|(p, uv)| (p.map(round), uv.map(round)))
+                    .collect();
+                vertices.sort();
+                (direction_from_positions(&quad.positions).unwrap(), vertices)
+            })
+            .collect();
+        faces.sort_by_key(|(d, _)| *d as u8);
+        faces
+    }
+
+    #[test]
+    fn uvlock_keeps_a_turned_cube_textured_as_the_unturned_one() {
+        let cube = uvlock_box([0.0; 3], [16.0; 3]);
+        let unturned = baked_uvs(&cube, 0, 0, false);
+        for x in [0, 90, 180, 270] {
+            for y in [0, 90, 180, 270] {
+                assert_eq!(baked_uvs(&cube, x, y, true), unturned, "x {x} y {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn uvlock_samples_the_texture_under_a_turned_slab_top() {
+        // The bottom half of `block/stairs`, as `birch_stairs` facing west.
+        let slab = uvlock_box([0.0; 3], [16.0, 8.0, 16.0]);
+        let unturned = baked_uvs(&slab, 0, 0, false);
+        assert_eq!(baked_uvs(&slab, 0, 180, true), unturned);
+        assert_ne!(baked_uvs(&slab, 0, 180, false), unturned);
     }
 
     #[test]
@@ -2650,7 +2734,7 @@ mod tests {
             gui_light: GuiLight::default(),
             ground_transform: Mat4::IDENTITY,
         };
-        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        let baked = bake_resolved_model(&resolved, 0, 0, false, Tint::None).unwrap();
         assert_eq!(baked.quads[0].tint_index, Some(1));
     }
 
@@ -2705,8 +2789,10 @@ mod tests {
     #[test]
     fn rotated_faces_wind_back_to_their_facings_vertex_order() {
         // A full cube's top turned on its side, as a sideways log's is.
-        let mut positions =
-            rotate_positions(face_positions(Direction::Up, [0.0; 3], [1.0; 3]), 90, 0);
+        let mut positions = rotate_positions(
+            face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
+            model_rotation(90, 0),
+        );
         let mut uvs = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
         let facing = direction_from_positions(&positions).unwrap();
         let before: Vec<([f32; 3], [f32; 2])> = positions.into_iter().zip(uvs).collect();
@@ -3366,7 +3452,7 @@ mod tests {
         let resources = crate::test_util::test_resources(std::slice::from_ref(&root));
         let inputs = ModelInputs::prepare(&resources).unwrap();
         let resolved = resolve_model("block/test_core", &inputs, &mut cache);
-        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        let baked = bake_resolved_model(&resolved, 0, 0, false, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
         assert!(
             baked
