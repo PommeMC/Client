@@ -122,8 +122,8 @@ impl TitleState {
             return;
         }
 
-        let cx = (screen_w / 2.0).round();
-        let cy = (screen_h / 2.0).round();
+        let cx = crate::ui::common::gui_half_width(screen_w, gs);
+        let cy = crate::ui::common::gui_half_height(screen_h, gs);
         // Vanilla draws at local y -10 under a 4x scale about the center, and
         // the subtitle at local y 5 under a 2x scale.
         let mut push = |spans: &[TextSpan], y_off: f32, size: f32| {

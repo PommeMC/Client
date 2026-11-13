@@ -45,7 +45,7 @@ impl MainMenu {
         }
 
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: (header_h - fs) / 2.0,
             text: "Play Multiplayer".into(),
             scale: fs,
@@ -67,8 +67,7 @@ impl MainMenu {
         }
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
 
-        let list_cx = screen_w / 2.0;
-        let list_left = list_cx - row_w / 2.0;
+        let list_left = common::gui_row_left(screen_w, ROW_W, gs);
         let ping_results = self.ping_results.read().clone();
 
         // Persist pinged protocols for joins before a ping completes.
@@ -269,7 +268,7 @@ impl MainMenu {
 
         if self.server_list.servers.is_empty() {
             elements.push(MenuElement::Text {
-                x: screen_w / 2.0,
+                x: common::gui_half_width(screen_w, gs),
                 y: list_top + 40.0 * gs,
                 text: "No servers added".into(),
                 scale: fs,
@@ -284,7 +283,7 @@ impl MainMenu {
             .unwrap_or_default()
             .as_millis();
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: lan_y,
             text: "Scanning for games on your local network".into(),
             scale: fs,
@@ -298,7 +297,7 @@ impl MainMenu {
             _ => "o O o",
         };
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: lan_y + fs * 1.5,
             text: loading_dots.into(),
             scale: fs,
@@ -340,7 +339,7 @@ impl MainMenu {
         let footer_y = list_bottom + footer_pad;
 
         let row1_w = top_w * 3.0 + gap * 2.0;
-        let row1_x = (screen_w - row1_w) / 2.0;
+        let row1_x = common::gui_centered(screen_w, row1_w / gs, gs);
 
         // Prefill geometry for the edit forms opened from these buttons.
         let form_inner = (FORM_W - FIELD_TEXT_PAD) * gs;
@@ -414,7 +413,7 @@ impl MainMenu {
 
         let row2_y = footer_y + btn_h + gap;
         let row2_w = bot_w * 4.0 + gap * 3.0;
-        let row2_x = (screen_w - row2_w) / 2.0;
+        let row2_x = common::gui_centered(screen_w, row2_w / gs, gs);
 
         if push_button_f(
             &mut elements,
@@ -562,7 +561,6 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
         let field_h = FIELD_H * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
@@ -579,29 +577,27 @@ impl MainMenu {
         let mut action = MenuAction::None;
         let mut any_hovered = false;
 
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         let form_x = cx - form_w / 2.0;
-        let mut y = 20.0 * gs;
+        // `DirectJoinServerScreen.init` and `extractRenderState`.
+        let quarter = common::gui_quarter_height(screen_h, gs);
 
         elements.push(MenuElement::Text {
             x: cx,
-            y,
+            y: 20.0 * gs,
             text: "Direct Connection".into(),
             scale: fs,
             color: WHITE,
             centered: true,
         });
-        y += fs + 40.0 * gs;
-
         elements.push(MenuElement::Text {
-            x: form_x,
-            y,
+            x: form_x + gs,
+            y: 100.0 * gs,
             text: "Server Address".into(),
             scale: fs,
-            color: COL_DIM,
+            color: common::LIGHT_GRAY,
             centered: false,
         });
-        y += fs + 4.0 * gs;
 
         self.text_field(
             &mut elements,
@@ -609,14 +605,13 @@ impl MainMenu {
             0,
             input,
             form_x,
-            y,
+            116.0 * gs,
             form_w,
             field_h,
             fs,
             gs,
             text_width_fn,
         );
-        y += field_h + 28.0 * gs;
 
         let address = self.edit_address.value().to_string();
         let valid = is_valid_address(&address);
@@ -627,7 +622,7 @@ impl MainMenu {
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + 108.0 * gs,
             form_w,
             btn_h,
             gs,
@@ -649,13 +644,12 @@ impl MainMenu {
                 protocol: join_protocol(&self.ping_results.read(), &address, persisted),
             };
         }
-        y += btn_h + gap;
         if push_button(
             &mut elements,
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + 132.0 * gs,
             form_w,
             btn_h,
             gs,
@@ -667,14 +661,6 @@ impl MainMenu {
             self.set_screen(Screen::ServerList, key_bindings);
         }
 
-        push_bottom_text(
-            &mut elements,
-            screen_w,
-            screen_h,
-            gs,
-            &self.version,
-            text_width_fn,
-        );
         MainMenuResult {
             elements,
             action,
@@ -710,7 +696,7 @@ impl MainMenu {
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         let form_x = cx - form_w / 2.0;
         let mut y = 17.0 * gs;
 
@@ -967,8 +953,11 @@ impl MainMenu {
             } else {
                 f.on_click(pos, input.shift, inner_w, &wf);
             }
-        } else if input.clicked && self.focused_field == Some(field_idx) {
-            // Vanilla clears widget focus on a click that lands elsewhere.
+        } else if cfg!(mobile) && input.clicked && self.focused_field == Some(field_idx) {
+            // Pomme-only: a tap off the field hides the soft keyboard. Vanilla
+            // keeps focus through a click on empty space.
+            // TODO: a clicked button takes focus in vanilla; Pomme's buttons
+            // can't hold it yet, so the field keeps it on desktop.
             self.unfocus_current_field();
             self.focused_field = None;
         } else if self.focused_field == Some(field_idx) && input.mouse_held && !input.clicked {
@@ -1068,15 +1057,14 @@ impl MainMenu {
         let btn_h = common::BTN_H * gs;
         let (text_pad, btn_pad) = (10.0 * gs, 2.0 * gs);
 
-        let max_w = ((screen_w / gs).floor() - 50.0) * gs;
+        let max_w = (common::gui_size(screen_w, gs) - 50.0) * gs;
         let lines = crate::ui::text::wrap_plain(&reason, max_w, |ch| {
             text_width_fn(ch.encode_utf8(&mut [0; 4]), fs)
         });
         let reason_h = lines.len() as f32 * line_h;
         let total_h = line_h + reason_h + btn_h + 4.0 * text_pad + 2.0 * btn_pad;
-        // `FrameLayout.centerInRectangle` truncates to whole gui units.
-        let top = ((screen_h - total_h) / 2.0 / gs).floor() * gs;
-        let cx = screen_w / 2.0;
+        let top = common::gui_centered(screen_h, total_h / gs, gs);
+        let cx = common::gui_half_width(screen_w, gs);
 
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
@@ -1106,7 +1094,7 @@ impl MainMenu {
             &mut any_hovered,
             input.cursor,
             input.clicked,
-            cx - btn_w / 2.0,
+            common::gui_centered(screen_w, btn_w / gs, gs),
             btn_y,
             btn_w,
             btn_h,

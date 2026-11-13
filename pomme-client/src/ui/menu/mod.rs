@@ -1774,6 +1774,8 @@ impl MainMenu {
             Screen::Main => "title",
             Screen::ServerList => "server_list",
             Screen::DirectConnect => "direct_connect",
+            Screen::WorldList => "world_list",
+            Screen::CreateWorld => "create_world",
             _ => "other",
         }
     }

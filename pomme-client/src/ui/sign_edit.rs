@@ -7,7 +7,10 @@ use winit::keyboard::KeyCode;
 
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
-use crate::ui::common::{FIELD_SELECTION, FONT_SIZE, WHITE, push_button, rgb};
+use crate::ui::common::{
+    FIELD_SELECTION, FONT_SIZE, WHITE, gui_centered, gui_float_half_width, gui_half_width,
+    gui_quarter_height, push_button, rgb,
+};
 use crate::ui::container::push_transparent_background;
 use crate::ui::text_edit::{SystemClipboard, TextFieldHelper, TextInputEvent, caret_visible};
 use crate::world::block_entity::{SignBlock, SignText};
@@ -99,7 +102,7 @@ impl SignEditState {
             "sign.edit"
         };
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: gui_half_width(screen_w, gs),
             y: 40.0 * gs,
             text: crate::lang::translate(title).unwrap_or(title).into(),
             scale: FONT_SIZE * gs,
@@ -114,7 +117,7 @@ impl SignEditState {
         } else {
             (90.0, 0.9765628)
         };
-        let origin = (screen_w / 2.0, y_offset * gs);
+        let origin = (gui_float_half_width(screen_w, gs), y_offset * gs);
         self.push_background(elements, origin, gs);
 
         // `extractSignText`, in text units scaled by `getSignTextScale`.
@@ -176,8 +179,8 @@ impl SignEditState {
         let done_hovered = push_button(
             elements,
             cursor,
-            (screen_w - btn_w) / 2.0,
-            (screen_h / gs / 4.0).floor() * gs + 144.0 * gs,
+            gui_centered(screen_w, btn_w / gs, gs),
+            gui_quarter_height(screen_h, gs) + 144.0 * gs,
             btn_w,
             btn_h,
             gs,

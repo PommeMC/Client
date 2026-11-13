@@ -44,13 +44,14 @@ pub fn build_death_screen(
     let fs = common::FONT_SIZE * gs;
     let btn_h = common::BTN_H * gs;
     let btn_w = BTN_W * gs;
-    let cx = screen_w / 2.0;
+    let cx = common::gui_half_width(screen_w, gs);
 
     push_gradient(elements, screen_w, screen_h);
 
     let title_fs = fs * 2.0;
     elements.push(MenuElement::Text {
-        x: cx,
+        // Vanilla `middleLine / 2` under a 2x scale.
+        x: (cx / gs / 2.0).floor() * 2.0 * gs,
         y: 30.0 * gs,
         text: if hardcore { "Game Over!" } else { "You Died!" }.into(),
         scale: title_fs,
@@ -93,7 +94,7 @@ pub fn build_death_screen(
         centered: false,
     });
 
-    let respawn_y = screen_h / 4.0 + 72.0 * gs;
+    let respawn_y = common::gui_quarter_height(screen_h, gs) + 72.0 * gs;
     let h = common::push_button(
         elements,
         cursor,
@@ -114,7 +115,7 @@ pub fn build_death_screen(
         action = DeathAction::Respawn;
     }
 
-    let title_y = screen_h / 4.0 + 96.0 * gs;
+    let title_y = common::gui_quarter_height(screen_h, gs) + 96.0 * gs;
     let h = common::push_button(
         elements,
         cursor,
@@ -150,8 +151,8 @@ pub fn build_death_confirm(
     let mut action = DeathAction::None;
     let fs = common::FONT_SIZE * gs;
     let btn_h = common::BTN_H * gs;
-    let cx = screen_w / 2.0;
-    let cy = screen_h / 2.0;
+    let cx = common::gui_half_width(screen_w, gs);
+    let cy = common::gui_half_height(screen_h, gs);
 
     push_gradient(elements, screen_w, screen_h);
 

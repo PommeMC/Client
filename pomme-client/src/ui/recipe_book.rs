@@ -2292,8 +2292,8 @@ fn main_panel(
 fn book_origin(screen_w: f32, screen_h: f32, gs: f32, narrow: bool) -> (f32, f32, f32) {
     let scale = super::container::panel_scale(screen_w, screen_h, gs, BOOK_W, BOOK_H);
     let x_offset = if narrow { 0.0 } else { 86.0 };
-    let bx = (screen_w - BOOK_W * scale) / 2.0 - x_offset * scale;
-    let by = (screen_h - BOOK_H * scale) / 2.0;
+    let bx = super::common::gui_centered(screen_w, BOOK_W, scale) - x_offset * scale;
+    let by = super::common::gui_centered(screen_h, BOOK_H, scale);
     (bx, by, scale)
 }
 

@@ -19,9 +19,11 @@ pub const LINE_HEIGHT: i32 = 9;
 pub const BTN_H: f32 = 20.0;
 /// `Tooltip.create` splits at this width.
 pub const TOOLTIP_WRAP: f32 = 170.0;
-/// Vanilla's inactive-widget text colour, `0xA0A0A0`
+/// Vanilla `CommonColors.LIGHT_GRAY`.
+pub const LIGHT_GRAY: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+/// Vanilla's inactive-widget text colour
 /// (`AbstractWidget.WithInactiveMessage.defaultInactiveMessage`).
-pub const COL_DISABLED: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+pub const COL_DISABLED: [f32; 4] = LIGHT_GRAY;
 pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
@@ -36,6 +38,53 @@ fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedTe
     }
     data.get_component::<ItemName>()
         .map(|name| name.name.clone())
+}
+
+/// Vanilla `Window.getGuiScaledWidth` and `getGuiScaledHeight`: `px` in GUI
+/// units, rounded up (`Window.calculateScale`).
+pub fn gui_size(px: f32, gs: f32) -> f32 {
+    (px / gs).ceil()
+}
+
+/// Vanilla `this.width / 2` in a screen, in framebuffer px.
+pub fn gui_half_width(screen_w: f32, gs: f32) -> f32 {
+    (gui_size(screen_w, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `(float)this.width / 2.0f`, unrounded.
+pub fn gui_float_half_width(screen_w: f32, gs: f32) -> f32 {
+    gui_size(screen_w, gs) * gs / 2.0
+}
+
+/// Vanilla `AbstractSelectionList.getRowLeft` for a full-width list.
+pub fn gui_row_left(screen_w: f32, row_w: f32, gs: f32) -> f32 {
+    gui_half_width(screen_w, gs) - (row_w / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 2` in a screen, in framebuffer px.
+pub fn gui_half_height(screen_h: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 4` in a screen, in framebuffer px.
+pub fn gui_quarter_height(screen_h: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) / 4.0).floor() * gs
+}
+
+/// Vanilla `FrameLayout.alignInDimension`: an element `len` GUI px long
+/// placed `align` of the way along `px`, in framebuffer px.
+pub fn gui_aligned(px: f32, len: f32, gs: f32, align: f32) -> f32 {
+    ((gui_size(px, gs) - len) * align).floor() * gs
+}
+
+/// Vanilla `(this.width - w) / 2`, or the same along the height.
+pub fn gui_centered(px: f32, len: f32, gs: f32) -> f32 {
+    gui_aligned(px, len, gs, 0.5)
+}
+
+/// Vanilla `guiHeight() - n`, in framebuffer px.
+pub fn gui_from_bottom(screen_h: f32, n: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) - n) * gs
 }
 
 pub fn item_display_name(data: &ItemStackData) -> String {
@@ -1209,6 +1258,21 @@ mod tests {
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
     use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn screen_positions_round_in_gui_units() {
+        use super::{
+            gui_aligned, gui_centered, gui_from_bottom, gui_half_width, gui_quarter_height,
+        };
+        // 1280x721 at scale 3 is 427x241 GUI px, both rounded up.
+        assert_eq!(gui_half_width(1280.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_half_width(1281.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_quarter_height(721.0, 3.0), 60.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 200.0, 3.0), 113.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 15.0, 3.0), 206.0 * 3.0);
+        assert_eq!(gui_aligned(721.0, 100.0, 3.0, 0.25), 35.0 * 3.0);
+        assert_eq!(gui_from_bottom(721.0, 22.0, 3.0), 219.0 * 3.0);
+    }
 
     #[test]
     fn a_cooldown_covers_its_remaining_share_from_the_bottom() {

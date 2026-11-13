@@ -369,9 +369,9 @@ pub fn build_spectator_menu(
         state.close();
         return;
     }
-    let cx = screen_w / 2.0;
+    let cx = common::gui_half_width(screen_w, gs);
     // The bar slides down as it fades: y = floor(guiHeight - 22 * alpha).
-    let y = (screen_h - 22.0 * alpha * gs).floor();
+    let y = (common::gui_size(screen_h, gs) - 22.0 * alpha).floor() * gs;
     let fade = [1.0, 1.0, 1.0, alpha];
     let menu = state.menu.as_ref().unwrap();
 
@@ -484,7 +484,7 @@ pub fn build_spectator_menu(
     }
     elements.push(MenuElement::McText {
         x: cx,
-        y: screen_h - 35.0 * gs,
+        y: common::gui_from_bottom(screen_h, 35.0, gs),
         spans,
         scale: common::FONT_SIZE * gs,
         centered: true,

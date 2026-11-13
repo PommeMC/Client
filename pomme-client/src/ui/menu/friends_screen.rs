@@ -40,8 +40,8 @@ impl MainMenu {
         // Cap height so the panel stays a dialog (not a tall strip) on big
         // windows with a fixed GUI scale. 220 = content width; 280 keeps it ~1.27:1.
         let content_h = (screen_h - 80.0 * gs).clamp(60.0 * gs, 280.0 * gs);
-        let content_x = (screen_w - content_w) / 2.0;
-        let content_y = (screen_h - content_h) / 2.0; // = 40*gs -> vertical centering
+        let content_x = common::gui_centered(screen_w, content_w / gs, gs);
+        let content_y = common::gui_centered(screen_h, content_h / gs, gs);
 
         // Background frame = content plus the 8px border on every side.
         let panel_x = content_x - border;
@@ -227,8 +227,8 @@ impl MainMenu {
         if let Some((uuid, name)) = self.pending_remove.clone() {
             let pw = 240.0 * gs;
             let ph = 90.0 * gs;
-            let px = (screen_w - pw) / 2.0;
-            let py = (screen_h - ph) / 2.0;
+            let px = common::gui_centered(screen_w, pw / gs, gs);
+            let py = common::gui_centered(screen_h, ph / gs, gs);
             elements.push(MenuElement::FrostedRect {
                 x: px,
                 y: py,
@@ -239,7 +239,7 @@ impl MainMenu {
             });
             push_centered(
                 &mut elements,
-                screen_w / 2.0,
+                common::gui_half_width(screen_w, gs),
                 py + 12.0 * gs,
                 fs,
                 &format!("Remove {name}?"),
@@ -248,7 +248,7 @@ impl MainMenu {
             // Vanilla FriendsListConfirmScreen has a message body under the title.
             push_centered(
                 &mut elements,
-                screen_w / 2.0,
+                common::gui_half_width(screen_w, gs),
                 py + 12.0 * gs + fs + 6.0 * gs,
                 fs,
                 "Are you sure you want to remove them?",

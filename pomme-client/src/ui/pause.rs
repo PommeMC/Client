@@ -122,8 +122,9 @@ fn build_main(
     let grid_w = (half_w + pad) * 2.0 + pad * 2.0;
     let grid_h = (top_pad + btn_h) + 4.0 * (pad + btn_h);
 
-    let grid_x = (screen_w - grid_w) / 2.0;
-    let grid_y = (screen_h - grid_h) * 0.25;
+    let grid_x = common::gui_centered(screen_w, grid_w / gs, gs);
+    // `PauseScreen`: `alignInRectangle(.., 0.5f, 0.25f)`.
+    let grid_y = common::gui_aligned(screen_h, grid_h / gs, gs, 0.25);
 
     let col1_x = grid_x + pad;
     let col2_x = col1_x + half_w + pad * 2.0;
@@ -132,7 +133,7 @@ fn build_main(
     let row_y = |row: u32| -> f32 { grid_y + top_pad + row as f32 * (btn_h + pad) };
 
     elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
+        x: common::gui_half_width(screen_w, gs),
         y: grid_y + 40.0 * gs - top_pad,
         text: "Game".into(),
         scale: fs,
@@ -291,12 +292,12 @@ fn build_submenu(
 
     let n = items.len() as f32;
     let grid_h = top_pad + n * btn_h + (n - 1.0).max(0.0) * pad;
-    let grid_y = (screen_h - grid_h) * 0.25;
-    let x = (screen_w - full_w) / 2.0;
+    let grid_y = common::gui_aligned(screen_h, grid_h / gs, gs, 0.25);
+    let x = common::gui_centered(screen_w, FULL_W, gs);
 
     let title_y = grid_y + 40.0 * gs - top_pad;
     elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
+        x: common::gui_half_width(screen_w, gs),
         y: title_y,
         text: title.into(),
         scale: fs,
@@ -305,7 +306,7 @@ fn build_submenu(
     });
     if let Some(sub) = subtitle {
         elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
+            x: common::gui_half_width(screen_w, gs),
             y: title_y + fs * 1.4,
             text: sub.into(),
             scale: fs * 0.8,

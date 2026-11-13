@@ -60,8 +60,8 @@ pub fn build_game_mode_switcher(
     cursor: (f32, f32),
     gs: f32,
 ) {
-    let cx = (screen_w / 2.0).round();
-    let cy = (screen_h / 2.0).round();
+    let cx = common::gui_half_width(screen_w, gs);
+    let cy = common::gui_half_height(screen_h, gs);
 
     // The dialog is the top-left 125x75 of a 128x128 texture; the rest is
     // transparent, so the full sprite draws correctly.

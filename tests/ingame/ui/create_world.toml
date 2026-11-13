@@ -1,0 +1,53 @@
+# Create New World's tab bar sits where vanilla's does: tabs of an even width,
+# the bar's x rounded to even, the header separator either side.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+cursor_to_button = "Disconnect"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "server_list" }
+
+[[step]]
+cursor_to_button = "Back"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "title" }
+
+[[step]]
+cursor_to_button = "Singleplayer"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "create_world" }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "game_tab"

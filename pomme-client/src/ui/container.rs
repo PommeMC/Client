@@ -11,8 +11,8 @@ use azalea_inventory::operations::{
 };
 
 use super::common::{
-    FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_gradient_overlay,
-    push_item_icon,
+    FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, gui_centered, hit_test,
+    push_gradient_overlay, push_item_icon,
 };
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -155,8 +155,8 @@ pub fn panel_at(
     let h = panel_h * scale;
     Panel {
         scale,
-        ox: (screen_w - w) / 2.0 + x_offset * scale,
-        oy: (screen_h - h) / 2.0,
+        ox: gui_centered(screen_w, panel_w, scale) + x_offset * scale,
+        oy: gui_centered(screen_h, panel_h, scale),
         w,
         h,
     }

@@ -1,5 +1,6 @@
-# Disconnecting from a server lands on the server list, and Direct Connection
-# keeps its address when the screen is closed with escape.
+# Disconnecting from a server lands on the server list, Direct Connection
+# keeps its address when the screen is closed with escape, and its field keeps
+# focus through a click on empty space.
 
 [[step]]
 wait_ms = 2000
@@ -101,3 +102,18 @@ expect = { screen = "direct_connect", address = "second.example.net" }
 
 [[step]]
 screenshot = "reopened"
+
+[[step]]
+cursor = [2, 2]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+text = "x"
+
+[[step]]
+expect = { screen = "direct_connect", address = "second.example.netx" }
