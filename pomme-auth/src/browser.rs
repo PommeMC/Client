@@ -22,6 +22,8 @@ const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/
 const SIGNED_IN_URL: &str = "https://pomme.rs/signed-in";
 const SIGN_IN_FAILED_URL: &str = "https://pomme.rs/sign-in-failed";
 const TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a connection gets to send its request.
+const REQUEST_WAIT: Duration = Duration::from_secs(2);
 
 /// `base` with `pairs` as its query.
 fn url_with(base: &str, pairs: &[(&str, &str)]) -> String {
@@ -134,7 +136,9 @@ async fn callback(
             .await
             .map_err(|e| format!("Couldn't take the sign-in: {}", crate::error_chain(e)))?;
         let mut buf = [0u8; 8192];
-        let Ok(n) = stream.read(&mut buf).await else {
+        // Browsers open spare connections they may never use; one held idle
+        // mustn't keep the redirect waiting behind it.
+        let Ok(Ok(n)) = tokio::time::timeout(REQUEST_WAIT, stream.read(&mut buf)).await else {
             continue;
         };
         if let Some(params) = query(&String::from_utf8_lossy(&buf[..n]))
@@ -239,6 +243,8 @@ mod tests {
         };
         let browser = tokio::spawn(async move {
             drop(TcpStream::connect(v4).await.unwrap());
+            // A spare connection held open and never used.
+            let _idle = TcpStream::connect(v4).await.unwrap();
             for (request, addr, skipped) in [
                 ("GET /favicon.ico HTTP/1.1\r\n\r\n", v4, true),
                 ("GET /?code=forged&state=guess HTTP/1.1\r\n\r\n", v4, true),
