@@ -1425,6 +1425,9 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
+            if creative {
+                self.destroy_delay = DESTROY_COOLDOWN;
+            }
             return;
         }
 
