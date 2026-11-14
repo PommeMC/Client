@@ -307,7 +307,6 @@ impl InteractionState {
             chunks,
             effects.biome_climate,
         );
-        self.destroy_delay = DESTROY_COOLDOWN;
     }
 
     /// Vanilla `endPredictionsUpTo` + `ClientLevel.syncBlockState`: resolves
@@ -1426,6 +1425,9 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
+            if creative {
+                self.destroy_delay = DESTROY_COOLDOWN;
+            }
             return;
         }
 
@@ -1553,6 +1555,7 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
+            self.destroy_delay = DESTROY_COOLDOWN;
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
