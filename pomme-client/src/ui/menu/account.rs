@@ -1,6 +1,5 @@
 //! The account screen: who's signed in, or Microsoft's sign-in: through the
-//! browser on desktop, or a code to enter at microsoft.com/link (on phones,
-//! and as desktop's fallback).
+//! browser on desktop, or a code to enter at microsoft.com/link on phones.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,28 +53,21 @@ impl MainMenu {
     }
 
     fn start_sign_in(&mut self) {
-        if cfg!(mobile) {
-            self.start_code_sign_in();
-            return;
-        }
         let store = Arc::clone(&self.account_store);
         self.run_sign_in(true, |progress| async move {
-            pomme_auth::browser_sign_in(crate::net::http::client(), &*store, |url| {
-                crate::util::open_url(url);
-                progress.set(SignIn::Browser(url.to_owned()));
-            })
-            .await
-            .map(Some)
-        });
-    }
-
-    fn start_code_sign_in(&mut self) {
-        let store = Arc::clone(&self.account_store);
-        self.run_sign_in(true, |progress| async move {
-            pomme_auth::device_code_sign_in(crate::net::http::client(), &*store, |code| {
-                progress.set(SignIn::Code(code.clone()));
-            })
-            .await
+            let http = crate::net::http::client();
+            if cfg!(mobile) {
+                pomme_auth::device_code_sign_in(http, &*store, |code| {
+                    progress.set(SignIn::Code(code.clone()));
+                })
+                .await
+            } else {
+                pomme_auth::browser_sign_in(http, &*store, |url| {
+                    crate::util::open_url(url);
+                    progress.set(SignIn::Browser(url.to_owned()));
+                })
+                .await
+            }
             .map(Some)
         });
     }
@@ -198,7 +190,7 @@ impl MainMenu {
                         "Pomme will continue once you're done.".into(),
                     ],
                     None,
-                    vec!["Open Again", "Use a Code", "Cancel"],
+                    vec!["Open Again", "Cancel"],
                 ),
                 (None, SignIn::Code(code)) => (
                     vec![format!(
@@ -217,11 +209,7 @@ impl MainMenu {
                 (None, SignIn::Failed(reason)) => (
                     vec!["Sign-in failed:".into(), reason.clone()],
                     None,
-                    if cfg!(mobile) {
-                        vec!["Try Again", leave]
-                    } else {
-                        vec!["Try Again", "Use a Code", leave]
-                    },
+                    vec!["Try Again", leave],
                 ),
                 (None, SignIn::Done { .. }) => unreachable!("handled above"),
             };
@@ -294,7 +282,6 @@ impl MainMenu {
         let mut action = MenuAction::None;
         match pressed {
             Some("Sign In" | "Try Again") => self.start_sign_in(),
-            Some("Use a Code") => self.start_code_sign_in(),
             Some("Open Again") => {
                 if let SignIn::Browser(url) = &*self.sign_in.read() {
                     crate::util::open_url(url);
@@ -380,18 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_sign_in_waits_with_a_way_back_and_a_code_fallback() {
+    fn a_browser_sign_in_waits_with_a_way_back() {
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-browser-sign-in-test", &mut key_bindings);
         menu.open_account(&key_bindings);
         menu.new_attempt(SignIn::Browser("https://login.example/authorize".into()));
         let screen = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
-        for text in [
-            "Finish signing in in your browser.",
-            "Open Again",
-            "Use a Code",
-            "Cancel",
-        ] {
+        for text in ["Finish signing in in your browser.", "Open Again", "Cancel"] {
             assert!(texts(&screen).contains(&text), "{text}");
         }
     }
