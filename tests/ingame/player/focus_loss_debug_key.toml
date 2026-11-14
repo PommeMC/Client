@@ -1,0 +1,42 @@
+# Losing focus lets go of F3 as a key-up would: with the game-mode switcher
+# open from F3+F4, the switch to the hovered mode applies and the screen
+# closes. Survival after creative hovers creative.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+expect = { player = { game_mode = 1 } }
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+expect = { player = { game_mode = 0 } }
+
+[[step]]
+key_down = { action = "key.debug.modifier" }
+
+[[step]]
+press = { action = "key.debug.switchGameMode" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+focus = false
+
+[[step]]
+expect = { player = { game_mode = 1 } }
+
+[[step]]
+focus = true
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+expect = { player = { game_mode = 0 } }

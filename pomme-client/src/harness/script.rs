@@ -48,6 +48,7 @@ struct StepFile {
     press: Option<protocol::Press>,
     key_down: Option<protocol::Key>,
     key_up: Option<protocol::Key>,
+    focus: Option<bool>,
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
@@ -386,6 +387,9 @@ impl StepFile {
         }
         if let Some(key) = self.key_up {
             steps.push(Step::Run(Command::KeyUp(key)));
+        }
+        if let Some(focused) = self.focus {
+            steps.push(Step::Run(Command::Focus { focused }));
         }
         if let Some(bind) = self.bind {
             steps.push(Step::Run(Command::Bind(bind)));
@@ -1067,10 +1071,13 @@ mod tests {
             max_differing_pixels = 64
             [[step]]
             hold_packets = true
+            [[step]]
+            focus = false
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 23);
+        assert_eq!(steps.len(), 24);
+        assert_eq!(steps[23], Step::Run(Command::Focus { focused: false }));
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[21],

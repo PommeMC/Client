@@ -54,6 +54,10 @@ pub enum Command {
     /// Holds a key down until `key_up`, as `press` names it.
     KeyDown(Key),
     KeyUp(Key),
+    /// The window gaining or losing focus, as the OS moving it would.
+    Focus {
+        focused: bool,
+    },
     /// Assigns inputs to a key binding for this session, unsaved.
     Bind(Bind),
     /// Changes client options through the options screen's own setters.

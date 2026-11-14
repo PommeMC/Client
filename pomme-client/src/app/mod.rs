@@ -593,6 +593,44 @@ fn is_user_input(event: &WindowEvent) -> bool {
     )
 }
 
+pub(crate) fn focus_changed(core: &mut AppCore, phase: &mut AppPhase, focused: bool) {
+    let mut released = Vec::new();
+    if !focused {
+        core.menu.end_binding_capture();
+        core.input.set_binding_capture(false);
+        released = core.input.release_all();
+    }
+    core.unfocused_since = (!focused).then(Instant::now);
+    // The window manager may silently drop a cursor lock on focus change, so
+    // a quick refocus (under the pause-on-lost-focus delay) re-issues the
+    // grab.
+    core.invalidate_cursor_grab_state();
+    let (window, game) = match phase {
+        AppPhase::Setup { .. } => return,
+        AppPhase::InMenu { gfx, .. }
+        | AppPhase::Connecting { gfx, .. }
+        | AppPhase::SavingWorld { gfx, .. } => (&gfx.window, None),
+        AppPhase::InGame {
+            gfx,
+            game,
+            connection,
+            ..
+        } => {
+            // As a key-up would: F3 let go toggles the overlay or applies
+            // the game-mode switcher.
+            for code in released {
+                game.on_key_released(code, &core.input, connection);
+            }
+            (&gfx.window, Some(game))
+        }
+    };
+    if focused {
+        core.apply_cursor_grab(window, game);
+    } else {
+        core.suspend_cursor_grab(window);
+    }
+}
+
 /// The game window, born in the persisted display mode: the swapchain is
 /// sized from `inner_size()` before the window is shown, so switching after
 /// creation would leave it built for the windowed size.
@@ -810,9 +848,11 @@ impl ApplicationHandler for App {
             }
             return;
         }
-        // The harness drives a test window's input itself; the desktop's
-        // mouse and keys passing over it mustn't steer a script.
-        if self.core.test_window && is_user_input(&event) {
+        // The harness drives a test window's input and focus itself; the
+        // desktop's mouse, keys and focus mustn't steer a script.
+        if self.core.test_window
+            && (is_user_input(&event) || matches!(event, WindowEvent::Focused(_)))
+        {
             return;
         }
         // Vanilla `MouseHandler.handleAccumulatedMovement` counts the mouse
@@ -1239,31 +1279,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Focused(focused) => {
-                if !focused {
-                    self.core.menu.end_binding_capture();
-                    self.core.input.set_binding_capture(false);
-                }
-                self.core.unfocused_since = (!focused).then(Instant::now);
-                // The window manager may silently drop a cursor lock on focus
-                // change, so a quick refocus (under the pause-on-lost-focus
-                // delay) re-issues the grab.
-                self.core.invalidate_cursor_grab_state();
-                if !focused && let Some(gfx) = self.phase.gfx_mut() {
-                    self.core.suspend_cursor_grab(&gfx.window);
-                }
-                if focused {
-                    match self.phase.get_mut() {
-                        AppPhase::Setup { .. } => {}
-                        AppPhase::InMenu { gfx, .. }
-                        | AppPhase::Connecting { gfx, .. }
-                        | AppPhase::SavingWorld { gfx, .. } => {
-                            self.core.apply_cursor_grab(&gfx.window, None);
-                        }
-                        AppPhase::InGame { gfx, game, .. } => {
-                            self.core.apply_cursor_grab(&gfx.window, Some(game));
-                        }
-                    }
-                }
+                focus_changed(&mut self.core, self.phase.get_mut(), focused);
             }
 
             WindowEvent::RedrawRequested => {

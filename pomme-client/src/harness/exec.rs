@@ -130,6 +130,7 @@ pub fn runs_anywhere(command: &Command) -> bool {
             | Command::Press(_)
             | Command::KeyDown(_)
             | Command::KeyUp(_)
+            | Command::Focus { .. }
             | Command::Modifiers(_)
             | Command::Cursor { .. }
             | Command::CursorToButton { .. }
@@ -158,6 +159,10 @@ fn run_anywhere(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> 
                     .hold_key(code, matches!(command, Command::KeyDown(_)));
                 Value::Null
             })
+        }
+        Command::Focus { focused } => {
+            crate::app::focus_changed(core, phase, *focused);
+            Ok(Value::Null)
         }
         Command::Modifiers(modifiers) => {
             core.input.hold_harness_shift(modifiers.shift);

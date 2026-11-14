@@ -1,0 +1,43 @@
+# Losing focus lets go of held keys: their releases go to whichever window
+# has focus, so forward held through a focus change stops, and the player
+# stays where a teleport put them once focus comes back.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/tp @s 140.5 -60 140.5 0 0"
+
+[[step]]
+expect = { player = { position = [140.5, -60.0, 140.5] } }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+focus = false
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+focus = true
+
+[[step]]
+chat = "/tp @s 140.5 -60 140.5 0 0"
+
+[[step]]
+expect = { player = { position = [140.5, -60.0, 140.5] } }
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+expect = { player = { position = [140.5, -60.0, 140.5] } }
+timeout_ms = 0

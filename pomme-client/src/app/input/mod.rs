@@ -837,6 +837,26 @@ impl InputState {
         }
     }
 
+    /// Lets go of every held key and mouse button, as SDL does under vanilla
+    /// on losing focus; winit sends those releases only on Windows and X11.
+    /// Returns the keys let go, for the game's own release handling.
+    // TODO: held gamepad buttons stay down; SDL drops background gamepad
+    // events by default, gilrs keeps delivering them.
+    pub fn release_all(&mut self) -> Vec<KeyCode> {
+        let keys: Vec<KeyCode> = self
+            .pressed
+            .union(&self.binding_keys_down)
+            .copied()
+            .collect();
+        for &code in &keys {
+            self.on_key(code, ElementState::Released, false);
+        }
+        for button in std::mem::take(&mut self.mouse_buttons_down) {
+            self.on_mouse_button(button, ElementState::Released);
+        }
+        keys
+    }
+
     /// No screen or text field is taking the input.
     fn gameplay(&self) -> bool {
         !self.text_capture && !self.menu_capture
@@ -1357,6 +1377,24 @@ mod binding_capture_tests {
 
         input.clear_just_pressed_actions();
         assert!(!input.performing_action(Action::Use));
+    }
+
+    #[test]
+    fn releases_every_held_key_and_button() {
+        let mut input = InputState::released();
+        input.on_key(KeyCode::KeyW, ElementState::Pressed, false);
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.set_binding_capture(true);
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, false);
+        input.set_binding_capture(false);
+
+        let released: HashSet<KeyCode> = input.release_all().into_iter().collect();
+        assert_eq!(released, HashSet::from([KeyCode::KeyW, KeyCode::F3]));
+        assert!(!input.key_pressed(KeyCode::KeyW));
+        assert!(!input.action_held(Action::Forward));
+        assert!(!input.left_click.held);
+        assert!(input.mouse_buttons_down.is_empty());
+        assert!(input.binding_keys_down.is_empty());
     }
 
     #[test]
