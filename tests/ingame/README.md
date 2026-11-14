@@ -151,6 +151,12 @@ press = { action = "key.drop", ctrl = true }  # a key binding's default key, or
 key_down = { action = "key.forward" }        # held until key_up, which
                                               # takes the same key
 [[step]]
+focus = false                                 # the window losing focus (it
+                                              # lets go of held keys and
+                                              # buttons) or gaining it; a
+                                              # test window ignores the OS's
+                                              # own focus changes
+[[step]]
 bind = { action = "key.drop", keys = ["key.keyboard.j"] }  # this session only;
                                               # no keys resets the defaults
 [[step]]
