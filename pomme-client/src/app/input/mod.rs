@@ -839,18 +839,22 @@ impl InputState {
 
     /// Lets go of every held key and mouse button, as SDL does under vanilla
     /// on losing focus; winit sends those releases only on Windows and X11.
-    pub fn release_all(&mut self) {
-        let keys: HashSet<KeyCode> = self
+    /// Returns the keys let go, for the game's own release handling.
+    // TODO: held gamepad buttons stay down; SDL drops background gamepad
+    // events by default, gilrs keeps delivering them.
+    pub fn release_all(&mut self) -> Vec<KeyCode> {
+        let keys: Vec<KeyCode> = self
             .pressed
             .union(&self.binding_keys_down)
             .copied()
             .collect();
-        for code in keys {
+        for &code in &keys {
             self.on_key(code, ElementState::Released, false);
         }
         for button in std::mem::take(&mut self.mouse_buttons_down) {
             self.on_mouse_button(button, ElementState::Released);
         }
+        keys
     }
 
     /// No screen or text field is taking the input.
@@ -1384,7 +1388,8 @@ mod binding_capture_tests {
         input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, false);
         input.set_binding_capture(false);
 
-        input.release_all();
+        let released: HashSet<KeyCode> = input.release_all().into_iter().collect();
+        assert_eq!(released, HashSet::from([KeyCode::KeyW, KeyCode::F3]));
         assert!(!input.key_pressed(KeyCode::KeyW));
         assert!(!input.action_held(Action::Forward));
         assert!(!input.left_click.held);
