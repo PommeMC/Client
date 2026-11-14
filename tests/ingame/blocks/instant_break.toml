@@ -1,0 +1,71 @@
+# Blocks that break on the first hit in survival break one a tick while the
+# button is held, with no cooldown between them: a diamond hoe takes a row
+# of leaves at eye height, the server's replies held back so only the
+# client's own predictions count. A finished long break would wait 5 ticks.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/tp @s 1150.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1150.5, -60.0, 0.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [1150, -61, 3] }
+
+[[step]]
+chat = "/fill 1150 -59 1 1150 -59 4 minecraft:oak_leaves[persistent=true]"
+
+[[step]]
+expect = { block = "oak_leaves", at = [1150, -59, 4] }
+
+[[step]]
+chat = "/give @s minecraft:diamond_hoe"
+
+[[step]]
+expect = { slot = 36, item = "diamond_hoe" }
+
+[[step]]
+press = { key = "key.keyboard.1" }
+
+[[step]]
+look_at = [1150.5, -58.5, 1.0]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hold_packets = true
+
+[[step]]
+mouse_down = "left"
+
+# About 6 ticks: a leaf a tick has taken the third, a 5-tick cooldown after
+# each break only the first.
+[[step]]
+wait_ms = 300
+
+[[step]]
+expect = { block = "air", at = [1150, -59, 3] }
+timeout_ms = 1
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+hold_packets = false
+
+[[step]]
+chat = "/fill 1150 -59 1 1150 -59 4 minecraft:air"
+
+[[step]]
+chat = "/clear @s"
