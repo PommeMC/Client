@@ -313,6 +313,11 @@ mod tests {
             (Direction::Serverbound, "move_vehicle", 34),
             (Direction::Serverbound, "paddle_boat", 35),
             (Direction::Clientbound, "move_vehicle", 57),
+            (Direction::Clientbound, "open_sign_editor", 60),
+            (Direction::Clientbound, "set_camera", 93),
+            (Direction::Clientbound, "resource_pack_pop", 80),
+            (Direction::Clientbound, "resource_pack_push", 81),
+            (Direction::Clientbound, "waypoint", 138),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
         }

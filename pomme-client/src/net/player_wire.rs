@@ -118,6 +118,23 @@ fn event(packet: PlayerPacket) -> Option<NetworkEvent> {
         PlayerPacket::Cooldown { group, duration } => {
             NetworkEvent::ItemCooldown { group, duration }
         }
+        PlayerPacket::Camera { entity } => NetworkEvent::SetCamera { id: entity },
+        PlayerPacket::MoveVehicle {
+            position,
+            y_rot,
+            x_rot,
+        } => NetworkEvent::MoveVehicle {
+            position,
+            y_rot_deg: y_rot,
+            x_rot_deg: x_rot,
+        },
+        PlayerPacket::OpenSignEditor {
+            pos: (x, y, z),
+            is_front_text,
+        } => NetworkEvent::OpenSignEditor {
+            pos: azalea_core::position::BlockPos::new(x, y, z),
+            is_front_text,
+        },
     })
 }
 

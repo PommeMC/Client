@@ -1,6 +1,5 @@
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Registry;
+use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::{Sender, TrySendError};
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -13,18 +12,8 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
-use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::BlockStateTable;
-
-fn dialog_holder_reference(
-    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
-) -> DialogReference {
-    match holder {
-        azalea_registry::Holder::Reference(dialog) => DialogReference::ProtocolId(dialog.to_u32()),
-        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
-    }
-}
 
 /// Queues an event the game thread must not lose, blocking while the queue is
 /// full. Blocking stalls this connection's reads and writes until the game
@@ -49,21 +38,11 @@ pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent)
 
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
-    sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
 ) {
     match packet {
-        ClientboundGamePacket::Waypoint(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::Waypoint {
-                    operation: p.operation,
-                    waypoint: p.waypoint.clone(),
-                },
-            );
-        }
         ClientboundGamePacket::UpdateAdvancements(p) => {
             use azalea_protocol::packets::game::c_update_advancements::FrameType;
 
@@ -124,32 +103,6 @@ pub fn handle_game_packet(
         ClientboundGamePacket::SetEntityData(p) => {
             super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
         }
-        ClientboundGamePacket::ResourcePackPush(p) => {
-            tracing::info!(
-                "Server pushing resource pack {} (required: {})",
-                p.id,
-                p.required
-            );
-            send_ordered(
-                event_tx,
-                NetworkEvent::ResourcePackPush {
-                    id: p.id,
-                    url: p.url.clone(),
-                    hash: p.hash.clone(),
-                    required: p.required,
-                },
-            );
-            sender.send(ServerboundGamePacket::ResourcePack(
-                azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
-                    id: p.id,
-                    action: azalea_protocol::packets::game::s_resource_pack::Action::Accepted,
-                },
-            ));
-        }
-        ClientboundGamePacket::ResourcePackPop(p) => {
-            tracing::info!("Server popping resource pack {:?}", p.id);
-            send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
-        }
         ClientboundGamePacket::Commands(p) => {
             let tree = std::sync::Arc::new(CommandTree::from_packet(p));
             tracing::info!(
@@ -159,46 +112,6 @@ pub fn handle_game_packet(
             );
             *shared_tree.lock() = Some(tree.clone());
             send_ordered(event_tx, NetworkEvent::CommandTree { tree });
-        }
-        ClientboundGamePacket::ShowDialog(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::ShowDialog {
-                    dialog: dialog_holder_reference(&p.dialog),
-                },
-            );
-        }
-        ClientboundGamePacket::ClearDialog(_) => {
-            send_ordered(event_tx, NetworkEvent::ClearDialog);
-        }
-        ClientboundGamePacket::MoveVehicle(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::MoveVehicle {
-                    position: glam::DVec3::new(p.pos.x, p.pos.y, p.pos.z),
-                    y_rot_deg: p.look_direction.y_rot(),
-                    x_rot_deg: p.look_direction.x_rot(),
-                },
-            );
-        }
-        ClientboundGamePacket::SetCamera(p) => {
-            send_ordered(event_tx, NetworkEvent::SetCamera { id: p.camera_id.0 });
-        }
-        ClientboundGamePacket::OpenSignEditor(p) => {
-            send_ordered(
-                event_tx,
-                NetworkEvent::OpenSignEditor {
-                    pos: p.pos,
-                    is_front_text: p.is_front_text,
-                },
-            );
-        }
-        ClientboundGamePacket::CustomChatCompletions(p) => {
-            tracing::debug!(
-                "Custom chat completions: {:?} ({} entries)",
-                p.action,
-                p.entries.len()
-            );
         }
         _other => {}
     }
@@ -397,6 +310,21 @@ pub(crate) fn decode_raw_game_packet(
     })
     .or_else(|| {
         claimed(
+            "resource_pack",
+            super::resource_pack_wire::handle_raw_resource_pack_packet(
+                packet_id, payload, sender, event_tx,
+            ),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "waypoint",
+            super::waypoint_wire::handle_raw_waypoint_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| ignored(packet_id).then_some(("ignored", Ok(()))))
+    .or_else(|| {
+        claimed(
             "block",
             super::block_wire::handle_raw_block_packet(
                 packet_id,
@@ -440,6 +368,63 @@ pub(crate) fn decode_raw_game_packet(
             })
             .flatten()
     })
+}
+
+/// Packets the client doesn't act on yet, skipped by id without decoding.
+// TODO: `cookie_request` expects a `cookie_response`, which pomme never
+// sends; the rest are features pomme lacks (world border, maps, trading,
+// ticking state, transfers, debug renderers and more).
+const IGNORED_PACKETS: &[&str] = &[
+    "award_stats",
+    "block_destruction",
+    "bundle_delimiter",
+    "change_difficulty",
+    "cookie_request",
+    "custom_chat_completions",
+    "custom_payload",
+    "custom_report_details",
+    "debug/block_value",
+    "debug/chunk_value",
+    "debug/entity_value",
+    "debug/event",
+    "debug_sample",
+    "game_rule_values",
+    "game_test_highlight_pos",
+    "initialize_border",
+    "low_disk_space_warning",
+    "map_item_data",
+    "merchant_offers",
+    "mount_screen_open",
+    "move_minecart_along_track",
+    "open_book",
+    "player_combat_end",
+    "player_combat_enter",
+    "player_look_at",
+    "pong_response",
+    "projectile_power",
+    "select_advancements_tab",
+    "server_data",
+    "set_border_center",
+    "set_border_lerp_size",
+    "set_border_size",
+    "set_border_warning_delay",
+    "set_border_warning_distance",
+    "set_default_spawn_position",
+    "set_entity_link",
+    "store_cookie",
+    "tag_query",
+    "test_instance_block_status",
+    "ticking_state",
+    "ticking_step",
+    "transfer",
+];
+
+fn ignored(packet_id: u32) -> bool {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    PacketTable::native()
+        .name_of(Phase::Game, Direction::Clientbound, packet_id)
+        .is_some_and(|name| IGNORED_PACKETS.contains(&name))
 }
 
 /// Runs `raw` through [`handle_raw_game_packet`] with fresh connection
@@ -554,6 +539,7 @@ mod tests {
     use std::sync::{Arc, Barrier, mpsc as std_mpsc};
     use std::time::Duration;
 
+    use azalea_protocol::packets::game::ServerboundGamePacket;
     use pomme_protocol::wire;
 
     use super::*;

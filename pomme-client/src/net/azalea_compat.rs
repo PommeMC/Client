@@ -7524,3 +7524,119 @@ fn reconnect_resets_translation_dimensions() {
         "new connection must not retain custom_end at index 1"
     );
 }
+
+/// azalea's encoders for the packets pomme now decodes itself land as the
+/// same events through pomme's raw handlers.
+#[test]
+fn azalea_encoded_player_and_world_packets_read_in_pomme() {
+    use azalea_protocol::packets::game::{
+        c_move_vehicle, c_open_sign_editor, c_resource_pack_pop, c_resource_pack_push,
+        c_set_camera, c_waypoint,
+    };
+
+    use crate::net::NetworkEvent;
+
+    let read = |packet: ClientboundGamePacket| {
+        let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (took, _) = crate::net::handler::handle_raw_for_test(
+            &frame,
+            crate::world::block::BlockStateTable::native(),
+            &tx,
+        );
+        assert!(took, "{packet:?}");
+        rx.try_iter().next().expect("an event")
+    };
+
+    let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    assert!(matches!(
+        read(ClientboundGamePacket::SetCamera(
+            c_set_camera::ClientboundSetCamera {
+                camera_id: MinecraftEntityId(300),
+            }
+        )),
+        NetworkEvent::SetCamera { id: 300 }
+    ));
+    let NetworkEvent::MoveVehicle {
+        position,
+        y_rot_deg,
+        x_rot_deg,
+    } = read(ClientboundGamePacket::MoveVehicle(
+        c_move_vehicle::ClientboundMoveVehicle {
+            pos: azalea_core::position::Vec3::new(1.5, 64.0, -2.25),
+            look_direction: azalea_entity::LookDirection::new(90.0, -10.0),
+        },
+    ))
+    else {
+        panic!("expected move_vehicle");
+    };
+    assert_eq!(
+        (position, y_rot_deg, x_rot_deg),
+        (glam::DVec3::new(1.5, 64.0, -2.25), 90.0, -10.0)
+    );
+    let NetworkEvent::OpenSignEditor { pos, is_front_text } = read(
+        ClientboundGamePacket::OpenSignEditor(c_open_sign_editor::ClientboundOpenSignEditor {
+            pos: azalea_core::position::BlockPos::new(-12, 70, 345),
+            is_front_text: false,
+        }),
+    ) else {
+        panic!("expected open_sign_editor");
+    };
+    assert_eq!(
+        (pos, is_front_text),
+        (azalea_core::position::BlockPos::new(-12, 70, 345), false)
+    );
+    let NetworkEvent::ResourcePackPush {
+        id: pushed, url, ..
+    } = read(ClientboundGamePacket::ResourcePackPush(
+        c_resource_pack_push::ClientboundResourcePackPush {
+            id,
+            url: "https://example.com/pack.zip".into(),
+            hash: String::new(),
+            required: true,
+            prompt: None,
+        },
+    ))
+    else {
+        panic!("expected resource_pack_push");
+    };
+    assert_eq!((pushed, url.as_str()), (id, "https://example.com/pack.zip"));
+    assert!(matches!(
+        read(ClientboundGamePacket::ResourcePackPop(
+            c_resource_pack_pop::ClientboundResourcePackPop { id: Some(id) }
+        )),
+        NetworkEvent::ResourcePackPop { id: Some(popped) } if popped == id
+    ));
+    let NetworkEvent::Waypoint {
+        operation,
+        waypoint,
+    } = read(ClientboundGamePacket::Waypoint(
+        c_waypoint::ClientboundWaypoint {
+            operation: c_waypoint::WaypointOperation::Update,
+            waypoint: c_waypoint::TrackedWaypoint {
+                identifier: c_waypoint::WaypointIdentifier::Uuid(id),
+                icon: c_waypoint::WaypointIcon {
+                    style: Identifier::new("minecraft:bowtie"),
+                    color: Some(azalea_core::color::RgbColor::new(0x12, 0xab, 0x34)),
+                },
+                data: c_waypoint::WaypointData::Chunk { x: -3, z: 7 },
+            },
+        },
+    ))
+    else {
+        panic!("expected waypoint");
+    };
+    assert_eq!(
+        operation,
+        pomme_protocol::waypoint::WaypointOperation::Update
+    );
+    assert_eq!(
+        waypoint,
+        pomme_protocol::waypoint::TrackedWaypoint {
+            id: pomme_protocol::waypoint::WaypointId::Uuid(id.as_u128()),
+            style: "minecraft:bowtie".into(),
+            color: Some([0x12, 0xab, 0x34]),
+            data: pomme_protocol::waypoint::WaypointData::Chunk { x: -3, z: 7 },
+        }
+    );
+}

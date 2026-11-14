@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.function.BiConsumer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
@@ -24,6 +25,7 @@ import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.Vec3i;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.network.FriendlyByteBuf;
@@ -32,19 +34,24 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
 import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
+import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
+import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
+import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
-import net.minecraft.network.protocol.game.ServerboundMoveVehiclePacket;
-import net.minecraft.network.protocol.game.ServerboundPaddleBoatPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
+import net.minecraft.network.protocol.game.ServerboundMoveVehiclePacket;
+import net.minecraft.network.protocol.game.ServerboundPaddleBoatPacket;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -73,6 +80,8 @@ import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.waypoints.Waypoint;
+import net.minecraft.world.waypoints.WaypointStyleAssets;
 
 /**
  * Encodes packets with vanilla's own STREAM_CODECs and writes the payloads
@@ -123,6 +132,27 @@ public final class CodecOracle {
                 new ServerboundPaddleBoatPacket(true, false));
         encode("cooldown/shield", ClientboundCooldownPacket.STREAM_CODEC::encode,
                 new ClientboundCooldownPacket(Identifier.withDefaultNamespace("shield"), 100));
+        encode("move_vehicle/clientbound", ClientboundMoveVehiclePacket.STREAM_CODEC::encode,
+                new ClientboundMoveVehiclePacket(new Vec3(1.5, 64.0, -2.25), 90.0f, -10.0f));
+        encode("open_sign_editor/back", ClientboundOpenSignEditorPacket.STREAM_CODEC::encode,
+                new ClientboundOpenSignEditorPacket(new BlockPos(-12, 70, 345), false));
+        UUID waypointId = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
+        Waypoint.Icon icon = new Waypoint.Icon();
+        icon.style = WaypointStyleAssets.BOWTIE;
+        icon.color = Optional.of(0x12ab34);
+        encode("waypoint/track_position", ClientboundTrackedWaypointPacket.STREAM_CODEC::encode,
+                ClientboundTrackedWaypointPacket.addWaypointPosition(waypointId, icon, new Vec3i(1, -64, 300)));
+        encode("waypoint/update_chunk", ClientboundTrackedWaypointPacket.STREAM_CODEC::encode,
+                ClientboundTrackedWaypointPacket.updateWaypointChunk(waypointId, new Waypoint.Icon(), new ChunkPos(-3, 7)));
+        encode("waypoint/track_azimuth", ClientboundTrackedWaypointPacket.STREAM_CODEC::encode,
+                ClientboundTrackedWaypointPacket.addWaypointAzimuth(waypointId, new Waypoint.Icon(), 1.25f));
+        encode("waypoint/untrack", ClientboundTrackedWaypointPacket.STREAM_CODEC::encode,
+                ClientboundTrackedWaypointPacket.removeWaypoint(waypointId));
+        encode("resource_pack_push/prompt", ClientboundResourcePackPushPacket.STREAM_CODEC::encode,
+                new ClientboundResourcePackPushPacket(waypointId, "https://example.com/pack.zip",
+                        "0123456789abcdef0123456789abcdef01234567", true, Optional.of(Component.literal("Please"))));
+        encode("resource_pack_pop/all", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
+                new ClientboundResourcePackPopPacket(Optional.empty()));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());

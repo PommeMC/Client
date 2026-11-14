@@ -80,6 +80,20 @@ pub enum PlayerPacket {
         group: String,
         duration: i32,
     },
+    /// The entity the camera follows; the player's own id puts it back.
+    Camera {
+        entity: i32,
+    },
+    /// The server's correction of the vehicle the player steers.
+    MoveVehicle {
+        position: glam::DVec3,
+        y_rot: f32,
+        x_rot: f32,
+    },
+    OpenSignEditor {
+        pos: (i32, i32, i32),
+        is_front_text: bool,
+    },
 }
 
 /// Decodes packet `name`, or `None` if it isn't a player-state packet.
@@ -156,6 +170,27 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<PlayerPacket>> {
                 duration: r.var_i32()?,
             })
         },
+        // ClientboundSetCameraPacket.java:28-30
+        "set_camera" => |r| {
+            Ok(PlayerPacket::Camera {
+                entity: r.var_i32()?,
+            })
+        },
+        // ClientboundMoveVehiclePacket.java:18
+        "move_vehicle" => |r| {
+            Ok(PlayerPacket::MoveVehicle {
+                position: r.vec3()?,
+                y_rot: r.f32()?,
+                x_rot: r.f32()?,
+            })
+        },
+        // ClientboundOpenSignEditorPacket.java:25-28
+        "open_sign_editor" => |r| {
+            Ok(PlayerPacket::OpenSignEditor {
+                pos: r.block_pos()?,
+                is_front_text: r.bool()?,
+            })
+        },
         _ => return None,
     };
     Some(read(r))
@@ -190,6 +225,31 @@ mod tests {
     #[test]
     fn other_packets_are_not_read() {
         assert!(read("add_entity", &mut Reader::new(&[])).is_none());
+    }
+
+    #[test]
+    fn camera_vehicle_and_sign_editor_read_as_vanilla_writes_them() {
+        use crate::vanilla_fixtures::case;
+
+        assert_eq!(
+            decode("set_camera", &[0xAC, 0x02]),
+            PlayerPacket::Camera { entity: 300 }
+        );
+        assert_eq!(
+            decode("move_vehicle", &case("move_vehicle/clientbound")),
+            PlayerPacket::MoveVehicle {
+                position: glam::DVec3::new(1.5, 64.0, -2.25),
+                y_rot: 90.0,
+                x_rot: -10.0,
+            }
+        );
+        assert_eq!(
+            decode("open_sign_editor", &case("open_sign_editor/back")),
+            PlayerPacket::OpenSignEditor {
+                pos: (-12, 70, 345),
+                is_front_text: false,
+            }
+        );
     }
 
     #[test]

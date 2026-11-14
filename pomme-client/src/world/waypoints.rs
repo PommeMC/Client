@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use azalea_protocol::packets::game::c_waypoint as packet;
 use glam::{DVec3, IVec3, Mat4};
+use pomme_protocol::waypoint as packet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WaypointId {
@@ -161,22 +161,23 @@ impl WaypointMap {
 
 impl TrackedWaypoint {
     fn from_packet(wp: packet::TrackedWaypoint) -> Self {
-        let id = match wp.identifier {
-            packet::WaypointIdentifier::Uuid(uuid) => WaypointId::Uuid(uuid),
-            packet::WaypointIdentifier::String(name) => WaypointId::Name(name),
+        let id = match wp.id {
+            packet::WaypointId::Uuid(uuid) => WaypointId::Uuid(uuid::Uuid::from_u128(uuid)),
+            packet::WaypointId::Name(name) => WaypointId::Name(name),
         };
-        let style = match (wp.icon.style.namespace(), wp.icon.style.path()) {
+        // `Identifier.parse`: no namespace means `minecraft`.
+        let style = match wp.style.split_once(':').unwrap_or(("minecraft", &wp.style)) {
             ("minecraft", "default") => WaypointStyleId::Default,
             ("minecraft", "bowtie") => WaypointStyleId::Bowtie,
             _ => {
-                tracing::warn!("Unknown waypoint style {}", wp.icon.style);
+                tracing::warn!("Unknown waypoint style {}", wp.style);
                 WaypointStyleId::Missing
             }
         };
-        let color = wp.icon.color.map(|c| [c.red(), c.green(), c.blue()]);
+        let color = wp.color;
         let data = match wp.data {
             packet::WaypointData::Empty => WaypointData::Empty,
-            packet::WaypointData::Vec3i(v) => WaypointData::Pos(IVec3::new(v.x, v.y, v.z)),
+            packet::WaypointData::Position { x, y, z } => WaypointData::Pos(IVec3::new(x, y, z)),
             packet::WaypointData::Chunk { x, z } => WaypointData::Chunk { x, z },
             packet::WaypointData::Azimuth { angle } => WaypointData::Azimuth { angle_rad: angle },
         };
@@ -561,11 +562,9 @@ mod tests {
 
     fn packet_waypoint(uuid: uuid::Uuid, data: packet::WaypointData) -> packet::TrackedWaypoint {
         packet::TrackedWaypoint {
-            identifier: packet::WaypointIdentifier::Uuid(uuid),
-            icon: packet::WaypointIcon {
-                style: azalea_registry::identifier::Identifier::new("minecraft:default"),
-                color: None,
-            },
+            id: packet::WaypointId::Uuid(uuid.as_u128()),
+            style: "minecraft:default".into(),
+            color: None,
             data,
         }
     }
@@ -606,12 +605,12 @@ mod tests {
         track(
             &mut map,
             local,
-            packet::WaypointData::Vec3i(azalea_core::position::Vec3i::new(0, 0, 5)),
+            packet::WaypointData::Position { x: 0, y: 0, z: 5 },
         );
         track(
             &mut map,
             near,
-            packet::WaypointData::Vec3i(azalea_core::position::Vec3i::new(0, 0, 10)),
+            packet::WaypointData::Position { x: 0, y: 0, z: 10 },
         );
         track(&mut map, far, packet::WaypointData::Azimuth { angle: 0.0 });
 
