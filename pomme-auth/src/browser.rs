@@ -47,12 +47,8 @@ pub async fn browser_sign_in(
     store: &dyn SecretStore,
     on_url: impl FnOnce(&str),
 ) -> Result<AuthAccount, String> {
-    let listen_error = |e| format!("Couldn't listen for the sign-in: {}", crate::error_chain(e));
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(listen_error)?;
-    let port = listener.local_addr().map_err(listen_error)?.port();
-    let redirect_uri = format!("http://localhost:{port}");
+    let loopback = Loopback::bind().await?;
+    let redirect_uri = format!("http://localhost:{}", loopback.port);
     let verifier = random_token(32);
     let challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
     let state = random_token(16);
@@ -71,7 +67,7 @@ pub async fn browser_sign_in(
         ],
     ));
 
-    let (mut stream, params) = tokio::time::timeout(TIMEOUT, callback(&listener))
+    let (mut stream, params) = tokio::time::timeout(TIMEOUT, callback(&loopback))
         .await
         .map_err(|_| "The sign-in timed out; try again".to_string())??;
     let result = match callback_code(&params, &state) {
@@ -89,12 +85,47 @@ pub async fn browser_sign_in(
     result.map_err(String::from)
 }
 
+/// The redirect's listeners: `localhost` can resolve to either loopback, so
+/// IPv6 listens too at the same port where the system has it.
+struct Loopback {
+    v4: TcpListener,
+    v6: Option<TcpListener>,
+    port: u16,
+}
+
+impl Loopback {
+    async fn bind() -> Result<Self, String> {
+        let listen_error =
+            |e| format!("Couldn't listen for the sign-in: {}", crate::error_chain(e));
+        let v4 = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(listen_error)?;
+        let port = v4.local_addr().map_err(listen_error)?.port();
+        let v6 = TcpListener::bind(("::1", port)).await.ok();
+        Ok(Self { v4, v6, port })
+    }
+
+    async fn accept(&self) -> std::io::Result<TcpStream> {
+        let v6 = async {
+            match &self.v6 {
+                Some(v6) => v6.accept().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            accepted = self.v4.accept() => accepted,
+            accepted = v6 => accepted,
+        }
+        .map(|(stream, _)| stream)
+    }
+}
+
 /// The first request that carries the sign-in's answer, and the connection to
 /// answer it on; anything else (a favicon, an empty speculative connection)
 /// gets a 404.
-async fn callback(listener: &TcpListener) -> Result<(TcpStream, HashMap<String, String>), String> {
+async fn callback(loopback: &Loopback) -> Result<(TcpStream, HashMap<String, String>), String> {
     loop {
-        let (mut stream, _) = listener
+        let mut stream = loopback
             .accept()
             .await
             .map_err(|e| format!("Couldn't take the sign-in: {}", crate::error_chain(e)))?;
@@ -207,13 +238,19 @@ mod tests {
 
     #[tokio::test]
     async fn the_listener_skips_requests_without_an_answer() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let loopback = Loopback::bind().await.unwrap();
+        let v4 = ("127.0.0.1", loopback.port);
+        // The answer comes over IPv6 where the machine has it.
+        let answer_from = if loopback.v6.is_some() {
+            ("::1", loopback.port)
+        } else {
+            v4
+        };
         let browser = tokio::spawn(async move {
-            drop(TcpStream::connect(addr).await.unwrap());
-            for request in [
-                "GET /favicon.ico HTTP/1.1\r\n\r\n",
-                "GET /?code=c&state=s HTTP/1.1\r\n\r\n",
+            drop(TcpStream::connect(v4).await.unwrap());
+            for (request, addr) in [
+                ("GET /favicon.ico HTTP/1.1\r\n\r\n", v4),
+                ("GET /?code=c&state=s HTTP/1.1\r\n\r\n", answer_from),
             ] {
                 let mut stream = TcpStream::connect(addr).await.unwrap();
                 stream.write_all(request.as_bytes()).await.unwrap();
@@ -224,7 +261,7 @@ mod tests {
                 }
             }
         });
-        let (_, params) = callback(&listener).await.unwrap();
+        let (_, params) = callback(&loopback).await.unwrap();
         assert_eq!(params.get("code").map(String::as_str), Some("c"));
         browser.await.unwrap();
     }

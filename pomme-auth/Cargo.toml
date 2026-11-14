@@ -17,7 +17,7 @@ reqwest = { workspace = true, features = ["form"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "time"] }
 keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"], optional = true }
 
 [dev-dependencies]
