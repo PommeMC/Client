@@ -94,8 +94,6 @@ fn validated_server_link_url(url: &str) -> Option<String> {
         .ok()
 }
 
-/// Configuration's `ClientboundShowDialogPacket.CONTEXT_FREE_STREAM_CODEC`:
-/// always an inline dialog.
 /// `ByteBufCodecs.holder`: 0 and an inline dialog, else a registry id plus 1.
 fn parse_dialog_holder(raw: &[u8], pos: &mut usize) -> Result<DialogReference, String> {
     match read_varint(raw, pos).ok_or("dialog holder id")? {
@@ -104,6 +102,8 @@ fn parse_dialog_holder(raw: &[u8], pos: &mut usize) -> Result<DialogReference, S
     }
 }
 
+/// Configuration's `ClientboundShowDialogPacket.CONTEXT_FREE_STREAM_CODEC`:
+/// always an inline dialog.
 fn parse_inline_dialog(raw: &[u8], pos: &mut usize) -> Result<DialogReference, String> {
     match read_nbt_tag(raw, pos)? {
         NbtTag::Compound(nbt) => Ok(DialogReference::inline(&nbt)),
@@ -119,10 +119,12 @@ mod tests {
     use super::*;
     use crate::chat_component::Content;
 
-    fn packet_id(phase: Phase, name: &str) -> u32 {
-        PacketTable::native()
-            .id(phase, Direction::Clientbound, name)
-            .unwrap()
+    /// A frame holding just packet `name`'s id.
+    fn frame(phase: Phase, name: &str) -> Vec<u8> {
+        let mut raw = Vec::new();
+        let id = PacketTable::native().id(phase, Direction::Clientbound, name);
+        write_varint(&mut raw, id.unwrap());
+        raw
     }
 
     fn write_string(out: &mut Vec<u8>, value: &str) {
@@ -143,8 +145,7 @@ mod tests {
     }
 
     fn links_packet(phase: Phase) -> Vec<u8> {
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(phase, "server_links"));
+        let mut raw = frame(phase, "server_links");
         write_varint(&mut raw, 4);
         // Known type 6 (website).
         raw.push(1);
@@ -193,8 +194,7 @@ mod tests {
 
     #[test]
     fn out_of_range_link_type_is_a_bug_report() {
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "server_links"));
+        let mut raw = frame(Phase::Game, "server_links");
         write_varint(&mut raw, 1);
         raw.push(1);
         write_varint(&mut raw, 42);
@@ -229,8 +229,7 @@ mod tests {
         let mut expected = NbtCompound::new();
         expected.insert("type", "minecraft:notice");
         expected.insert("title", "Rules");
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Configuration, "show_dialog"));
+        let mut raw = frame(Phase::Configuration, "show_dialog");
         NbtTag::Compound(expected.clone()).write(&mut raw);
         let events = decode(Phase::Configuration, &raw);
         let [NetworkEvent::ShowDialog { dialog }] = events.as_slice() else {
@@ -241,8 +240,7 @@ mod tests {
         };
         assert_eq!(tag, &NbtTag::Compound(expected));
 
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Configuration, "clear_dialog"));
+        let raw = frame(Phase::Configuration, "clear_dialog");
         assert!(matches!(
             decode(Phase::Configuration, &raw).as_slice(),
             [NetworkEvent::ClearDialog]
@@ -251,35 +249,39 @@ mod tests {
 
     #[test]
     fn play_dialogs_are_holders() {
-        // Holder id 0, then the dialog inline.
-        let mut inline = NbtCompound::new();
-        inline.insert("type", "minecraft:notice");
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "show_dialog"));
-        write_varint(&mut raw, 0);
-        NbtTag::Compound(inline.clone()).write(&mut raw);
-        let events = decode(Phase::Game, &raw);
+        use pomme_protocol::vanilla_fixtures::{case, registry_id};
+
+        let play = |name| {
+            let mut raw = frame(Phase::Game, "show_dialog");
+            raw.extend(case(name));
+            decode(Phase::Game, &raw)
+        };
+        let events = play("show_dialog/inline");
         let [NetworkEvent::ShowDialog { dialog }] = events.as_slice() else {
             panic!("expected one show_dialog event");
         };
-        let DialogReference::Holder(crate::chat_component::DialogHolder::Nbt(tag)) = dialog else {
+        let DialogReference::Holder(crate::chat_component::DialogHolder::Nbt(NbtTag::Compound(
+            nbt,
+        ))) = dialog
+        else {
             panic!("expected an inline dialog");
         };
-        assert_eq!(tag, &NbtTag::Compound(inline));
+        assert_eq!(
+            nbt.string("type")
+                .map(|s| s.to_str().into_owned())
+                .as_deref(),
+            Some("minecraft:server_links")
+        );
 
-        // A registry id plus 1.
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "show_dialog"));
-        write_varint(&mut raw, 3);
+        let server_links = registry_id("dialog", "minecraft:server_links");
         assert!(matches!(
-            decode(Phase::Game, &raw).as_slice(),
+            play("show_dialog/reference").as_slice(),
             [NetworkEvent::ShowDialog {
-                dialog: DialogReference::ProtocolId(2)
-            }]
+                dialog: DialogReference::ProtocolId(id)
+            }] if *id == server_links
         ));
 
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "clear_dialog"));
+        let raw = frame(Phase::Game, "clear_dialog");
         assert!(matches!(
             decode(Phase::Game, &raw).as_slice(),
             [NetworkEvent::ClearDialog]

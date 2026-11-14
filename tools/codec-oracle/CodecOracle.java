@@ -36,6 +36,7 @@ import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
+import net.minecraft.network.protocol.common.ClientboundShowDialogPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
@@ -58,6 +59,8 @@ import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.dialog.Dialog;
+import net.minecraft.server.dialog.Dialogs;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
@@ -107,7 +110,8 @@ public final class CodecOracle {
         Registry<DimensionType> dimensionTypes = builtIn(Registries.DIMENSION_TYPE);
         Registry<WorldClock> clocks = builtIn(Registries.WORLD_CLOCK);
         Registry<Biome> biomes = builtIn(Registries.BIOME);
-        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes));
+        Registry<Dialog> dialogs = builtIn(Registries.DIALOG);
+        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs));
 
         lifecycle(dimensionTypes, clocks);
         sections();
@@ -153,12 +157,18 @@ public final class CodecOracle {
                         "0123456789abcdef0123456789abcdef01234567", true, Optional.of(Component.literal("Please"))));
         encode("resource_pack_pop/all", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
                 new ClientboundResourcePackPopPacket(Optional.empty()));
+        Holder<Dialog> serverLinks = dialogs.getOrThrow(Dialogs.SERVER_LINKS);
+        encode("show_dialog/reference", ClientboundShowDialogPacket.STREAM_CODEC::encode,
+                new ClientboundShowDialogPacket(serverLinks));
+        encode("show_dialog/inline", ClientboundShowDialogPacket.STREAM_CODEC::encode,
+                new ClientboundShowDialogPacket(Holder.direct(serverLinks.value())));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
         JsonObject ids = new JsonObject();
         idsOf(ids, "dimension_type", dimensionTypes);
         idsOf(ids, "world_clock", clocks);
+        idsOf(ids, "dialog", dialogs);
         out.add("registry_ids", ids);
         JsonObject sizes = new JsonObject();
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
