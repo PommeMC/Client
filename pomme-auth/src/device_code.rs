@@ -95,7 +95,9 @@ pub async fn device_code_sign_in(
         if ok {
             let msa: MsaTokenResponse = serde_json::from_str(&body)
                 .map_err(|e| format!("Token parse failed: {}", crate::error_chain(e)))?;
-            return finish_msa_exchange(http, store, &msa).await;
+            return finish_msa_exchange(http, store, &msa)
+                .await
+                .map_err(String::from);
         }
         match poll_error(&body) {
             Poll::Pending => {}

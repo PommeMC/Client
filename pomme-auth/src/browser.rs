@@ -13,7 +13,9 @@ use sha2::Digest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{CLIENT_ID, MsaTokenResponse, SCOPE, TOKEN_URL, TokenError, finish_msa_exchange};
+use super::{
+    AuthError, CLIENT_ID, MsaTokenResponse, SCOPE, TOKEN_URL, TokenError, finish_msa_exchange,
+};
 use crate::{AuthAccount, SecretStore};
 
 const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
@@ -78,10 +80,13 @@ pub async fn browser_sign_in(
     };
     let target = match &result {
         Ok(_) => SIGNED_IN_URL.to_owned(),
-        Err(reason) => url_with(SIGN_IN_FAILED_URL, &[("reason", reason)]),
+        Err(e) => url_with(
+            SIGN_IN_FAILED_URL,
+            &[("code", e.code), ("reason", &e.message)],
+        ),
     };
     reply(&mut stream, &format!("302 Found\r\nLocation: {target}")).await;
-    result
+    result.map_err(String::from)
 }
 
 /// The first request that carries the sign-in's answer, and the connection to
@@ -114,16 +119,26 @@ fn query(request: &str) -> Option<HashMap<String, String>> {
 }
 
 /// The authorization code, once the callback's state matches the one sent.
-fn callback_code<'a>(params: &'a HashMap<String, String>, state: &str) -> Result<&'a str, String> {
+fn callback_code<'a>(
+    params: &'a HashMap<String, String>,
+    state: &str,
+) -> Result<&'a str, AuthError> {
     if let Some(error) = params.get("error") {
         return Err(if error == "access_denied" {
-            "Sign-in was cancelled".into()
+            AuthError::new("cancelled", "Sign-in was cancelled")
         } else {
-            params.get("error_description").unwrap_or(error).clone()
+            params
+                .get("error_description")
+                .unwrap_or(error)
+                .clone()
+                .into()
         });
     }
     if params.get("state").map(String::as_str) != Some(state) {
-        return Err("The sign-in didn't match; try again".into());
+        return Err(AuthError::new(
+            "mismatch",
+            "The sign-in didn't match; try again",
+        ));
     }
     params
         .get("code")
@@ -137,7 +152,7 @@ async fn exchange_code(
     code: &str,
     redirect_uri: &str,
     verifier: &str,
-) -> Result<AuthAccount, String> {
+) -> Result<AuthAccount, AuthError> {
     let resp = http
         .post(TOKEN_URL)
         .form(&[
@@ -158,7 +173,8 @@ async fn exchange_code(
         .map_err(|e| format!("Sign-in read failed: {}", crate::error_chain(e)))?;
     if !ok {
         return Err(serde_json::from_str::<TokenError>(&body)
-            .map_or_else(|_| format!("Sign-in failed: {body}"), TokenError::reason));
+            .map_or_else(|_| format!("Sign-in failed: {body}"), TokenError::reason)
+            .into());
     }
     let msa: MsaTokenResponse = serde_json::from_str(&body)
         .map_err(|e| format!("Token parse failed: {}", crate::error_chain(e)))?;
@@ -176,12 +192,15 @@ mod tests {
     #[test]
     fn the_callback_gives_its_code_only_with_the_state_sent() {
         let ok = params("GET /?code=M.C5%2Fabc&state=s1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        assert_eq!(callback_code(&ok, "s1"), Ok("M.C5/abc"));
-        assert!(callback_code(&ok, "s2").is_err());
+        assert_eq!(callback_code(&ok, "s1").ok(), Some("M.C5/abc"));
+        assert_eq!(
+            callback_code(&ok, "s2").err().map(|e| e.code),
+            Some("mismatch")
+        );
         let denied = params("GET /?error=access_denied&state=s1 HTTP/1.1\r\n\r\n");
         assert_eq!(
-            callback_code(&denied, "s1"),
-            Err("Sign-in was cancelled".into())
+            callback_code(&denied, "s1").err().map(|e| e.code),
+            Some("cancelled")
         );
         assert!(query("").is_none());
     }
