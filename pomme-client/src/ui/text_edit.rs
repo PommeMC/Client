@@ -70,6 +70,9 @@ pub struct TextFieldRenderInfo {
     pub caret_visible: bool,
     pub selection: Option<(usize, usize)>,
     pub insert_mode: bool,
+    /// The append caret sits a pixel past the text, as `EditBox` draws it;
+    /// `MultiLineEditBox` draws it right against the text.
+    pub append_gap: bool,
 }
 
 pub struct TextFieldState {
@@ -471,6 +474,7 @@ impl TextFieldState {
             caret_visible,
             selection,
             insert_mode,
+            append_gap: true,
         }
     }
 }

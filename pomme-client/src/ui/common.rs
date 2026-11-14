@@ -460,9 +460,13 @@ pub(crate) fn push_field_text(
                 color: caret_color,
             });
         } else {
-            // Vanilla appends the `_` one pixel after the text (`drawX += 1`),
-            // and at the field's start when there's none.
-            let gap = if shown.is_empty() { 0.0 } else { bar_w };
+            // `EditBox` appends the `_` one pixel after the text
+            // (`drawX += 1`), and at the field's start when there's none.
+            let gap = if info.append_gap && !shown.is_empty() {
+                bar_w
+            } else {
+                0.0
+            };
             elements.push(MenuElement::Text {
                 x: caret_x + gap,
                 y: text_y,
@@ -1258,7 +1262,7 @@ mod tests {
 
     #[test]
     fn the_append_caret_follows_text_by_a_pixel_and_starts_an_empty_field() {
-        let caret_x = |shown: &str| {
+        let caret_x = |shown: &str, append_gap: bool| {
             let info = crate::ui::text_edit::TextFieldRenderInfo {
                 display_start: 0,
                 display_end: shown.len(),
@@ -1266,6 +1270,7 @@ mod tests {
                 caret_visible: true,
                 selection: None,
                 insert_mode: false,
+                append_gap,
             };
             let mut elements = Vec::new();
             super::push_field_text(
@@ -1287,8 +1292,9 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(caret_x(""), Some(10.0));
-        assert_eq!(caret_x("ab"), Some(23.0));
+        assert_eq!(caret_x("", true), Some(10.0));
+        assert_eq!(caret_x("ab", true), Some(23.0));
+        assert_eq!(caret_x("ab", false), Some(22.0));
     }
 
     #[test]
