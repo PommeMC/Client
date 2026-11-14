@@ -759,6 +759,8 @@ pub struct MainMenu {
     account_store: Arc<dyn pomme_auth::SecretStore>,
     sign_in: Arc<parking_lot::RwLock<account::SignIn>>,
     sign_in_task: Option<tokio::task::JoinHandle<()>>,
+    /// The newest sign-in attempt; see `SignInProgress`.
+    sign_in_attempt: Arc<std::sync::atomic::AtomicU64>,
     /// No launcher passed an account, so the menu is behind sign-in.
     account_required: bool,
     rt: Arc<tokio::runtime::Runtime>,
@@ -965,6 +967,7 @@ impl MainMenu {
             account_store: Arc::from(crate::account::store(game_dir)),
             sign_in: Default::default(),
             sign_in_task: None,
+            sign_in_attempt: Default::default(),
             account_required: false,
             rt,
             links_open: false,

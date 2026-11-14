@@ -1,6 +1,8 @@
 //! The account screen: who's signed in, or Microsoft's device-code sign-in
 //! (a code to enter at microsoft.com/link, then the client polls).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 
 const ACCOUNT_BTN_W: f32 = 150.0;
@@ -17,6 +19,26 @@ pub(super) enum SignIn {
     Done(pomme_auth::AuthAccount),
 }
 
+/// One sign-in attempt's way to report: it only lands while the attempt is
+/// still the newest.
+#[derive(Clone)]
+pub(super) struct SignInProgress {
+    state: Arc<parking_lot::RwLock<SignIn>>,
+    current: Arc<AtomicU64>,
+    attempt: u64,
+}
+
+impl SignInProgress {
+    fn set(&self, step: SignIn) {
+        // Under the lock, so a newer attempt can't start between the check
+        // and the write.
+        let mut state = self.state.write();
+        if self.current.load(Ordering::Relaxed) == self.attempt {
+            *state = step;
+        }
+    }
+}
+
 impl MainMenu {
     pub(super) fn open_account(&mut self, key_bindings: &KeyBindings) {
         self.cancel_sign_in();
@@ -24,11 +46,10 @@ impl MainMenu {
     }
 
     fn start_sign_in(&mut self) {
-        let state = Arc::clone(&self.sign_in);
         let store = Arc::clone(&self.account_store);
-        self.run_sign_in(async move {
+        self.run_sign_in(|progress| async move {
             pomme_auth::device_code_sign_in(crate::net::http::client(), &*store, |code| {
-                *state.write() = SignIn::Code(code.clone());
+                progress.set(SignIn::Code(code.clone()));
             })
             .await
             .map(Some)
@@ -45,23 +66,40 @@ impl MainMenu {
     /// screen offers Sign In.
     pub(crate) fn restore_account(&mut self) {
         let store = Arc::clone(&self.account_store);
-        self.run_sign_in(async move { Ok(crate::account::restore(&*store).await) });
+        self.run_sign_in(|_| async move { Ok(crate::account::restore(&*store).await) });
     }
 
-    fn run_sign_in(
-        &mut self,
-        sign_in: impl Future<Output = Result<Option<pomme_auth::AuthAccount>, String>> + Send + 'static,
-    ) {
-        let state = Arc::clone(&self.sign_in);
-        *state.write() = SignIn::Requesting;
-        self.focus = None;
+    fn run_sign_in<F>(&mut self, sign_in: impl FnOnce(SignInProgress) -> F)
+    where
+        F: Future<Output = Result<Option<pomme_auth::AuthAccount>, String>> + Send + 'static,
+    {
+        let progress = self.new_attempt(SignIn::Requesting);
+        let task = sign_in(progress.clone());
         self.sign_in_task = Some(self.rt.spawn(async move {
-            *state.write() = match sign_in.await {
+            progress.set(match task.await {
                 Ok(Some(account)) => SignIn::Done(account),
                 Ok(None) => SignIn::Idle,
                 Err(reason) => SignIn::Failed(reason),
-            };
+            });
         }));
+    }
+
+    /// Stops the running attempt and starts a new one at `step`, dropping
+    /// every earlier one's progress: an aborted task still finishes the poll
+    /// it's in, and could otherwise report after a Cancel or a newer Sign In.
+    fn new_attempt(&mut self, step: SignIn) -> SignInProgress {
+        if let Some(task) = self.sign_in_task.take() {
+            task.abort();
+        }
+        let mut state = self.sign_in.write();
+        let attempt = self.sign_in_attempt.fetch_add(1, Ordering::Relaxed) + 1;
+        *state = step;
+        self.focus = None;
+        SignInProgress {
+            state: Arc::clone(&self.sign_in),
+            current: Arc::clone(&self.sign_in_attempt),
+            attempt,
+        }
     }
 
     pub(crate) fn forget_account(&self, uuid: &uuid::Uuid) {
@@ -74,11 +112,7 @@ impl MainMenu {
     }
 
     fn cancel_sign_in(&mut self) {
-        if let Some(task) = self.sign_in_task.take() {
-            task.abort();
-        }
-        *self.sign_in.write() = SignIn::Idle;
-        self.focus = None;
+        self.new_attempt(SignIn::Idle);
     }
 
     pub(super) fn build_account(
@@ -290,6 +324,23 @@ mod tests {
         let account = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         assert!(texts(&account).contains(&"Sign In"));
         assert!(texts(&account).contains(&"Back"));
+    }
+
+    #[test]
+    fn a_superseded_sign_in_reports_nothing() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-sign-in-race-test", &mut key_bindings);
+        let stale = menu.new_attempt(SignIn::Requesting);
+        menu.cancel_sign_in();
+        stale.set(SignIn::Failed("late".into()));
+        assert!(matches!(*menu.sign_in.read(), SignIn::Idle));
+
+        let replaced = menu.new_attempt(SignIn::Requesting);
+        let current = menu.new_attempt(SignIn::Requesting);
+        replaced.set(SignIn::Failed("late".into()));
+        assert!(matches!(*menu.sign_in.read(), SignIn::Requesting));
+        current.set(SignIn::Failed("now".into()));
+        assert!(matches!(*menu.sign_in.read(), SignIn::Failed(_)));
     }
 
     #[test]
