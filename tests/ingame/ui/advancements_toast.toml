@@ -22,3 +22,4 @@ wait_ms = 1000
 
 [[step]]
 screenshot = "toast"
+keep_chat = true

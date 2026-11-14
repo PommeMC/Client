@@ -190,7 +190,10 @@ fn run_anywhere(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> 
             core.input.on_mouse_button((*button).into(), state);
             Ok(Value::Null)
         }
-        Command::Screenshot { path } => {
+        Command::Screenshot { path, keep_chat } => {
+            if !keep_chat && let AppPhase::InGame { game, .. } = phase {
+                game.chat.clear_messages();
+            }
             let Some(gfx) = phase.gfx_mut() else {
                 return Outcome::Done(Err("no window yet".into()));
             };

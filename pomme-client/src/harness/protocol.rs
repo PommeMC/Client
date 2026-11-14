@@ -81,9 +81,12 @@ pub enum Command {
         button: Mouse,
     },
     ChatLog,
-    /// A PNG of the next presented frame, written to `path`.
+    /// A PNG of the next presented frame, written to `path`. Chat is cleared
+    /// first, as F3+D clears it, unless `keep_chat` is set.
     Screenshot {
         path: PathBuf,
+        #[serde(default)]
+        keep_chat: bool,
     },
     /// Holds what varies frame to frame still for the rest of the session:
     /// block light flicker, particles, animated textures, clouds, view

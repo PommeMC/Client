@@ -61,6 +61,8 @@ struct StepFile {
     wait_ms: Option<u64>,
     frame_times: Option<FrameTimes>,
     screenshot: Option<String>,
+    /// Leaves chat in a `screenshot`, which otherwise clears it first.
+    keep_chat: Option<bool>,
     match_screenshots: Option<[String; 2]>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
@@ -329,7 +331,10 @@ enum Step {
     Run(Command),
     Wait(Duration),
     FrameTimes(Duration),
-    Screenshot(String),
+    Screenshot {
+        name: String,
+        keep_chat: bool,
+    },
     /// Two of the script's screenshots, which must match pixel for pixel to
     /// within [`MATCH_TOLERANCE`], but for at most this many pixels.
     MatchScreenshots([String; 2], usize),
@@ -341,7 +346,7 @@ impl Step {
     fn runs_anywhere(&self) -> bool {
         match self {
             Step::Run(command) => exec::runs_anywhere(command),
-            Step::Wait(_) | Step::Screenshot(_) | Step::Expect(Expect::Screen(_), _) => true,
+            Step::Wait(_) | Step::Screenshot { .. } | Step::Expect(Expect::Screen(_), _) => true,
             _ => false,
         }
     }
@@ -424,7 +429,10 @@ impl StepFile {
             steps.push(Step::FrameTimes(Duration::from_millis(ms)));
         }
         if let Some(name) = self.screenshot {
-            steps.push(Step::Screenshot(name));
+            steps.push(Step::Screenshot {
+                name,
+                keep_chat: self.keep_chat.unwrap_or(false),
+            });
         }
         if let Some(names) = self.match_screenshots {
             steps.push(Step::MatchScreenshots(
@@ -614,12 +622,16 @@ impl Script {
                 self.last_frame = Some(now);
                 (started.elapsed() >= *duration && !self.samples.is_empty()).then_some(Ok(()))
             }
-            Step::Screenshot(name) => {
+            Step::Screenshot { name, keep_chat } => {
                 let path = match &self.pending_shot {
                     Some(path) => path.clone(),
                     None => {
                         let path = self.shot_path(name);
-                        exec::run(&Command::Screenshot { path: path.clone() }, core, phase);
+                        let shot = Command::Screenshot {
+                            path: path.clone(),
+                            keep_chat: *keep_chat,
+                        };
+                        exec::run(&shot, core, phase);
                         self.pending_shot = Some(path.clone());
                         path
                     }
@@ -1067,10 +1079,24 @@ mod tests {
             max_differing_pixels = 64
             [[step]]
             hold_packets = true
+            [[step]]
+            screenshot = "chat"
+            keep_chat = true
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 23);
+        assert_eq!(steps.len(), 24);
+        assert!(steps.contains(&Step::Screenshot {
+            name: "inventory".into(),
+            keep_chat: false,
+        }));
+        assert_eq!(
+            steps[23],
+            Step::Screenshot {
+                name: "chat".into(),
+                keep_chat: true,
+            }
+        );
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[21],
