@@ -1,0 +1,229 @@
+# Mobs held still facing the camera: skeletons and the undead horses, the
+# horse family and golems, and the water mobs in a pool. Summoned with NBT, so no spawn gear or random variant is rolled.
+# A block high above each undead mob, out of frame, keeps the sun off it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 1000.5 -60 -2.5 0 40"
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [1000, -61, 5] }
+
+# A pillar to look down from, built before standing on it.
+[[step]]
+chat = "/fill 1000 -60 0 1000 -58 0 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [1000, -58, 0] }
+
+[[step]]
+chat = "/tp @s 1000.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [1000.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/setblock 996 -45 7 minecraft:stone"
+
+[[step]]
+chat = "/setblock 998 -45 7 minecraft:stone"
+
+[[step]]
+chat = "/setblock 1000 -45 7 minecraft:stone"
+
+[[step]]
+chat = "/setblock 1002 -45 7 minecraft:stone"
+
+[[step]]
+chat = "/setblock 1004 -45 8 minecraft:stone"
+
+[[step]]
+chat = '/summon minecraft:skeleton 996.5 -60 7.5 {NoAI:1b,Silent:1b,equipment:{mainhand:{id:"minecraft:bow",count:1}},Rotation:[180f,0f]}'
+
+[[step]]
+chat = '/summon minecraft:stray 998.5 -60 7.5 {NoAI:1b,Silent:1b,equipment:{mainhand:{id:"minecraft:bow",count:1}},Rotation:[180f,0f]}'
+
+[[step]]
+chat = '/summon minecraft:bogged 1000.5 -60 7.5 {NoAI:1b,Silent:1b,equipment:{mainhand:{id:"minecraft:bow",count:1}},Rotation:[180f,0f]}'
+
+[[step]]
+chat = "/summon minecraft:drowned 1002.5 -60 7.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:zombie_horse 1004.5 -60 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:skeleton_horse 996.5 -60 10.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+expect = { entity = "skeleton" }
+
+[[step]]
+expect = { entity = "stray" }
+
+[[step]]
+expect = { entity = "bogged" }
+
+[[step]]
+expect = { entity = "drowned" }
+
+[[step]]
+expect = { entity = "zombie_horse" }
+
+[[step]]
+expect = { entity = "skeleton_horse" }
+
+[[step]]
+expect = { player = { position = [1000.5, -57.0, 0.5] } }
+
+[[step]]
+look_at = [1000.5, -59.5, 7.0]
+
+[[step]]
+screenshot = "undead"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+# Past the death animation.
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/summon minecraft:horse 996.5 -60 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:donkey 998.5 -60 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:mule 1001.5 -60 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:iron_golem 1003.5 -60 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:witch 1005.5 -60 7.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:ocelot 997.5 -60 5.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:rabbit 999.5 -60 5.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:bat 1001.5 -58.5 5.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+expect = { entity = "horse" }
+
+[[step]]
+expect = { entity = "donkey" }
+
+[[step]]
+expect = { entity = "mule" }
+
+[[step]]
+expect = { entity = "iron_golem" }
+
+[[step]]
+expect = { entity = "witch" }
+
+[[step]]
+expect = { entity = "ocelot" }
+
+[[step]]
+expect = { entity = "rabbit" }
+
+[[step]]
+expect = { entity = "bat" }
+
+[[step]]
+expect = { player = { position = [1000.5, -57.0, 0.5] } }
+
+[[step]]
+look_at = [1000.5, -59.5, 7.0]
+
+[[step]]
+screenshot = "land"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+# Past the death animation.
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/fill 995 -62 4 1006 -61 9 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [1000, -61, 6] }
+
+[[step]]
+chat = "/summon minecraft:cod 997.5 -61.5 6.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:salmon 999.5 -61.5 6.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:pufferfish 1001.5 -61.5 6.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:tropical_fish 1003.5 -61.5 6.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:squid 1000.5 -61.5 8.5 {NoAI:1b,Silent:1b,Rotation:[180f,0f]}"
+
+[[step]]
+expect = { entity = "cod" }
+
+[[step]]
+expect = { entity = "salmon" }
+
+[[step]]
+expect = { entity = "pufferfish" }
+
+[[step]]
+expect = { entity = "tropical_fish" }
+
+[[step]]
+expect = { entity = "squid" }
+
+[[step]]
+expect = { player = { position = [1000.5, -57.0, 0.5] } }
+
+[[step]]
+look_at = [1000.5, -61.0, 6.5]
+
+[[step]]
+screenshot = "water"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 995 -62 4 1006 -62 9 minecraft:dirt"
+
+[[step]]
+chat = "/fill 995 -61 4 1006 -61 9 minecraft:grass_block"
+
+[[step]]
+chat = "/fill 1000 -60 0 1000 -58 0 minecraft:air"
+
+[[step]]
+chat = "/fill 996 -45 7 1004 -45 8 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

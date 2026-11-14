@@ -1,0 +1,338 @@
+# Container screens, each opened by a right click on its block: anvil,
+# crafting table, the furnaces, a shulker box and a double chest. Then an
+# ender chest, a trapped chest and a shulker box, closed.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/tp @s 1112.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1112.5, -60.0, 0.5] } }
+
+# The chunks are loaded once the client has them.
+
+[[step]]
+expect = { block = "grass_block", at = [1100, -61, 3] }
+
+[[step]]
+chat = "/setblock 1100 -60 3 minecraft:anvil[facing=east]"
+
+[[step]]
+expect = { block = "anvil", at = [1100, -60, 3] }
+
+[[step]]
+chat = "/setblock 1104 -60 3 minecraft:crafting_table"
+
+[[step]]
+expect = { block = "crafting_table", at = [1104, -60, 3] }
+
+[[step]]
+chat = "/setblock 1108 -60 3 minecraft:furnace[facing=north]"
+
+[[step]]
+expect = { block = "furnace", at = [1108, -60, 3] }
+
+[[step]]
+chat = "/setblock 1112 -60 3 minecraft:blast_furnace[facing=north]"
+
+[[step]]
+expect = { block = "blast_furnace", at = [1112, -60, 3] }
+
+[[step]]
+chat = "/setblock 1116 -60 3 minecraft:smoker[facing=north]"
+
+[[step]]
+expect = { block = "smoker", at = [1116, -60, 3] }
+
+[[step]]
+chat = "/setblock 1120 -60 3 minecraft:shulker_box"
+
+[[step]]
+expect = { block = "shulker_box", at = [1120, -60, 3] }
+
+[[step]]
+chat = "/setblock 1124 -60 3 minecraft:chest[facing=north,type=left]"
+
+[[step]]
+expect = { block = "chest", at = [1124, -60, 3] }
+
+[[step]]
+chat = "/setblock 1125 -60 3 minecraft:chest[facing=north,type=right]"
+
+[[step]]
+expect = { block = "chest", at = [1125, -60, 3] }
+
+[[step]]
+chat = "/tp @s 1100.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1100.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1100.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "anvil" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "anvil"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1104.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1104.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1104.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "crafting" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "crafting"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1108.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1108.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1108.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "furnace" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "furnace"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1112.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1112.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1112.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "blast_furnace" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "blast_furnace"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1116.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1116.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1116.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "smoker" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "smoker"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1120.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1120.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1120.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "shulker_box" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "shulker_box"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/tp @s 1124.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1124.5, -60.0, 0.5] } }
+
+[[step]]
+look_at = [1124.5, -59.5, 3.0]
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { menu = "generic_9x6" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "generic_9x6"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/setblock 1130 -60 3 minecraft:ender_chest[facing=north]"
+
+[[step]]
+expect = { block = "ender_chest", at = [1130, -60, 3] }
+
+[[step]]
+chat = "/setblock 1132 -60 3 minecraft:trapped_chest[facing=north]"
+
+[[step]]
+expect = { block = "trapped_chest", at = [1132, -60, 3] }
+
+[[step]]
+chat = "/setblock 1134 -60 3 minecraft:purple_shulker_box"
+
+[[step]]
+expect = { block = "purple_shulker_box", at = [1134, -60, 3] }
+
+[[step]]
+chat = "/tp @s 1132.5 -59 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1132.5, -59.0, 0.5] } }
+
+[[step]]
+look_at = [1132.5, -60.0, 3.5]
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "block_entities"
+
+[[step]]
+chat = "/fill 1100 -60 3 1134 -60 3 minecraft:air"
