@@ -107,6 +107,10 @@ impl BlockEntities {
         self.columns.get(&ChunkPos::containing(*pos))?.get(pos)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&BlockPos, &StoredBlockEntity)> {
+        self.columns.values().flat_map(|column| column.iter())
+    }
+
     pub fn get_mut(&mut self, pos: &BlockPos) -> Option<&mut StoredBlockEntity> {
         self.columns
             .get_mut(&ChunkPos::containing(*pos))?
