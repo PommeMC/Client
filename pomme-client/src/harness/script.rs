@@ -52,6 +52,7 @@ struct StepFile {
     press: Option<protocol::Press>,
     key_down: Option<protocol::Key>,
     key_up: Option<protocol::Key>,
+    focus: Option<bool>,
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
@@ -395,6 +396,9 @@ impl StepFile {
         }
         if let Some(key) = self.key_up {
             steps.push(Step::Run(Command::KeyUp(key)));
+        }
+        if let Some(focused) = self.focus {
+            steps.push(Step::Run(Command::Focus { focused }));
         }
         if let Some(bind) = self.bind {
             steps.push(Step::Run(Command::Bind(bind)));
@@ -1099,18 +1103,21 @@ mod tests {
             [[step]]
             hold_packets = true
             [[step]]
+            focus = false
+            [[step]]
             screenshot = "chat"
             keep_chat = true
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 24);
+        assert_eq!(steps.len(), 25);
+        assert_eq!(steps[23], Step::Run(Command::Focus { focused: false }));
         assert!(steps.contains(&Step::Screenshot {
             name: "inventory".into(),
             keep_chat: false,
         }));
         assert_eq!(
-            steps[23],
+            steps[24],
             Step::Screenshot {
                 name: "chat".into(),
                 keep_chat: true,
