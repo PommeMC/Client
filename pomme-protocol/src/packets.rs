@@ -318,6 +318,7 @@ mod tests {
             (Direction::Clientbound, "resource_pack_pop", 80),
             (Direction::Clientbound, "resource_pack_push", 81),
             (Direction::Clientbound, "waypoint", 138),
+            (Direction::Clientbound, "commands", 16),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
         }

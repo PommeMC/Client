@@ -3,14 +3,11 @@ use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use azalea_protocol::packets::game::c_commands::{
-    BrigadierNodeStub, BrigadierNumber, BrigadierParser, BrigadierString, ClientboundCommands,
-    NodeType,
-};
 use parking_lot::Mutex;
+use pomme_protocol::commands::{ArgumentType, Bounds, CommandsPacket, Node, NodeStub, StringType};
 
 /// Shared handle to the server's command tree. The network loop writes it when
-/// a `ClientboundCommands` packet arrives and reads it to sign commands.
+/// a `commands` packet arrives and reads it to sign commands.
 pub type SharedCommandTree = Arc<Mutex<Option<Arc<CommandTree>>>>;
 
 /// The server's Brigadier command tree as a flat node list plus the root index.
@@ -18,7 +15,7 @@ pub type SharedCommandTree = Arc<Mutex<Option<Arc<CommandTree>>>>;
 /// `ClientboundCommandsPacket`; used for command signing, local parse/usage
 /// feedback, and Vanilla-style chat completion/suggestion presentation.
 pub struct CommandTree {
-    nodes: Vec<BrigadierNodeStub>,
+    nodes: Vec<Node>,
     root_index: u32,
 }
 
@@ -189,16 +186,14 @@ impl TreeParse {
             .enumerate()
             .take_while(move |(i, c)| *i == 0 || !reject_root_redirects || Some(c.root) != root)
             .flat_map(|(_, c)| &c.nodes)
-            .filter_map(
-                |parsed| match tree.node(parsed.node).map(|n| &n.node_type) {
-                    Some(NodeType::Argument {
-                        name,
-                        parser: BrigadierParser::Message,
-                        ..
-                    }) => Some((name.as_str(), parsed.range.clone())),
-                    _ => None,
-                },
-            )
+            .filter_map(|parsed| match tree.node(parsed.node).map(|n| &n.stub) {
+                Some(NodeStub::Argument {
+                    name,
+                    argument: ArgumentType::Message,
+                    ..
+                }) => Some((name.as_str(), parsed.range.clone())),
+                _ => None,
+            })
     }
 
     /// `CommandContextBuilder.findSuggestionContext`: the node whose children
@@ -233,21 +228,21 @@ impl TreeParse {
 }
 
 impl CommandTree {
-    pub fn from_packet(packet: &ClientboundCommands) -> Self {
+    pub fn from_packet(packet: CommandsPacket) -> Self {
         Self {
-            nodes: packet.entries.clone(),
+            nodes: packet.nodes,
             root_index: packet.root_index,
         }
     }
 
-    fn node(&self, index: u32) -> Option<&BrigadierNodeStub> {
+    fn node(&self, index: u32) -> Option<&Node> {
         self.nodes.get(index as usize)
     }
 
     fn is_argument(&self, index: u32) -> bool {
         matches!(
-            self.node(index).map(|c| &c.node_type),
-            Some(NodeType::Argument { .. })
+            self.node(index).map(|c| &c.stub),
+            Some(NodeStub::Argument { .. })
         )
     }
 
@@ -262,16 +257,16 @@ impl CommandTree {
                 continue;
             };
             if matches!(
-                &node.node_type,
-                NodeType::Argument {
-                    parser: BrigadierParser::Message,
+                &node.stub,
+                NodeStub::Argument {
+                    argument: ArgumentType::Message,
                     ..
                 }
             ) {
                 return true;
             }
             stack.extend(node.children.iter().copied());
-            stack.extend(node.redirect_node);
+            stack.extend(node.redirect);
         }
         false
     }
@@ -284,7 +279,7 @@ impl CommandTree {
             .map(|root| {
                 root.children
                     .iter()
-                    .filter_map(|&i| self.node(i).and_then(BrigadierNodeStub::name))
+                    .filter_map(|&i| self.node(i).and_then(Node::name))
                     .map(str::to_string)
                     .collect()
             })
@@ -306,10 +301,12 @@ impl CommandTree {
                     .any(|&node| self.subtree_has_message(node))
             {
                 UnattendedCommandCheck::SignatureRequired
-            } else if parse.contexts.iter().flat_map(|c| &c.nodes).any(|parsed| {
-                self.node(parsed.node)
-                    .is_some_and(|node| node.is_restricted)
-            }) {
+            } else if parse
+                .contexts
+                .iter()
+                .flat_map(|c| &c.nodes)
+                .any(|parsed| self.node(parsed.node).is_some_and(|node| node.restricted))
+            {
                 UnattendedCommandCheck::PermissionsRequired
             } else {
                 UnattendedCommandCheck::ParseErrors
@@ -348,15 +345,15 @@ impl CommandTree {
     /// `CommandNode.getRelevantNodes`: the literal child named by the next
     /// word, else every argument child. A literal is only ever tried when it
     /// matches, so Brigadier's `literalIncorrect` can't arise.
-    fn relevant_nodes(&self, node: &BrigadierNodeStub, input: &str, cursor: usize) -> Vec<u32> {
+    fn relevant_nodes(&self, node: &Node, input: &str, cursor: usize) -> Vec<u32> {
         let word_end = input[cursor..]
             .find(' ')
             .map_or(input.len(), |i| cursor + i);
         let word = &input[cursor..word_end];
         let literal = node.children.iter().copied().find(|&child| {
             matches!(
-                self.node(child).map(|c| &c.node_type),
-                Some(NodeType::Literal { name }) if name == word
+                self.node(child).map(|c| &c.stub),
+                Some(NodeStub::Literal { name }) if name == word
             )
         });
         match literal {
@@ -379,38 +376,40 @@ impl CommandTree {
         context: ParseContext,
         allow_restricted: bool,
     ) -> TreeParse {
-        let candidates: Vec<(u32, &BrigadierNodeStub)> = self
+        let candidates: Vec<(u32, &Node)> = self
             .node(node)
             .map(|n| self.relevant_nodes(n, input, cursor))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|child| Some((child, self.node(child)?)))
-            .filter(|(_, child)| allow_restricted || !child.is_restricted)
+            .filter(|(_, child)| allow_restricted || !child.restricted)
             .collect();
         let mut potentials = Vec::new();
         let mut errors = Vec::new();
         let mut uncertain = Vec::new();
         for &(child, child_node) in &candidates {
-            let end = match &child_node.node_type {
-                NodeType::Argument { parser, .. } => match check_argument(parser, input, cursor) {
-                    ArgCheck::Valid(end) => end,
-                    ArgCheck::Unknown(Some(end)) => {
-                        uncertain.push(node);
-                        end
+            let end = match &child_node.stub {
+                NodeStub::Argument { argument, .. } => {
+                    match check_argument(argument, input, cursor) {
+                        ArgCheck::Valid(end) => end,
+                        ArgCheck::Unknown(Some(end)) => {
+                            uncertain.push(node);
+                            end
+                        }
+                        ArgCheck::Invalid(error) => {
+                            errors.push(error);
+                            continue;
+                        }
+                        ArgCheck::Unknown(None) => {
+                            uncertain.push(node);
+                            // TODO: the unported parser's own message.
+                            errors.push(SyntaxError::at("command.unknown.argument", cursor));
+                            continue;
+                        }
                     }
-                    ArgCheck::Invalid(error) => {
-                        errors.push(error);
-                        continue;
-                    }
-                    ArgCheck::Unknown(None) => {
-                        uncertain.push(node);
-                        // TODO: the unported parser's own message.
-                        errors.push(SyntaxError::at("command.unknown.argument", cursor));
-                        continue;
-                    }
-                },
-                NodeType::Literal { name } => cursor + name.len(),
-                NodeType::Root => continue,
+                }
+                NodeStub::Literal { name } => cursor + name.len(),
+                NodeStub::Root => continue,
             };
             if input.as_bytes().get(end).is_some_and(|&b| b != b' ') {
                 errors.push(SyntaxError::at("command.expected.separator", end));
@@ -422,8 +421,8 @@ impl CommandTree {
                 range: cursor..end,
             });
             context.range.end = context.range.end.max(end);
-            context.executable = child_node.is_executable;
-            let redirect = child_node.redirect_node;
+            context.executable = child_node.executable;
+            let redirect = child_node.redirect;
             if end + if redirect.is_some() { 1 } else { 2 } > input.len() {
                 potentials.push(TreeParse {
                     contexts: vec![context],
@@ -507,14 +506,14 @@ impl CommandTree {
         let mut options = Vec::new();
         let mut needs_server = false;
         for node in parent.children.iter().filter_map(|&child| self.node(child)) {
-            match &node.node_type {
-                NodeType::Literal { name } => {
+            match &node.stub {
+                NodeStub::Literal { name } => {
                     if name.to_lowercase().starts_with(&typed_lower) && name != typed {
                         options.push(name.clone());
                     }
                 }
-                NodeType::Argument { .. } => needs_server = true,
-                NodeType::Root => {}
+                NodeStub::Argument { .. } => needs_server = true,
+                NodeStub::Root => {}
             }
         }
         options.sort_by_key(|a| a.to_lowercase());
@@ -552,7 +551,7 @@ impl CommandTree {
                         .children
                         .iter()
                         .filter(|&&child| self.is_argument(child))
-                        .filter_map(|&child| self.smart_usage(child, parent.is_executable, false))
+                        .filter_map(|&child| self.smart_usage(child, parent.executable, false))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -576,7 +575,7 @@ impl CommandTree {
         if deep {
             return Some(this);
         }
-        if let Some(redirect) = node.redirect_node {
+        if let Some(redirect) = node.redirect {
             let redirect = if redirect == self.root_index {
                 "...".to_owned()
             } else {
@@ -585,7 +584,7 @@ impl CommandTree {
             return Some(format!("{this} {redirect}"));
         }
 
-        let child_optional = node.is_executable;
+        let child_optional = node.executable;
         match node.children.as_slice() {
             &[child] => {
                 if let Some(usage) = self.smart_usage(child, child_optional, child_optional) {
@@ -635,11 +634,11 @@ impl CommandTree {
 }
 
 /// `CommandNode.getUsageText`.
-fn usage_text(node: &BrigadierNodeStub) -> String {
-    match &node.node_type {
-        NodeType::Root => String::new(),
-        NodeType::Literal { name } => name.clone(),
-        NodeType::Argument { name, .. } => format!("<{name}>"),
+fn usage_text(node: &Node) -> String {
+    match &node.stub {
+        NodeStub::Root => String::new(),
+        NodeStub::Literal { name } => name.clone(),
+        NodeStub::Argument { name, .. } => format!("<{name}>"),
     }
 }
 
@@ -822,34 +821,34 @@ fn java_float_string(sci: &str) -> String {
     format!("{sign}{body}")
 }
 
-/// The `parse` of the argument type behind `parser`, starting at `start`.
+/// The `parse` of `argument`, starting at `start`.
 /// Parsers whose outcome depends on registries, permissions or syntax Pomme
 /// doesn't port (selectors, NBT, components, ...) are `Unknown`.
-fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgCheck {
+fn check_argument(argument: &ArgumentType, input: &str, start: usize) -> ArgCheck {
     const POS3D_INCOMPLETE: &str = "argument.pos3d.incomplete";
     const POS2D_INCOMPLETE: &str = "argument.pos2d.incomplete";
     let mut r = Reader {
         input,
         cursor: start,
     };
-    let parsed = match parser {
-        BrigadierParser::Bool => r.read_bool(),
-        BrigadierParser::Integer(bounds) => read_bounded(&mut r, bounds),
-        BrigadierParser::Long(bounds) => read_bounded(&mut r, bounds),
-        BrigadierParser::Float(bounds) => read_bounded(&mut r, bounds),
-        BrigadierParser::Double(bounds) => read_bounded(&mut r, bounds),
-        BrigadierParser::String(BrigadierString::SingleWord)
-        | BrigadierParser::Objective
-        | BrigadierParser::Team => {
+    let parsed = match argument {
+        ArgumentType::Bool => r.read_bool(),
+        ArgumentType::Integer(bounds) => read_bounded(&mut r, bounds),
+        ArgumentType::Long(bounds) => read_bounded(&mut r, bounds),
+        ArgumentType::Float(bounds) => read_bounded(&mut r, bounds),
+        ArgumentType::Double(bounds) => read_bounded(&mut r, bounds),
+        ArgumentType::String(StringType::SingleWord)
+        | ArgumentType::Objective
+        | ArgumentType::Team => {
             r.read_unquoted();
             Ok(())
         }
-        BrigadierParser::String(BrigadierString::QuotablePhrase) => r.read_string().map(drop),
-        BrigadierParser::String(BrigadierString::GreedyPhrase) => {
+        ArgumentType::String(StringType::QuotablePhrase) => r.read_string().map(drop),
+        ArgumentType::String(StringType::GreedyPhrase) => {
             r.cursor = input.len();
             Ok(())
         }
-        BrigadierParser::Message => {
+        ArgumentType::Message => {
             let length = input[start..].encode_utf16().count();
             if length > 256 {
                 Err(SyntaxError {
@@ -864,21 +863,19 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
                 Ok(())
             }
         }
-        BrigadierParser::Identifier
-        | BrigadierParser::Dimension
-        | BrigadierParser::ResourceKey { .. } => identifier(&mut r),
-        BrigadierParser::Entity(_)
-        | BrigadierParser::GameProfile
-        | BrigadierParser::ScoreHolder { .. }
+        ArgumentType::Identifier | ArgumentType::Dimension | ArgumentType::ResourceKey { .. } => {
+            identifier(&mut r)
+        }
+        ArgumentType::Entity(_) | ArgumentType::GameProfile | ArgumentType::ScoreHolder { .. }
             if r.peek() == Some('@') =>
         {
             return ArgCheck::Unknown(word_end(input.as_bytes(), start));
         }
-        BrigadierParser::GameProfile | BrigadierParser::ScoreHolder { .. } => {
+        ArgumentType::GameProfile | ArgumentType::ScoreHolder { .. } => {
             r.read_while(|c| c != ' ');
             Ok(())
         }
-        BrigadierParser::Entity(_) => match r.read_string() {
+        ArgumentType::Entity(_) => match r.read_string() {
             Ok(name) if name.len() <= 36 && name.matches('-').count() == 4 => {
                 return ArgCheck::Unknown(Some(r.cursor));
             }
@@ -886,27 +883,27 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
             Ok(_) => Err(r.error_at(start, "argument.entity.invalid", Vec::new())),
             Err(error) => Err(error),
         },
-        BrigadierParser::Vec3 | BrigadierParser::BlockPos if r.peek() == Some('^') => {
+        ArgumentType::Vec3 | ArgumentType::BlockPos if r.peek() == Some('^') => {
             coordinates(&mut r, 3, POS3D_INCOMPLETE, |r| local_coordinate(r, start))
         }
-        BrigadierParser::Vec3 => {
+        ArgumentType::Vec3 => {
             coordinates(&mut r, 3, POS3D_INCOMPLETE, |r| world_coordinate(r, false))
         }
-        BrigadierParser::BlockPos => {
+        ArgumentType::BlockPos => {
             coordinates(&mut r, 3, POS3D_INCOMPLETE, |r| world_coordinate(r, true))
         }
-        BrigadierParser::Vec2 => {
+        ArgumentType::Vec2 => {
             coordinates(&mut r, 2, POS2D_INCOMPLETE, |r| world_coordinate(r, false))
         }
-        BrigadierParser::Rotation => coordinates(&mut r, 2, "argument.rotation.incomplete", |r| {
+        ArgumentType::Rotation => coordinates(&mut r, 2, "argument.rotation.incomplete", |r| {
             world_coordinate(r, false)
         }),
-        BrigadierParser::ColumnPos => {
+        ArgumentType::ColumnPos => {
             coordinates(&mut r, 2, POS2D_INCOMPLETE, |r| world_coordinate(r, true))
         }
-        BrigadierParser::Angle => angle(&mut r),
-        BrigadierParser::Time { min } => time(&mut r, *min),
-        BrigadierParser::GameMode => {
+        ArgumentType::Angle => angle(&mut r),
+        ArgumentType::Time { min } => time(&mut r, *min),
+        ArgumentType::GameMode => {
             let name = r.read_unquoted();
             if matches!(name, "survival" | "creative" | "adventure" | "spectator") {
                 Ok(())
@@ -914,7 +911,7 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
                 Err(r.error("argument.gamemode.invalid", vec![name.to_owned()]))
             }
         }
-        BrigadierParser::EntityAnchor => {
+        ArgumentType::EntityAnchor => {
             let name = r.read_unquoted();
             if matches!(name, "feet" | "eyes") {
                 Ok(())
@@ -932,10 +929,7 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
 
 /// `IntegerArgumentType.parse` and its long/float/double siblings; an absent
 /// bound is the type's extreme.
-fn read_bounded<T: JavaNumber>(
-    r: &mut Reader,
-    bounds: &BrigadierNumber<T>,
-) -> Result<(), SyntaxError> {
+fn read_bounded<T: JavaNumber>(r: &mut Reader, bounds: &Bounds<T>) -> Result<(), SyntaxError> {
     let start = r.cursor;
     let value: T = r.read_number()?;
     let min = bounds.min.unwrap_or(T::LOWEST);
@@ -1109,62 +1103,62 @@ impl Suggestions {
 }
 
 #[cfg(test)]
-mod tests {
-    use azalea_protocol::packets::game::c_commands::EntityParser;
+pub(crate) mod tests {
+    use pomme_protocol::commands::EntityArgument;
 
     use super::*;
 
-    fn root(children: Vec<u32>) -> BrigadierNodeStub {
-        BrigadierNodeStub {
-            is_executable: false,
+    fn node(stub: NodeStub, children: Vec<u32>, executable: bool) -> Node {
+        Node {
+            executable,
+            restricted: false,
             children,
-            redirect_node: None,
-            node_type: NodeType::Root,
-            is_restricted: false,
+            redirect: None,
+            stub,
         }
     }
 
-    fn literal(name: &str, children: Vec<u32>, executable: bool) -> BrigadierNodeStub {
-        BrigadierNodeStub {
-            is_executable: executable,
-            children,
-            redirect_node: None,
-            node_type: NodeType::Literal {
-                name: name.to_string(),
+    pub(crate) fn root(children: Vec<u32>) -> Node {
+        node(NodeStub::Root, children, false)
+    }
+
+    pub(crate) fn literal(name: &str, children: Vec<u32>, executable: bool) -> Node {
+        node(
+            NodeStub::Literal {
+                name: name.to_owned(),
             },
-            is_restricted: false,
-        }
+            children,
+            executable,
+        )
     }
 
-    fn argument(
+    pub(crate) fn argument(
         name: &str,
-        parser: BrigadierParser,
+        kind: ArgumentType,
         children: Vec<u32>,
         executable: bool,
-    ) -> BrigadierNodeStub {
-        BrigadierNodeStub {
-            is_executable: executable,
-            children,
-            redirect_node: None,
-            node_type: NodeType::Argument {
-                name: name.to_string(),
-                parser,
-                suggestions_type: None,
+    ) -> Node {
+        node(
+            NodeStub::Argument {
+                name: name.to_owned(),
+                argument: kind,
+                suggestions: None,
             },
-            is_restricted: false,
-        }
+            children,
+            executable,
+        )
     }
 
-    fn tree(nodes: Vec<BrigadierNodeStub>) -> CommandTree {
+    fn tree(nodes: Vec<Node>) -> CommandTree {
         CommandTree {
             nodes,
             root_index: 0,
         }
     }
 
-    fn redirect(name: &str, target: u32) -> BrigadierNodeStub {
-        BrigadierNodeStub {
-            redirect_node: Some(target),
+    pub(crate) fn redirect(name: &str, target: u32) -> Node {
+        Node {
+            redirect: Some(target),
             ..literal(name, vec![], false)
         }
     }
@@ -1185,24 +1179,24 @@ mod tests {
             literal("msg", vec![2], false),
             argument(
                 "targets",
-                BrigadierParser::Entity(EntityParser {
+                ArgumentType::Entity(EntityArgument {
                     single: false,
                     players_only: true,
                 }),
                 vec![3],
                 false,
             ),
-            argument("message", BrigadierParser::Message, vec![], true),
+            argument("message", ArgumentType::Message, vec![], true),
             literal("say", vec![3], false),
             literal("execute", vec![6, 8], false),
             literal("as", vec![7], false),
-            BrigadierNodeStub {
-                redirect_node: Some(5),
+            Node {
+                redirect: Some(5),
                 ..argument("targets", entity(), vec![], false)
             },
             redirect("run", 0),
             literal("tp", vec![10], false),
-            argument("pos", BrigadierParser::Vec3, vec![3], true),
+            argument("pos", ArgumentType::Vec3, vec![3], true),
         ])
     }
 
@@ -1259,7 +1253,7 @@ mod tests {
         let t = tree(vec![
             root(vec![1, 3]),
             literal("tell", vec![2], false),
-            argument("message", BrigadierParser::Message, vec![], true),
+            argument("message", ArgumentType::Message, vec![], true),
             literal("w", vec![4], false),
             redirect("whisper", 1),
         ]);
@@ -1307,7 +1301,7 @@ mod tests {
             root(vec![1]),
             literal("mixed", vec![2, 3], false),
             argument("number", int(None, None), vec![], true),
-            argument("message", BrigadierParser::Message, vec![], true),
+            argument("message", ArgumentType::Message, vec![], true),
         ]);
         assert_eq!(
             t.verify_unattended("mixed hello"),
@@ -1321,7 +1315,7 @@ mod tests {
             root(vec![1, 4]),
             redirect("alias", 2),
             literal("target", vec![3], false),
-            argument("message", BrigadierParser::Message, vec![], true),
+            argument("message", ArgumentType::Message, vec![], true),
             literal("plain", vec![], true),
         ]);
         assert_eq!(
@@ -1337,7 +1331,7 @@ mod tests {
     #[test]
     fn unattended_verifier_reports_restricted_nodes() {
         let mut restricted = literal("admin", vec![], true);
-        restricted.is_restricted = true;
+        restricted.restricted = true;
         let t = tree(vec![root(vec![1]), restricted]);
         assert_eq!(
             t.verify_unattended("admin"),
@@ -1347,7 +1341,7 @@ mod tests {
         // An unported selector below a restricted literal still reports the
         // permission rather than a parse error.
         let mut kill = literal("kill", vec![2], false);
-        kill.is_restricted = true;
+        kill.restricted = true;
         let t = tree(vec![
             root(vec![1]),
             kill,
@@ -1379,8 +1373,8 @@ mod tests {
     #[test]
     fn unattended_verifier_checks_signatures_before_permissions() {
         let mut t = vanilla_like();
-        t.nodes[4].is_restricted = true;
-        t.nodes[5].is_restricted = true;
+        t.nodes[4].restricted = true;
+        t.nodes[5].restricted = true;
         assert_eq!(
             t.verify_unattended("say hi"),
             UnattendedCommandCheck::SignatureRequired
@@ -1396,12 +1390,12 @@ mod tests {
         );
     }
 
-    fn int(min: Option<i32>, max: Option<i32>) -> BrigadierParser {
-        BrigadierParser::Integer(BrigadierNumber::new(min, max))
+    fn int(min: Option<i32>, max: Option<i32>) -> ArgumentType {
+        ArgumentType::Integer(Bounds { min, max })
     }
 
-    fn entity() -> BrigadierParser {
-        BrigadierParser::Entity(EntityParser {
+    fn entity() -> ArgumentType {
+        ArgumentType::Entity(EntityArgument {
             single: false,
             players_only: false,
         })
@@ -1412,7 +1406,7 @@ mod tests {
         tree(vec![
             root(vec![1]),
             literal("trigger", vec![2], false),
-            argument("objective", BrigadierParser::Objective, vec![3, 4], true),
+            argument("objective", ArgumentType::Objective, vec![3, 4], true),
             literal("add", vec![5], false),
             literal("set", vec![5], false),
             argument("value", int(None, None), vec![], true),
@@ -1425,15 +1419,15 @@ mod tests {
         tree(vec![
             root(vec![1, 7]),
             literal("tp", vec![2, 3, 4], false),
-            argument("location", BrigadierParser::Vec3, vec![], true),
+            argument("location", ArgumentType::Vec3, vec![], true),
             argument("destination", entity(), vec![], true),
             argument("targets", entity(), vec![5, 6], false),
-            argument("location", BrigadierParser::Vec3, vec![], true),
+            argument("location", ArgumentType::Vec3, vec![], true),
             argument("destination", entity(), vec![], true),
             literal("execute", vec![8, 10], false),
             literal("as", vec![9], false),
-            BrigadierNodeStub {
-                redirect_node: Some(7),
+            Node {
+                redirect: Some(7),
                 ..argument("targets", entity(), vec![], false)
             },
             redirect("run", 0),
@@ -1566,9 +1560,9 @@ mod tests {
             root(vec![1]),
             literal("execute", vec![2, 4], false),
             literal("positioned", vec![3], false),
-            BrigadierNodeStub {
-                redirect_node: Some(1),
-                ..argument("pos", BrigadierParser::Vec3, vec![], false)
+            Node {
+                redirect: Some(1),
+                ..argument("pos", ArgumentType::Vec3, vec![], false)
             },
             redirect("run", 0),
         ]);
@@ -1586,7 +1580,7 @@ mod tests {
             literal("say2", vec![2], false),
             argument(
                 "text",
-                BrigadierParser::String(BrigadierString::QuotablePhrase),
+                ArgumentType::String(StringType::QuotablePhrase),
                 vec![3],
                 false,
             ),
@@ -1609,7 +1603,7 @@ mod tests {
             literal("night", vec![], true),
             literal("noon", vec![], true),
             literal("midnight", vec![], true),
-            argument("amount", BrigadierParser::Bool, vec![], true),
+            argument("amount", ArgumentType::Bool, vec![], true),
         ]);
 
         let all = complete(&t, "time set ", 9);
@@ -1646,7 +1640,7 @@ mod tests {
         let t = tree(vec![
             root(vec![1]),
             literal("gamemode", vec![2], false),
-            argument("gamemode", BrigadierParser::Bool, vec![], true),
+            argument("gamemode", ArgumentType::Bool, vec![], true),
         ]);
 
         let s = complete(&t, "gamemode ", 9);
@@ -1661,8 +1655,8 @@ mod tests {
         assert!(!complete(&t, "gam", 3).needs_server);
     }
 
-    fn check(parser: BrigadierParser, input: &str) -> ArgCheck {
-        check_argument(&parser, input, 0)
+    fn check(argument: ArgumentType, input: &str) -> ArgCheck {
+        check_argument(&argument, input, 0)
     }
 
     fn invalid(key: &'static str, args: &[&str], cursor: usize) -> ArgCheck {
@@ -1691,30 +1685,33 @@ mod tests {
         );
         assert_eq!(
             check(
-                BrigadierParser::Float(BrigadierNumber::new(Some(0.0), None)),
+                ArgumentType::Float(Bounds {
+                    min: Some(0.0),
+                    max: None
+                }),
                 "-1.5"
             ),
             invalid("argument.float.low", &["0.0", "-1.5"], 0)
         );
-        assert_eq!(check(BrigadierParser::Bool, "true"), ArgCheck::Valid(4));
+        assert_eq!(check(ArgumentType::Bool, "true"), ArgCheck::Valid(4));
         assert_eq!(
-            check(BrigadierParser::Bool, "yes"),
+            check(ArgumentType::Bool, "yes"),
             invalid("parsing.bool.invalid", &["yes"], 0)
         );
         assert_eq!(
-            check(BrigadierParser::Bool, "\"\""),
+            check(ArgumentType::Bool, "\"\""),
             invalid("parsing.bool.expected", &[], 2)
         );
         assert_eq!(
-            check(BrigadierParser::Time { min: 0 }, "1d"),
+            check(ArgumentType::Time { min: 0 }, "1d"),
             ArgCheck::Valid(2)
         );
         assert_eq!(
-            check(BrigadierParser::Time { min: 0 }, "1x"),
+            check(ArgumentType::Time { min: 0 }, "1x"),
             invalid("argument.time.invalid_unit", &[], 2)
         );
         assert_eq!(
-            check(BrigadierParser::Time { min: 1 }, "0.4t"),
+            check(ArgumentType::Time { min: 1 }, "0.4t"),
             invalid("argument.time.tick_count_too_low", &["1", "0"], 4)
         );
     }
@@ -1736,22 +1733,19 @@ mod tests {
     #[test]
     fn coordinates_follow_world_and_local_rules() {
         assert_eq!(
-            check(BrigadierParser::Vec3, "~ ~1 ^"),
+            check(ArgumentType::Vec3, "~ ~1 ^"),
             invalid("argument.pos.mixed", &[], 5)
         );
-        assert_eq!(check(BrigadierParser::Vec3, "^ ^ ^1"), ArgCheck::Valid(6));
+        assert_eq!(check(ArgumentType::Vec3, "^ ^ ^1"), ArgCheck::Valid(6));
         // An empty absolute coordinate before a space reads as zero.
-        assert_eq!(check(BrigadierParser::Vec3, "1  2 3"), ArgCheck::Valid(4));
+        assert_eq!(check(ArgumentType::Vec3, "1  2 3"), ArgCheck::Valid(4));
         assert_eq!(
-            check(BrigadierParser::Vec3, "1 2"),
+            check(ArgumentType::Vec3, "1 2"),
             invalid("argument.pos3d.incomplete", &[], 0)
         );
+        assert_eq!(check(ArgumentType::ColumnPos, "~1 2"), ArgCheck::Valid(4));
         assert_eq!(
-            check(BrigadierParser::ColumnPos, "~1 2"),
-            ArgCheck::Valid(4)
-        );
-        assert_eq!(
-            check(BrigadierParser::BlockPos, "1.5 2 3"),
+            check(ArgumentType::BlockPos, "1.5 2 3"),
             invalid("parsing.int.invalid", &["1.5"], 0)
         );
     }
@@ -1760,15 +1754,15 @@ mod tests {
     fn identifiers_strings_and_entities() {
         // Reads nothing; the node then fails on the missing separator.
         assert_eq!(
-            check(BrigadierParser::Identifier, "Minecraft:x"),
+            check(ArgumentType::Identifier, "Minecraft:x"),
             ArgCheck::Valid(0)
         );
         assert_eq!(
-            check(BrigadierParser::Identifier, "a:b:c"),
+            check(ArgumentType::Identifier, "a:b:c"),
             invalid("argument.id.invalid", &[], 0)
         );
         assert_eq!(
-            check(BrigadierParser::Identifier, "minecraft:stone"),
+            check(ArgumentType::Identifier, "minecraft:stone"),
             ArgCheck::Valid(15)
         );
         assert_eq!(check(entity(), "@a[tag=x"), ArgCheck::Unknown(None));
@@ -1788,7 +1782,7 @@ mod tests {
             invalid("parsing.quote.escape", &["b"], 3)
         );
         assert_eq!(
-            check(BrigadierParser::Message, &"a".repeat(257)),
+            check(ArgumentType::Message, &"a".repeat(257)),
             ArgCheck::Invalid(SyntaxError {
                 key: "argument.message.too_long",
                 args: vec!["257".to_owned(), "256".to_owned()],

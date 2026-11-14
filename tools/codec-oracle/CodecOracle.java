@@ -1,4 +1,13 @@
 import com.google.gson.GsonBuilder;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
+import com.mojang.brigadier.tree.ArgumentCommandNode;
+import com.mojang.brigadier.tree.CommandNode;
+import com.mojang.brigadier.tree.LiteralCommandNode;
+import com.mojang.brigadier.tree.RootCommandNode;
 import com.google.gson.JsonObject;
 import com.mojang.serialization.Lifecycle;
 import io.netty.buffer.ByteBufUtil;
@@ -17,6 +26,13 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 import net.minecraft.ChatFormatting;
+import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.commands.arguments.MessageArgument;
+import net.minecraft.commands.arguments.ResourceKeyArgument;
+import net.minecraft.commands.arguments.ScoreHolderArgument;
+import net.minecraft.commands.arguments.TimeArgument;
+import net.minecraft.commands.arguments.UuidArgument;
+import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
@@ -37,6 +53,7 @@ import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
+import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
@@ -153,6 +170,7 @@ public final class CodecOracle {
                         "0123456789abcdef0123456789abcdef01234567", true, Optional.of(Component.literal("Please"))));
         encode("resource_pack_pop/all", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
                 new ClientboundResourcePackPopPacket(Optional.empty()));
+        commands();
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
@@ -168,6 +186,48 @@ public final class CodecOracle {
         CASES.forEach(cases::addProperty);
         out.add("cases", cases);
         Files.writeString(Path.of(args[0]), new GsonBuilder().setPrettyPrinting().create().toJson(out) + "\n");
+    }
+
+    private static void commands() {
+        RootCommandNode<Object> root = new RootCommandNode<>();
+        LiteralCommandNode<Object> tp = LiteralArgumentBuilder.literal("tp")
+                .then(RequiredArgumentBuilder.argument("target", EntityArgument.entity())
+                        .then(RequiredArgumentBuilder.argument("pos", Vec3Argument.vec3()).executes(c -> 1)))
+                .build();
+        root.addChild(tp);
+        root.addChild(LiteralArgumentBuilder.literal("say")
+                .then(RequiredArgumentBuilder.argument("message", MessageArgument.message()).executes(c -> 1))
+                .build());
+        root.addChild(LiteralArgumentBuilder.literal("give")
+                .then(RequiredArgumentBuilder.argument("item", ResourceKeyArgument.key(Registries.ITEM))
+                        .then(RequiredArgumentBuilder.argument("count", IntegerArgumentType.integer(1, 64))
+                                .then(RequiredArgumentBuilder.argument("scale",
+                                                DoubleArgumentType.doubleArg(-Double.MAX_VALUE, 2.5))
+                                        .then(RequiredArgumentBuilder.argument("word", StringArgumentType.greedyString())
+                                                .then(RequiredArgumentBuilder.argument("delay", TimeArgument.time(1))
+                                                        .then(RequiredArgumentBuilder.argument("holders",
+                                                                        ScoreHolderArgument.scoreHolders())
+                                                                .then(RequiredArgumentBuilder.argument("id",
+                                                                        UuidArgument.uuid()).executes(c -> 1))))))))
+                .build());
+        root.addChild(LiteralArgumentBuilder.literal("alias").redirect(tp).build());
+        encode("commands/tree", ClientboundCommandsPacket.STREAM_CODEC::encode,
+                new ClientboundCommandsPacket(root, new ClientboundCommandsPacket.NodeInspector<Object>() {
+                    @Override
+                    public Identifier suggestionId(ArgumentCommandNode<Object, ?> node) {
+                        return node.getName().equals("message") ? Identifier.withDefaultNamespace("ask_server") : null;
+                    }
+
+                    @Override
+                    public boolean isExecutable(CommandNode<Object> node) {
+                        return node.getCommand() != null;
+                    }
+
+                    @Override
+                    public boolean isRestricted(CommandNode<Object> node) {
+                        return node.getName().equals("say");
+                    }
+                }));
     }
 
     private static void lifecycle(Registry<DimensionType> dimensionTypes, Registry<WorldClock> clocks) {

@@ -5229,10 +5229,8 @@ fn translate_commands_777() {
     );
     assert_ne!(old_parser("uuid"), native_parser("uuid"));
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::Commands(p) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.entries.len(), 5);
+    let p = translate_and_read(777, old, "commands", pomme_protocol::commands::read);
+    assert_eq!(p.nodes.len(), 5);
 }
 
 /// A pre-1.20.5 `server_data` frame: `motd`, no icon, then `tail`.
@@ -5341,10 +5339,8 @@ fn translate_commands_763() {
     );
     assert_ne!(parser(old_table, "resource"), parser(native, "resource"));
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::Commands(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.entries.len(), 3);
+    let p = translate_and_read(763, old, "commands", pomme_protocol::commands::read);
+    assert_eq!(p.nodes.len(), 3);
 }
 
 /// 26.3's `tag` slot display carries a `HolderSet`: a named tag becomes the
@@ -7639,4 +7635,159 @@ fn azalea_encoded_player_and_world_packets_read_in_pomme() {
             data: pomme_protocol::waypoint::WaypointData::Chunk { x: -3, z: 7 },
         }
     );
+}
+
+/// azalea's `commands` encoder and pomme's reader agree on a tree with a
+/// redirect, custom suggestions and argument properties.
+#[test]
+fn azalea_encoded_commands_read_in_pomme() {
+    use azalea_protocol::packets::game::c_commands::{
+        BrigadierNodeStub, BrigadierNumber, BrigadierParser, BrigadierString, ClientboundCommands,
+        EntityParser, NodeType,
+    };
+    use pomme_protocol::commands::{
+        ArgumentType, Bounds, CommandsPacket, EntityArgument, NodeStub, StringType,
+    };
+
+    use crate::net::commands::tests::{argument, literal, redirect, root};
+
+    let azalea_node = |node_type, children, executable, redirect_node| BrigadierNodeStub {
+        is_executable: executable,
+        children,
+        redirect_node,
+        node_type,
+        is_restricted: false,
+    };
+    let azalea_argument = |name: &str, parser, suggestions_type| NodeType::Argument {
+        name: name.into(),
+        parser,
+        suggestions_type,
+    };
+    let packet = ClientboundGamePacket::Commands(ClientboundCommands {
+        entries: vec![
+            azalea_node(NodeType::Root, vec![1, 5], false, None),
+            azalea_node(
+                NodeType::Literal {
+                    name: "give".into(),
+                },
+                vec![2],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "targets",
+                    BrigadierParser::Entity(EntityParser {
+                        single: false,
+                        players_only: true,
+                    }),
+                    Some(Identifier::new("minecraft:ask_server")),
+                ),
+                vec![3],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "item",
+                    BrigadierParser::ResourceKey {
+                        registry_key: Identifier::new("minecraft:item"),
+                    },
+                    None,
+                ),
+                vec![4],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "count",
+                    BrigadierParser::Integer(BrigadierNumber::new(Some(1), None)),
+                    None,
+                ),
+                vec![6],
+                true,
+                None,
+            ),
+            azalea_node(
+                NodeType::Literal { name: "g".into() },
+                vec![],
+                false,
+                Some(1),
+            ),
+            azalea_node(
+                azalea_argument(
+                    "note",
+                    BrigadierParser::String(BrigadierString::QuotablePhrase),
+                    None,
+                ),
+                vec![],
+                true,
+                None,
+            ),
+        ],
+        root_index: 0,
+    });
+    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let decoded = read_native_frame(&frame, "commands", pomme_protocol::commands::read);
+
+    let mut targets = argument(
+        "targets",
+        ArgumentType::Entity(EntityArgument {
+            single: false,
+            players_only: true,
+        }),
+        vec![3],
+        false,
+    );
+    if let NodeStub::Argument { suggestions, .. } = &mut targets.stub {
+        *suggestions = Some("minecraft:ask_server".into());
+    }
+    assert_eq!(
+        decoded,
+        CommandsPacket {
+            nodes: vec![
+                root(vec![1, 5]),
+                literal("give", vec![2], false),
+                targets,
+                argument(
+                    "item",
+                    ArgumentType::ResourceKey {
+                        registry: "minecraft:item".into(),
+                    },
+                    vec![4],
+                    false,
+                ),
+                argument(
+                    "count",
+                    ArgumentType::Integer(Bounds {
+                        min: Some(1),
+                        max: None,
+                    }),
+                    vec![6],
+                    true,
+                ),
+                redirect("g", 1),
+                argument(
+                    "note",
+                    ArgumentType::String(StringType::QuotablePhrase),
+                    vec![],
+                    true,
+                ),
+            ],
+            root_index: 0,
+        }
+    );
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let (took, _) = crate::net::handler::handle_raw_for_test(
+        &frame,
+        crate::world::block::BlockStateTable::native(),
+        &tx,
+    );
+    assert!(took);
+    let Some(crate::net::NetworkEvent::CommandTree { tree }) = rx.try_iter().next() else {
+        panic!("expected a command tree");
+    };
+    assert_eq!(tree.root_child_names(), ["give", "g"]);
 }

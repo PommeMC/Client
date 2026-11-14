@@ -5,7 +5,7 @@ use crossbeam_channel::{Sender, TrySendError};
 use pomme_protocol::codec::{DecodeResult, Reader};
 
 use super::NetworkEvent;
-use super::commands::{CommandTree, SharedCommandTree};
+use super::commands::SharedCommandTree;
 use super::sender::PacketSender;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
@@ -40,7 +40,6 @@ pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
-    shared_tree: &SharedCommandTree,
 ) {
     match packet {
         ClientboundGamePacket::UpdateAdvancements(p) => {
@@ -102,16 +101,6 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SetEntityData(p) => {
             super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
-        }
-        ClientboundGamePacket::Commands(p) => {
-            let tree = std::sync::Arc::new(CommandTree::from_packet(p));
-            tracing::info!(
-                "Command tree received: {} nodes, root commands = {:?}",
-                p.entries.len(),
-                tree.root_child_names()
-            );
-            *shared_tree.lock() = Some(tree.clone());
-            send_ordered(event_tx, NetworkEvent::CommandTree { tree });
         }
         _other => {}
     }
@@ -193,6 +182,7 @@ pub fn handle_raw_game_packet(
     block_state_table: BlockStateTable,
     registry_holder: &RegistryHolder,
     sender: &PacketSender,
+    shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
     event_tx: &Sender<NetworkEvent>,
 ) -> bool {
@@ -201,6 +191,7 @@ pub fn handle_raw_game_packet(
         block_state_table,
         registry_holder,
         sender,
+        shared_tree,
         batch_size_calculator,
         event_tx,
     );
@@ -219,6 +210,7 @@ pub(crate) fn decode_raw_game_packet(
     block_state_table: BlockStateTable,
     registry_holder: &RegistryHolder,
     sender: &PacketSender,
+    shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
     event_tx: &Sender<NetworkEvent>,
 ) -> RawDecode {
@@ -320,6 +312,17 @@ pub(crate) fn decode_raw_game_packet(
         claimed(
             "waypoint",
             super::waypoint_wire::handle_raw_waypoint_packet(packet_id, payload, event_tx),
+        )
+    })
+    .or_else(|| {
+        claimed(
+            "commands",
+            super::commands_wire::handle_raw_commands_packet(
+                packet_id,
+                payload,
+                shared_tree,
+                event_tx,
+            ),
         )
     })
     .or_else(|| ignored(packet_id).then_some(("ignored", Ok(()))))
@@ -444,6 +447,7 @@ pub(crate) fn handle_raw_for_test(
         block_state_table,
         &RegistryHolder::default(),
         &PacketSender::new(out_tx),
+        &SharedCommandTree::default(),
         &mut ChunkBatchSizeCalculator::default(),
         event_tx,
     );
