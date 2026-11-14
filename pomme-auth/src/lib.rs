@@ -1,16 +1,19 @@
-//! Microsoft account sign-in for Minecraft: the device-code sign-in's token
-//! is exchanged through Xbox Live for a Minecraft access token, and the
-//! account and its refresh token are kept in a [`SecretStore`].
+//! Microsoft account sign-in for Minecraft: the browser or device-code
+//! sign-in's token is exchanged through Xbox Live for a Minecraft access
+//! token, and the account and its refresh token are kept in a
+//! [`SecretStore`].
 //!
 //! Every call takes the HTTP client to use, so the client can pass one that
 //! trusts Android's CA store.
 
+mod browser;
 mod device_code;
 mod store;
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use browser::browser_sign_in;
 pub use device_code::{DeviceCode, device_code_sign_in};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "keyring")]
@@ -30,6 +33,19 @@ pub struct AuthAccount {
     pub uuid: String,
     pub access_token: String,
     pub expires_at: u64,
+}
+
+/// Microsoft's OAuth error reply.
+#[derive(Deserialize)]
+struct TokenError {
+    error: String,
+    error_description: Option<String>,
+}
+
+impl TokenError {
+    fn reason(self) -> String {
+        self.error_description.unwrap_or(self.error)
+    }
 }
 
 #[derive(Deserialize)]

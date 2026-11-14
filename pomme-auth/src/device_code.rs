@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{CLIENT_ID, MsaTokenResponse, SCOPE, TOKEN_URL, finish_msa_exchange};
+use super::{CLIENT_ID, MsaTokenResponse, SCOPE, TOKEN_URL, TokenError, finish_msa_exchange};
 use crate::{AuthAccount, SecretStore};
 
 const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
@@ -33,17 +33,12 @@ enum Poll {
 }
 
 fn poll_error(body: &str) -> Poll {
-    #[derive(Deserialize)]
-    struct TokenError {
-        error: String,
-        error_description: Option<String>,
-    }
     match serde_json::from_str::<TokenError>(body) {
         Ok(e) if e.error == "authorization_pending" => Poll::Pending,
         Ok(e) if e.error == "slow_down" => Poll::SlowDown,
         Ok(e) if e.error == "authorization_declined" => Poll::Failed("Sign-in was declined".into()),
         Ok(e) if e.error == "expired_token" => Poll::Failed("The code expired; try again".into()),
-        Ok(e) => Poll::Failed(e.error_description.unwrap_or(e.error)),
+        Ok(e) => Poll::Failed(e.reason()),
         Err(_) => Poll::Failed(format!("Sign-in failed: {body}")),
     }
 }

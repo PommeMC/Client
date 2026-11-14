@@ -177,7 +177,7 @@ pub fn update_menu(
             sync_resource_packs(core);
             core.menu.start_transition_open();
         }
-        MenuAction::Account(account) => {
+        MenuAction::Account { account, by_player } => {
             if account.is_none() {
                 core.menu.forget_account(&core.user.uuid);
             }
@@ -196,6 +196,10 @@ pub fn update_menu(
                 .load_player_skin(&core.user, core.resources(), &core.tokio_rt);
             core.menu
                 .set_player_face(core.user.has_profile.then_some(&core.user.uuid));
+            // Back from the browser the player signed in through.
+            if account.is_some() && by_player {
+                gfx.window.focus_window();
+            }
             if account.is_some()
                 && let Some(play) = core.deferred_quick_play.take()
             {
