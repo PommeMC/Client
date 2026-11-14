@@ -1,5 +1,5 @@
-//! The account screen: who's signed in, or Microsoft's device-code sign-in
-//! (a code to enter at microsoft.com/link, then the client polls).
+//! The account screen: who's signed in, or Microsoft's sign-in: through the
+//! browser on desktop, or a code to enter at microsoft.com/link on phones.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,9 +14,16 @@ pub(super) enum SignIn {
     #[default]
     Idle,
     Requesting,
+    /// Waiting on the browser, opened at this sign-in page.
+    Browser(String),
     Code(pomme_auth::DeviceCode),
     Failed(String),
-    Done(pomme_auth::AuthAccount),
+    /// `by_player` when they started it, rather than the stored account's
+    /// restore at launch.
+    Done {
+        account: pomme_auth::AuthAccount,
+        by_player: bool,
+    },
 }
 
 /// One sign-in attempt's way to report: it only lands while the attempt is
@@ -47,11 +54,20 @@ impl MainMenu {
 
     fn start_sign_in(&mut self) {
         let store = Arc::clone(&self.account_store);
-        self.run_sign_in(|progress| async move {
-            pomme_auth::device_code_sign_in(crate::net::http::client(), &*store, |code| {
-                progress.set(SignIn::Code(code.clone()));
-            })
-            .await
+        self.run_sign_in(true, |progress| async move {
+            let http = crate::net::http::client();
+            if cfg!(mobile) {
+                pomme_auth::device_code_sign_in(http, &*store, |code| {
+                    progress.set(SignIn::Code(code.clone()));
+                })
+                .await
+            } else {
+                pomme_auth::browser_sign_in(http, &*store, |url| {
+                    crate::util::open_url(url);
+                    progress.set(SignIn::Browser(url.to_owned()));
+                })
+                .await
+            }
             .map(Some)
         });
     }
@@ -66,10 +82,12 @@ impl MainMenu {
     /// screen offers Sign In.
     pub(crate) fn restore_account(&mut self) {
         let store = Arc::clone(&self.account_store);
-        self.run_sign_in(|_| async move { Ok(crate::account::restore(&*store).await) });
+        self.run_sign_in(false, |_| async move {
+            Ok(crate::account::restore(&*store).await)
+        });
     }
 
-    fn run_sign_in<F>(&mut self, sign_in: impl FnOnce(SignInProgress) -> F)
+    fn run_sign_in<F>(&mut self, by_player: bool, sign_in: impl FnOnce(SignInProgress) -> F)
     where
         F: Future<Output = Result<Option<pomme_auth::AuthAccount>, String>> + Send + 'static,
     {
@@ -77,7 +95,7 @@ impl MainMenu {
         let task = sign_in(progress.clone());
         self.sign_in_task = Some(self.rt.spawn(async move {
             progress.set(match task.await {
-                Ok(Some(account)) => SignIn::Done(account),
+                Ok(Some(account)) => SignIn::Done { account, by_player },
                 Ok(None) => SignIn::Idle,
                 Err(reason) => SignIn::Failed(reason),
             });
@@ -128,14 +146,18 @@ impl MainMenu {
             self.close_account(key_bindings);
             return empty_result();
         }
-        if matches!(*self.sign_in.read(), SignIn::Done(_)) {
-            let SignIn::Done(account) = std::mem::take(&mut *self.sign_in.write()) else {
+        if matches!(*self.sign_in.read(), SignIn::Done { .. }) {
+            let SignIn::Done { account, by_player } = std::mem::take(&mut *self.sign_in.write())
+            else {
                 unreachable!()
             };
             self.sign_in_task = None;
             self.set_screen(Screen::Main, key_bindings);
             let mut result = empty_result();
-            result.action = MenuAction::Account(Some(account));
+            result.action = MenuAction::Account {
+                account: Some(account),
+                by_player,
+            };
             return result;
         }
 
@@ -162,6 +184,14 @@ impl MainMenu {
                 (None, SignIn::Requesting) => {
                     (vec!["Contacting Microsoft...".into()], None, vec!["Cancel"])
                 }
+                (None, SignIn::Browser(_)) => (
+                    vec![
+                        "Finish signing in in your browser.".into(),
+                        "Pomme will continue once you're done.".into(),
+                    ],
+                    None,
+                    vec!["Open Again", "Cancel"],
+                ),
                 (None, SignIn::Code(code)) => (
                     vec![format!(
                         "Go to {} and enter this code:",
@@ -181,7 +211,7 @@ impl MainMenu {
                     None,
                     vec!["Try Again", leave],
                 ),
-                (None, SignIn::Done(_)) => unreachable!("handled above"),
+                (None, SignIn::Done { .. }) => unreachable!("handled above"),
             };
 
         let gs = self.gui_scale(screen_w, screen_h);
@@ -252,6 +282,11 @@ impl MainMenu {
         let mut action = MenuAction::None;
         match pressed {
             Some("Sign In" | "Try Again") => self.start_sign_in(),
+            Some("Open Again") => {
+                if let SignIn::Browser(url) = &*self.sign_in.read() {
+                    crate::util::open_url(url);
+                }
+            }
             Some("Copy Code") => {
                 if let SignIn::Code(code) = &*self.sign_in.read() {
                     common::set_clipboard(&code.user_code);
@@ -262,7 +297,12 @@ impl MainMenu {
                     crate::util::open_url(&code.verification_uri);
                 }
             }
-            Some("Sign Out") => action = MenuAction::Account(None),
+            Some("Sign Out") => {
+                action = MenuAction::Account {
+                    account: None,
+                    by_player: true,
+                }
+            }
             Some("Cancel") => self.cancel_sign_in(),
             Some("Back") => self.close_account(key_bindings),
             Some("Quit") => action = MenuAction::Quit,
@@ -324,6 +364,18 @@ mod tests {
         let account = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
         assert!(texts(&account).contains(&"Sign In"));
         assert!(texts(&account).contains(&"Back"));
+    }
+
+    #[test]
+    fn a_browser_sign_in_waits_with_a_way_back() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-browser-sign-in-test", &mut key_bindings);
+        menu.open_account(&key_bindings);
+        menu.new_attempt(SignIn::Browser("https://login.example/authorize".into()));
+        let screen = menu.build(W, H, &MenuInput::default(), &mut key_bindings, text_width);
+        for text in ["Finish signing in in your browser.", "Open Again", "Cancel"] {
+            assert!(texts(&screen).contains(&text), "{text}");
+        }
     }
 
     #[test]

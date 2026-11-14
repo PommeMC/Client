@@ -4526,10 +4526,13 @@ dependencies = [
 name = "pomme-auth"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "keyring",
+ "rand 0.10.3",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

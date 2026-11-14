@@ -1,16 +1,19 @@
-//! Microsoft account sign-in for Minecraft: the device-code sign-in's token
-//! is exchanged through Xbox Live for a Minecraft access token, and the
-//! account and its refresh token are kept in a [`SecretStore`].
+//! Microsoft account sign-in for Minecraft: the browser or device-code
+//! sign-in's token is exchanged through Xbox Live for a Minecraft access
+//! token, and the account and its refresh token are kept in a
+//! [`SecretStore`].
 //!
 //! Every call takes the HTTP client to use, so the client can pass one that
 //! trusts Android's CA store.
 
+mod browser;
 mod device_code;
 mod store;
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use browser::browser_sign_in;
 pub use device_code::{DeviceCode, device_code_sign_in};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "keyring")]
@@ -30,6 +33,54 @@ pub struct AuthAccount {
     pub uuid: String,
     pub access_token: String,
     pub expires_at: u64,
+}
+
+/// Why a sign-in failed: the message to show, and a stable `code` the
+/// website's sign-in page keys its own wording on (any failure without a
+/// specific one is `failed`).
+pub(crate) struct AuthError {
+    code: &'static str,
+    message: String,
+}
+
+impl AuthError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for AuthError {
+    fn from(message: String) -> Self {
+        Self::new("failed", message)
+    }
+}
+
+impl From<&str> for AuthError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl From<AuthError> for String {
+    fn from(e: AuthError) -> Self {
+        e.message
+    }
+}
+
+/// Microsoft's OAuth error reply.
+#[derive(Deserialize)]
+struct TokenError {
+    error: String,
+    error_description: Option<String>,
+}
+
+impl TokenError {
+    fn reason(self) -> String {
+        self.error_description.unwrap_or(self.error)
+    }
 }
 
 #[derive(Deserialize)]
@@ -162,7 +213,7 @@ async fn refresh_msa_token(
     http: &reqwest::Client,
     store: &dyn SecretStore,
     refresh_token: &str,
-) -> Result<AuthAccount, String> {
+) -> Result<AuthAccount, AuthError> {
     let msa: MsaTokenResponse = http
         .post(TOKEN_URL)
         .form(&[
@@ -185,7 +236,7 @@ async fn finish_msa_exchange(
     http: &reqwest::Client,
     store: &dyn SecretStore,
     msa: &MsaTokenResponse,
-) -> Result<AuthAccount, String> {
+) -> Result<AuthAccount, AuthError> {
     let account = exchange_msa_to_minecraft(http, &msa.access_token).await?;
     save_account(store, &account, msa.refresh_token.as_deref());
     Ok(account)
@@ -194,7 +245,7 @@ async fn finish_msa_exchange(
 async fn exchange_msa_to_minecraft(
     http: &reqwest::Client,
     msa_token: &str,
-) -> Result<AuthAccount, String> {
+) -> Result<AuthAccount, AuthError> {
     let xbl: XblResponse = http
         .post("https://user.auth.xboxlive.com/user/authenticate")
         .json(&serde_json::json!({
@@ -263,7 +314,10 @@ async fn exchange_msa_to_minecraft(
         .await
         .map_err(|e| format!("Profile fetch failed: {}", crate::error_chain(e)))?;
     if profile.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err("This Microsoft account doesn't own Minecraft".into());
+        return Err(AuthError::new(
+            "not_owned",
+            "This Microsoft account doesn't own Minecraft",
+        ));
     }
     let profile: McProfileResponse = profile
         .json()
@@ -280,20 +334,32 @@ async fn exchange_msa_to_minecraft(
 }
 
 /// Why XSTS refused the account, from its `XErr` code.
-fn xsts_error(body: &str) -> String {
+fn xsts_error(body: &str) -> AuthError {
     #[derive(Deserialize)]
     struct XstsError {
         #[serde(rename = "XErr")]
         code: u64,
     }
-    let reason = match serde_json::from_str::<XstsError>(body).map(|e| e.code) {
-        Ok(2148916233) => "This Microsoft account has no Xbox profile; create one at xbox.com",
-        Ok(2148916235) => "Xbox Live isn't available in this account's country",
-        Ok(2148916236 | 2148916237) => "This account needs adult verification on xbox.com",
-        Ok(2148916238) => "This is a child account; an adult must add it to a Microsoft family",
-        _ => return format!("XSTS auth refused: {body}"),
+    let (code, message) = match serde_json::from_str::<XstsError>(body).map(|e| e.code) {
+        Ok(2148916233) => (
+            "no_xbox_profile",
+            "This Microsoft account has no Xbox profile; create one at xbox.com",
+        ),
+        Ok(2148916235) => (
+            "region_unavailable",
+            "Xbox Live isn't available in this account's country",
+        ),
+        Ok(2148916236 | 2148916237) => (
+            "adult_verification",
+            "This account needs adult verification on xbox.com",
+        ),
+        Ok(2148916238) => (
+            "child_account",
+            "This is a child account; an adult must add it to a Microsoft family",
+        ),
+        _ => return format!("XSTS auth refused: {body}").into(),
     };
-    reason.into()
+    AuthError::new(code, message)
 }
 
 #[cfg(test)]
@@ -304,9 +370,13 @@ mod tests {
 
     #[test]
     fn xsts_errors_read_as_reasons() {
-        assert!(xsts_error(r#"{"XErr":2148916233,"Message":""}"#).contains("no Xbox profile"));
-        assert!(xsts_error(r#"{"XErr":2148916238}"#).contains("child account"));
-        assert!(xsts_error("not json").starts_with("XSTS auth refused"));
+        let no_profile = xsts_error(r#"{"XErr":2148916233,"Message":""}"#);
+        assert_eq!(no_profile.code, "no_xbox_profile");
+        assert!(no_profile.message.contains("no Xbox profile"));
+        assert_eq!(xsts_error(r#"{"XErr":2148916238}"#).code, "child_account");
+        let unknown = xsts_error("not json");
+        assert_eq!(unknown.code, "failed");
+        assert!(unknown.message.starts_with("XSTS auth refused"));
     }
 
     #[test]

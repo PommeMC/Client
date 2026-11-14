@@ -460,8 +460,12 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
-    /// Signed in (`Some`) or out (`None`) from the account screen.
-    Account(Option<pomme_auth::AuthAccount>),
+    /// Signed in (`Some`) or out (`None`) from the account screen;
+    /// `by_player` unless it's the stored account restored at launch.
+    Account {
+        account: Option<pomme_auth::AuthAccount>,
+        by_player: bool,
+    },
     /// Open the singleplayer world in this save folder.
     PlayWorld {
         folder: String,
