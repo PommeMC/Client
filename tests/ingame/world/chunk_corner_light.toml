@@ -11,9 +11,6 @@ wait_ms = 2000
 chat = "/gamemode creative"
 
 [[step]]
-deterministic = true
-
-[[step]]
 chat = "/fill -3 -61 -3 2 -56 2 minecraft:stone hollow"
 
 [[step]]

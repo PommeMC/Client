@@ -35,9 +35,6 @@ look_at = [0.5, -60.0, 4.5]
 [[step]]
 press = { action = "key.toggleGui" }
 
-[[step]]
-deterministic = true
-
 # Chat fades after 10 seconds.
 
 [[step]]

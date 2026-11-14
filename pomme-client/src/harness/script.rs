@@ -24,6 +24,10 @@ const MATCH_TOLERANCE: u8 = 1;
 struct ScriptFile {
     #[serde(rename = "step")]
     steps: Vec<StepFile>,
+    /// Whether the script starts under the `deterministic` step; a script
+    /// about that noise itself turns it off.
+    #[serde(default = "starts_deterministic")]
+    deterministic: bool,
     /// The versions the script is valid on; `tools/ingame-test` reads them
     /// to skip it elsewhere.
     #[serde(default, rename = "min_version")]
@@ -450,13 +454,20 @@ impl StepFile {
     }
 }
 
-fn parse(source: &str) -> Result<Vec<Step>, String> {
+fn starts_deterministic() -> bool {
+    true
+}
+
+/// The script's steps, and whether it starts deterministic.
+fn parse(source: &str) -> Result<(Vec<Step>, bool), String> {
     let file: ScriptFile = toml::from_str(source).map_err(|e| e.to_string())?;
-    file.steps
+    let steps = file
+        .steps
         .into_iter()
         .enumerate()
         .map(|(i, step)| step.into_step().map_err(|e| format!("step {}: {e}", i + 1)))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok((steps, file.deterministic))
 }
 
 #[derive(Serialize)]
@@ -541,6 +552,9 @@ struct Report<'a> {
 pub struct Script {
     name: String,
     steps: Vec<Step>,
+    /// Holds the frame's noise still from the first frame in game, as the
+    /// `deterministic` step does, until applied.
+    deterministic: bool,
     out_dir: PathBuf,
     started: Instant,
     next: usize,
@@ -557,7 +571,8 @@ impl Script {
     pub fn load(path: &Path, out_dir: Option<PathBuf>) -> Result<Self, String> {
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let steps = parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (steps, deterministic) =
+            parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path
             .file_stem()
             .map_or("script".into(), |s| s.to_string_lossy().into_owned());
@@ -565,6 +580,7 @@ impl Script {
         Ok(Self {
             name,
             steps,
+            deterministic,
             out_dir,
             started: Instant::now(),
             next: 0,
@@ -595,6 +611,9 @@ impl Script {
             } else {
                 return None;
             }
+        }
+        if std::mem::take(&mut self.deterministic) {
+            exec::run(&Command::Deterministic, core, phase);
         }
         let Some(step) = self.steps.get(self.next) else {
             return Some(self.finish(true));
@@ -1029,7 +1048,7 @@ mod tests {
 
     #[test]
     fn parses_every_step_kind() {
-        let steps = parse(
+        let (steps, _) = parse(
             r#"
             [[step]]
             chat = "/give @s stone"
@@ -1193,8 +1212,18 @@ mod tests {
     }
 
     #[test]
+    fn scripts_start_deterministic_unless_turned_off() {
+        assert!(parse("[[step]]\nwait_ms = 1").unwrap().1);
+        assert!(
+            !parse("deterministic = false\n[[step]]\nwait_ms = 1")
+                .unwrap()
+                .1
+        );
+    }
+
+    #[test]
     fn frame_times_parse_and_sum_up_with_the_slowest_hundredth() {
-        let steps = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
+        let (steps, _) = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
         assert_eq!(steps, [Step::FrameTimes(Duration::from_secs(5))]);
         // 198 frames of 10 ms and 2 of 50 ms: the 1% low is the slowest 2.
         let samples: Vec<FrameSample> = (0..200)

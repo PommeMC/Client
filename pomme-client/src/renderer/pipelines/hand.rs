@@ -1,15 +1,16 @@
 use glam::camera::rh::proj;
 use glam::{Mat3, Mat4, Vec3};
 
+use crate::player::default_skin;
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::entity_model::pack_normal;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{SkinData, rhi, shader, util};
-use crate::resources::{ResourceId, ResourceManager, resource_id};
+use crate::resources::ResourceManager;
 use crate::world::block::model::CardinalLightType;
+
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
-const DEFAULT_SKIN: ResourceId = resource_id!("minecraft:textures/entity/player/wide/steve.png");
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -169,27 +170,33 @@ impl HandPipeline {
         );
     }
 
+    /// Whether the profile's own skin is shown, not a default one.
+    pub fn has_profile_skin(&self) -> bool {
+        self.custom_skin
+    }
+
+    /// Shows `DefaultPlayerSkin`'s skin `index`; whether it is slim.
     pub fn reload_default_skin(
         &mut self,
         device: &rhi::backend::Device,
         resources: &dyn ResourceManager,
+        index: usize,
     ) -> bool {
-        if self.custom_skin {
-            return false;
-        }
         let (pixels, width, height) =
-            util::load_asset_png(resources, &DEFAULT_SKIN).unwrap_or_else(fallback_skin);
+            util::load_asset_png(resources, &default_skin::TEXTURES[index][0])
+                .unwrap_or_else(fallback_skin);
+        let slim = index < default_skin::SLIM_COUNT;
         self.reload_skin(
             device,
             &SkinData {
                 pixels,
                 width,
                 height,
-                slim: false,
+                slim,
             },
         );
         self.custom_skin = false;
-        true
+        slim
     }
 
     pub fn recreate_pipeline(
@@ -356,11 +363,11 @@ fn load_skin_texture(
     device: &rhi::backend::Device,
     resources: &dyn ResourceManager,
 ) -> (rhi::backend::Texture, u32, u32) {
-    let (pixels, width, height) =
-        util::load_asset_png(resources, &DEFAULT_SKIN).unwrap_or_else(|| {
-            tracing::warn!("Failed to load skin from {}, using fallback", DEFAULT_SKIN);
-            fallback_skin()
-        });
+    let steve = &default_skin::TEXTURES[default_skin::STEVE][0];
+    let (pixels, width, height) = util::load_asset_png(resources, steve).unwrap_or_else(|| {
+        tracing::warn!("Failed to load skin from {steve}, using fallback");
+        fallback_skin()
+    });
 
     let texture = upload_skin_to_gpu(device, &pixels, width, height);
     (texture, width, height)

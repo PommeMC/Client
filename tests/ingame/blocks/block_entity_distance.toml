@@ -28,9 +28,6 @@ chat = "/tp @s 0.5 -60 0.5 -90 0"
 expect = { block = "ender_chest", at = [70, -58, 6] }
 
 [[step]]
-deterministic = true
-
-[[step]]
 look_at = [64.0, -59.0, 0.5]
 
 # Chat fades after 10 seconds.

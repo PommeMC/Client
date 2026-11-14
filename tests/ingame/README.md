@@ -99,7 +99,14 @@ a test exercises the real code.
 A script is a list of `[[step]]` tables, run in order once the client is in
 game. After it leaves the game (the pause menu's Disconnect), only steps that
 work on the title screens may follow: waits, screenshots, input, `cursor_to_button`
-and `screen` checks. Each step has exactly one action:
+and `screen` checks.
+
+Scripts start under the `deterministic` step, so both clients' shots hold
+still and compare alike. A script about that noise itself (animated textures,
+particles) sets `deterministic = false` above its first step, and can turn it
+on later with the step.
+
+Each step has exactly one action:
 
 ```toml
 [[step]]
@@ -175,7 +182,7 @@ deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view
                                               # bobbing and the autosave
                                               # indicator still for the rest of
-                                              # the script
+                                              # a script that started without
 [[step]]
 hold_packets = true                           # incoming packets wait unhandled
                                               # until hold_packets = false, as

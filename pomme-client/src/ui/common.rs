@@ -710,39 +710,11 @@ impl HeadProfile {
     /// profile's id (an offline id from the name when it has no id, else
     /// nil). A `namespace:path` under `textures/`.
     pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
-        const DEFAULT_SKINS: [&str; 18] = [
-            "minecraft:entity/player/slim/alex",
-            "minecraft:entity/player/slim/ari",
-            "minecraft:entity/player/slim/efe",
-            "minecraft:entity/player/slim/kai",
-            "minecraft:entity/player/slim/makena",
-            "minecraft:entity/player/slim/noor",
-            "minecraft:entity/player/slim/steve",
-            "minecraft:entity/player/slim/sunny",
-            "minecraft:entity/player/slim/zuri",
-            "minecraft:entity/player/wide/alex",
-            "minecraft:entity/player/wide/ari",
-            "minecraft:entity/player/wide/efe",
-            "minecraft:entity/player/wide/kai",
-            "minecraft:entity/player/wide/makena",
-            "minecraft:entity/player/wide/noor",
-            "minecraft:entity/player/wide/steve",
-            "minecraft:entity/player/wide/sunny",
-            "minecraft:entity/player/wide/zuri",
-        ];
         if let Some(texture) = &self.patch_texture {
             return texture.into();
         }
-        let id = self
-            .id
-            .or_else(|| {
-                self.name
-                    .as_deref()
-                    .map(crate::user::UserData::offline_uuid)
-            })
-            .unwrap_or_default();
-        let hash = crate::world::waypoints::java_uuid_hash(&id);
-        DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
+        use crate::player::default_skin;
+        default_skin::DEFAULT_SKINS[default_skin::for_profile(self.id, self.name.as_deref())].into()
     }
 
     /// The key an [`Self::asset_skin`] texture is held under.

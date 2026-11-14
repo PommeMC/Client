@@ -100,9 +100,6 @@ enum HeadState {
     },
     /// No skin to show: a static profile with no textures, or a lookup that
     /// failed. Cached so it isn't retried (and re-logged) every frame.
-    // TODO: vanilla falls back to `DefaultPlayerSkin.get(uuid)`, which head
-    // items draw (`HeadProfile::asset_skin`); chat head glyphs and entities
-    // still draw wide Steve.
     Fallback,
 }
 

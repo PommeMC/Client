@@ -44,9 +44,6 @@ expect = { entity = "creeper" }
 press = { action = "key.toggleGui" }
 
 [[step]]
-deterministic = true
-
-[[step]]
 option = { shader_pack = "pomme_test" }
 
 [[step]]
