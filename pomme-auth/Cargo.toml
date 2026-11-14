@@ -21,4 +21,4 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "time"] }
 keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"], optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+tokio = { workspace = true, features = ["rt"] }

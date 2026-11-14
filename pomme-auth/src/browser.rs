@@ -67,10 +67,10 @@ pub async fn browser_sign_in(
         ],
     ));
 
-    let (mut stream, params) = tokio::time::timeout(TIMEOUT, callback(&loopback))
+    let (mut stream, params) = tokio::time::timeout(TIMEOUT, callback(&loopback, &state))
         .await
         .map_err(|_| "The sign-in timed out; try again".to_string())??;
-    let result = match callback_code(&params, &state) {
+    let result = match callback_code(&params) {
         Ok(code) => exchange_code(http, store, code, &redirect_uri, &verifier).await,
         Err(reason) => Err(reason),
     };
@@ -120,10 +120,14 @@ impl Loopback {
     }
 }
 
-/// The first request that carries the sign-in's answer, and the connection to
-/// answer it on; anything else (a favicon, an empty speculative connection)
-/// gets a 404.
-async fn callback(loopback: &Loopback) -> Result<(TcpStream, HashMap<String, String>), String> {
+/// The first request that carries this sign-in's answer (its `state`), and
+/// the connection to answer it on; anything else (a favicon, an empty
+/// speculative connection, another program's guess) gets a 404, so only
+/// Microsoft's redirect can end the sign-in.
+async fn callback(
+    loopback: &Loopback,
+    state: &str,
+) -> Result<(TcpStream, HashMap<String, String>), String> {
     loop {
         let mut stream = loopback
             .accept()
@@ -134,7 +138,7 @@ async fn callback(loopback: &Loopback) -> Result<(TcpStream, HashMap<String, Str
             continue;
         };
         if let Some(params) = query(&String::from_utf8_lossy(&buf[..n]))
-            && (params.contains_key("code") || params.contains_key("error"))
+            && params.get("state").map(String::as_str) == Some(state)
         {
             return Ok((stream, params));
         }
@@ -149,11 +153,8 @@ fn query(request: &str) -> Option<HashMap<String, String>> {
     Some(url.query_pairs().into_owned().collect())
 }
 
-/// The authorization code, once the callback's state matches the one sent.
-fn callback_code<'a>(
-    params: &'a HashMap<String, String>,
-    state: &str,
-) -> Result<&'a str, AuthError> {
+/// The authorization code from Microsoft's redirect, or why there's none.
+fn callback_code(params: &HashMap<String, String>) -> Result<&str, AuthError> {
     if let Some(error) = params.get("error") {
         return Err(if error == "access_denied" {
             AuthError::new("cancelled", "Sign-in was cancelled")
@@ -164,12 +165,6 @@ fn callback_code<'a>(
                 .clone()
                 .into()
         });
-    }
-    if params.get("state").map(String::as_str) != Some(state) {
-        return Err(AuthError::new(
-            "mismatch",
-            "The sign-in didn't match; try again",
-        ));
     }
     params
         .get("code")
@@ -221,23 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn the_callback_gives_its_code_only_with_the_state_sent() {
+    fn the_redirect_gives_its_code_or_why_not() {
         let ok = params("GET /?code=M.C5%2Fabc&state=s1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        assert_eq!(callback_code(&ok, "s1").ok(), Some("M.C5/abc"));
-        assert_eq!(
-            callback_code(&ok, "s2").err().map(|e| e.code),
-            Some("mismatch")
-        );
+        assert_eq!(callback_code(&ok).ok(), Some("M.C5/abc"));
         let denied = params("GET /?error=access_denied&state=s1 HTTP/1.1\r\n\r\n");
         assert_eq!(
-            callback_code(&denied, "s1").err().map(|e| e.code),
+            callback_code(&denied).err().map(|e| e.code),
             Some("cancelled")
         );
         assert!(query("").is_none());
     }
 
     #[tokio::test]
-    async fn the_listener_skips_requests_without_an_answer() {
+    async fn the_listener_takes_only_this_sign_ins_answer() {
         let loopback = Loopback::bind().await.unwrap();
         let v4 = ("127.0.0.1", loopback.port);
         // The answer comes over IPv6 where the machine has it.
@@ -248,20 +239,21 @@ mod tests {
         };
         let browser = tokio::spawn(async move {
             drop(TcpStream::connect(v4).await.unwrap());
-            for (request, addr) in [
-                ("GET /favicon.ico HTTP/1.1\r\n\r\n", v4),
-                ("GET /?code=c&state=s HTTP/1.1\r\n\r\n", answer_from),
+            for (request, addr, skipped) in [
+                ("GET /favicon.ico HTTP/1.1\r\n\r\n", v4, true),
+                ("GET /?code=forged&state=guess HTTP/1.1\r\n\r\n", v4, true),
+                ("GET /?code=c&state=s HTTP/1.1\r\n\r\n", answer_from, false),
             ] {
                 let mut stream = TcpStream::connect(addr).await.unwrap();
                 stream.write_all(request.as_bytes()).await.unwrap();
-                let mut reply = String::new();
-                if request.contains("favicon") {
+                if skipped {
+                    let mut reply = String::new();
                     stream.read_to_string(&mut reply).await.unwrap();
-                    assert!(reply.starts_with("HTTP/1.1 404"));
+                    assert!(reply.starts_with("HTTP/1.1 404"), "{request}");
                 }
             }
         });
-        let (_, params) = callback(&loopback).await.unwrap();
+        let (_, params) = callback(&loopback, "s").await.unwrap();
         assert_eq!(params.get("code").map(String::as_str), Some("c"));
         browser.await.unwrap();
     }
