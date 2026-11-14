@@ -2,6 +2,8 @@
 # flicker and smoke, lava's pops, animated textures, server particles and the
 # clouds all stay put, so two shots a second apart match.
 
+deterministic = false
+
 [[step]]
 wait_ms = 2000
 

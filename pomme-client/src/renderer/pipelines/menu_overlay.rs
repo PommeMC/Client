@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::assets::load_resource_image;
+use crate::player::default_skin;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, packing, rhi, shader, util};
 use crate::resources::pack_resources::{POMME_ICON, POMME_ICONS_FONT, POMME_UI_FONT};
 use crate::resources::{ResourceError, ResourceId, ResourceManager, resource_id};
@@ -860,7 +861,9 @@ impl MenuGeometry {
                         &self.favicon_regions,
                         &self.sprite_atlas,
                         uuid,
-                        SpriteId::SteveHead,
+                        SpriteId::DefaultHead(
+                            default_skin::for_profile(uuid.parse().ok(), None) as u8
+                        ),
                         *x,
                         *y,
                         *size,
@@ -2321,7 +2324,7 @@ pub enum MenuElement {
         address: String,
     },
     /// A player's 8x8 skin face, looked up in the shared face/favicon atlas by
-    /// UUID; falls back to the default `SteveHead` sprite until it loads.
+    /// UUID; falls back to `DefaultPlayerSkin.get(uuid)`'s face until it loads.
     SkinFace {
         x: f32,
         y: f32,
@@ -2602,7 +2605,8 @@ pub enum SpriteId {
     Pinging5,
     Incompatible,
     Unreachable,
-    SteveHead,
+    /// `DefaultPlayerSkin`'s faces, by its index.
+    DefaultHead(u8),
     PommeLogo,
     MinecraftLogo,
     MinecraftEdition,
@@ -3982,25 +3986,22 @@ fn build_sprite_atlas(
         }
     }
 
-    // Steve head: 8x8 face composited with the 8x8 hat overlay from the wide skin.
-    let steve_image = load_resource_image(
-        resources,
-        &resource_id!("minecraft:textures/entity/player/wide/steve.png"),
-    );
-    match steve_image {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
-            match extract_face_8x8(rgba.as_raw(), rgba.width(), rgba.height()) {
-                Some(out) => images.push((SpriteId::SteveHead, out, 8, 8, 0.0)),
-                None => {
-                    tracing::warn!("Steve skin too small: {}x{}", rgba.width(), rgba.height());
-                    images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
-                }
+    // `DefaultPlayerSkin`'s faces: each 8x8 face composited with its hat.
+    for (index, texture) in default_skin::TEXTURES.iter().enumerate() {
+        let id = SpriteId::DefaultHead(index as u8);
+        let face = load_resource_image(resources, &texture[0])
+            .map_err(|e| e.to_string())
+            .and_then(|img| {
+                let rgba = img.to_rgba8();
+                extract_face_8x8(rgba.as_raw(), rgba.width(), rgba.height())
+                    .ok_or_else(|| format!("too small: {}x{}", rgba.width(), rgba.height()))
+            });
+        match face {
+            Ok(face) => images.push((id, face, 8, 8, 0.0)),
+            Err(e) => {
+                tracing::warn!("Failed to load default skin {}: {e}", texture[0]);
+                images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to load Steve skin: {e}");
-            images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
         }
     }
 
@@ -5267,7 +5268,9 @@ fn push_mc_text(
                 let sy = (cy - px_scale).round();
                 let key = object.atlas_key();
                 let fallback = match object {
-                    InlineObject::Player { .. } => SpriteId::SteveHead,
+                    InlineObject::Player { uuid, name, .. } => SpriteId::DefaultHead(
+                        default_skin::for_profile(*uuid, name.as_deref()) as u8,
+                    ),
                     InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                 };
                 let mut draw_object = |dx: f32, color: [f32; 4]| {

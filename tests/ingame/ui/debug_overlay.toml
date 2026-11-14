@@ -17,9 +17,6 @@ chat = "/time set 6000"
 expect = { terrain = "settled" }
 timeout_ms = 30000
 
-[[step]]
-deterministic = true
-
 # Chat fades after 10 seconds.
 [[step]]
 wait_ms = 11000

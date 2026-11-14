@@ -2,6 +2,8 @@
 # and prismarine blend between theirs. Screenshots a few ticks apart differ on
 # the blocks.
 
+deterministic = false
+
 [[step]]
 wait_ms = 2000
 

@@ -99,7 +99,14 @@ a test exercises the real code.
 A script is a list of `[[step]]` tables, run in order once the client is in
 game. After it leaves the game (the pause menu's Disconnect), only steps that
 work on the title screens may follow: waits, screenshots, input, `cursor_to_button`
-and `screen` checks. Each step has exactly one action:
+and `screen` checks.
+
+Scripts start under the `deterministic` step, so both clients' shots hold
+still and compare alike. A script about that noise itself (animated textures,
+particles) sets `deterministic = false` above its first step, and can turn it
+on later with the step.
+
+Each step has exactly one action:
 
 ```toml
 [[step]]
@@ -175,7 +182,7 @@ deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view
                                               # bobbing and the autosave
                                               # indicator still for the rest of
-                                              # the script
+                                              # a script that started without
 [[step]]
 hold_packets = true                           # incoming packets wait unhandled
                                               # until hold_packets = false, as
@@ -197,10 +204,14 @@ frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # rate, its 1% low, the render
                                               # encode time, the GPU wait, the
                                               # GPU's own time per pass, and
-                                              # the sections and triangles drawn
+                                              # the sections and triangles drawn;
+                                              # set `deterministic = false` to
+                                              # time clouds and particles too
 
 [[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
+keep_chat = true                              # chat is cleared before a shot,
+                                              # as F3+D clears it, unless kept
 
 [[step]]
 match_screenshots = ["first", "second"]       # fails unless two shots match
@@ -257,4 +268,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`, optional `keep_chat`).

@@ -259,12 +259,10 @@ impl App {
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
-        let pending_skin_uuid = user.has_profile.then_some(user.uuid);
         let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
         Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
-                pending_skin_uuid,
                 loading: None,
             }),
             install: install::Install::new(&core, false),
@@ -406,7 +404,6 @@ impl App {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
-                mut pending_skin_uuid,
                 loading: Some(loading),
             } => {
                 let Loading { boot, window, .. } = *loading;
@@ -421,7 +418,6 @@ impl App {
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_play,
-                            pending_skin_uuid,
                             loading: None,
                         };
                     }
@@ -431,9 +427,13 @@ impl App {
                     p.set_in_menu(&self.core.version);
                 }
 
-                if let Some(uuid) = pending_skin_uuid.take() {
-                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
-                    self.core.menu.set_player_face(Some(&uuid));
+                renderer.load_player_skin(
+                    &self.core.user,
+                    self.core.resources(),
+                    &self.core.tokio_rt,
+                );
+                if self.core.user.has_profile {
+                    self.core.menu.set_player_face(Some(&self.core.user.uuid));
                 }
 
                 self.core.apply_cursor_grab(&window, None);
@@ -622,7 +622,13 @@ fn create_window(
         .with_visible(cfg!(mobile))
         .with_active(!core.test_window)
         .with_window_icon(window_icon);
-    if cfg!(not(mobile)) {
+    if core.test_window {
+        // In pixels, as vanilla's `--width` is, so shots are the same size at
+        // any display scale.
+        let size = core.window_size;
+        window_attrs =
+            window_attrs.with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+    } else if cfg!(not(mobile)) {
         window_attrs = window_attrs.with_inner_size(core.window_size);
     }
     event_loop.create_window(window_attrs).map(Arc::new)
@@ -719,7 +725,6 @@ impl ApplicationHandler for App {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
-                pending_skin_uuid,
                 loading: None,
             } => {
                 // The first-run download's window, if it ran.
@@ -734,7 +739,6 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_play,
-                            pending_skin_uuid,
                             loading: None,
                         };
                     }
@@ -764,7 +768,6 @@ impl ApplicationHandler for App {
                 };
                 AppPhase::Setup {
                     quick_play,
-                    pending_skin_uuid,
                     loading,
                 }
             }

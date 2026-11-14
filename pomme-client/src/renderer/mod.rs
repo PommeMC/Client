@@ -342,6 +342,9 @@ pub struct Renderer {
     width: u32,
     height: u32,
     last_timings: RenderTimings,
+    /// The local player's `DefaultPlayerSkin` index, drawn until their own
+    /// skin arrives, and for good without one.
+    default_skin: usize,
     /// The player's skin still downloading, applied by the frame it arrives
     /// in.
     pending_skin: Option<(
@@ -661,6 +664,7 @@ impl Renderer {
             width: swapchain_extent.width,
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
+            default_skin: crate::player::default_skin::STEVE,
             pending_skin: None,
         })
     }
@@ -1928,19 +1932,15 @@ impl Renderer {
         self.book_preview.destroy(device);
         self.book_preview = BookPreviewPipeline::new(device, targets, resources);
         self.entity_renderer.reload_textures(device, resources);
-        if self.hand_pipeline.reload_default_skin(device, resources) {
-            self.skin_preview.rebind_skin(
-                device,
-                self.hand_pipeline.skin_texture(),
-                self.hand_pipeline.skin_sampler(),
-            );
-        }
         self.panorama_pipeline.reload_cubemap(
             device,
             pipelines::panorama::resolve_panorama_faces(resources),
         );
         self.menu_pipeline
             .reload_resource_images(resources, device, menu_fonts);
+        if !self.hand_pipeline.has_profile_skin() {
+            self.show_default_skin(resources);
+        }
     }
 
     /// A theme switch: theme packs only alias the panorama faces, and the
@@ -1977,15 +1977,53 @@ impl Renderer {
         self.skin_preview.trigger_swing();
     }
 
-    /// Starts downloading the player's skin; vanilla `SkinManager` fetches
-    /// skins asynchronously too, drawing the default one until then.
-    pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
+    /// Shows the local player's default skin, then starts downloading their
+    /// own when they have a profile: vanilla `SkinManager` fetches skins
+    /// asynchronously too, drawing `DefaultPlayerSkin.get(uuid)` until then.
+    // TODO: vanilla draws the skin of the profile the server sent, so an
+    // offline-mode server shows the default skin of its offline uuid; this
+    // shows the account's own skin everywhere.
+    pub fn load_player_skin(
+        &mut self,
+        user: &crate::user::UserData,
+        resources: &dyn ResourceManager,
+        rt: &tokio::runtime::Runtime,
+    ) {
+        self.default_skin = crate::player::default_skin::index(&user.uuid);
+        self.pending_skin = None;
+        self.ctx.device.wait_idle();
+        self.show_default_skin(resources);
+        if !user.has_profile {
+            return;
+        }
+        let uuid = user.uuid;
         let uuid_str = uuid.to_string().replace('-', "");
         let (tx, rx) = std::sync::mpsc::channel();
         rt.spawn(async move {
             let _ = tx.send(fetch_skin_texture(&uuid_str).await);
         });
-        self.pending_skin = Some((*uuid, rx));
+        self.pending_skin = Some((uuid, rx));
+    }
+
+    /// The caller has made the device idle.
+    fn show_default_skin(&mut self, resources: &dyn ResourceManager) {
+        let slim =
+            self.hand_pipeline
+                .reload_default_skin(&self.ctx.device, resources, self.default_skin);
+        self.rebuild_skin_preview(slim);
+    }
+
+    /// Points the skin preview at the hand's skin, with its arm model. The
+    /// caller has made the device idle.
+    fn rebuild_skin_preview(&mut self, slim: bool) {
+        self.skin_preview.destroy(&self.ctx.device);
+        self.skin_preview = SkinPreviewPipeline::new(
+            &self.ctx.device,
+            self.swapchain.targets(),
+            self.hand_pipeline.skin_texture(),
+            self.hand_pipeline.skin_sampler(),
+            slim,
+        );
     }
 
     fn apply_fetched_skin(&mut self) {
@@ -2007,14 +2045,7 @@ impl Renderer {
                 // hand mesh, and preview pipeline about to be destroyed.
                 self.ctx.device.wait_idle();
                 self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
-                self.skin_preview.destroy(&self.ctx.device);
-                self.skin_preview = SkinPreviewPipeline::new(
-                    &self.ctx.device,
-                    self.swapchain.targets(),
-                    self.hand_pipeline.skin_texture(),
-                    self.hand_pipeline.skin_sampler(),
-                    skin.slim,
-                );
+                self.rebuild_skin_preview(skin.slim);
                 self.update_player_entity_skin(&uuid, &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),

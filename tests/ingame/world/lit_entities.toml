@@ -41,9 +41,6 @@ expect = { entity = "glow_squid" }
 press = { action = "key.toggleGui" }
 
 [[step]]
-deterministic = true
-
-[[step]]
 wait_ms = 3000
 
 [[step]]

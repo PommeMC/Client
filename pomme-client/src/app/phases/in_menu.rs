@@ -192,10 +192,8 @@ pub fn update_menu(
                 core.user.access_token.clone(),
                 &core.input.key_bindings,
             );
-            if core.user.has_profile {
-                gfx.renderer
-                    .load_player_skin(&core.user.uuid, &core.tokio_rt);
-            }
+            gfx.renderer
+                .load_player_skin(&core.user, core.resources(), &core.tokio_rt);
             core.menu
                 .set_player_face(core.user.has_profile.then_some(&core.user.uuid));
             if account.is_some()

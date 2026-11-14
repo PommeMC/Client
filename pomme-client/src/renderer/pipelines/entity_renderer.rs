@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::entity::components::Position;
 use crate::entity::dimensions;
+use crate::player::default_skin;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::{LightLevels, UNLIT_LANE};
 use crate::renderer::entity_model::{BakedEntityModel, EntityVertex};
@@ -1059,7 +1060,6 @@ fn mob_definitions() -> Vec<MobDef> {
         tex_table!("sheep" => "sheep_wool_undercoat");
     const SHEEP_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool");
     const SHEEP_BABY_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool_baby");
-    const PLAYER_TEX: &[&[ResourceId]] = tex_table!("player/wide" => "steve");
     const ZOMBIE_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie");
     const ZOMBIE_BABY_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie_baby");
     const HUSK_TEX: &[&[ResourceId]] = tex_table!("zombie" => "husk");
@@ -1602,11 +1602,19 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
-            // Variant 0 = classic (wide) arms, 1 = slim; picked per player from
-            // the skin's model metadata (effective_variant_index).
+            // `DefaultPlayerSkin`'s skins in its order, slim then wide;
+            // picked per player (effective_variant_index).
             adult: vec![
-                opaque(entity_model::bake_player_model(false), PLAYER_TEX, 64),
-                opaque(entity_model::bake_player_model(true), PLAYER_TEX, 64),
+                opaque(
+                    entity_model::bake_player_model(true),
+                    &default_skin::TEXTURES[..default_skin::SLIM_COUNT],
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_player_model(false),
+                    &default_skin::TEXTURES[default_skin::SLIM_COUNT..],
+                    64,
+                ),
             ],
             baby: None,
             adult_overlays: vec![],
@@ -2502,11 +2510,19 @@ impl EntityRenderer {
         self.player_skin(info).map_or(fallback, |skin| skin.set)
     }
 
-    /// Players pick their model variant (0 = wide, 1 = slim) from the fetched
-    /// skin's metadata rather than the caller-supplied index.
+    /// A player draws its fetched skin on a variant of that skin's model, or
+    /// else `DefaultPlayerSkin.get(uuid)`'s variant.
     fn effective_variant_index(&self, info: &EntityRenderInfo) -> u32 {
-        self.player_skin(info)
-            .map_or(info.variant_index, |skin| skin.slim as u32)
+        if info.entity_kind != EntityKind::Player {
+            return info.variant_index;
+        }
+        let index = match (self.player_skin(info), info.player_uuid) {
+            (Some(skin), _) if skin.slim => 0,
+            (Some(_), _) => default_skin::SLIM_COUNT,
+            (None, Some(uuid)) => default_skin::index(&uuid),
+            (None, None) => default_skin::STEVE,
+        };
+        index as u32
     }
 
     /// Texture set and tint of each drawn equipment layer, in submit order.
