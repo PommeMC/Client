@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 
 use azalea_inventory::ItemStackData;
-use azalea_inventory::components::UseCooldown;
+use azalea_inventory::components::{DataComponentTrait, UseCooldown};
+use azalea_inventory::default_components::get_default_component;
 use azalea_registry::builtin::ItemKind;
-
-use super::interaction::stack_component;
+use azalea_registry::identifier::Identifier;
 
 /// A cooldown group's identifier. An item's id is held as the item, so the
 /// common lookup (an item without a `use_cooldown` group) doesn't allocate.
@@ -21,14 +21,24 @@ impl CooldownGroup {
     fn parse(id: String) -> Self {
         match id.parse() {
             Ok(kind) => Self::Item(kind),
-            Err(_) => Self::Other(id),
+            Err(_) => Self::Other(Identifier::new(id).to_string()),
         }
     }
 
     /// Vanilla `ItemCooldowns.getCooldownGroup`: the `use_cooldown` group,
     /// else the item's id.
     pub fn of(stack: &ItemStackData) -> Self {
-        match stack_component::<UseCooldown>(stack).and_then(|c| c.cooldown_group) {
+        // An explicit removal suppresses the default component too.
+        let cooldown = if stack
+            .component_patch
+            .iter()
+            .any(|(kind, _)| kind == UseCooldown::KIND)
+        {
+            stack.component_patch.get::<UseCooldown>().cloned()
+        } else {
+            get_default_component::<UseCooldown>(stack.kind)
+        };
+        match cooldown.and_then(|c| c.cooldown_group) {
             Some(group) => Self::parse(group.to_string()),
             None => Self::Item(stack.kind),
         }

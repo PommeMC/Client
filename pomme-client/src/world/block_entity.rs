@@ -44,10 +44,12 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
 
 /// The block entity a block gets the moment it's placed, before (or without)
 /// any data from the server: [`rendered_kind`]'s, and signs, whose editor
-/// opens on the empty sign the placement made.
+/// opens on the empty sign the placement made, and client-ticked campfires.
 fn synthesized_kind(name: &str) -> Option<BlockEntityKind> {
     rendered_kind(name).or_else(|| {
-        if name.ends_with("_hanging_sign") {
+        if matches!(name, "campfire" | "soul_campfire") {
+            Some(BlockEntityKind::Campfire)
+        } else if name.ends_with("_hanging_sign") {
             Some(BlockEntityKind::HangingSign)
         } else {
             name.ends_with("_sign").then_some(BlockEntityKind::Sign)
@@ -66,6 +68,7 @@ fn is_synthesized(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::ShulkerBox
             | BlockEntityKind::Sign
             | BlockEntityKind::HangingSign
+            | BlockEntityKind::Campfire
     )
 }
 
@@ -102,6 +105,10 @@ pub struct BlockEntities {
 impl BlockEntities {
     pub fn get(&self, pos: &BlockPos) -> Option<&StoredBlockEntity> {
         self.columns.get(&ChunkPos::containing(*pos))?.get(pos)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&BlockPos, &StoredBlockEntity)> {
+        self.columns.values().flat_map(|column| column.iter())
     }
 
     pub fn get_mut(&mut self, pos: &BlockPos) -> Option<&mut StoredBlockEntity> {

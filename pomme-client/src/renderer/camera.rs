@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj, view};
-use glam::{DVec3, FloatExt, Mat4, Vec2, Vec3};
+use glam::{DVec3, FloatExt, Mat3, Mat4, Quat, Vec2, Vec3};
 
 use crate::app::input::InputState;
 use crate::entity::HURT_DURATION;
@@ -112,6 +112,28 @@ impl CloudMode {
             1 => Self::Fast,
             _ => Self::Fancy,
         }
+    }
+}
+
+/// Coefficients [a, b, c, d] for the six planes bounding the camera frustum.
+pub type FrustumPlanes = [[f32; 4]; 6];
+
+/// Culling snapshot with a world-space pivot and pivot-relative planes.
+pub(crate) struct CameraFrustum {
+    pivot: DVec3,
+    planes: FrustumPlanes,
+}
+
+impl CameraFrustum {
+    pub(super) fn planes(&self) -> &FrustumPlanes {
+        &self.planes
+    }
+
+    pub fn contains(&self, position: DVec3) -> bool {
+        let relative = (position - self.pivot).as_vec3();
+        self.planes
+            .iter()
+            .all(|[a, b, c, d]| a * relative.x + b * relative.y + c * relative.z + d >= 0.0)
     }
 }
 
@@ -387,14 +409,21 @@ impl Camera {
         (fov * self.fluid_fov_factor).to_radians()
     }
 
-    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
+    pub(crate) fn frustum(&self) -> CameraFrustum {
+        CameraFrustum {
+            pivot: *self.position,
+            planes: self.frustum_planes(),
+        }
+    }
+
+    pub fn frustum_planes(&self) -> FrustumPlanes {
         Self::planes_from_view_projection(self.culling_view_projection(self.culling_fov()))
     }
 
     /// Frustum planes for a FOV widened by `extra_radians` (clamped below
     /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
     /// scheduling.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
+    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> FrustumPlanes {
         let fov = (self.culling_fov() + extra_radians).min(2.96);
         Self::planes_from_view_projection(self.culling_view_projection(fov))
     }
@@ -415,7 +444,7 @@ impl Camera {
         proj * view
     }
 
-    pub fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
+    pub fn planes_from_view_projection(m: Mat4) -> FrustumPlanes {
         let mt = m.transpose();
         let r0 = mt.x_axis;
         let r1 = mt.y_axis;
@@ -424,7 +453,7 @@ impl Camera {
 
         let raw = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2];
 
-        let mut planes = [[0.0f32; 4]; 6];
+        let mut planes = FrustumPlanes::default();
         for (i, v) in raw.iter().enumerate() {
             let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
             if len > 0.0 {
@@ -466,6 +495,11 @@ impl Camera {
         } else {
             (right, up)
         }
+    }
+
+    pub fn billboard_rotation(&self) -> Quat {
+        let (right, up) = self.billboard_axes();
+        Quat::from_mat3(&Mat3::from_cols(right, up, right.cross(up))).normalize()
     }
 
     /// The way the camera looks (vanilla `Camera.forwardVector`).

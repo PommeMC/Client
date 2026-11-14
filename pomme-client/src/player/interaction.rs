@@ -30,15 +30,15 @@ use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::ItemCooldowns;
-use crate::position::BlockPos;
+use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
 use crate::world::block::model::Direction;
-use crate::world::block::render_assets::BlockRenderView;
 use crate::world::block::sound::{BlockSounds, block_sounds_for_id};
 use crate::world::block::{BlockStateData, BlockStateTable};
 use crate::world::chunk::ChunkStore;
+use crate::world::level::LevelContext;
 
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
@@ -54,8 +54,7 @@ const MAX_FOOD_LEVEL: u32 = 20;
 /// break particles alongside the sound).
 pub struct BreakEffects<'a> {
     pub particles: &'a mut ParticleStore,
-    pub registry: BlockRenderView<'a>,
-    pub biome_climate: &'a HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+    pub level: LevelContext<'a>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +104,9 @@ enum UseResult {
     Success { swing: bool },
     Pass,
     Fail,
+    /// The item's block use cannot PASS, but its exact SUCCESS/FAIL is
+    /// unknown. Stop fallback without predicting success or presentation.
+    NonPassingUnpredicted,
 }
 
 /// Last server-known state for a locally-predicted block change, matching
@@ -300,13 +302,7 @@ impl InteractionState {
         mark_dirty(&pos, dirty_chunks);
         let table = block_registry.block_state_table();
         play_break_sound_for_id(audio, table, table.block_state_data(state).id(), pos);
-        effects.particles.add_destroy_block_effect(
-            pos,
-            state,
-            effects.registry,
-            chunks,
-            effects.biome_climate,
-        );
+        effects.level.add_destroy_block_effect(pos, state);
         self.destroy_delay = DESTROY_COOLDOWN;
     }
 
@@ -483,6 +479,7 @@ impl InteractionState {
         look: LookDirection,
         on_ground: bool,
         creative: bool,
+        may_build: bool,
         food: u32,
         selected_slot: u8,
         hands: [HandItem; 2],
@@ -554,6 +551,7 @@ impl InteractionState {
                 hands,
                 food,
                 creative,
+                may_build,
                 input.performing_action(input::Action::Sneak),
                 effects,
                 &mut dirty_chunks,
@@ -821,6 +819,7 @@ impl InteractionState {
         hands: [HandItem; 2],
         food: u32,
         creative: bool,
+        may_build: bool,
         sneaking: bool,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
@@ -858,7 +857,9 @@ impl InteractionState {
                     chunks,
                     hit,
                     hand,
+                    held.stack,
                     self.placed_block(&held),
+                    may_build,
                     suppress_block_use,
                     player_pos,
                     player_aabb,
@@ -870,7 +871,7 @@ impl InteractionState {
             // A passing block use falls through to `useItem`, which is how
             // eating at the ground works.
             let result = match (result, held.stack) {
-                (UseResult::Fail, _) => return false,
+                (UseResult::Fail | UseResult::NonPassingUnpredicted, _) => return false,
                 (UseResult::Pass, Some(stack)) => self.use_item(
                     sender, audio, player_pos, eye_pos, look, hand, stack, held.worn, food,
                     creative, effects,
@@ -888,7 +889,7 @@ impl InteractionState {
     }
 
     /// Vanilla `MultiPlayerGameMode.useItemOn`: the block's own use (main
-    /// hand only, as `useWithoutItem`) and then the item's placement.
+    /// hand only, as `useWithoutItem`) and then the item's block use.
     #[allow(clippy::too_many_arguments)]
     fn use_item_on(
         &mut self,
@@ -898,7 +899,9 @@ impl InteractionState {
         chunks: &ChunkStore,
         hit: BlockHitResult,
         hand: InteractionHand,
+        stack: Option<&ItemStackData>,
         place_block: Option<BlockState>,
+        may_build: bool,
         suppress_block_use: bool,
         player_pos: DVec3,
         player_aabb: Aabb,
@@ -938,8 +941,18 @@ impl InteractionState {
                 return UseResult::Success { swing: false };
             }
         }
-        // TODO: other `Item.useOn` successes (hoes, flint and steel, bone
-        // meal, ...) pass here and fall through to `useItem`.
+        let Some(stack) = stack.filter(|stack| !stack.is_empty()) else {
+            return UseResult::Pass;
+        };
+        if self.item_cooldowns.is_on_cooldown(stack) {
+            return UseResult::Pass;
+        }
+        if let Some(result) = predict_igniter_use_on(block_registry, chunks, hit, stack, may_build)
+        {
+            return result;
+        }
+        // Unsupported item families (tools, bone meal, honeycomb, ...) and
+        // Adventure CanPlaceOn permissions retain the existing PASS approximation.
         if place_block.is_none() {
             return UseResult::Pass;
         }
@@ -1929,6 +1942,64 @@ fn hand_render_selection(
 pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
     stack.kind == ItemKind::Crossbow
         && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
+}
+
+/// Bounded, result-only prediction for the two igniters. Neither item can
+/// PASS once eligible; unmodelled fire survival/portal checks stay unknown.
+fn predict_igniter_use_on(
+    block_registry: &BlockRegistry,
+    chunks: &ChunkStore,
+    hit: BlockHitResult,
+    stack: &ItemStackData,
+    may_build: bool,
+) -> Option<UseResult> {
+    if !may_build
+        || stack.is_empty()
+        || !matches!(stack.kind, ItemKind::FlintAndSteel | ItemKind::FireCharge)
+    {
+        return None;
+    }
+    // Missing columns and out-of-height reads otherwise synthesize AIR.
+    let known_state = |pos: BlockPos| {
+        let min_y = i64::from(chunks.min_y());
+        let y = i64::from(pos.y);
+        if y < min_y
+            || y >= min_y + i64::from(chunks.height())
+            || chunks
+                .get_chunk(&ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16)))
+                .is_none()
+        {
+            return None;
+        }
+        Some(block_registry.block_state_data(chunks.get_block_state(pos.x, pos.y, pos.z)))
+    };
+    let Some(target) = known_state(hit.block_pos) else {
+        return Some(UseResult::NonPassingUnpredicted);
+    };
+    let tags = block_registry.tags();
+    let properties = target.properties();
+    let direct_light = properties.get("lit") == Some("false")
+        && (tags.contains("minecraft:candle_cakes", target.id())
+            || ((tags.contains("minecraft:campfires", target.id())
+                || tags.contains("minecraft:candles", target.id()))
+                && properties.get("waterlogged") == Some("false")));
+    if direct_light {
+        return Some(UseResult::Success { swing: true });
+    }
+    let adjacent = hit.block_pos.relative(hit.face);
+    let Some(state) = known_state(adjacent) else {
+        return Some(UseResult::NonPassingUnpredicted);
+    };
+    if !state.is_air() {
+        return Some(UseResult::Fail);
+    }
+    if let Some(below) = known_state(adjacent.relative(Direction::Down))
+        && (tags.contains("minecraft:soul_fire_base_blocks", below.id())
+            || below.is_full_face_sturdy(Direction::Up) == Some(true))
+    {
+        return Some(UseResult::Success { swing: true });
+    }
+    Some(UseResult::NonPassingUnpredicted)
 }
 
 /// The stack's component override if the server set one, else the item's

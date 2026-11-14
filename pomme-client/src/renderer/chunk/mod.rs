@@ -1,4 +1,5 @@
 pub mod atlas;
+pub(crate) mod atlas_sources;
 pub(crate) mod block_lighter;
 pub mod buffer;
 pub mod mesh_columns;

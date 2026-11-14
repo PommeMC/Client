@@ -25,6 +25,7 @@ mod logging;
 mod mob_effect;
 mod net;
 mod particle;
+pub(crate) mod particles;
 mod physics;
 mod player;
 mod position;
@@ -221,7 +222,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         })
         .flatten();
 
-    let mut app = App::new(
+    let mut app = match App::new(
         version.to_owned(),
         data_dirs,
         rt,
@@ -229,7 +230,13 @@ pub fn run(args: LaunchArgs, platform: Platform) {
         user,
         quick_play,
         winit::dpi::LogicalSize::new(args.width, args.height),
-    )
+    ) {
+        Ok(app) => app,
+        Err(error) => {
+            tracing::error!("Failed to initialize application: {error}");
+            std::process::exit(1);
+        }
+    }
     .with_chunk_bench(args.chunk_bench);
     if check_for_update {
         app.check_for_update();

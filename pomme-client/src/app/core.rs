@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput;
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
@@ -24,13 +25,20 @@ use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
+use crate::particle::{ServerParticleKind, next_gaussian};
+use crate::particles::types::SimpleParticleType;
+use crate::particles::{
+    MappedParticleResources, ParticleAtlasSprites, ParticleEngine, ParticleResources,
+    ParticleTypes, PreparedParticleDescriptions, register_builtin_providers,
+};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
+use crate::renderer::chunk::atlas::AtlasCpu;
+use crate::renderer::chunk::atlas_sources::{SpriteSourceList, SpriteSources};
 use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
-use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
 use crate::resources::pack_resources::PackType;
 use crate::resources::packs::{
@@ -38,6 +46,7 @@ use crate::resources::packs::{
     PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
     SymlinkPolicy, ThemeSpecification, download_server_pack,
 };
+use crate::resources::{ResourceManager, resource_id};
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
@@ -45,9 +54,12 @@ use crate::ui::menu::{
 };
 use crate::ui::text::InlineObject;
 use crate::user::UserData;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::block_registry::BlockDefinitions;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::chunk::ChunkStore;
 use crate::world::environment::EnvironmentProbe;
+use crate::world::level::LevelContext;
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,
@@ -397,30 +409,27 @@ pub(crate) fn play_movement_sounds(audio: &crate::audio::AudioEngine, game: &mut
     }
 }
 
+// COMPAT: Vanilla's LevelEventHandler delegates block destruction to
+// ClientLevel. Keep this sound/particle handling here; reorganizing network
+// packet handling is outside the particle port's scope.
 /// Vanilla `LevelEventHandler` case 2001: a broken block's sound and
 /// particles.
 fn block_break_effect(
     audio: &crate::audio::AudioEngine,
-    game: &mut GameState,
+    level: &mut LevelContext<'_>,
     pos: crate::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
-    let block_state_data = game.block_registry.block_state_data(state);
+    let block_state_data = level.block_state_table().block_state_data(state);
     if !block_state_data.is_air() {
         crate::player::interaction::play_break_sound_for_id(
             audio,
-            game.block_registry.block_state_table(),
+            level.block_state_table(),
             block_state_data.id(),
             pos,
         );
     }
-    game.particle_store.add_destroy_block_effect(
-        pos,
-        state,
-        game.block_registry.render_view(),
-        &game.chunk_store,
-        &game.biome_climate,
-    );
+    level.add_destroy_block_effect(pos, state);
 }
 
 /// The local player's box as a push target, gated on `LivingEntity.isPushable`
@@ -994,6 +1003,17 @@ impl RepeatStepper {
     }
 }
 
+pub(super) struct PreparedParticleAssets {
+    pub(super) descriptions: PreparedParticleDescriptions,
+    pub(super) cpu: AtlasCpu,
+    pub(super) sprites: ParticleAtlasSprites,
+}
+
+struct PreparedPackAssets {
+    renderer: crate::renderer::PreparedResources,
+    particles: PreparedParticleAssets,
+}
+
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -1023,6 +1043,12 @@ pub struct AppCore {
     asset_reload_revision: u64,
     server_resource_ids: HashMap<uuid::Uuid, PackId>,
     pub(crate) block_definitions: Rc<BlockDefinitions>,
+    /// Canonical client-lifetime engine; world changes and reloads clear it in
+    /// place.
+    pub(crate) particle_engine: ParticleEngine<MappedParticleResources>,
+    particle_resources: Rc<MappedParticleResources>,
+    sprite_sources: SpriteSources,
+    particle_types: ParticleTypes,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1152,7 +1178,7 @@ impl AppCore {
         presence: Option<DiscordPresence>,
         user: UserData,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let pack_type = PackType::ClientResources;
         let builtin_resources = BuiltinRepositorySource::new(None);
         let folder_resources = FolderRepositorySource::new(Vec::new(), None, pack_type, None);
@@ -1181,6 +1207,12 @@ impl AppCore {
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
+        let particle_types = ParticleTypes::new()?;
+        let sprite_sources = SpriteSources::bootstrap();
+        let mut particle_resources = MappedParticleResources::new();
+        register_builtin_providers(&particle_types, &mut particle_resources);
+        let particle_resources = Rc::new(particle_resources);
+        let particle_engine = ParticleEngine::new(Rc::clone(&particle_resources));
         let mut core = Self {
             user,
             presence,
@@ -1205,7 +1237,11 @@ impl AppCore {
             server_resource_ids: HashMap::new(),
             resource_repository,
             resources,
-            block_definitions: Rc::new(BlockDefinitions::new()),
+            block_definitions: Rc::new(BlockDefinitions::new(&particle_types)),
+            particle_engine,
+            particle_resources,
+            sprite_sources,
+            particle_types,
             pending_pack_download: None,
             audio,
             tick_accumulator: 0.0,
@@ -1235,7 +1271,7 @@ impl AppCore {
             game_dynamic_atlas_keys: HashSet::new(),
         };
         core.configure_resources();
-        core
+        Ok(core)
     }
 
     fn configure_resources(&mut self) {
@@ -1305,7 +1341,7 @@ impl AppCore {
 
     /// Activates the selection with nothing to prepare.
     fn reload_resources(&mut self) {
-        self.activate_resource_selection(None, |_| Ok(()))
+        self.activate_resource_selection(None, |_, _, _| Ok(()))
             .expect("activation with nothing to prepare can't fail");
     }
 
@@ -1314,7 +1350,11 @@ impl AppCore {
     fn activate_resource_selection<T>(
         &mut self,
         toggle: Option<(PackId, bool)>,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         self.resource_repository.reload();
         self.resource_repository
@@ -1329,13 +1369,17 @@ impl AppCore {
         let opened = self.resource_repository.open_all_enabled();
         let menu = &mut self.menu;
         let audio = &mut self.audio;
-        let prepared = self
-            .resources
-            .reload_with_preparation(opened, prepare, |resources| {
+        let particle_resources = &*self.particle_resources;
+        let sprite_sources = &self.sprite_sources;
+        let prepared = self.resources.reload_with_preparation(
+            opened,
+            |resources| prepare(resources, particle_resources, sprite_sources),
+            |resources| {
                 crate::lang::load(resources);
                 menu.load_splashes(resources);
                 audio.reload_assets(resources);
-            })?;
+            },
+        )?;
         self.asset_head_skins.clear();
         self.asset_head_skins_stale = true;
         self.head_skins_dirty = true;
@@ -1406,7 +1450,7 @@ impl AppCore {
         renderer: &mut Renderer,
         game: Option<&mut GameState>,
     ) -> std::io::Result<()> {
-        let prepared = self.activate_resource_selection(toggle, Renderer::prepare_resources)?;
+        let prepared = self.activate_resource_selection(toggle, Self::prepare_pack_assets)?;
         match game {
             Some(game) => self.reload_live_resource_assets(game, renderer, prepared),
             None => self.reload_pack_assets(renderer, prepared),
@@ -1539,6 +1583,7 @@ impl AppCore {
     /// Every return from a world or server, before the title screen shows.
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+        self.particle_engine.set_level();
         self.menu.restore_bench_render_distance();
         self.clear_server_resource_packs(&mut gfx.renderer);
         // Leaving the world still retires it if resource preparation failed.
@@ -2010,7 +2055,7 @@ impl AppCore {
         &mut self,
         game: &mut GameState,
         renderer: &mut Renderer,
-        prepared: crate::renderer::PreparedResources,
+        prepared: PreparedPackAssets,
     ) {
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
@@ -2027,15 +2072,9 @@ impl AppCore {
             self.resources(),
             game.cardinal_light,
         );
-        let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
         game.sync_distant_colors();
-        game.particle_store = crate::particle::ParticleStore::new(
-            renderer.uv_map().clone(),
-            grass,
-            foliage,
-            dry_foliage,
-        );
+        game.particle_store = crate::particle::ParticleStore::new(renderer.uv_map().clone());
 
         game.rebuild_meshes();
     }
@@ -2061,7 +2100,7 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        match self.remove_server_resource_packs(None, Renderer::prepare_resources) {
+        match self.remove_server_resource_packs(None, Self::prepare_pack_assets) {
             Ok(Some(prepared)) => {
                 renderer.clear_chunk_meshes();
                 self.reload_pack_assets(renderer, prepared);
@@ -2074,7 +2113,11 @@ impl AppCore {
     fn remove_server_resource_packs<T>(
         &mut self,
         uuid: Option<uuid::Uuid>,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<Option<T>> {
         let ids: Vec<_> = match uuid {
             Some(uuid) => self
@@ -2115,7 +2158,11 @@ impl AppCore {
         uuid: uuid::Uuid,
         hash: &str,
         path: std::path::PathBuf,
-        prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
+        prepare: impl FnOnce(
+            &dyn ResourceManager,
+            &MappedParticleResources,
+            &SpriteSources,
+        ) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         let previous = self
             .server_resource_ids
@@ -2183,18 +2230,63 @@ impl AppCore {
         self.active_custom_resource_ids.is_empty()
     }
 
-    fn reload_pack_assets(
-        &mut self,
-        renderer: &mut Renderer,
-        prepared: crate::renderer::PreparedResources,
-    ) {
-        renderer.reload_assets(self.font_sources(), prepared);
+    fn reload_pack_assets(&mut self, renderer: &mut Renderer, prepared: PreparedPackAssets) {
+        renderer.reload_assets(self.font_sources(), prepared.renderer, prepared.particles.cpu);
+        self.apply_particle_assets(prepared.particles.descriptions, prepared.particles.sprites);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.asset_reload_revision = self.asset_reload_revision.wrapping_add(1);
         self.complete_resource_selection();
+    }
+
+    fn prepare_pack_assets(
+        resources: &dyn ResourceManager,
+        particle_resources: &MappedParticleResources,
+        sprite_sources: &SpriteSources,
+    ) -> std::io::Result<PreparedPackAssets> {
+        Ok(PreparedPackAssets {
+            renderer: Renderer::prepare_resources(resources)?,
+            particles: Self::prepare_particle_assets(resources, particle_resources, sprite_sources)?,
+        })
+    }
+
+    pub(super) fn prepare_initial_particle_assets(&self) -> std::io::Result<PreparedParticleAssets> {
+        Self::prepare_particle_assets(
+            &self.resources,
+            &self.particle_resources,
+            &self.sprite_sources,
+        )
+    }
+
+    fn prepare_particle_assets(
+        resources: &dyn ResourceManager,
+        particle_resources: &MappedParticleResources,
+        sprite_sources: &SpriteSources,
+    ) -> std::io::Result<PreparedParticleAssets> {
+        let descriptions = particle_resources.prepare(resources)?;
+        let prepared =
+            SpriteSourceList::load(resources, &resource_id!("minecraft:particles"), sprite_sources)?
+                .prepare(resources, 0)?;
+        let sprites =
+            ParticleAtlasSprites::new(prepared.sprites, prepared.cpu.uv_map.missing_region());
+        Ok(PreparedParticleAssets {
+            descriptions,
+            cpu: prepared.cpu,
+            sprites,
+        })
+    }
+
+    pub(super) fn apply_particle_assets(
+        &mut self,
+        descriptions: PreparedParticleDescriptions,
+        sprites: ParticleAtlasSprites,
+    ) {
+        self.particle_resources
+            .apply(descriptions, &sprites, &mut || {
+                self.particle_engine.clear_particles();
+            });
     }
 
     /// Vanilla `Options.updateFontOptions`: a Font Settings toggle applies at
@@ -2265,6 +2357,7 @@ impl AppCore {
                 }
                 NetworkEvent::BiomeColors { colors } => game.set_biome_climate(colors),
                 NetworkEvent::DimensionInfo(dim) => {
+                    self.particle_engine.set_level();
                     game.enter_dimension(
                         dim,
                         self.menu.render_distance,
@@ -2959,15 +3052,37 @@ impl AppCore {
                         game.block_registry.block_state_table(),
                         state,
                     ) {
-                        let mut level = ClientPistonLevel::new(game, &mut priority_remesh);
-                        crate::world::piston::trigger_event(
-                            &mut level,
-                            pos,
-                            action_id,
-                            action_parameter,
+                        let destroyed = {
+                            let mut level = ClientPistonLevel::new(game, &mut priority_remesh);
+                            crate::world::piston::trigger_event(
+                                &mut level,
+                                pos,
+                                action_id,
+                                action_parameter,
+                            );
+                            std::mem::take(&mut level.destroyed)
+                        };
+                        let level_random = game.level_runtime.get_random().clone();
+                        let engine_access = self.particle_engine.engine_access();
+                        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                        let colors = BlockColors::new(grass, foliage, dry);
+                        let appearance = BlockParticleAppearance::new(
+                            game.block_registry.render_view(),
+                            renderer.uv_map(),
+                            &colors,
+                            &game.biome_climate,
                         );
-                        for (pos, state) in std::mem::take(&mut level.destroyed) {
-                            block_break_effect(&self.audio, game, pos, state);
+                        let mut level = LevelContext::new(
+                            &game.chunk_store,
+                            &appearance,
+                            game.block_registry.tags(),
+                            renderer.camera_render_position(),
+                            ParticleStatus::All,
+                            &level_random,
+                            engine_access.as_ref(),
+                        );
+                        for (pos, state) in destroyed {
+                            block_break_effect(&self.audio, &mut level, pos, state);
                         }
                     } else if action_id == 1 {
                         // Chest/shulker: the open-viewer count.
@@ -3261,23 +3376,264 @@ impl AppCore {
                     pos,
                     data,
                 } => {
-                    // Vanilla `LevelEventHandler` case 2001 (block break).
+                    use crate::world::level_event;
+
+                    // Vanilla `LevelEventHandler` particle cases.
                     // The server excludes the breaking player from the
                     // broadcast; the local break's effects come from
-                    // `predict_destroy`. TODO: the other level events.
-                    // 1010/1011 (jukebox start/stop) only notify nearby
+                    // `predict_destroy`. TODO: the remaining level events.
+                    // Jukebox start/stop only notify nearby
                     // entities so far. TODO: the song itself and the
                     // now-playing HUD line.
-                    if event_type == 1010 || event_type == 1011 {
-                        game.entity_store
-                            .set_record_playing_nearby(pos, event_type == 1010);
-                    }
-                    if event_type == 2001
-                        && let Some(state) = game.block_registry.block_state_table().try_state(data)
+                    if event_type == level_event::SOUND_PLAY_JUKEBOX_SONG
+                        || event_type == level_event::SOUND_STOP_JUKEBOX_SONG
                     {
-                        block_break_effect(&self.audio, game, pos, state);
+                        game.entity_store.set_record_playing_nearby(
+                            pos,
+                            event_type == level_event::SOUND_PLAY_JUKEBOX_SONG,
+                        );
+                    }
+                    let break_state = if matches!(
+                        event_type,
+                        level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK
+                            | level_event::PARTICLES_DESTROY_BLOCK
+                    ) {
+                        game.block_registry.block_state_table().try_state(data)
+                    } else {
+                        None
+                    };
+                    if break_state.is_some()
+                        || event_type == level_event::PARTICLES_SHOOT_SMOKE
+                        || event_type == level_event::PARTICLES_MOBBLOCK_SPAWN
+                        || event_type == level_event::PARTICLES_BEE_GROWTH
+                        || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
+                        || event_type == level_event::COMPOSTER_FILL
+                        || event_type == level_event::PARTICLES_SHOOT_WHITE_SMOKE
+                        || event_type == level_event::PARTICLES_WAX_ON
+                        || event_type == level_event::PARTICLES_WAX_OFF
+                        || event_type == level_event::PARTICLES_SCRAPE
+                        || event_type == level_event::PARTICLES_ELECTRIC_SPARK
+                        || event_type == level_event::PARTICLES_SMASH_ATTACK
+                        || event_type == level_event::PARTICLES_DRAGON_EGG_TELEPORT
+                        || event_type == level_event::PARTICLES_SHULKER_TELEPORT
+                        || event_type == level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
+                        || event_type == level_event::PARTICLES_ENDERMAN_TELEPORT
+                        || event_type == level_event::PARTICLES_DESTROY_PROGRESS
+                        || event_type == level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
+                        || event_type == level_event::PARTICLES_EGG_CRACK
+                        || event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK
+                        || event_type == level_event::ANIMATION_END_GATEWAY_SPAWN
+                        || event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH
+                        || event_type == level_event::LAVA_FIZZ
+                        || event_type == level_event::REDSTONE_TORCH_BURNOUT
+                        || event_type == level_event::END_PORTAL_FRAME_FILL
+                    {
+                        let level_random = game.level_runtime.get_random().clone();
+                        let engine_access = self.particle_engine.engine_access();
+                        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                        let colors = BlockColors::new(grass, foliage, dry);
+                        let appearance = BlockParticleAppearance::new(
+                            game.block_registry.render_view(),
+                            renderer.uv_map(),
+                            &colors,
+                            &game.biome_climate,
+                        );
+                        let mut level = LevelContext::new(
+                            &game.chunk_store,
+                            &appearance,
+                            game.block_registry.tags(),
+                            renderer.camera_render_position(),
+                            ParticleStatus::All,
+                            &level_random,
+                            engine_access.as_ref(),
+                        );
+                        if let Some(state) = break_state {
+                            if event_type == level_event::PARTICLES_AND_SOUND_DESTROY_BLOCK {
+                                block_break_effect(&self.audio, &mut level, pos, state);
+                            } else {
+                                level.add_destroy_block_effect(pos, state);
+                            }
+                        } else if event_type == level_event::PARTICLES_SHOOT_SMOKE {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            crate::world::level_event_handler::shoot_particles(
+                                &mut level, pos, data, &smoke,
+                            );
+                        } else if event_type == level_event::PARTICLES_MOBBLOCK_SPAWN {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            let flame =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.flame));
+                            crate::world::level_event_handler::spawner_particles(
+                                &mut level, pos, &smoke, &flame,
+                            );
+                        } else if event_type == level_event::PARTICLES_BEE_GROWTH
+                            || event_type == level_event::PARTICLES_TURTLE_EGG_PLACEMENT
+                        {
+                            let happy_villager = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.happy_villager,
+                            ));
+                            crate::world::level_event_handler::spawn_particle_in_block(
+                                &mut level,
+                                pos,
+                                data as i32,
+                                &happy_villager,
+                            );
+                        } else if event_type == level_event::COMPOSTER_FILL {
+                            let composter =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.composter));
+                            crate::world::level_event_handler::composter_fill_particles(
+                                &mut level, pos, &composter,
+                            );
+                        } else if event_type == level_event::PARTICLES_SHOOT_WHITE_SMOKE {
+                            let white_smoke = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.white_smoke,
+                            ));
+                            crate::world::level_event_handler::shoot_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                &white_smoke,
+                            );
+                        } else if event_type == level_event::PARTICLES_WAX_ON {
+                            let wax_on =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.wax_on));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level,
+                                pos,
+                                &wax_on,
+                                3..=5,
+                            );
+                        } else if event_type == level_event::PARTICLES_WAX_OFF {
+                            let wax_off =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.wax_off));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level,
+                                pos,
+                                &wax_off,
+                                3..=5,
+                            );
+                        } else if event_type == level_event::PARTICLES_SCRAPE {
+                            let scrape =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.scrape));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level,
+                                pos,
+                                &scrape,
+                                3..=5,
+                            );
+                        } else if event_type == level_event::PARTICLES_ELECTRIC_SPARK {
+                            let electric_spark = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.electric_spark,
+                            ));
+                            crate::world::level_event_handler::electric_spark_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                &electric_spark,
+                            );
+                        } else if event_type == level_event::PARTICLES_SMASH_ATTACK {
+                            crate::world::level_event_handler::spawn_smash_attack_particles(
+                                &mut level,
+                                pos,
+                                data as i32,
+                                &self.particle_types.dust_pillar,
+                            );
+                        } else if matches!(
+                            event_type,
+                            level_event::PARTICLES_DRAGON_EGG_TELEPORT
+                                | level_event::PARTICLES_SHULKER_TELEPORT
+                                | level_event::PARTICLES_CONSUME_EFFECT_TELEPORT
+                        ) {
+                            let radii = match event_type {
+                                level_event::PARTICLES_DRAGON_EGG_TELEPORT => [16, 8, 16],
+                                level_event::PARTICLES_SHULKER_TELEPORT => [8; 3],
+                                _ => [127; 3],
+                            };
+                            let portal =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.portal));
+                            crate::world::level_event_handler::single_block_teleportation_particles(
+                                &mut level, pos, data, radii, &portal,
+                            );
+                        } else if event_type == level_event::PARTICLES_ENDERMAN_TELEPORT {
+                            let portal =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.portal));
+                            crate::world::level_event_handler::enderman_teleportation_particles(
+                                &mut level, pos, data, &portal,
+                            );
+                        } else if matches!(
+                            event_type,
+                            level_event::PARTICLES_DESTROY_PROGRESS
+                                | level_event::PARTICLES_AND_SOUND_DESTROY_PROGRESS
+                        ) {
+                            // Source broadcasts progress to the miner too.
+                            // COMPAT: 2020's hit sound is deferred; Source uses
+                            // independent sound RNG, never a LEVEL seed draw.
+                            let direction = crate::world::block::model::Direction::VALUES
+                                [(data as i32).clamp(0, 5) as usize];
+                            let state = level.get_block_state(pos);
+                            level.add_breaking_block_effect(pos, state, direction);
+                        } else if event_type == level_event::PARTICLES_EGG_CRACK {
+                            let egg_crack =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.egg_crack));
+                            crate::world::level_event_handler::spawn_particles_on_block_faces(
+                                &mut level,
+                                pos,
+                                &egg_crack,
+                                3..=6,
+                            );
+                        } else if event_type == level_event::PARTICLES_DRAGON_BLOCK_BREAK {
+                            let explosion =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.explosion));
+                            let center = dvec3(
+                                f64::from(pos.x) + 0.5,
+                                f64::from(pos.y) + 0.5,
+                                f64::from(pos.z) + 0.5,
+                            );
+                            level.add_particle(&explosion, center, dvec3(0.0, 0.0, 0.0));
+                        } else if event_type == level_event::ANIMATION_END_GATEWAY_SPAWN {
+                            let explosion_emitter = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.explosion_emitter,
+                            ));
+                            crate::world::level_event_handler::end_gateway_spawn_particles(
+                                &mut level,
+                                pos,
+                                &explosion_emitter,
+                            );
+                        } else if event_type == level_event::PARTICLES_DRAGON_FIREBALL_SPLASH {
+                            crate::world::level_event_handler::dragon_fireball_splash_particles(
+                                &mut level,
+                                pos,
+                                data,
+                                Rc::clone(&self.particle_types.dragon_breath),
+                            );
+                        } else if event_type == level_event::LAVA_FIZZ {
+                            let large_smoke = SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.large_smoke,
+                            ));
+                            crate::world::level_event_handler::lava_fizz_particles(
+                                &mut level,
+                                pos,
+                                &large_smoke,
+                            );
+                        } else if event_type == level_event::REDSTONE_TORCH_BURNOUT {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            crate::world::level_event_handler::redstone_torch_burnout_particles(
+                                &mut level, pos, &smoke,
+                            );
+                        } else if event_type == level_event::END_PORTAL_FRAME_FILL {
+                            let smoke =
+                                SimpleParticleType::new(Rc::clone(&self.particle_types.smoke));
+                            crate::world::level_event_handler::end_portal_frame_fill_particles(
+                                &mut level, pos, &smoke,
+                            );
+                        }
                     }
                 }
+                // COMPAT: Vanilla expands particle packets in ClientPacketListener and
+                // delegates spawning to ClientLevel. Moving network packet handling out of AppCore
+                // is outside the particle port's scope.
                 NetworkEvent::LevelParticles {
                     kind,
                     override_limiter,
@@ -3288,15 +3644,216 @@ impl AppCore {
                     max_speed,
                     count,
                 } => {
-                    game.particle_store.add_particles_from_packet(
-                        kind,
-                        override_limiter,
-                        pos,
-                        glam::dvec3(x_dist as f64, y_dist as f64, z_dist as f64),
-                        max_speed as f64,
-                        count,
-                        renderer.camera_render_position(),
+                    let options = match kind {
+                        ServerParticleKind::CherryLeaves => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.cherry_leaves))
+                        }
+                        ServerParticleKind::PaleOakLeaves => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.pale_oak_leaves))
+                        }
+                        ServerParticleKind::Firework => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.firework))
+                        }
+                        ServerParticleKind::SculkChargePop => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sculk_charge_pop))
+                        }
+                        ServerParticleKind::Fishing => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.fishing))
+                        }
+                        ServerParticleKind::EndRod => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.end_rod))
+                        }
+                        ServerParticleKind::Explosion => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.explosion))
+                        }
+                        ServerParticleKind::ExplosionEmitter => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.explosion_emitter,
+                        )),
+                        ServerParticleKind::Heart => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.heart))
+                        }
+                        ServerParticleKind::AngryVillager => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.angry_villager))
+                        }
+                        ServerParticleKind::Note => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.note))
+                        }
+                        ServerParticleKind::SweepAttack => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sweep_attack))
+                        }
+                        ServerParticleKind::Crit => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.crit))
+                        }
+                        ServerParticleKind::EnchantedHit => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.enchanted_hit))
+                        }
+                        ServerParticleKind::TotemOfUndying => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.totem_of_undying,
+                        )),
+                        ServerParticleKind::SquidInk => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.squid_ink))
+                        }
+                        ServerParticleKind::GlowSquidInk => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.glow_squid_ink))
+                        }
+                        ServerParticleKind::DamageIndicator => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.damage_indicator,
+                        )),
+                        ServerParticleKind::SonicBoom => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sonic_boom))
+                        }
+                        ServerParticleKind::Snowflake => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.snowflake))
+                        }
+                        ServerParticleKind::Soul => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.soul))
+                        }
+                        ServerParticleKind::SculkSoul => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.sculk_soul))
+                        }
+                        ServerParticleKind::Gust => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.gust))
+                        }
+                        ServerParticleKind::SmallGust => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.small_gust))
+                        }
+                        ServerParticleKind::GustEmitterLarge => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.gust_emitter_large,
+                        )),
+                        ServerParticleKind::GustEmitterSmall => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.gust_emitter_small,
+                        )),
+                        ServerParticleKind::Poof => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.poof))
+                        }
+                        ServerParticleKind::Rain => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.rain))
+                        }
+                        ServerParticleKind::Ash => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.ash))
+                        }
+                        ServerParticleKind::WhiteAsh => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.white_ash))
+                        }
+                        ServerParticleKind::Spit => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.spit))
+                        }
+                        ServerParticleKind::BubblePop => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.bubble_pop))
+                        }
+                        ServerParticleKind::CrimsonSpore => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.crimson_spore))
+                        }
+                        ServerParticleKind::WarpedSpore => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.warped_spore))
+                        }
+                        ServerParticleKind::Dolphin => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.dolphin))
+                        }
+                        ServerParticleKind::Glow => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.glow))
+                        }
+                        ServerParticleKind::Firefly => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.firefly))
+                        }
+                        ServerParticleKind::Nautilus => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.nautilus))
+                        }
+                        ServerParticleKind::VaultConnection => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.vault_connection,
+                        )),
+                        ServerParticleKind::OminousSpawning => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.ominous_spawning,
+                        )),
+                        ServerParticleKind::DrippingDripstoneLava => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.dripping_dripstone_lava,
+                            ))
+                        }
+                        ServerParticleKind::DrippingDripstoneWater => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.dripping_dripstone_water,
+                            ))
+                        }
+                        ServerParticleKind::FallingDripstoneLava => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.falling_dripstone_lava,
+                            ))
+                        }
+                        ServerParticleKind::FallingDripstoneWater => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.falling_dripstone_water,
+                            ))
+                        }
+                        ServerParticleKind::FallingNectar => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.falling_nectar,
+                        )),
+                        ServerParticleKind::PauseMobGrowth => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.pause_mob_growth,
+                        )),
+                        ServerParticleKind::ResetMobGrowth => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.reset_mob_growth,
+                        )),
+                        ServerParticleKind::DustPlume => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.dust_plume))
+                        }
+                        ServerParticleKind::NoxiousGas => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.noxious_gas))
+                        }
+                        ServerParticleKind::TrialSpawnerDetection => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.trial_spawner_detection),
+                        ),
+                        ServerParticleKind::TrialSpawnerDetectionOminous => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.trial_spawner_detection_ominous),
+                        ),
+                    };
+                    let level_random = game.level_runtime.get_random().clone();
+                    let engine_access = self.particle_engine.engine_access();
+                    let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+                    let colors = BlockColors::new(grass, foliage, dry);
+                    let appearance = BlockParticleAppearance::new(
+                        game.block_registry.render_view(),
+                        renderer.uv_map(),
+                        &colors,
+                        &game.biome_climate,
                     );
+                    let mut level = LevelContext::new(
+                        &game.chunk_store,
+                        &appearance,
+                        game.block_registry.tags(),
+                        renderer.camera_render_position(),
+                        ParticleStatus::All,
+                        &level_random,
+                        engine_access.as_ref(),
+                    );
+                    let dist = dvec3(x_dist as f64, y_dist as f64, z_dist as f64);
+                    let max_speed = max_speed as f64;
+                    if count == 0 {
+                        level.add_particle_with_flags(
+                            &options,
+                            override_limiter,
+                            false,
+                            pos,
+                            dist * max_speed,
+                        );
+                    } else {
+                        for _ in 0..count {
+                            let scatter = dvec3(
+                                next_gaussian() * dist.x,
+                                next_gaussian() * dist.y,
+                                next_gaussian() * dist.z,
+                            );
+                            let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian())
+                                * max_speed;
+                            level.add_particle_with_flags(
+                                &options,
+                                override_limiter,
+                                false,
+                                pos + scatter,
+                                vel,
+                            );
+                        }
+                    }
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {
@@ -3639,7 +4196,7 @@ impl AppCore {
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
-                    match self.remove_server_resource_packs(id, Renderer::prepare_resources) {
+                    match self.remove_server_resource_packs(id, Self::prepare_pack_assets) {
                         Ok(Some(prepared)) => {
                             self.reload_live_resource_assets(game, renderer, prepared);
                         }
@@ -3666,6 +4223,7 @@ impl AppCore {
                     game.server_dialog = None;
                     game.configuring = true;
                     game.reset_sleep_for_level_teardown();
+                    self.particle_engine.set_level();
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
                 }
@@ -3739,7 +4297,7 @@ impl AppCore {
                             pending.id,
                             &pending.hash,
                             path,
-                            Renderer::prepare_resources,
+                            Self::prepare_pack_assets,
                         )
                         .map(|prepared| {
                             self.reload_live_resource_assets(game, renderer, prepared);
@@ -3865,6 +4423,33 @@ impl AppCore {
             ));
     }
 
+    pub(crate) fn animate_level(
+        &self,
+        runtime: &mut crate::world::level::LevelRuntime,
+        block_registry: &crate::world::block::block_registry::BlockRegistry,
+        player_pos: glam::DVec3,
+        level: &mut LevelContext<'_>,
+    ) {
+        runtime.animate_tick(
+            block_registry,
+            player_pos,
+            level,
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.lava)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.underwater)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.dripping_water)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.dripping_lava)),
+        );
+    }
+
+    pub(crate) fn tick_campfires(&self, level: &mut LevelContext<'_>) {
+        crate::world::block::tick_campfires(
+            level,
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.campfire_cosy_smoke)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.campfire_signal_smoke)),
+            &SimpleParticleType::new(Rc::clone(&self.particle_types.smoke)),
+        );
+    }
+
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
@@ -3886,7 +4471,16 @@ impl AppCore {
             self.tick_remote_entities(game);
         }
         game.position_remote_riders();
-        super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
+        let engine_access = self.particle_engine.engine_access();
+        let block_type = Rc::clone(&self.particle_types.block);
+        super::sniffer::tick(
+            &mut self.audio,
+            game,
+            renderer.camera_render_position(),
+            renderer.uv_map(),
+            engine_access.as_ref(),
+            &block_type,
+        );
         super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
     }
@@ -3983,6 +4577,25 @@ impl AppCore {
                 .inventory
                 .hand_stacks(self.input.selected_slot())
                 .map(Option::<&_>::cloned);
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = self.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
+            let level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                game.block_registry.tags(),
+                renderer.camera_render_position(),
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
             game.interaction.tick_using_item(
                 hand_stacks.each_ref().map(Option::as_ref),
                 &connection.packet_tx,
@@ -3992,8 +4605,7 @@ impl AppCore {
                 game.player.look_dir,
                 &mut crate::player::interaction::BreakEffects {
                     particles: &mut game.particle_store,
-                    registry: game.block_registry.render_view(),
-                    biome_climate: &game.biome_climate,
+                    level,
                 },
             );
 
@@ -4166,6 +4778,7 @@ impl AppCore {
         let hand_stacks = hand_stacks.each_ref().map(Option::as_ref);
         let held_stack = hand_stacks[0];
         let creative = crate::player::is_creative(game.player.game_mode);
+        let may_build = matches!(game.player.game_mode, 0 | 1);
         let held_item = held_stack
             .as_ref()
             .map(|data| crate::player::inventory::item_resource_name(data.kind));
@@ -4203,10 +4816,28 @@ impl AppCore {
             ),
         });
         let player_aabb = game.player.bounding_box();
+        let level_random = game.level_runtime.get_random().clone();
+        let engine_access = self.particle_engine.engine_access();
+        let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+        let colors = BlockColors::new(grass, foliage, dry);
+        let appearance = BlockParticleAppearance::new(
+            game.block_registry.render_view(),
+            renderer.uv_map(),
+            &colors,
+            &game.biome_climate,
+        );
+        let level = LevelContext::new(
+            &game.chunk_store,
+            &appearance,
+            game.block_registry.tags(),
+            renderer.camera_render_position(),
+            ParticleStatus::All,
+            &level_random,
+            engine_access.as_ref(),
+        );
         let mut effects = crate::player::interaction::BreakEffects {
             particles: &mut game.particle_store,
-            registry: game.block_registry.render_view(),
-            biome_climate: &game.biome_climate,
+            level,
         };
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
@@ -4220,6 +4851,7 @@ impl AppCore {
             game.player.look_dir,
             game.player.on_ground,
             creative,
+            may_build,
             game.player.food,
             input.selected_slot(),
             hands,

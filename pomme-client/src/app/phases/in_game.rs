@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
+use azalea_protocol::common::client_information::ParticleStatus;
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
@@ -25,6 +26,7 @@ use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
+use crate::particles::render::{ParticleView, ParticlesRenderState};
 use crate::player::LocalPlayer;
 use crate::player::interaction::{
     HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
@@ -59,10 +61,13 @@ use crate::ui::debug_entries::{self, DebugColumns, DebugEntryInput};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block::BedDirection;
+use crate::world::block::block_colors::BlockColors;
 use crate::world::block::block_registry::{BlockDefinitions, BlockRegistry};
 use crate::world::block::model::CardinalLightType;
+use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
+use crate::world::level::LevelContext;
 
 /// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
 /// those skipped as occluded (the per-section occlusion win). Kept as each
@@ -571,15 +576,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
-            particle_store: {
-                let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
-                crate::particle::ParticleStore::new(
-                    mesh_source.uv_map().clone(),
-                    grass,
-                    foliage,
-                    dry_foliage,
-                )
-            },
+            particle_store: crate::particle::ParticleStore::new(mesh_source.uv_map().clone()),
             block_entity_anim: BlockEntityAnimStore::default(),
             level_runtime: crate::world::level::LevelRuntime::new(),
             player: LocalPlayer::new(),
@@ -2963,12 +2960,37 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        if !game.deterministic {
-            game.level_runtime.animate_tick(
-                &game.block_registry,
-                &game.chunk_store,
-                *game.player.position,
+        {
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
             );
+            let mut level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                game.block_registry.tags(),
+                gfx.renderer.camera_render_position(),
+                // The client currently advertises ParticleStatus::All; no quality setting exists.
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
+            if !game.deterministic {
+                core.tick_campfires(&mut level);
+                core.animate_level(
+                    &mut game.level_runtime,
+                    &game.block_registry,
+                    *game.player.position,
+                    &mut level,
+                );
+            }
+            core.particle_engine.tick(&mut level);
         }
         game.particle_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
@@ -5217,6 +5239,13 @@ pub fn update_game(
         )
     };
 
+    let effective_rd = if game.server_render_distance > 0 {
+        core.menu.render_distance.min(game.server_render_distance)
+    } else {
+        core.menu.render_distance
+    };
+    gfx.renderer.set_render_distance(effective_rd);
+
     if game.deterministic {
         game.particle_store.clear();
     }
@@ -5229,11 +5258,6 @@ pub fn update_game(
             .extract(partial_tick, gfx.renderer.camera_anchor(), &world_light)
     };
 
-    let effective_rd = if game.server_render_distance > 0 {
-        core.menu.render_distance.min(game.server_render_distance)
-    } else {
-        core.menu.render_distance
-    };
     // `EntityRenderer.extractNameTags` with the living renderers'
     // `shouldShowName`.
     // TODO: an entity carrying passengers hides its name (Pomme doesn't link
@@ -5374,52 +5398,89 @@ pub fn update_game(
             .set_terrain_format(game.mesh_dispatcher.format());
         game.rebuild_meshes();
     }
-    if let Err(e) = gfx.renderer.render_world(
-        game.block_registry.render_view(),
-        &gfx.window,
-        hide_cursor,
-        elements,
-        swing_progress,
-        use_anim,
-        held_items,
-        core.menu.main_hand_right(),
-        player_light,
-        shown_hands,
-        game.scoreboard.member_team_color(&core.user.username),
-        renders_first_person_hand(game),
-        destroy_info,
-        block_outline,
-        game.show_chunk_borders,
-        sky,
-        ShadowScene {
-            casters: &shadow_casters,
-            chunks: &game.chunk_store,
-            block_state_table: game.block_registry.block_state_table(),
-            sky_darken: game.sky_darken(),
-            ambient_light: game.ambient_light,
-        },
-        &moving_block_renders,
-        &entity_renders,
-        &item_renders,
-        crate::renderer::BlockEntityList {
-            items: &block_entity_renders,
-            camera_len: camera_block_entities,
-        },
-        &particle_quads,
-        &nameplate_renders,
-        &sign_renders,
-        &weather_columns,
-        if no_ambience {
-            crate::renderer::CloudMode::Off
+    let result = gfx.renderer.prepare_swapchain().and_then(|()| {
+        let frustum = gfx.renderer.camera_frustum();
+        let engine_particles = if no_ambience {
+            ParticlesRenderState::default()
         } else {
-            core.menu.cloud_mode
-        },
-        effective_rd,
-        distant_terrain,
-        player_preview,
-        book_preview,
-        game.player.eyes_in_water,
-    ) {
+            let eye = gfx.renderer.camera_render_position();
+            let view = ParticleView {
+                position: eye,
+                rotation: gfx.renderer.camera_billboard_rotation(),
+                partial_tick,
+                frustum: &frustum,
+            };
+            let level_random = game.level_runtime.get_random().clone();
+            let engine_access = core.particle_engine.engine_access();
+            let (grass, foliage, dry) = game.mesh_dispatcher.colormaps();
+            let colors = BlockColors::new(grass, foliage, dry);
+            let appearance = BlockParticleAppearance::new(
+                game.block_registry.render_view(),
+                gfx.renderer.uv_map(),
+                &colors,
+                &game.biome_climate,
+            );
+            let level = LevelContext::new(
+                &game.chunk_store,
+                &appearance,
+                game.block_registry.tags(),
+                eye,
+                ParticleStatus::All,
+                &level_random,
+                engine_access.as_ref(),
+            );
+            core.particle_engine.extract(&level, &view)
+        };
+        gfx.renderer.render_world(
+            game.block_registry.render_view(),
+            &gfx.window,
+            hide_cursor,
+            elements,
+            swing_progress,
+            use_anim,
+            held_items,
+            core.menu.main_hand_right(),
+            player_light,
+            shown_hands,
+            game.scoreboard.member_team_color(&core.user.username),
+            renders_first_person_hand(game),
+            destroy_info,
+            block_outline,
+            game.show_chunk_borders,
+            sky,
+            ShadowScene {
+                casters: &shadow_casters,
+                chunks: &game.chunk_store,
+                block_state_table: game.block_registry.block_state_table(),
+                sky_darken: game.sky_darken(),
+                ambient_light: game.ambient_light,
+            },
+            &moving_block_renders,
+            &entity_renders,
+            &item_renders,
+            crate::renderer::BlockEntityList {
+                items: &block_entity_renders,
+                camera_len: camera_block_entities,
+            },
+            &particle_quads,
+            &nameplate_renders,
+            &sign_renders,
+            &engine_particles,
+            &frustum,
+            &weather_columns,
+            if no_ambience {
+                crate::renderer::CloudMode::Off
+            } else {
+                core.menu.cloud_mode
+            },
+            effective_rd,
+            distant_terrain,
+            player_preview,
+            book_preview,
+            game.player.eyes_in_water,
+        )
+    });
+    if let Err(e) = result {
         tracing::error!("Render error: {e}");
     }
     // Whole-frame wall time (incl. render), read next frame to align with `raw_dt`.
