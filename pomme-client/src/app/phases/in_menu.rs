@@ -177,7 +177,7 @@ pub fn update_menu(
             sync_resource_packs(core);
             core.menu.start_transition_open();
         }
-        MenuAction::Account(account) => {
+        MenuAction::Account { account, by_player } => {
             if account.is_none() {
                 core.menu.forget_account(&core.user.uuid);
             }
@@ -192,12 +192,18 @@ pub fn update_menu(
                 core.user.access_token.clone(),
                 &core.input.key_bindings,
             );
-            if core.user.has_profile {
-                gfx.renderer
-                    .load_player_skin(&core.user.uuid, &core.tokio_rt);
-            }
+            gfx.renderer
+                .load_player_skin(&core.user, core.resources(), &core.tokio_rt);
             core.menu
                 .set_player_face(core.user.has_profile.then_some(&core.user.uuid));
+            // Back from the browser the player signed in through. Windows may
+            // refuse the focus to a background window; the taskbar flash then
+            // points the player back.
+            if account.is_some() && by_player {
+                gfx.window.focus_window();
+                gfx.window
+                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            }
             if account.is_some()
                 && let Some(play) = core.deferred_quick_play.take()
             {

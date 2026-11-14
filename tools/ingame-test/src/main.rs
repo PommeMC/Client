@@ -27,6 +27,8 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(180);
 const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const PLAYER_LEAVE_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_JOBS: usize = 6;
+/// The client's frame in pixels, as the vanilla harness sizes its window.
+const WINDOW_SIZE: [&str; 2] = ["1280", "720"];
 
 const OUT_DIR: &str = "target/ingame";
 const SCRIPT_DIR: &str = "tests/ingame";
@@ -523,7 +525,8 @@ fn run_script(
         .arg("--harness-script")
         .arg(script)
         .arg("--harness-out")
-        .arg(&out);
+        .arg(&out)
+        .args(["--width", WINDOW_SIZE[0], "--height", WINDOW_SIZE[1]]);
     if capture {
         command.arg("--capture-frames").arg(&frames);
     }

@@ -16,9 +16,6 @@ chat = "/gamerule advance_time false"
 chat = "/time set 6000"
 
 [[step]]
-deterministic = true
-
-[[step]]
 chat = "/tp @s 200.5 -60 0.5 0 0"
 
 [[step]]

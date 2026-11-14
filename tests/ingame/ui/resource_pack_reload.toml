@@ -24,9 +24,6 @@ chat = "/tp @s 43.5 -60 0.5 0 0"
 expect = { player = { position = [43.5, -60.0, 0.5] } }
 
 [[step]]
-deterministic = true
-
-[[step]]
 wait_ms = 3000
 
 [[step]]

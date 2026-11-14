@@ -1,0 +1,107 @@
+# Boats and chest boats of eight woods side by side on the ground, boats
+# in front and chest boats behind, plus an oak chest boat and the bamboo
+# chest raft.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 1050.5 -60 -2.5 0 40"
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [1050, -61, 5] }
+
+# A pillar to look down from, built before standing on it.
+[[step]]
+chat = "/fill 1050 -60 0 1050 -58 0 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [1050, -58, 0] }
+
+[[step]]
+chat = "/tp @s 1050.5 -57 0.5 0 40"
+
+[[step]]
+expect = { player = { position = [1050.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:acacia_boat 1043.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:acacia_chest_boat 1043.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:birch_boat 1045.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:birch_chest_boat 1045.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:cherry_boat 1047.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:cherry_chest_boat 1047.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:dark_oak_boat 1049.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:dark_oak_chest_boat 1049.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:jungle_boat 1051.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:jungle_chest_boat 1051.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:mangrove_boat 1053.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:mangrove_chest_boat 1053.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:pale_oak_boat 1055.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:pale_oak_chest_boat 1055.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:spruce_boat 1057.5 -60 5.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:spruce_chest_boat 1057.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:oak_chest_boat 1041.5 -60 9.5 {Rotation:[90f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:bamboo_chest_raft 1059.5 -60 7.5 {Rotation:[90f,0f]}"
+
+[[step]]
+expect = { entity = "bamboo_chest_raft" }
+
+[[step]]
+look_at = [1050.5, -60.0, 7.5]
+
+[[step]]
+screenshot = "boats"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 1050 -60 0 1050 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

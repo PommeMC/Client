@@ -133,7 +133,7 @@ pub fn build_anvil(
         SpriteId::AnvilTextFieldDisabled
     };
     panel.image(elements, field_sprite, 59.0, 20.0, 110.0, 16.0);
-    push_name_text(elements, &panel, state, editable, text_width_fn);
+    push_name_text(elements, &panel, state, text_width_fn);
 
     if (item(0).is_present() || item(1).is_present()) && item(2).is_empty() {
         panel.image(elements, SpriteId::AnvilError, 99.0, 45.0, 28.0, 21.0);
@@ -181,11 +181,12 @@ pub fn build_anvil(
 
 /// The rename text at (62,24): white shadowed inside its 103-wide clip, with
 /// vanilla EditBox caret, selection, and caret-following horizontal scroll.
+/// The field can't lose focus, so its caret blinks even with no item to
+/// rename.
 fn push_name_text(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
     state: &AnvilState,
-    editable: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
     let s = panel.scale;
@@ -194,7 +195,7 @@ fn push_name_text(
     let field_w = FIELD_INNER_W * s;
     let text_y = panel.oy + 24.0 * s;
     let wf = |t: &str| text_width_fn(t, fs);
-    let info = state.field.render_info(field_w, editable, &wf);
+    let info = state.field.render_info(field_w, true, &wf);
     let shown = &state.field.value()[info.display_start..info.display_end];
 
     elements.push(MenuElement::ScissorPush {

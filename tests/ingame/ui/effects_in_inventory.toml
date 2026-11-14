@@ -14,9 +14,6 @@ chat = "/gamerule advance_time false"
 chat = "/time set 6000"
 
 [[step]]
-deterministic = true
-
-[[step]]
 chat = "/effect give @s minecraft:speed infinite 4"
 
 [[step]]

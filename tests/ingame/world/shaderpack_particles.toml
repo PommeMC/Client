@@ -4,6 +4,8 @@
 # cyan). Then packs off, with the same particles in their own colours. The
 # broken blocks' drops are cleared at the end.
 
+deterministic = false
+
 [[step]]
 wait_ms = 2000
 

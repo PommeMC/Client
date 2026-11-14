@@ -620,7 +620,7 @@ impl MainMenu {
             None => push_image(
                 buttons.elements,
                 [head[0], head[1], head[2], head[2]],
-                SpriteId::SteveHead,
+                SpriteId::DefaultHead(crate::player::default_skin::STEVE as u8),
                 WHITE,
             ),
         }

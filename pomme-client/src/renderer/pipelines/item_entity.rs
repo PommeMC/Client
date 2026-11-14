@@ -30,6 +30,7 @@ impl ItemVertex {
         rhi::vertex_buffer!(Self, [Float32x3, Float32x2, Unorm8x4, Snorm8x4, Uint32]);
 }
 
+#[derive(Clone)]
 pub struct ItemRenderInfo {
     pub item_name: Arc<str>,
     /// `0xRRGGBB` while the item entity glows.

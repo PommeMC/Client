@@ -674,6 +674,16 @@ impl InteractionState {
             && (self.attack_strength_ticker as f32 / attack_strength_delay(attributes)) < required
     }
 
+    /// Vanilla `MultiPlayerGameMode.attack`: in creative, holding the button
+    /// on into a block waits the break cooldown.
+    fn attack(&mut self, sender: &PacketSender, entity_id: i32, creative: bool) {
+        sender.send_raw(wire::encode_attack(entity_id));
+        self.attack_strength_ticker = 0;
+        if creative {
+            self.destroy_delay = DESTROY_COOLDOWN;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
@@ -712,8 +722,7 @@ impl InteractionState {
                 return;
             }
             Some(HitResult::Entity(hit)) => {
-                sender.send_raw(wire::encode_attack(hit.entity_id));
-                self.attack_strength_ticker = 0;
+                self.attack(sender, hit.entity_id, creative);
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
                 return;
@@ -2738,6 +2747,26 @@ mod tests {
         };
         assert!(matches!(*packet, ServerboundGamePacket::UseItemOn(_)));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_creative_attack_waits_the_break_cooldown() {
+        use crate::net::sender::Outbound;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut state = InteractionState::new();
+        state.attack(&sender, 7, false);
+        assert_eq!(state.destroy_delay, 0);
+        state.attack(&sender, 7, true);
+        assert_eq!(state.destroy_delay, DESTROY_COOLDOWN);
+        assert_eq!(state.attack_strength_ticker, 0);
+        for _ in 0..2 {
+            let Ok(Outbound::Raw(bytes)) = rx.try_recv() else {
+                panic!("expected a raw attack packet");
+            };
+            assert_eq!(bytes, wire::encode_attack(7));
+        }
     }
 
     #[test]

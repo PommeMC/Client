@@ -11,9 +11,6 @@ wait_ms = 2000
 chat = "/gamemode creative"
 
 [[step]]
-deterministic = true
-
-[[step]]
 option = { render_distance = 4 }
 
 [[step]]

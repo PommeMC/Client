@@ -155,6 +155,17 @@ impl HeldItemPipeline {
         }
     }
 
+    /// `item`'s `thirdperson_*hand` display, as an arm holds it.
+    pub fn third_person_display(
+        &self,
+        item: &HeldItemInfo,
+        in_use: bool,
+        right_arm: bool,
+    ) -> DisplayTransform {
+        let default = default_third_person(item.has_3d_model);
+        self.hand_display(THIRD_PERSON_KEYS, item, in_use, default, right_arm)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn update_and_draw(
         &mut self,
@@ -242,14 +253,7 @@ impl HeldItemPipeline {
             let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
                 continue;
             };
-            let default = default_third_person(item.has_3d_model);
-            let display = self.hand_display(
-                THIRD_PERSON_KEYS,
-                item,
-                hand.in_use,
-                default,
-                hand.right_arm,
-            );
+            let display = self.third_person_display(item, hand.in_use, hand.right_arm);
             let instance = self.preview.push_item(
                 frame,
                 &(hand.hand * display.to_matrix()),
@@ -352,6 +356,21 @@ fn block_matrix(invert: f32) -> Mat4 {
 
 /// The fallback third-person right-hand display: `block/block.json`'s or
 /// `item/generated.json`'s.
+/// Vanilla `ItemInHandLayer.submitArmWithItem` after `translateToHand`:
+/// from an arm's frame to the item's, up to its display transform.
+pub fn arm_to_item(right_arm: bool, baby: bool) -> Mat4 {
+    // `useBabyOffset`.
+    let offset = if baby {
+        Vec3::new(0.0, 1.0, -4.5)
+    } else {
+        Vec3::new(1.0, 2.0, -10.0)
+    };
+    let side = if right_arm { 1.0 } else { -1.0 };
+    Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+        * Mat4::from_rotation_y(std::f32::consts::PI)
+        * Mat4::from_translation(offset * Vec3::new(side, 1.0, 1.0) / 16.0)
+}
+
 fn default_third_person(has_3d_model: bool) -> DisplayTransform {
     if has_3d_model {
         DisplayTransform {

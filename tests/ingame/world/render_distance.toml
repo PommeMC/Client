@@ -23,9 +23,6 @@ chat = "/fill 0 -60 0 0 -51 0 minecraft:stone"
 chat = "/tp @s 0.5 -50 0.5 0 20"
 
 [[step]]
-deterministic = true
-
-[[step]]
 option = { render_distance = 2 }
 
 [[step]]

@@ -14,9 +14,6 @@ chat = "/gamerule advance_time false"
 [[step]]
 chat = "/time set 6000"
 
-[[step]]
-deterministic = true
-
 # A pillar to look down from.
 [[step]]
 chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"

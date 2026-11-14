@@ -144,7 +144,6 @@ pub enum ConnectionPhase {
 pub enum AppPhase {
     Setup {
         quick_play: Option<crate::app::QuickPlay>,
-        pending_skin_uuid: Option<uuid::Uuid>,
         /// The window and its renderer, once `resumed` has started loading
         /// them.
         loading: Option<Box<Loading>>,

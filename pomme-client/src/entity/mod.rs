@@ -884,6 +884,9 @@ pub struct LivingEntity {
     pub aggressive: bool,
     /// Mob-flags bit 0x01.
     pub no_ai: bool,
+    /// Mob-flags bit 0x02: the main hand is the left (vanilla
+    /// `Mob.isLeftHanded`).
+    pub left_handed: bool,
     /// Creeper charged/powered flag — shows the blue aura overlay.
     pub powered: bool,
     /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0
@@ -1125,6 +1128,7 @@ impl LivingEntity {
             custom_name_visible: false,
             aggressive: false,
             no_ai: false,
+            left_handed: false,
             powered: false,
             swing_time: 0,
             flapping: 1.0,
@@ -1162,6 +1166,16 @@ impl LivingEntity {
 
     pub fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
         self.equipment.get(&slot)
+    }
+
+    /// Vanilla `getItemHeldByArm`: the main hand's item in the main arm.
+    pub fn item_held_by_arm(&self, right_arm: bool) -> Option<&ItemStack> {
+        let main_arm_right = !self.left_handed;
+        self.equipment(if right_arm == main_arm_right {
+            EquipmentSlot::Mainhand
+        } else {
+            EquipmentSlot::Offhand
+        })
     }
 
     /// Vanilla `getViewYRot` / `getViewXRot`: the rotation between ticks.
@@ -2112,10 +2126,12 @@ impl EntityStore {
             (k, 12, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[1] = b,
             (k, 13, Int(t)) if is_boat(k) => entity.boat_sim.bubble_time = t,
             (_, 9, Float(h)) => entity.health = h,
-            // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
-            // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
+            // Mob flags byte: 0x01 no AI, 0x02 left-handed, 0x04 aggressive.
+            // Players aren't mobs; their 15 is Avatar's main hand (a byte on
+            // 1.21.9-1.21.10).
             (k, 15, Byte(f)) if k != EntityKind::Player => {
                 entity.no_ai = f & 0x01 != 0;
+                entity.left_handed = f & 0x02 != 0;
                 entity.aggressive = f & 0x04 != 0;
             }
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
@@ -3266,6 +3282,24 @@ mod tests {
             10,
             None,
         );
+    }
+
+    #[test]
+    fn a_left_handed_mob_holds_its_main_hand_item_in_the_left_arm() {
+        let sword = ItemStack::new(ItemKind::IronSword, 1);
+        let shield = ItemStack::new(ItemKind::Shield, 1);
+        let mut entity = LivingEntity::new(
+            EntityKind::Skeleton,
+            Position::default(),
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        entity.set_equipment(EquipmentSlot::Mainhand, sword.clone());
+        entity.set_equipment(EquipmentSlot::Offhand, shield.clone());
+        assert_eq!(entity.item_held_by_arm(true), Some(&sword));
+        entity.left_handed = true;
+        assert_eq!(entity.item_held_by_arm(true), Some(&shield));
+        assert_eq!(entity.item_held_by_arm(false), Some(&sword));
     }
 
     #[test]

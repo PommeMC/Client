@@ -460,9 +460,15 @@ pub(crate) fn push_field_text(
                 color: caret_color,
             });
         } else {
-            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
+            // `EditBox` appends the `_` one pixel after the text
+            // (`drawX += 1`), and at the field's start when there's none.
+            let gap = if info.append_gap && !shown.is_empty() {
+                bar_w
+            } else {
+                0.0
+            };
             elements.push(MenuElement::Text {
-                x: caret_x + bar_w,
+                x: caret_x + gap,
                 y: text_y,
                 text: "_".into(),
                 scale: fs,
@@ -710,39 +716,11 @@ impl HeadProfile {
     /// profile's id (an offline id from the name when it has no id, else
     /// nil). A `namespace:path` under `textures/`.
     pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
-        const DEFAULT_SKINS: [&str; 18] = [
-            "minecraft:entity/player/slim/alex",
-            "minecraft:entity/player/slim/ari",
-            "minecraft:entity/player/slim/efe",
-            "minecraft:entity/player/slim/kai",
-            "minecraft:entity/player/slim/makena",
-            "minecraft:entity/player/slim/noor",
-            "minecraft:entity/player/slim/steve",
-            "minecraft:entity/player/slim/sunny",
-            "minecraft:entity/player/slim/zuri",
-            "minecraft:entity/player/wide/alex",
-            "minecraft:entity/player/wide/ari",
-            "minecraft:entity/player/wide/efe",
-            "minecraft:entity/player/wide/kai",
-            "minecraft:entity/player/wide/makena",
-            "minecraft:entity/player/wide/noor",
-            "minecraft:entity/player/wide/steve",
-            "minecraft:entity/player/wide/sunny",
-            "minecraft:entity/player/wide/zuri",
-        ];
         if let Some(texture) = &self.patch_texture {
             return texture.into();
         }
-        let id = self
-            .id
-            .or_else(|| {
-                self.name
-                    .as_deref()
-                    .map(crate::user::UserData::offline_uuid)
-            })
-            .unwrap_or_default();
-        let hash = crate::world::waypoints::java_uuid_hash(&id);
-        DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
+        use crate::player::default_skin;
+        default_skin::DEFAULT_SKINS[default_skin::for_profile(self.id, self.name.as_deref())].into()
     }
 
     /// The key an [`Self::asset_skin`] texture is held under.
@@ -1281,6 +1259,43 @@ mod tests {
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
     use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn the_append_caret_follows_text_by_a_pixel_and_starts_an_empty_field() {
+        let caret_x = |shown: &str, append_gap: bool| {
+            let info = crate::ui::text_edit::TextFieldRenderInfo {
+                display_start: 0,
+                display_end: shown.len(),
+                caret_byte: shown.len(),
+                caret_visible: true,
+                selection: None,
+                insert_mode: false,
+                append_gap,
+            };
+            let mut elements = Vec::new();
+            super::push_field_text(
+                &mut elements,
+                &info,
+                shown,
+                None,
+                10.0,
+                0.0,
+                8.0,
+                1.0,
+                1.0,
+                [1.0; 4],
+                None,
+                &|t: &str| 6.0 * t.len() as f32,
+            );
+            elements.iter().find_map(|e| match e {
+                MenuElement::Text { x, text, .. } if text == "_" => Some(*x),
+                _ => None,
+            })
+        };
+        assert_eq!(caret_x("", true), Some(10.0));
+        assert_eq!(caret_x("ab", true), Some(23.0));
+        assert_eq!(caret_x("ab", false), Some(22.0));
+    }
 
     #[test]
     fn screen_positions_round_in_gui_units() {

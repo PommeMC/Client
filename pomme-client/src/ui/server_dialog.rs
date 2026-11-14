@@ -1965,6 +1965,7 @@ impl Draw<'_> {
                 caret_visible: focused && on_this_line && field.caret_visible(),
                 selection,
                 insert_mode,
+                append_gap: false,
             };
             self.field_text(&info, shown, inner_x, y, fs, &wf);
         }
