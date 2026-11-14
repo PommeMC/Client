@@ -1980,6 +1980,9 @@ impl Renderer {
     /// Shows the local player's default skin, then starts downloading their
     /// own when they have a profile: vanilla `SkinManager` fetches skins
     /// asynchronously too, drawing `DefaultPlayerSkin.get(uuid)` until then.
+    // TODO: vanilla draws the skin of the profile the server sent, so an
+    // offline-mode server shows the default skin of its offline uuid; this
+    // shows the account's own skin everywhere.
     pub fn load_player_skin(
         &mut self,
         user: &crate::user::UserData,

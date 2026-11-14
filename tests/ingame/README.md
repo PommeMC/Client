@@ -204,7 +204,9 @@ frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # rate, its 1% low, the render
                                               # encode time, the GPU wait, the
                                               # GPU's own time per pass, and
-                                              # the sections and triangles drawn
+                                              # the sections and triangles drawn;
+                                              # set `deterministic = false` to
+                                              # time clouds and particles too
 
 [[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
