@@ -460,9 +460,11 @@ pub(crate) fn push_field_text(
                 color: caret_color,
             });
         } else {
-            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
+            // Vanilla appends the `_` one pixel after the text (`drawX += 1`),
+            // and at the field's start when there's none.
+            let gap = if shown.is_empty() { 0.0 } else { bar_w };
             elements.push(MenuElement::Text {
-                x: caret_x + bar_w,
+                x: caret_x + gap,
                 y: text_y,
                 text: "_".into(),
                 scale: fs,
@@ -1253,6 +1255,41 @@ mod tests {
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
     use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn the_append_caret_follows_text_by_a_pixel_and_starts_an_empty_field() {
+        let caret_x = |shown: &str| {
+            let info = crate::ui::text_edit::TextFieldRenderInfo {
+                display_start: 0,
+                display_end: shown.len(),
+                caret_byte: shown.len(),
+                caret_visible: true,
+                selection: None,
+                insert_mode: false,
+            };
+            let mut elements = Vec::new();
+            super::push_field_text(
+                &mut elements,
+                &info,
+                shown,
+                None,
+                10.0,
+                0.0,
+                8.0,
+                1.0,
+                1.0,
+                [1.0; 4],
+                None,
+                &|t: &str| 6.0 * t.len() as f32,
+            );
+            elements.iter().find_map(|e| match e {
+                MenuElement::Text { x, text, .. } if text == "_" => Some(*x),
+                _ => None,
+            })
+        };
+        assert_eq!(caret_x(""), Some(10.0));
+        assert_eq!(caret_x("ab"), Some(23.0));
+    }
 
     #[test]
     fn screen_positions_round_in_gui_units() {
