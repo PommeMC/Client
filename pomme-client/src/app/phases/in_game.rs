@@ -4895,6 +4895,8 @@ pub fn update_game(
                     is_creepy: e.is_creepy,
                     is_converting: e.is_converting,
                     is_holding_item: e.equipment(EquipmentSlot::Mainhand).is_some(),
+                    held_items: [true, false]
+                        .map(|right| e.item_held_by_arm(right).and_then(held_stack)),
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
                     is_passenger: passengers.contains(&entity_id),
@@ -5333,14 +5335,7 @@ pub fn update_game(
     let held_items = if benchmark_running {
         [None, None]
     } else {
-        let held = |stack: &azalea_inventory::ItemStack| match stack {
-            azalea_inventory::ItemStack::Present(data) => {
-                let name = crate::player::inventory::item_resource_name(data.kind);
-                (name != "air").then(|| (name, data.clone()))
-            }
-            _ => None,
-        };
-        [held(main_stack), held(inventory.offhand())]
+        [held_stack(main_stack), held_stack(inventory.offhand())]
     };
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
@@ -5695,6 +5690,17 @@ mod dropped_item_tests {
         assert!((min - glam::Vec3::new(-0.25, -0.0625, -0.25)).length() < 1.0e-6);
         assert!((max - glam::Vec3::new(0.25, 0.4375, 0.25)).length() < 1.0e-6);
     }
+}
+
+/// A stack's item name and data, for drawing it in a hand; `None` when empty.
+fn held_stack(
+    stack: &azalea_inventory::ItemStack,
+) -> Option<(String, azalea_inventory::ItemStackData)> {
+    let azalea_inventory::ItemStack::Present(data) = stack else {
+        return None;
+    };
+    let name = crate::player::inventory::item_resource_name(data.kind);
+    (name != "air").then(|| (name, data.clone()))
 }
 
 fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
