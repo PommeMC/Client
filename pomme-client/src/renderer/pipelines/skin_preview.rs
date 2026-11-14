@@ -1,4 +1,4 @@
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::PI;
 
 use glam::camera::rh::{proj, view};
 use glam::{Mat3, Mat4, Vec2, Vec3};
@@ -10,6 +10,7 @@ use crate::renderer::entity_model::{
 use crate::renderer::pipelines::entity_renderer::{
     ARMOR_ALPHA_CUTOFF, ARMOR_SUBMIT_ORDER, EntityRenderer, WHITE_TINT,
 };
+use crate::renderer::pipelines::held_item;
 use crate::renderer::{PlayerPreview, rhi, shader, util};
 
 #[repr(C)]
@@ -296,12 +297,7 @@ impl SkinPreviewPipeline {
             // Vanilla `PlayerModel.translateToHand`'s slim-arm nudge.
             let slim_nudge = if self.slim { side * 0.5 } else { 0.0 };
             let pivot = ARM_PIVOTS[i] + Vec3::new(slim_nudge, 0.0, 0.0);
-            // Vanilla `ItemInHandLayer.submitArmWithItem`.
-            body_rot_mat
-                * arm_part(pivot, arm_rots[i])
-                * Mat4::from_rotation_x(-FRAC_PI_2)
-                * Mat4::from_rotation_y(PI)
-                * Mat4::from_translation(Vec3::new(side, 2.0, -10.0) / 16.0)
+            body_rot_mat * arm_part(pivot, arm_rots[i]) * held_item::arm_to_item(right, false)
         });
         PreviewHands {
             view_proj,

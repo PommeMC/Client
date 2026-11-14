@@ -1738,22 +1738,9 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_items = held_items.map(|held| {
-            held.map(|(name, stack)| {
-                let model = self.render_assets.stack_model_key(&name, &stack);
-                let item_tints =
-                    self.render_assets
-                        .item_tint_palette(&model, Some(&stack), player_team_color);
-                let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
-                pipelines::held_item::HeldItemInfo {
-                    name,
-                    model,
-                    item_tints,
-                    has_3d_model,
-                    charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
-                }
-            })
-        });
+        let held_items = held_items
+            .map(|held| held.map(|(name, stack)| self.held_item(name, &stack, player_team_color)));
+        let item_entities = &*self.with_mob_held_items(item_entities, entities);
         sky.fog_color = fog::fog_color(&sky, self.camera.forward(), render_distance);
         // Vanilla clears to the fog colour, which shows below the sky disc's
         // rim; underwater, the water fog colour.
@@ -2107,6 +2094,65 @@ impl Renderer {
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
         self.menu_pipeline.geometry.text_width(text, scale)
+    }
+
+    /// A stack to draw in a hand, its mesh loaded; `team_color` is its
+    /// holder's, for `team` tints.
+    fn held_item(
+        &mut self,
+        name: String,
+        stack: &azalea_inventory::ItemStackData,
+        team_color: Option<u32>,
+    ) -> pipelines::held_item::HeldItemInfo {
+        let model = self.render_assets.stack_model_key(&name, stack);
+        let item_tints = self
+            .render_assets
+            .item_tint_palette(&model, Some(stack), team_color);
+        let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
+        pipelines::held_item::HeldItemInfo {
+            name,
+            model,
+            item_tints,
+            has_3d_model,
+            charged_crossbow: crate::player::interaction::is_charged_crossbow(stack),
+        }
+    }
+
+    /// `item_entities` plus the items `entities` hold (vanilla
+    /// `ItemInHandLayer`), which draw with them.
+    // TODO: the holder's team colour for `team` tints.
+    fn with_mob_held_items<'a>(
+        &mut self,
+        item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
+        entities: &[EntityRenderInfo],
+    ) -> std::borrow::Cow<'a, [pipelines::item_entity::ItemRenderInfo]> {
+        let anchor = self.camera_anchor();
+        let mut items = std::borrow::Cow::Borrowed(item_entities);
+        let holders = entities
+            .iter()
+            .filter(|info| info.held_items.iter().any(Option::is_some));
+        for info in holders {
+            let Some(hands) = self.entity_renderer.hand_poses(info, anchor) else {
+                continue;
+            };
+            for (arm, held) in info.held_items.iter().enumerate() {
+                let Some((name, stack)) = held else {
+                    continue;
+                };
+                let item = self.held_item(name.clone(), stack, None);
+                let display = self
+                    .held_item_pipeline
+                    .third_person_display(&item, false, arm == 0);
+                items.to_mut().push(pipelines::item_entity::ItemRenderInfo {
+                    item_name: item.model.into(),
+                    outline_color: info.outline_color,
+                    tints: item.item_tints.into(),
+                    model_matrix: hands[arm] * display.to_matrix(),
+                    light: info.light,
+                });
+            }
+        }
+        items
     }
 
     /// Menu text width in the SGA (`minecraft:alt`) glyphs.
