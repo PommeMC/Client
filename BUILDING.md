@@ -31,7 +31,9 @@ Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and Python (to stage
 OpenAL Soft next to the binary; without it the client runs with audio disabled).
 
 On Linux, source the Vulkan SDK's `setup-env.sh` into the current Bash shell
-before running client builds or `just client-pre-pr`.
+before running client builds or `just client-pre-pr`. With Nix, `nix-shell`
+at the repo root provides everything instead, including the JDK
+`just ingame-test` needs.
 For builds run from an editor or agent, launch it from the configured environment
 so its build processes inherit the SDK variables.
 
