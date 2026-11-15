@@ -1,0 +1,33 @@
+# Forward held for exactly 20 game ticks, then let go: `wait_ticks` puts the
+# press and the release on the same ticks every run, so the player stops at
+# the same spot to the last digit.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+wait_ticks = 20
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ticks = 20
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+wait_ticks = 40
+
+[[step]]
+screenshot = "stopped"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 4.8134] } }
