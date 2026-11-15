@@ -1,0 +1,78 @@
+# A new recipe stays highlighted while the inventory is open with the recipe
+# book closed, and is marked seen once the book shows it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/recipe take @s *"
+
+[[step]]
+chat = "/recipe give @s minecraft:stick"
+
+[[step]]
+expect = { recipes = { at_least = 1, highlighted = 1 } }
+
+# The "New Recipes Unlocked" toast leaves before the screenshots.
+[[step]]
+wait_ms = 6000
+
+[[step]]
+press = { action = "key.inventory" }
+
+[[step]]
+expect = { menu = "inventory" }
+
+# Off the slots, so none is hovered and the player preview faces one way.
+[[step]]
+cursor = [10.0, 10.0]
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "book_closed"
+
+[[step]]
+expect = { recipes = { highlighted = 1 } }
+
+# The recipe book button, beside the crafting grid.
+[[step]]
+cursor = [239.0, 107.0]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { recipes = { highlighted = 0 } }
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "book_open"
+
+# The button moved right with the inventory; close the book again.
+[[step]]
+cursor = [316.0, 107.0]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+press = { action = "key.inventory" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/recipe take @s *"
