@@ -1,20 +1,17 @@
-//! `set_entity_data` values into the client's entity events. Native sessions
-//! decode the packet with pomme's grammar; translated ones map azalea's
-//! decode onto the same values.
+//! `set_entity_data`, decoded with pomme's grammar for every session:
+//! translated frames already carry the native layout.
 
-use azalea_buf::AzBuf;
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_entity::EntityDataValue;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
+use azalea_registry::Registry;
 use azalea_registry::builtin::EntityKind;
-use azalea_registry::{DataRegistry, Registry};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::entity_data::{DataValue, Value, Variant};
 use pomme_protocol::item::ItemCodec;
 
 use super::handler::{send_ordered, variant_index};
+use super::translate::Translation;
 use super::{NetworkEvent, item_codec};
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
@@ -26,59 +23,54 @@ const ITEM_INDEX: u8 = 8;
 /// `Pose.CROUCHING`'s id.
 const CROUCHING: u32 = 5;
 
-/// Decodes a native `set_entity_data`; `None` for any other packet or a
-/// translated session.
+/// Decodes a `set_entity_data`; `None` for any other packet.
 pub(super) fn handle_raw_entity_data(
     packet_id: u32,
     payload: &[u8],
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    if packet_id != item_codec::item_packet_ids().set_entity_data || !item_codec::native_session() {
+    if packet_id != item_codec::item_packet_ids().set_entity_data {
         return None;
     }
-    Some(read_entity_data(payload).map(|(id, values)| {
-        for data in values {
-            match &data.value {
-                Value::Item(Some(stack)) if data.index == ITEM_INDEX => {
-                    if let ItemStack::Present(stack) = item_codec::to_azalea(stack) {
-                        send_item_data(id, &stack, event_tx);
+    Some(
+        read_entity_data(payload, super::translate::active()).map(|(id, values)| {
+            for DataValue { index, value } in values {
+                match &value {
+                    Value::Item(Some(stack)) if index == ITEM_INDEX => {
+                        if let ItemStack::Present(stack) = item_codec::to_azalea(stack) {
+                            send_item_data(id, &stack, event_tx);
+                        }
                     }
+                    value => send_data_value(id, index, value, registry_holder, event_tx),
                 }
-                value => send_data_value(id, data.index, value, registry_holder, event_tx),
             }
-        }
-    }))
+        }),
+    )
 }
 
 /// `ClientboundSetEntityDataPacket.java:39-44`: the entity id, then values.
-fn read_entity_data(payload: &[u8]) -> DecodeResult<(i32, Vec<DataValue>)> {
+/// Where `translation` left an item stack's id in the wire version's space,
+/// it becomes the native id, or an empty stack when there is none.
+pub(super) fn read_entity_data(
+    payload: &[u8],
+    translation: Option<&Translation>,
+) -> DecodeResult<(i32, Vec<DataValue>)> {
     let mut r = Reader::new(payload);
     let id = r.var_i32()?;
-    let values = ItemCodec::native().read_entity_data(&mut r)?;
+    let mut values = ItemCodec::native().read_entity_data(&mut r)?;
     r.ensure_eof()?;
-    Ok((id, values))
-}
-
-/// A translated session's `set_entity_data`, decoded by azalea.
-// TODO: drop once translated sessions decode it raw too.
-pub(super) fn handle_typed_entity_data(
-    p: &ClientboundSetEntityData,
-    registry_holder: &RegistryHolder,
-    event_tx: &Sender<NetworkEvent>,
-) {
-    for item in p.packed_items.iter() {
-        match &item.value {
-            EntityDataValue::ItemStack(ItemStack::Present(stack)) if item.index == ITEM_INDEX => {
-                send_item_data(p.id.0, stack, event_tx);
-            }
-            value => {
-                if let Some(value) = from_azalea(value) {
-                    send_data_value(p.id.0, item.index, &value, registry_holder, event_tx);
-                }
+    if let Some(translation) = translation.filter(|t| t.entity_data_items_in_wire_ids()) {
+        for data in &mut values {
+            if let Value::Item(stack) = &mut data.value {
+                *stack = stack.take().and_then(|mut stack| {
+                    stack.item = translation.remap_item_to_native(stack.item)?;
+                    Some(stack)
+                });
             }
         }
     }
+    Ok((id, values))
 }
 
 fn send_item_data(id: i32, stack: &ItemStackData, event_tx: &Sender<NetworkEvent>) {
@@ -218,67 +210,11 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
     send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });
 }
 
-/// The values [`send_data_value`] reads, from azalea's decode.
-pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
-    Some(match value {
-        EntityDataValue::Byte(v) => Value::Byte(*v),
-        EntityDataValue::Int(v) => Value::Int(*v),
-        EntityDataValue::Long(v) => Value::Long(*v),
-        EntityDataValue::Float(v) => Value::Float(*v),
-        EntityDataValue::Boolean(v) => Value::Bool(*v),
-        EntityDataValue::OptionalFormattedText(text) => Value::OptionalComponent(match text {
-            Some(text) => {
-                let mut nbt = Vec::new();
-                text.azalea_write(&mut nbt).ok()?;
-                Some(nbt.into())
-            }
-            None => None,
-        }),
-        EntityDataValue::OptionalBlockPos(pos) => {
-            Value::OptionalBlockPos(pos.map(|pos| (pos.x, pos.y, pos.z)))
-        }
-        EntityDataValue::Pose(pose) => Value::Pose(*pose as u32),
-        EntityDataValue::VillagerData(data) => Value::VillagerData {
-            kind: data.kind.to_u32(),
-            profession: data.profession.to_u32(),
-            level: data.level,
-        },
-        EntityDataValue::CatVariant(v) => Value::Variant(Variant::Cat, v.protocol_id()),
-        EntityDataValue::CowVariant(v) => Value::Variant(Variant::Cow, v.protocol_id()),
-        EntityDataValue::WolfVariant(v) => Value::Variant(Variant::Wolf, v.protocol_id()),
-        EntityDataValue::ChickenVariant(v) => Value::Variant(Variant::Chicken, v.protocol_id()),
-        EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
-        EntityDataValue::CopperGolemState(state) => Value::Int(*state as i32),
-        EntityDataValue::WeatheringCopperState(state) => Value::Int(*state as i32),
-        // TODO: azalea's `ArmadilloStateKind` lacks UNROLLING (id 3), so a
-        // translated session fails to decode that state.
-        EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use pomme_protocol::wire::write_varint;
 
     use super::*;
-
-    #[test]
-    fn copper_golem_states_map_to_their_ids() {
-        use azalea_entity::{CopperGolemStateKind, WeatheringCopperStateKind};
-        assert_eq!(
-            from_azalea(&EntityDataValue::CopperGolemState(
-                CopperGolemStateKind::DroppingItem
-            )),
-            Some(Value::Int(3))
-        );
-        assert_eq!(
-            from_azalea(&EntityDataValue::WeatheringCopperState(
-                WeatheringCopperStateKind::Weathered
-            )),
-            Some(Value::Int(2))
-        );
-    }
 
     #[test]
     fn native_entity_data_becomes_events() {

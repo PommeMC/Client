@@ -47,9 +47,9 @@ pub(super) const DROPPED: &[&str] = &[
     "rabbit/variant",
 ];
 
-/// Whether this session speaks the native protocol, the only one pomme's
-/// item grammar decodes; translated sessions keep azalea's decode, which
-/// their id remaps run after.
+/// Whether this session speaks the native protocol. Translated sessions
+/// keep azalea's decode of `update_advancements`, whose icon layout differs
+/// by version.
 pub(super) fn native_session() -> bool {
     crate::version::session_protocol() == NATIVE.protocol
 }

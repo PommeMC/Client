@@ -383,8 +383,8 @@ use std::sync::{Mutex, OnceLock};
 use azalea_buf::AzBuf;
 use azalea_inventory::components::Profile;
 use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_container_click::HashedStack;
-use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::Registry;
 use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
@@ -730,8 +730,8 @@ struct Ids763 {
     tag_query_id: u32,
     add_player_old_id: u32,
     add_entity_old_id: u32,
-    /// The wire version's `player` entity type; `remap_inbound` turns it into
-    /// the native id after the frame decodes.
+    /// The wire version's `player` entity type; the entity reader turns it
+    /// into the native id after the frame decodes.
     player_entity_type: u32,
 }
 

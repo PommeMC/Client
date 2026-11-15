@@ -25,8 +25,7 @@ pub(super) fn read_velocity(cur: &mut Cursor<&[u8]>) -> Option<DVec3> {
 /// Rewrites `add_entity`: 1.21.9 moved the velocity from three trailing
 /// shorts to an `LpVec3` between the position and the rotation bytes
 /// (`ClientboundAddEntityPacket` read/write in both references). The entity
-/// type id stays in the wire version's space; `remap_inbound` remaps it on
-/// the decoded packet.
+/// type id stays in the wire version's space; the entity reader remaps it.
 pub(super) fn translate_add_entity(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id

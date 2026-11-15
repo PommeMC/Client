@@ -29,26 +29,11 @@ impl Translation {
         self.to_native.remap(ClientRegistry::Item, id)
     }
 
-    /// Remaps a decoded packet's static-registry ids into the native
-    /// version's id space; `false` drops the packet (its subject no longer
-    /// exists, e.g. the bed block entity removed in 26.2).
-    pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
-        match packet {
-            ClientboundGamePacket::SetEntityData(p) => {
-                // `translate_entity_data` already remaps item-stack values
-                // while rewriting serializer ids, except on pre-1.20.5 wires
-                // where `translate_item_765` leaves the wire id for this pass.
-                let needs_remap = self.game_ids.as_ref().is_none_or(|g| g.v765.is_some());
-                if needs_remap {
-                    for item in &mut p.packed_items.0 {
-                        if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
-                            remap_stack(self.to_native, stack);
-                        }
-                    }
-                }
-                true
-            }
-            _ => true,
-        }
+    /// Whether `set_entity_data` item stacks keep the wire version's item
+    /// ids: `translate_entity_data` remaps them while rewriting serializer
+    /// ids, except with no game translation at all and on pre-1.20.5 wires,
+    /// where `translate_item_765` leaves the id as sent.
+    pub fn entity_data_items_in_wire_ids(&self) -> bool {
+        self.game_ids.as_ref().is_none_or(|g| g.v765.is_some())
     }
 }

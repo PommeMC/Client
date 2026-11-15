@@ -36,11 +36,7 @@ pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent)
     }
 }
 
-pub fn handle_game_packet(
-    packet: &ClientboundGamePacket,
-    event_tx: &Sender<NetworkEvent>,
-    registry_holder: &RegistryHolder,
-) {
+pub fn handle_game_packet(packet: &ClientboundGamePacket, event_tx: &Sender<NetworkEvent>) {
     match packet {
         ClientboundGamePacket::UpdateAdvancements(p) => {
             use azalea_protocol::packets::game::c_update_advancements::FrameType;
@@ -98,9 +94,6 @@ pub fn handle_game_packet(
                     show_advancements: p.show_advancements,
                 })),
             );
-        }
-        ClientboundGamePacket::SetEntityData(p) => {
-            super::entity_data::handle_typed_entity_data(p, registry_holder, event_tx);
         }
         _other => {}
     }

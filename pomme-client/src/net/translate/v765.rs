@@ -120,7 +120,7 @@ pub(super) fn translate_chat_command_765(old_id: u32, payload: &[u8]) -> Vec<Vec
 
 /// Translates one 1.20.4 optional item stack into a bare 26.2 stack
 /// (count + item + empty patch). Item ids stay in the wire version's
-/// space for `remap_inbound`/`remap_stack`.
+/// space for the reader to remap.
 pub(super) fn translate_item_765(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,

@@ -591,14 +591,6 @@ fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     decoded
 }
 
-/// `translate_and_decode` plus the id remap the connection applies next, for
-/// packets whose frame rewrite leaves item ids in the wire version's space.
-fn translate_decode_and_remap(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
-    let mut packet = translate_and_decode(protocol, old);
-    assert!(translation_for(protocol).remap_inbound(&mut packet));
-    packet
-}
-
 /// An item 765 and 26.2 number differently (27 against 54), so a stack that
 /// never gets remapped decodes as the wrong item rather than passing by
 /// identity.
@@ -2752,31 +2744,20 @@ fn translate_level_particles_765() {
 /// `sniffer_state` sits at 25 (26.2's is 27).
 #[test]
 fn translate_entity_data_765() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(765, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[17, 25, 2]); // index 17, sniffer_state, ordinal 2
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::SnifferState(_)
-    ));
+    // index 17, sniffer_state, ordinal 2
     assert_eq!(
-        super::entity_data::from_azalea(&p.packed_items.0[0].value),
-        Some(pomme_protocol::entity_data::Value::Int(2))
+        entity_data_entries(765, &[17, 25, 2])[0].value,
+        pomme_protocol::entity_data::Value::Int(2)
     );
 }
 
 /// Translates a `set_entity_data` frame for entity 9 carrying `values` (the
-/// entry list without its terminator) and returns the decoded entries.
-fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::EntityDataItem> {
+/// entry list without its terminator) and reads the entries as the raw
+/// handler does.
+fn entity_data_entries(
+    protocol: i32,
+    values: &[u8],
+) -> Vec<pomme_protocol::entity_data::DataValue> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -2785,28 +2766,40 @@ fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::Entit
     wire::write_varint(&mut old, 9); // entity id
     old.extend_from_slice(values);
     old.push(0xFF);
-    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(protocol, old) else {
-        panic!("wrong packet");
-    };
-    p.packed_items.0
+    let translation = translation_for(protocol);
+    let translated = translation
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut r = pomme_protocol::codec::Reader::new(&translated);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(
+            Phase::Game,
+            Direction::Clientbound,
+            "set_entity_data"
+        ))
+    );
+    let (id, entries) =
+        super::entity_data::read_entity_data(&translated[r.pos()..], Some(&translation)).unwrap();
+    assert_eq!(id, 9);
+    entries
 }
 
-fn entity_data_stack(entry: &azalea_entity::EntityDataItem) -> &azalea_inventory::ItemStack {
-    let azalea_entity::EntityDataValue::ItemStack(stack) = &entry.value else {
+/// The item of an entry's stack; `None` for an empty one.
+fn entity_data_item(
+    entry: &pomme_protocol::entity_data::DataValue,
+) -> Option<azalea_registry::builtin::ItemKind> {
+    use azalea_registry::Registry;
+
+    let pomme_protocol::entity_data::Value::Item(stack) = &entry.value else {
         panic!("wrong value");
     };
-    stack
+    let stack = stack.as_ref()?;
+    Some(azalea_registry::builtin::ItemKind::from_u32(stack.item).expect("a native item"))
 }
 
-fn entity_data_item(entry: &azalea_entity::EntityDataItem) -> azalea_registry::builtin::ItemKind {
-    let azalea_inventory::ItemStack::Present(data) = entity_data_stack(entry) else {
-        panic!("empty stack");
-    };
-    data.kind
-}
-
-/// `translate_entity_data` already remaps item stacks, so `remap_inbound` must
-/// not remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
+/// `translate_entity_data` already remaps item stacks, so the read must not
+/// remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
 #[test]
 fn entity_data_item_remaps_once_777() {
     // index 8, item_stack serializer, count 1, 26.3 oak_log (varint 163),
@@ -2814,7 +2807,7 @@ fn entity_data_item_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        azalea_registry::builtin::ItemKind::OakLog
+        Some(azalea_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -2826,7 +2819,7 @@ fn entity_data_item_with_components_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        azalea_registry::builtin::ItemKind::OakLog
+        Some(azalea_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -2836,10 +2829,7 @@ fn entity_data_item_with_components_remaps_once_777() {
 fn entity_data_unmapped_item_empties_777() {
     // poplar_log (varint 172), empty patch; then index 9, int serializer, 7
     let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 0, 0, 9, 1, 7]);
-    assert!(matches!(
-        entity_data_stack(&entries[0]),
-        azalea_inventory::ItemStack::Empty
-    ));
+    assert_eq!(entity_data_item(&entries[0]), None);
     assert_eq!(entries.len(), 2);
 }
 
@@ -2848,21 +2838,18 @@ fn entity_data_unmapped_item_empties_777() {
 #[test]
 fn entity_data_unmapped_item_with_components_keeps_the_list_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
-    assert!(matches!(
-        entity_data_stack(&entries[0]),
-        azalea_inventory::ItemStack::Empty
-    ));
+    assert_eq!(entity_data_item(&entries[0]), None);
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].index, 9);
 }
 
-/// `translate_item_765` leaves the wire item id for the typed pass, so
-/// `remap_inbound` must still remap `set_entity_data` stacks on 765 wires.
+/// `translate_item_765` leaves the wire item id, so the read must still remap
+/// `set_entity_data` stacks on 765 wires.
 #[test]
 fn entity_data_item_remaps_765() {
     // index 8, item_stack serializer, present, 765 item id, count 1, empty NBT
     let entries = entity_data_entries(765, &[8, 7, 1, SHIFTED_ITEM, 1, 0x0A, 0x00]);
-    assert_eq!(entity_data_item(&entries[0]), SHIFTED_ITEM_KIND);
+    assert_eq!(entity_data_item(&entries[0]), Some(SHIFTED_ITEM_KIND));
 }
 
 /// `container_set_slot`'s -1/-2 sentinels split like 767's, but with the
@@ -5839,13 +5826,56 @@ fn entity_data_matches_azalea() {
             }
             (ours, theirs) => assert_eq!(
                 Some(ours),
-                super::entity_data::from_azalea(theirs)
-                    .as_ref()
-                    .or(Some(&Value::Other)),
+                pomme_data_value(theirs).as_ref().or(Some(&Value::Other)),
                 "{theirs:?}"
             ),
         }
     }
+}
+
+/// azalea's decode of an entity data value as pomme's, for the values the
+/// client reads.
+fn pomme_data_value(
+    value: &azalea_entity::EntityDataValue,
+) -> Option<pomme_protocol::entity_data::Value> {
+    use azalea_buf::AzBuf;
+    use azalea_entity::EntityDataValue;
+    use azalea_registry::{DataRegistry, Registry};
+    use pomme_protocol::entity_data::{Value, Variant};
+
+    Some(match value {
+        EntityDataValue::Byte(v) => Value::Byte(*v),
+        EntityDataValue::Int(v) => Value::Int(*v),
+        EntityDataValue::Long(v) => Value::Long(*v),
+        EntityDataValue::Float(v) => Value::Float(*v),
+        EntityDataValue::Boolean(v) => Value::Bool(*v),
+        EntityDataValue::OptionalFormattedText(text) => Value::OptionalComponent(match text {
+            Some(text) => {
+                let mut nbt = Vec::new();
+                text.azalea_write(&mut nbt).ok()?;
+                Some(nbt.into())
+            }
+            None => None,
+        }),
+        EntityDataValue::OptionalBlockPos(pos) => {
+            Value::OptionalBlockPos(pos.map(|pos| (pos.x, pos.y, pos.z)))
+        }
+        EntityDataValue::Pose(pose) => Value::Pose(*pose as u32),
+        EntityDataValue::VillagerData(data) => Value::VillagerData {
+            kind: data.kind.to_u32(),
+            profession: data.profession.to_u32(),
+            level: data.level,
+        },
+        EntityDataValue::CatVariant(v) => Value::Variant(Variant::Cat, v.protocol_id()),
+        EntityDataValue::CowVariant(v) => Value::Variant(Variant::Cow, v.protocol_id()),
+        EntityDataValue::WolfVariant(v) => Value::Variant(Variant::Wolf, v.protocol_id()),
+        EntityDataValue::ChickenVariant(v) => Value::Variant(Variant::Chicken, v.protocol_id()),
+        EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
+        EntityDataValue::CopperGolemState(state) => Value::Int(*state as i32),
+        EntityDataValue::WeatheringCopperState(state) => Value::Int(*state as i32),
+        EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
+        _ => return None,
+    })
 }
 
 /// pomme's `update_advancements` decode agrees with azalea's on every field
