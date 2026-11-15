@@ -1,0 +1,49 @@
+# The sun at noon and the moon at midnight, straight overhead: each texel
+# draws with hard edges, as the game's nearest-filtered celestials atlas does.
+
+[[step]]
+wait_ms = 2000
+
+# Spectators have no hand or hotbar over the sky.
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 0.5 100 0.5 0 -90"
+
+[[step]]
+expect = { player = { day_time = 6000, game_mode = 3 } }
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "sun"
+
+[[step]]
+chat = "/time set 18000"
+
+[[step]]
+expect = { player = { day_time = 18000 } }
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "moon"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/gamerule advance_time true"
+
+[[step]]
+chat = "/gamemode survival"
