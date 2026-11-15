@@ -135,6 +135,15 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_outside_the_default_namespace_keeps_its_own() {
+        use super::builtin::CommandArgumentKind;
+        assert_eq!(CommandArgumentKind::Bool.to_str(), "brigadier:bool");
+        assert_eq!("brigadier:bool".parse(), Ok(CommandArgumentKind::Bool));
+        assert_eq!("bool".parse::<CommandArgumentKind>(), Err(()));
+        assert_eq!(CommandArgumentKind::Entity.to_str(), "minecraft:entity");
+    }
+
+    #[test]
     fn every_id_round_trips_and_the_one_past_the_end_is_none() {
         for (id, &kind) in EntityKind::ALL.iter().enumerate() {
             assert_eq!(kind.to_u32(), id as u32);

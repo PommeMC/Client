@@ -1641,12 +1641,12 @@ registry!(ChunkStatus {
 });
 
 registry!(CommandArgumentKind {
-    Bool => "bool",
-    Float => "float",
-    Double => "double",
-    Integer => "integer",
-    Long => "long",
-    String => "string",
+    Bool => "bool" in "brigadier",
+    Float => "float" in "brigadier",
+    Double => "double" in "brigadier",
+    Integer => "integer" in "brigadier",
+    Long => "long" in "brigadier",
+    String => "string" in "brigadier",
     Entity => "entity",
     GameProfile => "game_profile",
     BlockPos => "block_pos",

@@ -1089,7 +1089,7 @@ fn translate_set_player_team_26_1_reset_color() {
 
 /// Every native registry id must match the runtime enum used by remapping.
 #[test]
-fn registry_table_matches_azalea() {
+fn registry_table_matches_the_registry_enums() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
     use pomme_registry::Registry;
     use pomme_registry::builtin::*;
@@ -1106,9 +1106,10 @@ fn registry_table_matches_azalea() {
             for (id, name) in names.iter().enumerate() {
                 let value = $kind::from_u32(id as u32).expect("builtin id");
                 assert_eq!(value.to_u32(), id as u32);
-                let azalea = value.to_str().trim_start_matches("minecraft:");
-                if azalea != name {
-                    mismatches.push((stringify!($kind), azalea.to_owned(), name.clone()));
+                // The table drops the default namespace, as `toShortString`.
+                let entry = value.to_str().trim_start_matches("minecraft:");
+                if entry != name {
+                    mismatches.push((stringify!($kind), entry.to_owned(), name.clone()));
                 }
             }
         }};
@@ -1135,20 +1136,7 @@ fn registry_table_matches_azalea() {
             ClientRegistry::SoundEvent => check!(SoundEvent, SoundEvent),
         }
     }
-    // azalea names brigadier's own argument types in the minecraft namespace;
-    // vanilla registers them as brigadier:* (ArgumentTypeInfos.bootstrap).
-    let brigadier = ["bool", "float", "double", "integer", "long", "string"];
-    let expected: Vec<_> = brigadier
-        .iter()
-        .map(|t| {
-            (
-                "CommandArgumentKind",
-                t.to_string(),
-                format!("brigadier:{t}"),
-            )
-        })
-        .collect();
-    assert_eq!(mismatches, expected);
+    assert_eq!(mismatches, []);
 }
 
 /// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's

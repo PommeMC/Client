@@ -59,7 +59,14 @@ fn generate(reference: &Path, version: &str, out: &Path) -> Result<(), Error> {
     for (name, entries) in &registries {
         writeln!(builtin, "\nregistry!({} {{", enum_name(name))?;
         for entry in entries {
-            writeln!(builtin, "    {} => \"{entry}\",", variant(entry))?;
+            match entry.split_once(':') {
+                None => writeln!(builtin, "    {} => \"{entry}\",", variant(entry))?,
+                Some((namespace, path)) => writeln!(
+                    builtin,
+                    "    {} => \"{path}\" in \"{namespace}\",",
+                    variant(path)
+                )?,
+            }
         }
         builtin.push_str("});\n");
     }
@@ -144,7 +151,14 @@ fn path_of(ident: &str) -> Result<&str, Error> {
     }
 }
 
-/// Each builtin registry's entry paths in protocol-id order, by its path.
+/// An identifier without the default namespace; another of the game's stays.
+fn local(ident: &str) -> Result<&str, Error> {
+    path_of(ident)?;
+    Ok(ident.strip_prefix("minecraft:").unwrap_or(ident))
+}
+
+/// Each builtin registry's entries in protocol-id order, by its path. An
+/// entry is its path, led by its namespace when that isn't the default.
 fn builtin_registries(report: &Value) -> Result<BTreeMap<String, Vec<String>>, Error> {
     let report = report
         .as_object()
@@ -162,7 +176,7 @@ fn builtin_registries(report: &Value) -> Result<BTreeMap<String, Vec<String>>, E
             let slot = ordered
                 .get_mut(id as usize)
                 .ok_or_else(|| format!("{name} {entry} has id {id} past the registry's end"))?;
-            if slot.replace(path_of(entry)?.to_owned()).is_some() {
+            if slot.replace(local(entry)?.to_owned()).is_some() {
                 return Err(format!("{name} has two entries with id {id}").into());
             }
         }
@@ -326,6 +340,7 @@ mod tests {
         });
         let registries = builtin_registries(&report).unwrap();
         assert_eq!(registries["item"], ["air", "stone"]);
+        assert_eq!(local("brigadier:bool").unwrap(), "brigadier:bool");
 
         let clash = serde_json::json!({
             "minecraft:item": {"entries": {

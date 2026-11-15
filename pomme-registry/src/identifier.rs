@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 /// `Identifier.DEFAULT_NAMESPACE`.
-pub const DEFAULT_NAMESPACE: &str = "minecraft";
+pub const DEFAULT_NAMESPACE: &str = namespace!();
 
 /// A namespaced name, like `minecraft:stone`.
 ///

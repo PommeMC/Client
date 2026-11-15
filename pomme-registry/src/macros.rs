@@ -1,9 +1,19 @@
 //! The macros the generated entry lists are written with.
 
+/// An entry's namespace: the default one unless it names another.
+macro_rules! namespace {
+    () => {
+        "minecraft"
+    };
+    ($namespace:literal) => {
+        $namespace
+    };
+}
+
 /// A builtin registry: an enum whose variants are its entries in protocol-id
-/// order, each with its path under the `minecraft` namespace.
+/// order, each with its path and, outside the default one, its namespace.
 macro_rules! registry {
-    ($name:ident { $($variant:ident => $path:literal,)* }) => {
+    ($name:ident { $($variant:ident => $path:literal $(in $namespace:literal)?,)* }) => {
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         #[repr(u32)]
         pub enum $name {
@@ -13,7 +23,8 @@ macro_rules! registry {
         impl $name {
             /// Every entry, in protocol-id order.
             pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
-            const NAMES: &'static [&'static str] = &[$(concat!("minecraft:", $path),)*];
+            const NAMES: &'static [&'static str] =
+                &[$(concat!(namespace!($($namespace)?), ":", $path),)*];
 
             /// The entry's identifier, like `minecraft:stone`.
             pub fn to_str(&self) -> &'static str {
@@ -49,11 +60,8 @@ macro_rules! registry {
             type Error = ();
 
             fn try_from(ident: &$crate::Identifier) -> Result<Self, ()> {
-                if ident.namespace() != $crate::identifier::DEFAULT_NAMESPACE {
-                    return Err(());
-                }
-                match ident.path() {
-                    $($path => Ok(Self::$variant),)*
+                match (ident.namespace(), ident.path()) {
+                    $((namespace!($($namespace)?), $path) => Ok(Self::$variant),)*
                     _ => Err(()),
                 }
             }
