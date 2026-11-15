@@ -17,7 +17,7 @@
 Pomme contains no Mojang code, and joins vanilla servers from 1.20 through 26.3.
 
 <p align="center">
-  <img width="100%" alt="Pomme flying over a jungle" src="https://github.com/user-attachments/assets/c35e717e-3535-4f4f-9539-9e62dd482e04" />
+  <img width="100%" alt="Pomme, a Minecraft client written from scratch in Rust, next to a landscape captured in Pomme." src="https://pomme.rs/og.jpg" />
 </p>
 
 ## Download
