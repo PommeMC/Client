@@ -365,8 +365,8 @@
 //! inserted `additional_trade_cost`; 1.21.10 and every older version with a
 //! component registry: 5, where 1.21.11 inserted `use_effects` — so even
 //! `custom_name` and `enchantments` are affected on all of them) decodes under
-//! the wrong 26.2 codec — usually a misparse that skips the packet via
-//! `skip_malformed_packet`, though a coincidentally parsable layout yields a
+//! the wrong 26.2 codec — usually a misparse that skips the packet with a
+//! warning, though a coincidentally parsable layout yields a
 //! silently wrong component. Common survival items only use earlier, unshifted
 //! components. Items nested inside component values (bundles, containers) also
 //! keep their source-version ids. On 26.3 a stack carrying one of the

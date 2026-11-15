@@ -1,30 +1,96 @@
 //! Resolve a server address to connectable socket addresses, IPv4 first.
 //!
-//! azalea uses the single "first" resolved IP, which on a dual-stack host can
-//! be an unreachable IPv6, such as a NAT64-synthesized AAAA whose gateway
-//! doesn't route while the plain IPv4 is fine. We gather every address we can,
-//! prefer IPv4, and let the caller try them in order so a dead IPv6 doesn't
-//! blackhole the connection.
+//! The "first" resolved IP can be an unreachable IPv6 on a dual-stack host,
+//! such as a NAT64-synthesized AAAA whose gateway doesn't route while the
+//! plain IPv4 is fine. We gather every address we can, prefer IPv4, and let
+//! the caller try them in order so a dead IPv6 doesn't blackhole the
+//! connection.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use azalea_protocol::address::ServerAddr;
-use azalea_protocol::resolve::{ResolveError, resolve_address};
+use hickory_resolver::config::{GOOGLE, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::{Name, RData};
+use hickory_resolver::{Resolver, TokioResolver};
 use pomme_protocol::status::{self, ClientIntent, Intention, ServerStatus, StatusPacket};
 use thiserror::Error;
 use tokio::net::TcpStream;
 
+use super::address::{DEFAULT_PORT, ServerAddr};
 use super::conn::Conn;
 
-/// Socket addresses to try in order: IPv4 first, the SRV-correct ones (derived
-/// from azalea's resolution) ahead of the system-resolver fallbacks.
+/// Why an address didn't resolve.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct ResolveError(String);
+
+impl ResolveError {
+    fn new(why: impl ToString) -> Self {
+        Self(why.to_string())
+    }
+}
+
+static RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_tokio()
+        .unwrap_or_else(|_| {
+            tracing::warn!("System DNS resolver unavailable; falling back to Google DNS.");
+            Resolver::builder_with_config(
+                ResolverConfig::udp_and_tcp(&GOOGLE),
+                TokioRuntimeProvider::new(),
+            )
+        })
+        .build()
+        .expect("DNS resolver")
+});
+
+/// Vanilla `ServerNameResolver.resolveAddress`: `server`'s address, or its SRV
+/// redirect's when it has one.
+async fn resolve_address(server: &ServerAddr) -> Result<SocketAddr, ResolveError> {
+    let redirect = srv_redirect(server).await;
+    let server = redirect.as_ref().unwrap_or(server);
+    if let Ok(ip) = server.host.parse() {
+        return Ok(SocketAddr::new(ip, server.port));
+    }
+    // As ASCII: read as UTF-8, a name with an underscore in it (an SRV
+    // target can have one) is refused.
+    let name = Name::from_ascii(&server.host).map_err(ResolveError::new)?;
+    let lookup = RESOLVER.lookup_ip(name).await.map_err(ResolveError::new)?;
+    let ip = lookup
+        .iter()
+        .next()
+        .ok_or_else(|| ResolveError::new("No A/AAAA record found"))?;
+    Ok(SocketAddr::new(ip, server.port))
+}
+
+/// Vanilla `ServerRedirectHandler`: the target of `_minecraft._tcp.<host>`'s
+/// first SRV record, asked for only on the default port.
+async fn srv_redirect(server: &ServerAddr) -> Option<ServerAddr> {
+    if server.port != DEFAULT_PORT {
+        return None;
+    }
+    let lookup = RESOLVER
+        .srv_lookup(format!("_minecraft._tcp.{}", server.host))
+        .await
+        .ok()?;
+    let RData::SRV(srv) = &lookup.answers().first()?.data else {
+        return None;
+    };
+    Some(ServerAddr {
+        host: srv.target.to_ascii(),
+        port: srv.port,
+    })
+}
+
+/// Socket addresses to try in order: IPv4 first, the SRV-correct ones ahead
+/// of the system-resolver fallbacks.
 pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, ResolveError> {
     let mut candidates: Vec<SocketAddr> = Vec::new();
 
-    // An IP literal needs no DNS; skip azalea's resolution, whose SRV lookup
-    // runs even for literals and stalls badly on resolvers that drop the query.
+    // An IP literal needs no DNS; an SRV lookup for one stalls badly on
+    // resolvers that drop the query.
     if let Ok(ip) = server.host.parse::<IpAddr>() {
         push_with_nat64(&mut candidates, SocketAddr::new(ip, server.port));
         return Ok(candidates);
@@ -40,7 +106,7 @@ pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, 
             tokio::net::lookup_host((server.host.as_str(), server.port)),
         ),
     );
-    let primary = primary.unwrap_or_else(|_| Err(ResolveError::from("resolution timed out")));
+    let primary = primary.unwrap_or_else(|_| Err(ResolveError::new("resolution timed out")));
     let extra: Vec<SocketAddr> = extra
         .ok()
         .and_then(Result::ok)

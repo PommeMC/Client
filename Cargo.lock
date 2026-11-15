@@ -4565,6 +4565,7 @@ dependencies = [
  "gilrs",
  "glam",
  "glsl-lang",
+ "hickory-resolver",
  "image",
  "jni",
  "libloading 0.9.0",

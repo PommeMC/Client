@@ -1,30 +1,30 @@
-//! A Minecraft protocol connection over either transport.
+//! A Minecraft protocol connection over either transport, TCP or the
+//! in-process pipe to an integrated server: the stream, the read buffer and
+//! encryption around `frame`'s frames.
 //!
-//! Replaces `azalea_protocol::connect::Connection`, which is pinned to a TCP
-//! stream's owned halves and cannot be rebuilt over another transport because
-//! its half wrappers carry private `PhantomData`. The framing beneath it is
-//! already transport-generic, so this owns only the struct layer.
-//!
-//! There is also no connection phase here. Azalea makes it a type parameter and
-//! re-types the whole connection on every transition; a frame is already
-//! encoded for its phase, and dropping the marker makes the mid-session
-//! reconfiguration excursion ordinary calls on one object.
+//! There is no connection phase here. A packet is already encoded for its
+//! phase, so a mid-session reconfiguration is ordinary calls on one object.
 
 use std::io::{self, Cursor};
 
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
-use azalea_protocol::read::{ReadPacketError, read_raw_packet};
-use azalea_protocol::write::write_raw_packet;
-use tokio::io::{ReadHalf, SimplexStream, WriteHalf};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, SimplexStream, WriteHalf};
 use tokio::net::TcpStream;
 
+use super::frame::{self, FrameError};
 use super::stream::{NetReader, NetWriter};
+
+/// How much one read takes off the stream.
+const READ_CHUNK: usize = 64 * 1024;
 
 pub struct RawReader {
     stream: NetReader,
     /// Accumulates wire bytes until they contain a whole frame; a single read
     /// can carry part of a packet, or several.
     buffer: Cursor<Vec<u8>>,
+    /// Where a read lands before it joins `buffer`, so one dropped halfway
+    /// (the loops read inside `select!`) leaves `buffer` as it was.
+    chunk: Box<[u8]>,
     compression_threshold: Option<u32>,
     dec_cipher: Option<Aes128CfbDec>,
 }
@@ -45,30 +45,42 @@ pub struct Conn {
 }
 
 impl RawReader {
-    /// Reads one frame, decrypted and decompressed.
-    // TODO: no maximum frame length, so a hostile length prefix buffers without
-    // bound. Inherited from azalea's framing; cap it if framing moves here.
-    pub async fn read(&mut self) -> Result<Box<[u8]>, Box<ReadPacketError>> {
-        let frame = read_raw_packet(
-            &mut self.stream,
-            &mut self.buffer,
-            self.compression_threshold,
-            &mut self.dec_cipher,
-        )
-        .await?;
-        self.compact();
-        Ok(frame)
+    /// Reads one packet, decrypted and decompressed.
+    pub async fn read(&mut self) -> Result<Box<[u8]>, FrameError> {
+        loop {
+            let consumed = self.buffer.position() as usize;
+            if let Some((frame, taken)) = frame::split(&self.buffer.get_ref()[consumed..])? {
+                let packet = frame::unpack(frame, self.compression_threshold.is_some())?;
+                self.buffer.set_position((consumed + taken) as u64);
+                self.compact();
+                return Ok(packet);
+            }
+            let read = self.stream.read(&mut self.chunk).await?;
+            if read == 0 {
+                return Err(FrameError::Closed);
+            }
+            let received = &mut self.chunk[..read];
+            if let Some(cipher) = &mut self.dec_cipher {
+                azalea_crypto::decrypt_packet(cipher, received);
+            }
+            self.buffer.get_mut().extend_from_slice(received);
+        }
     }
 
-    /// Drops the frames already handed out. The framing only empties the
-    /// buffer when a read ends on a frame boundary, which a burst rarely
-    /// does, so a join's chunks would otherwise all stay in it.
+    /// Drops the packets already handed out. A burst rarely ends on a frame
+    /// boundary, so a join's chunks would otherwise all stay buffered.
     fn compact(&mut self) {
         /// Below this the buffer isn't worth moving.
         const MIN: usize = 64 * 1024;
 
         let consumed = self.buffer.position() as usize;
         let bytes = self.buffer.get_mut();
+        if consumed == bytes.len() {
+            bytes.clear();
+            bytes.shrink_to(MIN);
+            self.buffer.set_position(0);
+            return;
+        }
         // Only once the consumed part outweighs the rest, so the moves stay
         // linear in the bytes read.
         if consumed >= MIN && consumed >= bytes.len() - consumed {
@@ -80,15 +92,13 @@ impl RawReader {
 }
 
 impl RawWriter {
-    /// Writes one already-serialized frame, compressing and encrypting it.
-    pub async fn write(&mut self, frame: &[u8]) -> io::Result<()> {
-        write_raw_packet(
-            frame,
-            &mut self.stream,
-            self.compression_threshold,
-            &mut self.enc_cipher,
-        )
-        .await
+    /// Writes one already-encoded packet, compressing and encrypting it.
+    pub async fn write(&mut self, packet: &[u8]) -> io::Result<()> {
+        let mut wire = frame::pack(packet, self.compression_threshold).map_err(io::Error::other)?;
+        if let Some(cipher) = &mut self.enc_cipher {
+            azalea_crypto::encrypt_packet(cipher, &mut wire);
+        }
+        self.stream.write_all(&wire).await
     }
 }
 
@@ -143,6 +153,7 @@ impl Conn {
             reader: RawReader {
                 stream: stream_in,
                 buffer: Cursor::new(Vec::new()),
+                chunk: vec![0; READ_CHUNK].into(),
                 compression_threshold: None,
                 dec_cipher: None,
             },
@@ -173,7 +184,6 @@ impl Conn {
 #[cfg(test)]
 mod tests {
     use pomme_protocol::status::{encode_ping_request as ping, encode_status_request};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -251,6 +261,24 @@ mod tests {
         let mut frame = [0u8; 2];
         wire_rx.read_exact(&mut frame).await.unwrap();
         assert_eq!(frame, [0x01, 0x00], "one byte of payload, packet id zero");
+    }
+
+    /// The loops read inside `select!`, which drops a read that another
+    /// branch beats; what it had taken off the stream must still be there.
+    #[tokio::test]
+    async fn a_dropped_read_loses_nothing() {
+        let (mut conn, _wire_rx, mut peer_tx) = conn_and_wire();
+        async fn dropped(conn: &mut Conn) {
+            let read = conn.reader.read();
+            let timed_out = tokio::time::timeout(std::time::Duration::from_millis(20), read).await;
+            assert!(timed_out.is_err(), "a whole frame arrived");
+        }
+
+        dropped(&mut conn).await;
+        peer_tx.write_all(&[0x09, 0x01, 0, 0]).await.unwrap();
+        dropped(&mut conn).await;
+        peer_tx.write_all(&[0, 0, 0, 0, 0, 7]).await.unwrap();
+        assert_eq!(recv(&mut conn).await, ping(7));
     }
 
     /// A read can deliver part of a frame, or several frames at once.
