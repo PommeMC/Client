@@ -383,6 +383,29 @@ pub struct BundleClick {
     pub sound: Option<crate::ui::bundle::Sound>,
 }
 
+/// Whether vanilla `doClick` drops an item for `op` (`player.drop`): a click
+/// outside the menu with a stack carried, or a throw from a filled slot with
+/// none carried. The client's `LivingEntity.drop` swings the arm for it.
+// TODO: a number-key swap whose stack overflows the target slot and the
+// inventory drops the rest too.
+pub fn drops_item(slots: &[ItemStack], cursor: &ItemStack, op: &ClickOperation) -> bool {
+    match op {
+        ClickOperation::Pickup(
+            PickupClick::Left { slot: None }
+            | PickupClick::Right { slot: None }
+            | PickupClick::LeftOutside
+            | PickupClick::RightOutside,
+        ) => cursor.is_present(),
+        ClickOperation::Throw(ThrowClick::Single { slot } | ThrowClick::All { slot }) => {
+            cursor.is_empty()
+                && slots
+                    .get(usize::from(*slot))
+                    .is_some_and(ItemStack::is_present)
+        }
+        _ => false,
+    }
+}
+
 /// Predict a non-drag click against the given menu slots, returning the
 /// changed slots (the caller applies them). Returns empty for ops we don't
 /// predict, leaving those server-authoritative.
@@ -1061,6 +1084,40 @@ mod bundle_tests {
         );
         assert_eq!(cursor.as_present().map(|d| d.kind), Some(ItemKind::Stone));
         assert_eq!(click.selection, Some((10, 0)));
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_click_that_drops_an_item_swings() {
+        let stone = ItemStack::new(ItemKind::Stone, 5);
+        let slots = [stone.clone(), ItemStack::Empty];
+        let throw = |slot| ClickOperation::Throw(ThrowClick::Single { slot });
+        let outside = ClickOperation::Pickup(PickupClick::LeftOutside);
+
+        assert!(drops_item(&slots, &ItemStack::Empty, &throw(0)));
+        assert!(drops_item(
+            &slots,
+            &ItemStack::Empty,
+            &ClickOperation::Throw(ThrowClick::All { slot: 0 })
+        ));
+        assert!(!drops_item(&slots, &ItemStack::Empty, &throw(1)));
+        // A throw does nothing with a stack carried.
+        assert!(!drops_item(&slots, &stone, &throw(0)));
+
+        assert!(drops_item(&slots, &stone, &outside));
+        assert!(drops_item(
+            &slots,
+            &stone,
+            &ClickOperation::Pickup(PickupClick::RightOutside)
+        ));
+        assert!(!drops_item(&slots, &ItemStack::Empty, &outside));
+
+        let pickup = ClickOperation::Pickup(PickupClick::Left { slot: Some(0) });
+        assert!(!drops_item(&slots, &ItemStack::Empty, &pickup));
     }
 }
 

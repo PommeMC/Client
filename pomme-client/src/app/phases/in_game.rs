@@ -2498,6 +2498,7 @@ pub(crate) fn send_container_clicks(
             .open_container
             .as_ref()
             .map_or(ContainerKind::Player, |c| c.click_kind(&game.recipe_book));
+        let drops = menu_click::drops_item(game.menu_slots(), &game.cursor_item, op);
         let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
             ClickOperation::QuickCraft(QuickCraftClick {
                 kind: qc_kind,
@@ -2572,6 +2573,12 @@ pub(crate) fn send_container_clicks(
             click
                 .changed_slots
                 .insert(*s, HashedStack::from_item_stack(item, &game.registries));
+        }
+        // Vanilla runs the click locally, where the drop swings, before
+        // sending it.
+        // TODO: as for the other drops, only the packet; the arm doesn't move.
+        if drops {
+            send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
         }
         connection
             .packet_tx
