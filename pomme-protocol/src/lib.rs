@@ -10,6 +10,7 @@ pub mod block;
 pub mod capture;
 pub mod chunk;
 pub mod codec;
+pub mod commands;
 pub mod container;
 pub mod entity;
 pub mod entity_data;

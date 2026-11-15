@@ -157,6 +157,7 @@ struct Session {
     inbound_chat: InboundChat,
     config_less_login: bool,
     sender: PacketSender,
+    commands: super::commands::SharedCommandTree,
     batches: ChunkBatchSizeCalculator,
     events: crossbeam_channel::Sender<super::NetworkEvent>,
     events_rx: crossbeam_channel::Receiver<super::NetworkEvent>,
@@ -179,6 +180,7 @@ impl Session {
             inbound_chat: InboundChat::for_protocol(protocol),
             config_less_login: true,
             sender: PacketSender::new(out_tx),
+            commands: Default::default(),
             batches: ChunkBatchSizeCalculator::default(),
             events,
             events_rx,
@@ -299,6 +301,7 @@ impl Session {
             blocks,
             &self.registries,
             &self.sender,
+            &self.commands,
             &mut self.batches,
             &self.events,
         ) {

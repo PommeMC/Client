@@ -1077,6 +1077,7 @@ async fn game_loop(
                 block_state_table,
                 &configured.registries,
                 &sender,
+                &shared_tree,
                 &mut batch_size_calculator,
                 event_tx,
             )
@@ -1150,7 +1151,7 @@ async fn game_loop(
                     }
                     forward_tags(event_tx, &p.tags);
                 }
-                handle_game_packet(&packet, event_tx, &configured.registries, &shared_tree);
+                handle_game_packet(&packet, event_tx, &configured.registries);
             }
             Err(e) => skip_malformed_packet(e)?,
         }

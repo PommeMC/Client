@@ -3521,11 +3521,10 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
 
 #[cfg(test)]
 mod tests {
-    use azalea_protocol::packets::game::c_commands::{
-        BrigadierNodeStub, BrigadierParser, ClientboundCommands, EntityParser, NodeType,
-    };
+    use pomme_protocol::commands::{ArgumentType, CommandsPacket, EntityArgument};
 
     use super::*;
+    use crate::net::commands::tests::{argument, literal, root};
 
     fn span(text: &str, color: [f32; 4]) -> TextSpan {
         TextSpan::new(text.to_string(), color)
@@ -4394,49 +4393,12 @@ mod tests {
         assert!(chat.suggestions.is_empty());
     }
 
-    fn node(node_type: NodeType, children: Vec<u32>, executable: bool) -> BrigadierNodeStub {
-        BrigadierNodeStub {
-            is_executable: executable,
-            children,
-            redirect_node: None,
-            node_type,
-            is_restricted: false,
-        }
-    }
-
-    fn literal(name: &str, children: Vec<u32>, executable: bool) -> BrigadierNodeStub {
-        node(
-            NodeType::Literal {
-                name: name.to_owned(),
-            },
-            children,
-            executable,
-        )
-    }
-
-    fn argument(
-        name: &str,
-        parser: BrigadierParser,
-        children: Vec<u32>,
-        executable: bool,
-    ) -> BrigadierNodeStub {
-        node(
-            NodeType::Argument {
-                name: name.to_owned(),
-                parser,
-                suggestions_type: None,
-            },
-            children,
-            executable,
-        )
-    }
-
     /// time set (day|night), msg <targets> <message>, gamemode <mode>,
     /// gamerule.
     fn test_tree() -> CommandTree {
-        CommandTree::from_packet(&ClientboundCommands {
-            entries: vec![
-                node(NodeType::Root, vec![1, 5, 8, 10], false),
+        CommandTree::from_packet(CommandsPacket {
+            nodes: vec![
+                root(vec![1, 5, 8, 10]),
                 literal("time", vec![2], false),
                 literal("set", vec![3, 4], false),
                 literal("day", vec![], true),
@@ -4444,16 +4406,16 @@ mod tests {
                 literal("msg", vec![6], false),
                 argument(
                     "targets",
-                    BrigadierParser::Entity(EntityParser {
+                    ArgumentType::Entity(EntityArgument {
                         single: false,
                         players_only: true,
                     }),
                     vec![7],
                     false,
                 ),
-                argument("message", BrigadierParser::Message, vec![], true),
+                argument("message", ArgumentType::Message, vec![], true),
                 literal("gamemode", vec![9], false),
-                argument("gamemode", BrigadierParser::Bool, vec![], true),
+                argument("gamemode", ArgumentType::Bool, vec![], true),
                 literal("gamerule", vec![], true),
             ],
             root_index: 0,
