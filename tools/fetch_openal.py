@@ -130,8 +130,11 @@ def main():
     args = parser.parse_args()
 
     if args.classifier is None and is_musl():
+        message = "musl host: the pinned LWJGL OpenAL is glibc-only"
+        if args.require:
+            raise SystemExit(message)
         print(
-            "musl host: the pinned LWJGL OpenAL is glibc-only, skipping the download. "
+            f"{message}, skipping the download. "
             "Audio needs a system OpenAL Soft (libopenal) installed.",
             file=sys.stderr,
         )
