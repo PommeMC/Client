@@ -354,11 +354,16 @@ impl RecipeBookUiState {
 
     /// Vanilla `updateButtonsForPage` / `RecipeButton.init`: resolves the
     /// page's buttons and marks their highlighted recipes seen, pulsing the
-    /// buttons that showed one.
+    /// buttons that showed one. Only for a visible book, as vanilla updates
+    /// its collections (`initVisuals`, `recipesUpdated`, `tick`): a closed
+    /// one keeps its highlights for when it opens.
     fn init_page_buttons(&mut self, book: &mut RecipeBookState, sender: &PacketSender) {
         let Some(view) = &mut self.view else {
             return;
         };
+        if !visible(book, view.spec.kind) {
+            return;
+        }
         let page = (self.page, view.shown_generation);
         if view.initialized_page == Some(page) {
             return;
@@ -3350,6 +3355,33 @@ mod tests {
         assert!(!matches("diamond"));
         assert!(!matches(" fancy"));
         assert!(matches(" minecraft : diamond "));
+    }
+
+    #[test]
+    fn a_closed_book_keeps_its_recipes_highlighted() {
+        let spec = RecipeBookScreenSpec::player(0);
+        let slots = vec![ItemStack::Empty; crate::player::inventory::PLAYER_SLOTS];
+        let mut state = RecipeBookUiState::new();
+        state.ensure_screen(spec);
+        let mut book = RecipeBookState::default();
+        let mut new_recipe = recipe(7, 0, Vec::new());
+        new_recipe.highlight = true;
+        book.apply_add(vec![new_recipe], false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let show = |state: &mut RecipeBookUiState, book: &mut RecipeBookState| {
+            state.prepare(book, spec, &slots);
+            state.init_page_buttons(book, &sender);
+        };
+
+        show(&mut state, &mut book);
+        assert!(book.highlight.contains(&7));
+        assert!(rx.try_recv().is_err());
+
+        book.settings.crafting.open = true;
+        show(&mut state, &mut book);
+        assert!(book.highlight.is_empty());
+        assert!(rx.try_recv().is_ok());
     }
 
     #[test]
