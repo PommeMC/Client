@@ -1173,13 +1173,8 @@ async fn game_loop(
             continue;
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
-            Ok(mut packet) => {
-                if let Some(t) = translation
-                    && !t.remap_inbound(&mut packet)
-                {
-                    continue;
-                }
-                handle_game_packet(&packet, event_tx, &configured.registries);
+            Ok(packet) => {
+                handle_game_packet(&packet, event_tx);
             }
             Err(e) => skip_malformed_packet(e)?,
         }

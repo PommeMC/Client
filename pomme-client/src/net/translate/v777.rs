@@ -260,7 +260,7 @@ pub(super) fn translate_level_particles_777(
 /// display, so each entry is walked to put it back or drop it; the rest of
 /// the packet copies verbatim. Item ids stay in wire space like every
 /// version's.
-/// TODO: remap advancement icon items in `remap_inbound`.
+/// TODO: remap advancement icon items where the packet is read.
 pub(super) fn translate_update_advancements_777(
     id: u32,
     payload: &[u8],
