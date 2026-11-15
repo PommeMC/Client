@@ -83,7 +83,9 @@ pub struct ServerStatus {
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Players {
+    #[serde(deserialize_with = "int")]
     pub max: i32,
+    #[serde(deserialize_with = "int")]
     pub online: i32,
     #[serde(default, deserialize_with = "lenient")]
     pub sample: Vec<NameAndId>,
@@ -99,7 +101,17 @@ pub struct NameAndId {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Version {
     pub name: String,
+    #[serde(deserialize_with = "int")]
     pub protocol: i32,
+}
+
+/// `Codec.INT` over JSON: any number, as `Number.intValue` narrows it (a
+/// fraction truncates, a value past 32 bits keeps its low ones).
+fn int<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    let number = serde_json::Number::deserialize(deserializer)?;
+    Ok(number
+        .as_i64()
+        .unwrap_or_else(|| number.as_f64().unwrap_or_default() as i64) as i32)
 }
 
 /// A field's value, or its default when it doesn't parse.
@@ -113,9 +125,11 @@ where
 }
 
 impl ServerStatus {
-    fn from_json(mut json: serde_json::Value) -> Self {
+    /// `None` when `json` isn't an object, which `ServerStatus.CODEC` rejects.
+    fn from_json(mut json: serde_json::Value) -> Option<Self> {
+        json.as_object()?;
         let mut field = |name: &str| json.get_mut(name).map(serde_json::Value::take);
-        Self {
+        Some(Self {
             description: field("description").unwrap_or_default(),
             players: field("players").and_then(|v| serde_json::from_value(v).ok()),
             version: field("version").and_then(|v| serde_json::from_value(v).ok()),
@@ -123,7 +137,7 @@ impl ServerStatus {
             enforces_secure_chat: field("enforcesSecureChat")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
-        }
+        })
     }
 }
 
@@ -132,8 +146,10 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<StatusPacket>> {
     Some(match name {
         "status_response" => r.utf(MAX_STATUS_LENGTH).and_then(|payload| {
             serde_json::from_str(payload)
-                .map(|json| StatusPacket::Response(ServerStatus::from_json(json)))
-                .map_err(|_| r.error("status isn't JSON"))
+                .ok()
+                .and_then(ServerStatus::from_json)
+                .map(StatusPacket::Response)
+                .ok_or_else(|| r.error("status isn't a JSON object"))
         }),
         "pong_response" => r.i64().map(StatusPacket::Pong),
         _ => return None,
@@ -228,7 +244,8 @@ mod tests {
 
     #[test]
     fn missing_and_malformed_fields_read_as_absent() {
-        let read = |json: &str| ServerStatus::from_json(serde_json::from_str(json).unwrap());
+        let read =
+            |json: &str| ServerStatus::from_json(serde_json::from_str(json).unwrap()).unwrap();
         assert_eq!(read("{}"), ServerStatus::default());
 
         let status = read(
@@ -249,9 +266,23 @@ mod tests {
     }
 
     #[test]
+    fn numbers_narrow_as_codec_int_does() {
+        let status = ServerStatus::from_json(serde_json::json!({
+            "players": {"max": 20.9, "online": 4294967297u64},
+            "version": {"name": "x", "protocol": -1.5},
+        }))
+        .unwrap();
+        let players = status.players.unwrap();
+        assert_eq!((players.max, players.online), (20, 1));
+        assert_eq!(status.version.unwrap().protocol, -1);
+    }
+
+    #[test]
     fn a_frame_that_isnt_a_status_packet_is_an_error() {
         assert!(read_frame(&[2]).is_err());
         assert!(read_frame(&[1, 0]).is_err());
         assert!(read_frame(&[0, 1, b'{']).is_err());
+        // JSON, but not an object.
+        assert!(read_frame(&[0, 2, b'[', b']']).is_err());
     }
 }

@@ -22,20 +22,20 @@ pub(super) enum ConfigFrame {
 }
 
 // TODO: vanilla shows `code_of_conduct` and answers it, stores and returns
-// cookies, follows `transfer` and keeps `server_links` for the pause menu.
+// cookies, and follows `transfer`.
 const IGNORED_PACKETS: &[&str] = &[
     "code_of_conduct",
     "custom_payload",
     "custom_report_details",
     "reset_chat",
-    "server_links",
     "store_cookie",
     "transfer",
     "update_enabled_features",
 ];
 
 /// Decodes a native configuration frame; `None` for a packet pomme ignores.
-/// The dialog packets are read by `dialog::handle_raw_dialog_packet` first.
+/// The dialog packets and `server_links` are read by
+/// `dialog::handle_raw_dialog_packet` first.
 pub(super) fn read(frame: &[u8]) -> Option<DecodeResult<ConfigFrame>> {
     let mut r = Reader::new(frame);
     let name = match r.varint() {
@@ -76,7 +76,8 @@ pub(super) fn read_or_skip(frame: &[u8]) -> Option<ConfigFrame> {
 #[derive(Default)]
 pub(super) struct Registries {
     pub holder: RegistryHolder,
-    /// Whether the server sent any registry at all.
+    /// Whether any registry was appended. A reconfiguration that appends
+    /// none keeps the registries it had.
     pub received: bool,
     selected_known_packs: bool,
 }
@@ -106,7 +107,6 @@ impl Registries {
     /// Appends one registry. The server omits the data of every entry a pack
     /// we claimed carries, so those are filled in before azalea drops them.
     pub fn append(&mut self, protocol: i32, data: RegistryData) -> Result<(), RegistryError> {
-        self.received = true;
         let registry = Identifier::new(&data.registry);
         let entries: Option<Vec<_>> = data
             .entries
@@ -134,6 +134,7 @@ impl Registries {
             entries
         };
         self.holder.append(registry, entries);
+        self.received = true;
         Ok(())
     }
 }
@@ -199,7 +200,7 @@ mod tests {
 
     #[test]
     fn ignored_packets_are_skipped_and_bad_ones_are_errors() {
-        assert!(read(&frame("server_links", &[1, 2, 3])).is_none());
+        assert!(read(&frame("store_cookie", &[1, 2, 3])).is_none());
         // Bytes left over, a truncated body, and an id past the table.
         assert!(matches!(
             read(&frame("finish_configuration", &[0])),
@@ -257,7 +258,7 @@ mod tests {
             Err(RegistryError::Unsupported(_))
         ));
         assert_eq!(registries.append_or_skip(NATIVE.protocol, data), Ok(()));
-        assert!(registries.received);
+        assert!(!registries.received);
         assert_eq!(crate::net::connection::biome_count(&registries.holder), 0);
     }
 
