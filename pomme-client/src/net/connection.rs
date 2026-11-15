@@ -1,8 +1,8 @@
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
+use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged;
-use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_protocol::packets::login::c_hello::ClientboundHello;
 use azalea_protocol::packets::login::s_hello::ServerboundHello;
 use azalea_protocol::packets::login::s_key::ServerboundKey;
@@ -19,7 +19,7 @@ use super::NetworkEvent;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::conn::{Conn, MemoryEnd, RawWriter};
-use super::handler::{handle_game_packet, handle_raw_game_packet, send_ordered};
+use super::handler::{handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
 use crate::ui::server_dialog::DialogRegistry;
 use crate::world::block::BlockStateTable;
@@ -1170,13 +1170,6 @@ async fn game_loop(
                 }
                 Err(e) => tracing::warn!("Skipping malformed update_tags packet: {e}"),
             }
-            continue;
-        }
-        match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
-            Ok(packet) => {
-                handle_game_packet(&packet, event_tx);
-            }
-            Err(e) => skip_malformed_packet(e)?,
         }
     }
 }
@@ -1339,7 +1332,9 @@ mod tests {
     #[test]
     fn game_tags_and_start_configuration_read_raw() {
         use azalea_protocol::common::tags::{TagMap, Tags as AzaleaTags};
-        use azalea_protocol::packets::game::{c_start_configuration, c_update_tags};
+        use azalea_protocol::packets::game::{
+            ClientboundGamePacket, c_start_configuration, c_update_tags,
+        };
 
         let tag = |name: &str, elements: Vec<i32>| AzaleaTags {
             name: name.into(),

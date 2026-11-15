@@ -34,7 +34,8 @@
 //!   {type, duration}`, rewritten back onto `animate`) and renumbered the rest
 //!   (wake up 0, critical hit 1, magic critical hit 2)
 //! - `update_advancements` moved each advancement's screen position out of
-//!   `DisplayInfo` to a float pair after the entry
+//!   `DisplayInfo` to a float pair after the entry; an icon whose item 26.2
+//!   lacks drops its display, so that advancement is tracked but not shown
 //! - `explode` appended a `playSound` bool
 //! - `EntityDataSerializers` appended `dye_color` (43), used only by the
 //!   cushion, whose entity type (like the poplar boats) has no native id
@@ -101,6 +102,11 @@
 //! - each chunk section in `level_chunk_with_light` gained a `fluidCount` short
 //!   after `nonEmptyBlockCount`
 //! - `set_time` replaced `dayTime`/`tickDayTime` with a world-clock map
+//! - an `update_advancements` display's icon was a non-empty `ItemStack`
+//!   (count, item, patch) where 26.1 sends an `ItemStackTemplate`; every
+//!   version's icon is rewritten into the template with native ids. Without an
+//!   item grammar (1.20.5 to 1.21.11), an icon with a component the patch
+//!   walker can't size drops the packet
 //! - serverbound `attack` split out of `interact`, which now always carries the
 //!   hand and a low-precision hit location; 26.2-only serverbound packets
 //!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
@@ -491,6 +497,8 @@ struct GameIds {
     serializer_map: &'static pomme_protocol::entity_serializers::SerializerTable,
     set_entity_data_id: u32,
     commands_id: u32,
+    update_advancements_id: u32,
+    advancements: AdvancementLayout,
     /// Names the wire-space ids the rewrites size by (command parsers,
     /// particles, slot and recipe displays).
     wire_registries: &'static RegistryTable,
@@ -654,7 +662,6 @@ struct Ids764 {
 /// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
-    update_advancements_id: u32,
     /// Native-space serverbound `chat` id and the wire version's, for the
     /// last-seen checksum strip.
     chat_id: u32,
@@ -703,7 +710,6 @@ struct Ids777 {
     respawn_id: u32,
     animate_id: u32,
     level_particles_id: u32,
-    update_advancements_id: u32,
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
@@ -865,6 +871,9 @@ const SMITHING_TRIM_DISPLAY: u32 = 8;
 
 mod shared;
 use shared::*;
+
+mod advancements;
+use advancements::*;
 
 mod v768;
 

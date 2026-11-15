@@ -10,7 +10,6 @@ use std::io::Read;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::config::ClientboundConfigPacket;
-use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_protocol::packets::login::ClientboundLoginPacket;
 use azalea_protocol::read::deserialize_packet;
 use pomme_protocol::chunk::ChunkPacket;
@@ -314,7 +313,7 @@ impl Session {
         if let Some(read) = super::read_raw_frame(&raw, pomme_protocol::tags::read) {
             return read.map(drop).map_err(|e| e.to_string());
         }
-        decode::<ClientboundGamePacket>(&raw).map(drop)
+        Err("no reader claims it".into())
     }
 
     /// A chunk's sections as `Chunk::read` parses them once the world loads

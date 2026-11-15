@@ -254,55 +254,6 @@ pub(super) fn translate_level_particles_777(
     Some(out)
 }
 
-/// Rewrites `update_advancements`: 26.3 moved an advancement's screen
-/// position (two floats) out of `DisplayInfo` to a pair after each entry,
-/// sent even without a display. 26.2 reads the pair at the end of the
-/// display, so each entry is walked to put it back or drop it; the rest of
-/// the packet copies verbatim. Item ids stay in wire space like every
-/// version's.
-/// TODO: remap advancement icon items where the packet is read.
-pub(super) fn translate_update_advancements_777(
-    id: u32,
-    payload: &[u8],
-    remaps: &RegistryRemaps,
-) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    advance(&mut cur, 1)?; // reset
-    let count = var_u32(&mut cur)?;
-    let mut out = Vec::with_capacity(payload.len() + 1);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(&payload[..cur.position() as usize]);
-    for _ in 0..count {
-        let entry_at = cur.position() as usize;
-        skip_utf(&mut cur)?; // id
-        skip_optional(&mut cur, skip_utf)?; // parent
-        let display_end = if read_u8(&mut cur)? != 0 {
-            skip_display_info(&mut cur, remaps)?;
-            Some(cur.position() as usize)
-        } else {
-            None
-        };
-        for _ in 0..var_u32(&mut cur)? {
-            for _ in 0..var_u32(&mut cur)? {
-                skip_utf(&mut cur)?; // requirement
-            }
-        }
-        advance(&mut cur, 1)?; // sends telemetry
-        let entry_end = cur.position() as usize;
-        advance(&mut cur, 8)?; // x, y
-        match display_end {
-            Some(end) => {
-                out.extend_from_slice(&payload[entry_at..end]);
-                out.extend_from_slice(&payload[entry_end..entry_end + 8]);
-                out.extend_from_slice(&payload[end..entry_end]);
-            }
-            None => out.extend_from_slice(&payload[entry_at..entry_end]),
-        }
-    }
-    out.extend_from_slice(&payload[cur.position() as usize..]);
-    Some(out)
-}
-
 /// Holds a 26.3 `accept_teleportation` back: 26.3 appends the accepted pose
 /// and no longer follows it with a `move_player_pos_rot`
 /// (`ClientPacketListener.handleMovePlayer`), whose pose pomme sends right

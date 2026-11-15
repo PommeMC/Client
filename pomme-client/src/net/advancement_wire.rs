@@ -1,5 +1,6 @@
-//! Native `update_advancements` decoding, with display icons read through
-//! pomme's item grammar. Translated sessions keep azalea's decode.
+//! `update_advancements` decoding for every session, with display icons
+//! read through pomme's item grammar: translated frames already carry the
+//! native layout and ids.
 
 use std::collections::HashMap;
 
@@ -18,16 +19,13 @@ use crate::ui::toast::{AdvancementData, AdvancementDisplay, AdvancementFrame, Ad
 const HAS_BACKGROUND: i32 = 1;
 const SHOW_TOAST: i32 = 2;
 
-/// Decodes a native `update_advancements`; `None` for any other packet or a
-/// translated session.
+/// Decodes an `update_advancements`; `None` for any other packet.
 pub(super) fn handle_raw_advancements(
     packet_id: u32,
     payload: &[u8],
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    if packet_id != item_codec::item_packet_ids().update_advancements
-        || !item_codec::native_session()
-    {
+    if packet_id != item_codec::item_packet_ids().update_advancements {
         return None;
     }
     Some(read_update(payload).map(|update| {
