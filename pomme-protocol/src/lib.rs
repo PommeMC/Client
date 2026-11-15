@@ -19,6 +19,7 @@ pub mod hud;
 pub mod item;
 pub mod known_packs;
 pub mod lifecycle;
+pub mod login;
 pub mod packets;
 pub mod player;
 pub mod player_info;

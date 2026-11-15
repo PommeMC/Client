@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use azalea_chat::FormattedText;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::text::{TextSpan, format_text_spans};
+use crate::ui::text::{TextSpan, format_text_spans, text_from_json};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -166,8 +165,7 @@ async fn ping_server(
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
         // Vanilla MOTD base color: 0x808080.
-        let description = FormattedText::deserialize(&status.description).unwrap_or_default();
-        let motd = format_text_spans(&description, [0.5, 0.5, 0.5, 1.0]);
+        let motd = format_text_spans(&text_from_json(&status.description), [0.5, 0.5, 0.5, 1.0]);
         // Vanilla `ServerStatusPinger`: a status without a version is "Old",
         // protocol 0.
         let (version, protocol) = status

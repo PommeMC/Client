@@ -246,6 +246,12 @@ pub fn format_component_spans_with_parent_and_bindings(
     spans
 }
 
+/// A text component sent as JSON (a server's MOTD, a login kick); empty when
+/// it isn't one.
+pub fn text_from_json(json: &serde_json::Value) -> FormattedText {
+    serde::Deserialize::deserialize(json).unwrap_or_default()
+}
+
 /// Flatten an azalea `FormattedText` component into styled spans for rendering.
 ///
 /// `base_color` applies wherever the component carries no explicit color,

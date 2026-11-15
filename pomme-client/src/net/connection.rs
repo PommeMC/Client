@@ -1,12 +1,8 @@
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
-use azalea_protocol::packets::login::c_hello::ClientboundHello;
-use azalea_protocol::packets::login::s_hello::ServerboundHello;
-use azalea_protocol::packets::login::s_key::ServerboundKey;
-use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
-use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
 use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
+use pomme_protocol::login::{self, LoginPacket, ServerboundLogin};
 use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::status::ClientIntent;
 use pomme_protocol::tags::Tags;
@@ -33,6 +29,9 @@ pub enum ConnectionError {
 
     #[error("packet read error: {0}")]
     Read(#[from] Box<ReadPacketError>),
+
+    #[error("packet read error: {0}")]
+    Decode(#[from] pomme_protocol::codec::DecodeError),
 
     #[error("packet write error: {0}")]
     Write(#[from] std::io::Error),
@@ -169,11 +168,11 @@ pub async fn connect_to_server(
     conn.translation =
         super::translate::TranslationSession::for_protocol(wire).map(std::sync::Arc::new);
 
-    let hello = ServerboundLoginPacket::Hello(ServerboundHello {
+    let frame = ServerboundLogin::Hello {
         name: username.clone(),
-        profile_id: uuid,
-    });
-    let frame = serialize_frame(&hello)?;
+        profile_id: uuid.as_u128(),
+    }
+    .encode();
     let frame = match conn.translation.as_deref() {
         Some(t) => t.translate_outbound_login_frame(frame),
         None => frame,
@@ -199,7 +198,7 @@ pub async fn connect_to_server(
         .as_deref()
         .is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write_packet(ServerboundLoginAcknowledged {}).await?;
+        send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
     }
 
     let joined = if no_config {
@@ -395,58 +394,57 @@ async fn login_sequence(
     access_token: Option<&str>,
 ) -> Result<uuid::Uuid, ConnectionError> {
     loop {
-        // Read the raw frame ourselves so older-version layouts can be
-        // rewritten before the typed decode (26.1's login_finished lacks the
-        // trailing session id).
+        // Older-version layouts are rewritten before the decode (26.1's
+        // login_finished lacks the trailing session id).
         let raw = conn.reader.read().await?;
         super::capture::record(Phase::Login, &raw);
         let raw = match conn.translation.as_deref() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
         };
-        let packet: ClientboundLoginPacket = deserialize_packet(&mut std::io::Cursor::new(&raw))?;
+        let packet = login::read_frame(&raw)?;
         tracing::info!("Login packet: {:?}", std::mem::discriminant(&packet));
         match packet {
-            ClientboundLoginPacket::Hello(p) => {
-                handle_encryption(conn, &p, uuid, access_token).await?;
+            LoginPacket::Hello(hello) => {
+                handle_encryption(conn, &hello, uuid, access_token).await?;
             }
-            ClientboundLoginPacket::LoginCompression(p) => {
-                conn.set_compression_threshold(p.compression_threshold);
-                tracing::info!(
-                    "Compression enabled (threshold: {})",
-                    p.compression_threshold
-                );
+            LoginPacket::Compression(threshold) => {
+                conn.set_compression_threshold(threshold);
+                tracing::info!("Compression enabled (threshold: {threshold})");
             }
-            ClientboundLoginPacket::LoginFinished(p) => {
-                tracing::info!(
-                    "Login success: {} ({})",
-                    p.game_profile.name,
-                    p.game_profile.uuid
-                );
-                return Ok(p.game_profile.uuid);
+            LoginPacket::Finished(finished) => {
+                let id = uuid::Uuid::from_u128(finished.profile.id);
+                tracing::info!("Login success: {} ({id})", finished.profile.name);
+                return Ok(id);
             }
-            ClientboundLoginPacket::LoginDisconnect(p) => {
-                return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            LoginPacket::Disconnect(reason) => {
+                let reason = crate::ui::text::text_from_json(&reason);
+                return Err(ConnectionError::Disconnected(reason.to_string()));
             }
-            ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write_packet(
-                    azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
-                        key: p.key,
-                        payload: None,
-                    },
+            // TODO: vanilla answers from the cookies an earlier transfer stored.
+            LoginPacket::CookieRequest(key) => {
+                send_login(
+                    conn,
+                    ServerboundLogin::CookieResponse { key, payload: None },
                 )
                 .await?;
             }
-            _ => {
-                tracing::debug!("Login packet: {:?}", std::mem::discriminant(&packet));
+            // Vanilla `handleCustomQuery`: every query is answered as not
+            // understood, which a server waiting on one needs to carry on.
+            LoginPacket::CustomQuery { transaction_id } => {
+                send_login(conn, ServerboundLogin::CustomQueryAnswer { transaction_id }).await?;
             }
         }
     }
 }
 
+async fn send_login(conn: &mut Conn, packet: ServerboundLogin) -> std::io::Result<()> {
+    conn.writer.write(&packet.encode()).await
+}
+
 async fn handle_encryption(
     conn: &mut Conn,
-    hello: &ClientboundHello,
+    hello: &login::Hello,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
 ) -> Result<(), ConnectionError> {
@@ -470,11 +468,11 @@ async fn handle_encryption(
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write_packet(ServerboundKey {
-        key_bytes: e.encrypted_public_key,
+    let key = ServerboundLogin::Key {
+        key: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    })
-    .await?;
+    };
+    send_login(conn, key).await?;
 
     conn.set_encryption_key(e.secret_key);
     tracing::info!("Encryption enabled");
@@ -1511,6 +1509,7 @@ mod tests {
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+        use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
         use uuid::Uuid;
 
         use crate::net::conn::memory_pipes;
@@ -1524,6 +1523,14 @@ mod tests {
                 &peer.reader.read().await.unwrap(),
             ))
             .unwrap()
+        }
+
+        async fn send<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+            peer: &mut Conn,
+            packet: &P,
+        ) {
+            let frame = serialize_frame(packet).unwrap();
+            peer.writer.write(&frame).await.unwrap();
         }
 
         let (client_end, server_end) = memory_pipes();
@@ -1559,12 +1566,11 @@ mod tests {
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
 
-        peer.write_packet(ClientboundLoginFinished {
+        let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
             game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
             session_id: Uuid::nil(),
-        })
-        .await
-        .unwrap();
+        });
+        send(&mut peer, &finished).await;
 
         assert!(matches!(
             sent(&mut peer).await,
@@ -1579,9 +1585,8 @@ mod tests {
             ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
         ));
 
-        peer.write_packet(ClientboundFinishConfiguration)
-            .await
-            .unwrap();
+        let finish = ClientboundConfigPacket::FinishConfiguration(ClientboundFinishConfiguration);
+        send(&mut peer, &finish).await;
 
         assert!(matches!(
             sent(&mut peer).await,

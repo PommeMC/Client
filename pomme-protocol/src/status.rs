@@ -6,7 +6,7 @@
 use serde::Deserialize;
 
 use crate::codec::{DecodeResult, Reader};
-use crate::packets::{Direction, PacketTable, Phase};
+use crate::packets::{PacketTable, Phase};
 use crate::wire::{write_utf, write_varint};
 
 /// `ClientboundStatusResponsePacket`'s `lenientJson(Short.MAX_VALUE)`.
@@ -54,12 +54,9 @@ pub fn encode_ping_request(time: i64) -> Vec<u8> {
 }
 
 fn frame(phase: Phase, name: &str) -> Vec<u8> {
-    let id = PacketTable::native()
-        .id(phase, Direction::Serverbound, name)
-        .unwrap_or_else(|| panic!("{name} missing from packet table"));
-    let mut buf = Vec::new();
-    write_varint(&mut buf, id);
-    buf
+    PacketTable::native()
+        .serverbound_frame(phase, name)
+        .unwrap_or_else(|| panic!("{name} missing from packet table"))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,14 +142,7 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<StatusPacket>> {
 
 /// Decodes a whole clientbound status frame, its id first.
 pub fn read_frame(frame: &[u8]) -> DecodeResult<StatusPacket> {
-    let mut r = Reader::new(frame);
-    let id = r.varint()?;
-    let packet = PacketTable::native()
-        .name_of(Phase::Status, Direction::Clientbound, id)
-        .and_then(|name| read(name, &mut r))
-        .unwrap_or_else(|| Err(r.error("not a status packet")))?;
-    r.ensure_eof()?;
-    Ok(packet)
+    PacketTable::native().read_clientbound(Phase::Status, frame, read)
 }
 
 #[cfg(test)]

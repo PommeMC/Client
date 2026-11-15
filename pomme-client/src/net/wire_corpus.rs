@@ -10,7 +10,6 @@ use std::io::Read;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::config::ClientboundConfigPacket;
-use azalea_protocol::packets::login::ClientboundLoginPacket;
 use azalea_protocol::read::deserialize_packet;
 use pomme_protocol::chunk::ChunkPacket;
 use pomme_protocol::section::Section;
@@ -198,7 +197,9 @@ impl Session {
             Some(t) => t.translate_login_frame(frame.into()),
             None => frame.into(),
         };
-        decode::<ClientboundLoginPacket>(&frame).map(drop)
+        pomme_protocol::login::read_frame(&frame)
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 
     fn config(

@@ -137,6 +137,7 @@ public final class CodecOracle {
 
         lifecycle(dimensionTypes, clocks);
         status();
+        login();
         sections();
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
@@ -238,6 +239,45 @@ public final class CodecOracle {
                                 java.util.Optional.of(new net.minecraft.network.protocol.status.ServerStatus.Favicon(
                                         new byte[] {1, 2, 3})),
                                 true)));
+    }
+
+    private static void login() {
+        UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
+        Identifier cookie = Identifier.withDefaultNamespace("session");
+        encode("login/serverbound/hello", net.minecraft.network.protocol.login.ServerboundHelloPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ServerboundHelloPacket("Player", uuid));
+        encode("login/serverbound/custom_query_answer",
+                net.minecraft.network.protocol.login.ServerboundCustomQueryAnswerPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ServerboundCustomQueryAnswerPacket(300, null));
+        encode("login/serverbound/login_acknowledged",
+                net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket.INSTANCE);
+        encode("login/serverbound/cookie_response",
+                net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket(cookie, new byte[] {1, 2, 3}));
+
+        encode("login/clientbound/login_disconnect",
+                net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket(Component.literal("Kicked")));
+        encode("login/clientbound/hello", net.minecraft.network.protocol.login.ClientboundHelloPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ClientboundHelloPacket("server", new byte[] {1, 2, 3}, new byte[] {4, 5, 6, 7}, true));
+        var properties = new com.mojang.authlib.properties.PropertyMap(
+                com.google.common.collect.ImmutableMultimap.of("textures",
+                        new com.mojang.authlib.properties.Property("textures", "value", "signature")));
+        encode("login/clientbound/login_finished",
+                net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket(
+                        new com.mojang.authlib.GameProfile(uuid, "Player", properties),
+                        new UUID(0x1032547698badcfeL, 0xefcdab8967452301L)));
+        encode("login/clientbound/login_compression",
+                net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket(256));
+        encode("login/clientbound/custom_query", net.minecraft.network.protocol.login.ClientboundCustomQueryPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.login.ClientboundCustomQueryPacket(300,
+                        new net.minecraft.network.protocol.login.custom.DiscardedQueryPayload(Identifier.withDefaultNamespace("query"))));
+        encode("login/clientbound/cookie_request",
+                net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket(cookie));
     }
 
     private static void serverbound() {

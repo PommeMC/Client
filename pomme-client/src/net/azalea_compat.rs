@@ -218,6 +218,123 @@ fn handshake_and_status_match_azalea() {
 }
 
 #[test]
+fn login_packets_match_azalea() {
+    use azalea_protocol::packets::login::{
+        ClientboundLoginPacket, ServerboundLoginPacket, c_cookie_request, c_custom_query, c_hello,
+        c_login_compression, c_login_finished, s_cookie_response, s_custom_query_answer, s_hello,
+        s_key, s_login_acknowledged,
+    };
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::login::{self, LoginPacket, ServerboundLogin};
+
+    let uuid = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    let key = Identifier::new("minecraft:session");
+    let pairs = [
+        (
+            ServerboundLoginPacket::Hello(s_hello::ServerboundHello {
+                name: "Steve".into(),
+                profile_id: uuid,
+            }),
+            ServerboundLogin::Hello {
+                name: "Steve".into(),
+                profile_id: uuid.as_u128(),
+            },
+        ),
+        (
+            ServerboundLoginPacket::Key(s_key::ServerboundKey {
+                key_bytes: vec![1, 2, 3],
+                encrypted_challenge: vec![4, 5],
+            }),
+            ServerboundLogin::Key {
+                key: vec![1, 2, 3],
+                encrypted_challenge: vec![4, 5],
+            },
+        ),
+        (
+            ServerboundLoginPacket::CustomQueryAnswer(
+                s_custom_query_answer::ServerboundCustomQueryAnswer {
+                    transaction_id: 300,
+                    data: None,
+                },
+            ),
+            ServerboundLogin::CustomQueryAnswer {
+                transaction_id: 300,
+            },
+        ),
+        (
+            ServerboundLoginPacket::LoginAcknowledged(
+                s_login_acknowledged::ServerboundLoginAcknowledged {},
+            ),
+            ServerboundLogin::LoginAcknowledged,
+        ),
+        (
+            ServerboundLoginPacket::CookieResponse(s_cookie_response::ServerboundCookieResponse {
+                key: key.clone(),
+                payload: None,
+            }),
+            ServerboundLogin::CookieResponse {
+                key: key.to_string(),
+                payload: None,
+            },
+        ),
+    ];
+    for (azalea, ours) in pairs {
+        assert_eq!(
+            *serialize_packet(&azalea).unwrap(),
+            ours.encode(),
+            "{}",
+            ours.name()
+        );
+    }
+
+    let read = |packet: ClientboundLoginPacket| {
+        login::read_frame(&serialize_packet(&packet).unwrap()).unwrap()
+    };
+    let hello = read(ClientboundLoginPacket::Hello(c_hello::ClientboundHello {
+        server_id: "id".into(),
+        public_key: vec![1, 2],
+        challenge: vec![3],
+        should_authenticate: true,
+    }));
+    assert!(matches!(hello, LoginPacket::Hello(h)
+        if h.server_id == "id" && h.public_key == [1, 2] && h.challenge == [3]
+            && h.should_authenticate));
+    let finished = read(ClientboundLoginPacket::LoginFinished(
+        c_login_finished::ClientboundLoginFinished {
+            game_profile: azalea_auth::game_profile::GameProfile::new(uuid, "Steve".into()),
+            session_id: uuid,
+        },
+    ));
+    assert!(matches!(finished, LoginPacket::Finished(f)
+        if f.profile.id == uuid.as_u128() && f.profile.name == "Steve"
+            && f.session_id == uuid.as_u128()));
+    assert_eq!(
+        read(ClientboundLoginPacket::LoginCompression(
+            c_login_compression::ClientboundLoginCompression {
+                compression_threshold: 256
+            }
+        )),
+        LoginPacket::Compression(256)
+    );
+    assert_eq!(
+        read(ClientboundLoginPacket::CustomQuery(
+            c_custom_query::ClientboundCustomQuery {
+                transaction_id: 7,
+                identifier: key.clone(),
+                data: vec![1, 2, 3].into(),
+            }
+        )),
+        LoginPacket::CustomQuery { transaction_id: 7 }
+    );
+    assert_eq!(
+        read(ClientboundLoginPacket::CookieRequest(
+            c_cookie_request::ClientboundCookieRequest { key }
+        )),
+        LoginPacket::CookieRequest("minecraft:session".into())
+    );
+}
+
+#[test]
 fn packet_ids_match_azalea() {
     use azalea_protocol::packets::game::{s_attack, s_interact};
 

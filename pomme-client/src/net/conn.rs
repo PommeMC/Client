@@ -6,17 +6,15 @@
 //! already transport-generic, so this owns only the struct layer.
 //!
 //! There is also no connection phase here. Azalea makes it a type parameter and
-//! re-types the whole connection on every transition; the packet passed at each
-//! call already fixes the phase, and dropping the marker makes the mid-session
+//! re-types the whole connection on every transition; a frame is already
+//! encoded for its phase, and dropping the marker makes the mid-session
 //! reconfiguration excursion ordinary calls on one object.
 
-use std::fmt::Debug;
 use std::io::{self, Cursor};
 
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
-use azalea_protocol::packets::{Packet, ProtocolPacket};
 use azalea_protocol::read::{ReadPacketError, read_raw_packet};
-use azalea_protocol::write::{serialize_packet, write_raw_packet};
+use azalea_protocol::write::write_raw_packet;
 use tokio::io::{ReadHalf, SimplexStream, WriteHalf};
 use tokio::net::TcpStream;
 
@@ -154,14 +152,6 @@ impl Conn {
                 enc_cipher: None,
             },
         }
-    }
-
-    pub async fn write_packet<P: ProtocolPacket + Debug>(
-        &mut self,
-        packet: impl Packet<P>,
-    ) -> io::Result<()> {
-        let raw = serialize_packet(&packet.into_variant()).map_err(io::Error::other)?;
-        self.writer.write(&raw).await
     }
 
     /// A negative threshold disables compression, per the wire format.
