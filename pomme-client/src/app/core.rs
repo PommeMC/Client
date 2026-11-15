@@ -2245,7 +2245,11 @@ impl AppCore {
     }
 
     fn reload_pack_assets(&mut self, renderer: &mut Renderer, prepared: PreparedPackAssets) {
-        renderer.reload_assets(self.font_sources(), prepared.renderer, prepared.particles.cpu);
+        renderer.reload_assets(
+            self.font_sources(),
+            prepared.renderer,
+            prepared.particles.cpu,
+        );
         self.apply_particle_assets(prepared.particles.descriptions, prepared.particles.sprites);
         // A pack swap changes what the sprites look like, so they reload.
         self.inline_objects
@@ -2262,11 +2266,17 @@ impl AppCore {
     ) -> std::io::Result<PreparedPackAssets> {
         Ok(PreparedPackAssets {
             renderer: Renderer::prepare_resources(resources)?,
-            particles: Self::prepare_particle_assets(resources, particle_resources, sprite_sources)?,
+            particles: Self::prepare_particle_assets(
+                resources,
+                particle_resources,
+                sprite_sources,
+            )?,
         })
     }
 
-    pub(super) fn prepare_initial_particle_assets(&self) -> std::io::Result<PreparedParticleAssets> {
+    pub(super) fn prepare_initial_particle_assets(
+        &self,
+    ) -> std::io::Result<PreparedParticleAssets> {
         Self::prepare_particle_assets(
             &self.resources,
             &self.particle_resources,
@@ -2280,9 +2290,12 @@ impl AppCore {
         sprite_sources: &SpriteSources,
     ) -> std::io::Result<PreparedParticleAssets> {
         let descriptions = particle_resources.prepare(resources)?;
-        let prepared =
-            SpriteSourceList::load(resources, &resource_id!("minecraft:particles"), sprite_sources)?
-                .prepare(resources, 0)?;
+        let prepared = SpriteSourceList::load(
+            resources,
+            &resource_id!("minecraft:particles"),
+            sprite_sources,
+        )?
+        .prepare(resources, 0)?;
         let sprites =
             ParticleAtlasSprites::new(prepared.sprites, prepared.cpu.uv_map.missing_region());
         Ok(PreparedParticleAssets {
@@ -3690,9 +3703,9 @@ impl AppCore {
                         ServerParticleKind::Firework => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.firework))
                         }
-                        ServerParticleKind::SculkChargePop => {
-                            SimpleParticleType::new(Rc::clone(&self.particle_types.sculk_charge_pop))
-                        }
+                        ServerParticleKind::SculkChargePop => SimpleParticleType::new(Rc::clone(
+                            &self.particle_types.sculk_charge_pop,
+                        )),
                         ServerParticleKind::Fishing => {
                             SimpleParticleType::new(Rc::clone(&self.particle_types.fishing))
                         }
@@ -3801,29 +3814,21 @@ impl AppCore {
                         ServerParticleKind::OminousSpawning => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.ominous_spawning,
                         )),
-                        ServerParticleKind::DrippingDripstoneLava => {
-                            SimpleParticleType::new(Rc::clone(
-                                &self.particle_types.dripping_dripstone_lava,
-                            ))
+                        ServerParticleKind::DrippingDripstoneLava => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.dripping_dripstone_lava),
+                        ),
+                        ServerParticleKind::DrippingDripstoneWater => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.dripping_dripstone_water),
+                        ),
+                        ServerParticleKind::FallingDripstoneLava => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.falling_dripstone_lava),
+                        ),
+                        ServerParticleKind::FallingDripstoneWater => SimpleParticleType::new(
+                            Rc::clone(&self.particle_types.falling_dripstone_water),
+                        ),
+                        ServerParticleKind::FallingNectar => {
+                            SimpleParticleType::new(Rc::clone(&self.particle_types.falling_nectar))
                         }
-                        ServerParticleKind::DrippingDripstoneWater => {
-                            SimpleParticleType::new(Rc::clone(
-                                &self.particle_types.dripping_dripstone_water,
-                            ))
-                        }
-                        ServerParticleKind::FallingDripstoneLava => {
-                            SimpleParticleType::new(Rc::clone(
-                                &self.particle_types.falling_dripstone_lava,
-                            ))
-                        }
-                        ServerParticleKind::FallingDripstoneWater => {
-                            SimpleParticleType::new(Rc::clone(
-                                &self.particle_types.falling_dripstone_water,
-                            ))
-                        }
-                        ServerParticleKind::FallingNectar => SimpleParticleType::new(Rc::clone(
-                            &self.particle_types.falling_nectar,
-                        )),
                         ServerParticleKind::PauseMobGrowth => SimpleParticleType::new(Rc::clone(
                             &self.particle_types.pause_mob_growth,
                         )),
@@ -3839,9 +3844,11 @@ impl AppCore {
                         ServerParticleKind::TrialSpawnerDetection => SimpleParticleType::new(
                             Rc::clone(&self.particle_types.trial_spawner_detection),
                         ),
-                        ServerParticleKind::TrialSpawnerDetectionOminous => SimpleParticleType::new(
-                            Rc::clone(&self.particle_types.trial_spawner_detection_ominous),
-                        ),
+                        ServerParticleKind::TrialSpawnerDetectionOminous => {
+                            SimpleParticleType::new(Rc::clone(
+                                &self.particle_types.trial_spawner_detection_ominous,
+                            ))
+                        }
                     };
                     let level_random = game.level_runtime.get_random().clone();
                     let engine_access = self.particle_engine.engine_access();
