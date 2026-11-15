@@ -1,8 +1,6 @@
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged;
 use azalea_protocol::packets::login::c_hello::ClientboundHello;
 use azalea_protocol::packets::login::s_hello::ServerboundHello;
 use azalea_protocol::packets::login::s_key::ServerboundKey;
@@ -10,6 +8,7 @@ use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAckno
 use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
 use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
+use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
@@ -521,11 +520,11 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(
+                    information: azalea_client_information(&super::client_information(
                         view_distance,
                         chat_options,
                         skin_options,
-                    ),
+                    )),
                 },
             ),
         )
@@ -580,22 +579,10 @@ async fn config_sequence(
                             write_config_frame(conn, frame).await?;
                         }
                     } else if let Outbound::Packet(packet) = outbound
-                        && let ServerboundGamePacket::ResourcePack(p) = *packet
+                        && matches!(*packet, GamePacket::ResourcePack { .. })
+                        && let Some(frame) = packet.encode_in(Phase::Configuration)
                     {
-                        use azalea_protocol::packets::config::s_resource_pack as config_pack;
-                        use azalea_protocol::packets::game::s_resource_pack as game_pack;
-                        let action = match p.action {
-                            game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
-                            game_pack::Action::Declined => config_pack::Action::Declined,
-                            game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
-                            game_pack::Action::Accepted => config_pack::Action::Accepted,
-                            game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
-                            game_pack::Action::FailedReload => config_pack::Action::FailedReload,
-                            game_pack::Action::Discarded => config_pack::Action::Discarded,
-                        };
-                        write_config_packet(conn, ServerboundConfigPacket::ResourcePack(
-                            config_pack::ServerboundResourcePack { id: p.id, action },
-                        )).await?;
+                        write_config_frame(conn, frame).await?;
                     }
                     // Anything else is discarded: vanilla defers its outbound
                     // queue, but pomme's game keeps ticking through a
@@ -934,6 +921,47 @@ fn config_tags(tags: &azalea_protocol::common::tags::TagMap) -> Tags {
         .collect()
 }
 
+/// Pomme's client information as azalea's configuration packet carries it.
+// TODO: send configuration's `client_information` with pomme's encoder.
+pub(super) fn azalea_client_information(
+    info: &pomme_protocol::serverbound::ClientInformation,
+) -> azalea_protocol::common::client_information::ClientInformation {
+    use azalea_entity::HumanoidArm;
+    use azalea_protocol::common::client_information::*;
+    let part = |bit: u8| info.model_customisation & (1 << bit) != 0;
+    ClientInformation {
+        language: info.language.clone(),
+        view_distance: info.view_distance,
+        chat_visibility: match info.chat_visibility {
+            0 => ChatVisibility::Full,
+            1 => ChatVisibility::System,
+            _ => ChatVisibility::Hidden,
+        },
+        chat_colors: info.chat_colors,
+        model_customization: ModelCustomization {
+            cape: part(0),
+            jacket: part(1),
+            left_sleeve: part(2),
+            right_sleeve: part(3),
+            left_pants: part(4),
+            right_pants: part(5),
+            hat: part(6),
+        },
+        main_hand: if info.main_hand == 1 {
+            HumanoidArm::Right
+        } else {
+            HumanoidArm::Left
+        },
+        text_filtering_enabled: info.text_filtering_enabled,
+        allows_listing: info.allows_listing,
+        particle_status: match info.particle_status {
+            0 => ParticleStatus::All,
+            1 => ParticleStatus::Decreased,
+            _ => ParticleStatus::Minimal,
+        },
+    }
+}
+
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
     compound.get(key).and_then(|v| match v {
         simdnbt::owned::NbtTag::String(s) => Some(s.to_string()),
@@ -999,24 +1027,18 @@ async fn game_loop(
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
-        let info = ServerboundGamePacket::ClientInformation(
-            azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(
-                    view_distance,
-                    chat_options,
-                    skin_options,
-                ),
-            },
-        );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
+        let info = GamePacket::ClientInformation(super::client_information(
+            view_distance,
+            chat_options,
+            skin_options,
+        ));
+        write_game_frame(&mut conn.writer, translation, info.encode()).await?;
 
-        let brand = ServerboundGamePacket::CustomPayload(
-            azalea_protocol::packets::game::s_custom_payload::ServerboundCustomPayload {
-                identifier: "minecraft:brand".into(),
-                data: super::brand_payload().into(),
-            },
-        );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&brand)?).await?;
+        let brand = GamePacket::CustomPayload {
+            id: "minecraft:brand".into(),
+            data: super::brand_payload(),
+        };
+        write_game_frame(&mut conn.writer, translation, brand.encode()).await?;
     }
     loop {
         let raw = if let Some(raw) = deferred_login.take() {
@@ -1119,10 +1141,8 @@ async fn game_loop(
                 if let Some(frame) = chat.flush_ack() {
                     write_game_frame(&mut conn.writer, translation, frame).await?;
                 }
-                let ack = ServerboundGamePacket::ConfigurationAcknowledged(
-                    ServerboundConfigurationAcknowledged,
-                );
-                write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
+                let ack = GamePacket::ConfigurationAcknowledged.encode();
+                write_game_frame(&mut conn.writer, translation, ack).await?;
                 let next = config_sequence(
                     &mut conn,
                     view_distance,
@@ -1187,17 +1207,10 @@ fn outbound_frame(
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
         Outbound::Packet(mut packet) => {
-            // Pomme encodes creative slots itself in vanilla's layout; a wire
-            // version with an item grammar translates that encoding.
-            if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet
-                && translation.is_none_or(|t| t.translates_items())
-            {
-                return Ok(Some(super::item_codec::creative_slot_frame(p)));
-            }
             if let Some(t) = translation {
                 t.remap_outbound(&mut packet);
             }
-            Some(serialize_frame(&*packet)?)
+            Some(packet.encode())
         }
         Outbound::Raw(bytes) => Some(bytes),
         Outbound::ChatInput(input) => match chat.encode_input(&input, tree.lock().as_deref()) {

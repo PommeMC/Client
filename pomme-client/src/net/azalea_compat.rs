@@ -862,44 +862,94 @@ fn remap_add_entity_26_1() {
     );
 }
 
-/// azalea's typed encoder always writes 26.2 component-type ids, so on a
-/// version without an item grammar a creative stack whose patch touches a
-/// shifted id is cleared wholesale outbound; unshifted components survive.
+/// A creative stack's component values can't be rewritten on a version
+/// without an item grammar, so a patch touching a component that version
+/// numbers differently is cleared wholesale outbound; unshifted ones survive.
 #[test]
 fn strip_creative_components_774() {
-    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
-    use azalea_protocol::packets::game::ServerboundGamePacket;
-    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use pomme_protocol::item::{ComponentPatch, ItemStack};
+    use pomme_protocol::serverbound::GamePacket;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let remap = |kind: DataComponentKind| {
-        let mut patch = DataComponentPatch::default();
-        // A removal marker carries no typed value, making it the safe way to
-        // put an arbitrary kind in the otherwise-opaque patch.
-        unsafe { patch.unchecked_insert_component(kind, None) };
-        let mut packet =
-            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
-                slot_num: 36,
-                item_stack: ItemStack::Present(ItemStackData {
-                    kind: ItemKind::Stone,
-                    count: 1,
-                    component_patch: patch,
-                }),
-            });
+    let component = |name| {
+        registry_id(
+            RegistryTable::native(),
+            ClientRegistry::DataComponentType,
+            name,
+        )
+    };
+    let remap = |name| {
+        let mut packet = GamePacket::SetCreativeModeSlot {
+            slot: 36,
+            stack: Some(ItemStack {
+                item: registry_id(RegistryTable::native(), ClientRegistry::Item, "stone"),
+                count: 1,
+                patch: ComponentPatch {
+                    added: Vec::new(),
+                    removed: vec![component(name)],
+                },
+            }),
+        };
         translation_for(774).remap_outbound(&mut packet);
-        let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
+        let GamePacket::SetCreativeModeSlot { stack, .. } = packet else {
             unreachable!()
         };
-        let ItemStack::Present(data) = p.item_stack else {
-            panic!("stack cleared");
-        };
-        data.component_patch
+        stack.expect("stack cleared").patch
     };
 
-    // max_stack_size (id 1) is numbered the same in 1.21.11: kept.
-    assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
-    // lock (79 in 26.2, 76 in 1.21.11) is shifted: the patch is cleared.
-    assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
+    // max_stack_size is numbered the same in 1.21.11: kept.
+    assert_eq!(
+        remap("max_stack_size").removed,
+        [component("max_stack_size")]
+    );
+    // lock is shifted in 1.21.11: the patch is cleared.
+    assert_eq!(remap("lock"), ComponentPatch::default());
+}
+
+/// 1.20.5 to 1.21.4 read a creative stack's component values without the
+/// length prefix 1.21.5 added; later versions keep it.
+#[test]
+fn creative_slot_component_values_lose_their_length_769() {
+    use pomme_protocol::item::{ComponentPatch, ItemStack};
+    use pomme_protocol::serverbound::GamePacket;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let native = RegistryTable::native();
+    let stone = registry_id(native, ClientRegistry::Item, "stone") as u8;
+    let size = registry_id(native, ClientRegistry::DataComponentType, "max_stack_size") as u8;
+    let frame = |protocol| {
+        let mut packet = GamePacket::SetCreativeModeSlot {
+            slot: 36,
+            stack: Some(ItemStack {
+                item: u32::from(stone),
+                count: 2,
+                patch: ComponentPatch {
+                    added: vec![(u32::from(size), [16].into())],
+                    removed: Vec::new(),
+                },
+            }),
+        };
+        let translation = translation_for(protocol);
+        translation.remap_outbound(&mut packet);
+        let frames = translation.translate_outbound_game_frame(packet.encode());
+        let [frame] = &frames[..] else {
+            panic!("one frame");
+        };
+        let mut pos = 0;
+        assert_eq!(
+            wire::read_varint(frame, &mut pos),
+            Some(old_id(
+                protocol,
+                Direction::Serverbound,
+                "set_creative_mode_slot"
+            ))
+        );
+        frame[pos..].to_vec()
+    };
+    // Slot, count, item, one added and no removed components, then the
+    // added one's id and value (16).
+    assert_eq!(frame(769), [0, 36, 2, stone, 1, 0, size, 16]);
+    assert_eq!(frame(774), [0, 36, 2, stone, 1, 0, size, 1, 16]);
 }
 
 /// 26.1's game ids match 26.2's, but its item grammar still routes its
@@ -2280,7 +2330,6 @@ fn translate_move_player_flags_767() {
 #[test]
 fn strip_particle_status_767() {
     use azalea_protocol::packets::config::{ServerboundConfigPacket, s_client_information};
-    use azalea_protocol::packets::game::s_client_information as game_client_information;
 
     let information = super::client_information(
         8,
@@ -2298,14 +2347,8 @@ fn strip_particle_status_767() {
         out
     };
 
-    let game = Vec::from(
-        azalea_protocol::write::serialize_packet(&ServerboundGamePacket::ClientInformation(
-            game_client_information::ServerboundClientInformation {
-                client_information: information.clone(),
-            },
-        ))
-        .unwrap(),
-    );
+    let game =
+        pomme_protocol::serverbound::GamePacket::ClientInformation(information.clone()).encode();
     for protocol in [767, 763] {
         let old = old_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
@@ -2317,7 +2360,9 @@ fn strip_particle_status_767() {
 
     let config = Vec::from(
         azalea_protocol::write::serialize_packet(&ServerboundConfigPacket::ClientInformation(
-            s_client_information::ServerboundClientInformation { information },
+            s_client_information::ServerboundClientInformation {
+                information: super::connection::azalea_client_information(&information),
+            },
         ))
         .unwrap(),
     );
@@ -2909,10 +2954,11 @@ fn translate_creative_slot_775() {
     use pomme_protocol::RegistryTable;
 
     let (native_item, native_size, _) = dripstone_with_size(RegistryTable::native());
-    let frame = pomme_protocol::wire::encode_set_creative_mode_slot(
-        36,
-        Some(&native_dripstone_with_size()),
-    );
+    let frame = pomme_protocol::serverbound::GamePacket::SetCreativeModeSlot {
+        slot: 36,
+        stack: Some(native_dripstone_with_size()),
+    }
+    .encode();
 
     let (wire_item, wire_size, wire_stack) =
         dripstone_with_size(RegistryTable::for_protocol(775).unwrap());
@@ -7518,16 +7564,15 @@ fn lifecycle_packets_match_azalea() {
 
 #[test]
 fn client_information_reports_the_skin_options() {
-    use azalea_entity::HumanoidArm;
     let skin = crate::ui::menu::SkinOptions {
         hat: false,
         main_hand_right: false,
         ..Default::default()
     };
     let info = super::client_information(8, crate::ui::chat::ChatOptions::default(), skin);
-    assert_eq!(info.main_hand, HumanoidArm::Left);
-    assert!(!info.model_customization.hat);
-    assert!(info.model_customization.cape);
+    // `HumanoidArm.LEFT`, and every `PlayerModelPart` bit but the hat's.
+    assert_eq!(info.main_hand, 0);
+    assert_eq!(info.model_customisation, 0x3f);
 }
 
 /// Reconnecting on the same protocol cannot inherit a previous dimension order.

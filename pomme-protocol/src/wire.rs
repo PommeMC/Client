@@ -1,6 +1,5 @@
-//! Pomme-owned outbound packet encoding, sent through the connection's raw
-//! write path (which still handles framing/compression/encryption). Grows as
-//! packets migrate off azalea's serializers.
+//! Wire primitives, and the outbound game packets encoded as free functions;
+//! the rest are [`crate::serverbound::GamePacket`]s.
 
 use glam::DVec3;
 
@@ -39,12 +38,18 @@ pub fn encode_attack(entity_id: i32) -> Vec<u8> {
 pub fn encode_pick_item_from_block(x: i32, y: i32, z: i32, include_data: bool) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("pick_item_from_block"));
+    write_block_pos(&mut buf, (x, y, z));
+    buf.push(include_data as u8);
+    buf
+}
+
+/// `FriendlyByteBuf.writeBlockPos`: `BlockPos.asLong`, x and z in 26 bits
+/// each above y's 12.
+pub fn write_block_pos(buf: &mut Vec<u8>, (x, y, z): (i32, i32, i32)) {
     let packed = ((i64::from(x) & 0x3ff_ffff) << 38)
         | ((i64::from(z) & 0x3ff_ffff) << 12)
         | (i64::from(y) & 0xfff);
     buf.extend_from_slice(&packed.to_be_bytes());
-    buf.push(include_data as u8);
-    buf
 }
 
 /// Vanilla 26.2 `ServerboundPickItemFromEntityPacket`: entity VarInt then
@@ -101,17 +106,6 @@ pub fn encode_recipe_book_seen_recipe(recipe_display_id: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("recipe_book_seen_recipe"));
     write_varint(&mut buf, recipe_display_id);
-    buf
-}
-
-/// Vanilla 26.2 `ServerboundSetCreativeModeSlotPacket`: the slot, then
-/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`, whose patch length-prefixes
-/// each component value.
-pub fn encode_set_creative_mode_slot(slot: i16, stack: Option<&crate::item::ItemStack>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write_varint(&mut buf, game_serverbound_id("set_creative_mode_slot"));
-    buf.extend(slot.to_be_bytes());
-    crate::item::write_stack(&mut buf, stack, true);
     buf
 }
 

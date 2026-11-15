@@ -26,6 +26,7 @@ pub mod registries;
 pub mod resource_pack;
 pub mod scoreboard;
 pub mod section;
+pub mod serverbound;
 pub mod sound;
 pub mod tags;
 #[cfg(any(test, feature = "vanilla-fixtures"))]

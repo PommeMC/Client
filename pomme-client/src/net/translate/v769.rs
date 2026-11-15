@@ -9,6 +9,38 @@ impl Ids769 {
     }
 }
 
+/// Rewrites a native `set_creative_mode_slot` payload for 1.20.5 to 1.21.4,
+/// whose stack codec doesn't length-prefix each component value as 1.21.5's
+/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` does. Ids are already in the
+/// wire version's space (`remap_outbound` runs before encoding).
+pub(super) fn undelimit_creative_slot(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        let mut out = Vec::with_capacity(payload.len() + 4);
+        wire::write_varint(&mut out, old_id);
+        advance(&mut cur, 2)?; // slot short
+        out.extend_from_slice(&payload[..2]);
+        if copy_varint(&mut cur, &mut out)? == 0 {
+            return Some(out);
+        }
+        copy_varint(&mut cur, &mut out)?; // item
+        let added = copy_varint(&mut cur, &mut out)?;
+        let removed = copy_varint(&mut cur, &mut out)?;
+        for _ in 0..added {
+            copy_varint(&mut cur, &mut out)?; // component type
+            let len = var_u32(&mut cur)? as usize;
+            let at = cur.position() as usize;
+            advance(&mut cur, len)?;
+            out.extend_from_slice(&payload[at..at + len]);
+        }
+        for _ in 0..removed {
+            copy_varint(&mut cur, &mut out)?;
+        }
+        Some(out)
+    };
+    rewrite().into_iter().collect()
+}
+
 /// Rewrites a native `container_click` payload for 1.21.4, which carries
 /// full item stacks where 1.21.5 hashes them (`ServerboundContainerClick-
 /// Packet` in both references). A hash can't be reversed, so each stack is

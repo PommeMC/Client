@@ -401,9 +401,7 @@ impl Direction {
     }
 }
 
-// TODO: drop this once the serverbound packets carrying a face are
-// pomme-encoded.
-impl From<Direction> for azalea_core::direction::Direction {
+impl From<Direction> for pomme_protocol::serverbound::Direction {
     fn from(direction: Direction) -> Self {
         match direction {
             Direction::Down => Self::Down,

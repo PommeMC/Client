@@ -131,7 +131,9 @@ public final class CodecOracle {
         Registry<WorldClock> clocks = builtIn(Registries.WORLD_CLOCK);
         Registry<Biome> biomes = builtIn(Registries.BIOME);
         Registry<Dialog> dialogs = builtIn(Registries.DIALOG);
-        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs));
+        registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs,
+                net.minecraft.core.registries.BuiltInRegistries.ITEM,
+                net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE));
 
         lifecycle(dimensionTypes, clocks);
         sections();
@@ -183,6 +185,7 @@ public final class CodecOracle {
         encode("show_dialog/inline", ClientboundShowDialogPacket.STREAM_CODEC::encode,
                 new ClientboundShowDialogPacket(Holder.direct(serverLinks.value())));
         commands();
+        serverbound();
         Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
         blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
         blockTags.put(Identifier.withDefaultNamespace("empty"), IntList.of());
@@ -207,6 +210,143 @@ public final class CodecOracle {
         CASES.forEach(cases::addProperty);
         out.add("cases", cases);
         Files.writeString(Path.of(args[0]), new GsonBuilder().setPrettyPrinting().create().toJson(out) + "\n");
+    }
+
+    /// The serverbound game packets pomme encodes itself.
+    private static void serverbound() {
+        UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
+        BlockPos pos = new BlockPos(-12, 70, 345);
+        encode("serverbound/accept_teleportation",
+                net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket(300));
+        encode("serverbound/bundle_item_selected",
+                net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket(36, -1));
+        encode("serverbound/change_game_mode",
+                net.minecraft.network.protocol.game.ServerboundChangeGameModePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundChangeGameModePacket(GameType.SPECTATOR));
+        encode("serverbound/chunk_batch_received",
+                net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket(12.5f));
+        encode("serverbound/client_command",
+                net.minecraft.network.protocol.game.ServerboundClientCommandPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundClientCommandPacket(
+                        net.minecraft.network.protocol.game.ServerboundClientCommandPacket.Action.REQUEST_STATS));
+        encode("serverbound/client_information",
+                net.minecraft.network.protocol.common.ServerboundClientInformationPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.common.ServerboundClientInformationPacket(
+                        new net.minecraft.server.level.ClientInformation("en_gb", 12,
+                                net.minecraft.world.entity.player.ChatVisiblity.SYSTEM, true, 0x7f,
+                                net.minecraft.world.entity.HumanoidArm.LEFT, false, true,
+                                net.minecraft.server.level.ParticleStatus.MINIMAL)));
+        encode("serverbound/client_tick_end",
+                net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
+        encode("serverbound/command_suggestion",
+                net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket(7, "/give @s sto"));
+        encode("serverbound/configuration_acknowledged",
+                net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket.INSTANCE);
+        encode("serverbound/container_button_click",
+                net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket(3, 200));
+        var changed = new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<net.minecraft.network.HashedStack>();
+        changed.put(5, new net.minecraft.network.HashedStack.ActualItem(
+                net.minecraft.core.registries.BuiltInRegistries.ITEM.wrapAsHolder(
+                        net.minecraft.world.item.Items.DIAMOND_SWORD),
+                1,
+                new net.minecraft.network.HashedPatchMap(
+                        Map.of(net.minecraft.core.component.DataComponents.DAMAGE, 0x12345678),
+                        Set.of(net.minecraft.core.component.DataComponents.CUSTOM_NAME))));
+        encode("serverbound/container_click",
+                net.minecraft.network.protocol.game.ServerboundContainerClickPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(3, 300, (short) -999, (byte) 1,
+                        net.minecraft.world.inventory.ContainerInput.THROW, changed,
+                        net.minecraft.network.HashedStack.EMPTY));
+        encode("serverbound/container_close",
+                net.minecraft.network.protocol.game.ServerboundContainerClosePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(3));
+        encode("serverbound/container_slot_state_changed",
+                net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket(8, 3, true));
+        encode("serverbound/custom_payload",
+                net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket(
+                        new net.minecraft.network.protocol.common.custom.BrandPayload("pomme")));
+        encode("serverbound/keep_alive",
+                net.minecraft.network.protocol.common.ServerboundKeepAlivePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.common.ServerboundKeepAlivePacket(-2L));
+        encode("serverbound/move_player_pos",
+                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Pos.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Pos(1.5, 64.0, -2.25, true, false));
+        encode("serverbound/move_player_pos_rot",
+                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.PosRot.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.PosRot(
+                        1.5, 64.0, -2.25, 90.0f, -10.0f, false, true));
+        encode("serverbound/move_player_rot",
+                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot(90.0f, -10.0f, true, true));
+        encode("serverbound/move_player_status_only",
+                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.StatusOnly.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.StatusOnly(false, false));
+        var abilities = new net.minecraft.world.entity.player.Abilities();
+        abilities.flying = true;
+        encode("serverbound/player_abilities",
+                net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket(abilities));
+        encode("serverbound/player_action",
+                net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
+                        net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
+                        pos, net.minecraft.core.Direction.WEST, 300));
+        // The constructor wants an entity, so this one decodes the bytes
+        // pomme writes (entity 300, START_RIDING_JUMP, 100) and encodes them back.
+        encode("serverbound/player_command",
+                net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.STREAM_CODEC.decode(
+                        new FriendlyByteBuf(Unpooled.wrappedBuffer(new byte[] {(byte) 0xAC, 2, 3, 100}))));
+        encode("serverbound/player_input",
+                net.minecraft.network.protocol.game.ServerboundPlayerInputPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundPlayerInputPacket(
+                        new net.minecraft.world.entity.player.Input(true, false, false, true, true, false, true)));
+        encode("serverbound/player_loaded",
+                net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket());
+        encode("serverbound/pong",
+                net.minecraft.network.protocol.common.ServerboundPongPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.common.ServerboundPongPacket(-5));
+        encode("serverbound/rename_item",
+                net.minecraft.network.protocol.game.ServerboundRenameItemPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundRenameItemPacket("Sting"));
+        encode("serverbound/resource_pack",
+                net.minecraft.network.protocol.common.ServerboundResourcePackPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.common.ServerboundResourcePackPacket(uuid,
+                        net.minecraft.network.protocol.common.ServerboundResourcePackPacket.Action.FAILED_RELOAD));
+        encode("serverbound/set_carried_item",
+                net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(8));
+        encode("serverbound/sign_update",
+                net.minecraft.network.protocol.game.ServerboundSignUpdatePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundSignUpdatePacket(pos, false, "one", "", "thrée", "4"));
+        encode("serverbound/swing",
+                net.minecraft.network.protocol.game.ServerboundSwingPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundSwingPacket(
+                        net.minecraft.world.InteractionHand.OFF_HAND));
+        encode("serverbound/teleport_to_entity",
+                net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket(uuid));
+        encode("serverbound/use_item",
+                net.minecraft.network.protocol.game.ServerboundUseItemPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundUseItemPacket(
+                        net.minecraft.world.InteractionHand.MAIN_HAND, 300, 90.0f, -10.0f));
+        encode("serverbound/use_item_on",
+                net.minecraft.network.protocol.game.ServerboundUseItemOnPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.game.ServerboundUseItemOnPacket(
+                        net.minecraft.world.InteractionHand.OFF_HAND,
+                        new net.minecraft.world.phys.BlockHitResult(new Vec3(-11.25, 71.0, 345.5),
+                                net.minecraft.core.Direction.UP, pos, true, false),
+                        300));
     }
 
     private static void commands() {

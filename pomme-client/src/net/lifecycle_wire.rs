@@ -5,12 +5,11 @@
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_core::registry_holder::dimension_type::DimensionKindElement;
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive;
 use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
+use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::{Direction, PacketTable, Phase};
 
 use super::chat_security::ProfileKeyServices;
@@ -137,9 +136,7 @@ fn handle(
             send_ordered(event_tx, NetworkEvent::ClearMobEffects);
         }
         LifecyclePacket::KeepAlive(id) => {
-            sender.send(ServerboundGamePacket::KeepAlive(ServerboundKeepAlive {
-                id: id as u64,
-            }));
+            sender.send(GamePacket::KeepAlive { id });
         }
         // Vanilla `handlePing` pongs from the main thread, in order with the
         // other main-thread packets.

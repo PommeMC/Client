@@ -471,7 +471,7 @@ mod tests {
     use std::sync::{Arc, Barrier, mpsc as std_mpsc};
     use std::time::Duration;
 
-    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use pomme_protocol::serverbound::GamePacket;
     use pomme_protocol::wire;
 
     use super::*;
@@ -649,7 +649,7 @@ mod tests {
         assert!(matches!(
             out_rx.try_recv(),
             Ok(crate::net::sender::Outbound::Packet(packet))
-                if matches!(*packet, ServerboundGamePacket::ChunkBatchReceived(_))
+                if matches!(*packet, GamePacket::ChunkBatchReceived { .. })
         ));
     }
 

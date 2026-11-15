@@ -696,44 +696,41 @@ pub enum NetworkEvent {
     },
 }
 
-/// The client information pomme reports. The configuration and game phase
-/// packets wrap the same struct under different field names, and 1.20.1 sends
-/// it in the game phase only, so all three sites share this.
-/// Vanilla `Options.buildPlayerInformation`.
+/// The client information pomme reports. The configuration and game phases
+/// send the same record, and 1.20.1 sends it in the game phase only, so all
+/// three sites share this. Vanilla `Options.buildPlayerInformation`.
 pub fn client_information(
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
     skin: crate::ui::menu::SkinOptions,
-) -> azalea_protocol::common::client_information::ClientInformation {
-    use azalea_entity::HumanoidArm;
-    use azalea_protocol::common::client_information::*;
-    let chat_visibility = match chat_options.visibility {
-        crate::ui::chat::ChatVisibilitySetting::Full => ChatVisibility::Full,
-        crate::ui::chat::ChatVisibilitySetting::System => ChatVisibility::System,
-        crate::ui::chat::ChatVisibilitySetting::Hidden => ChatVisibility::Hidden,
-    };
-    ClientInformation {
+) -> pomme_protocol::serverbound::ClientInformation {
+    // `PlayerModelPart`, by bit.
+    let parts = [
+        skin.cape,
+        skin.jacket,
+        skin.left_sleeve,
+        skin.right_sleeve,
+        skin.left_pants,
+        skin.right_pants,
+        skin.hat,
+    ];
+    pomme_protocol::serverbound::ClientInformation {
         language: "en_us".into(),
         view_distance,
-        chat_visibility,
+        chat_visibility: match chat_options.visibility {
+            crate::ui::chat::ChatVisibilitySetting::Full => 0,
+            crate::ui::chat::ChatVisibilitySetting::System => 1,
+            crate::ui::chat::ChatVisibilitySetting::Hidden => 2,
+        },
         chat_colors: chat_options.colors,
-        model_customization: ModelCustomization {
-            cape: skin.cape,
-            jacket: skin.jacket,
-            left_sleeve: skin.left_sleeve,
-            right_sleeve: skin.right_sleeve,
-            left_pants: skin.left_pants,
-            right_pants: skin.right_pants,
-            hat: skin.hat,
-        },
-        main_hand: if skin.main_hand_right {
-            HumanoidArm::Right
-        } else {
-            HumanoidArm::Left
-        },
+        model_customisation: parts
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (bit, &shown)| mask | u8::from(shown) << bit),
+        main_hand: u32::from(skin.main_hand_right),
         text_filtering_enabled: false,
         allows_listing: true,
-        particle_status: ParticleStatus::All,
+        particle_status: 0,
     }
 }
 

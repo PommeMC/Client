@@ -60,11 +60,9 @@ impl ChunkPos {
     }
 }
 
-// TODO: drop this once the serverbound packets carrying positions are
-// pomme-encoded.
-impl From<BlockPos> for azalea_core::position::BlockPos {
+impl From<BlockPos> for (i32, i32, i32) {
     fn from(pos: BlockPos) -> Self {
-        Self::new(pos.x, pos.y, pos.z)
+        (pos.x, pos.y, pos.z)
     }
 }
 

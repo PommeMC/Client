@@ -149,6 +149,9 @@ impl Translation {
             }
         }
         if let Some(v769) = &ids.v769 {
+            if id == v769.creative_slot_id {
+                return undelimit_creative_slot(v769.creative_slot_old_id, &frame[pos..]);
+            }
             if id == v769.chat_id {
                 return strip_last_byte(v769.chat_old_id, &frame[pos..]);
             }
@@ -206,39 +209,67 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
-    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5
-    /// through 1.21.11, which have no item grammar yet (see the
-    /// azalea-divergence list).
-    pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
+    pub fn remap_outbound(&self, packet: &mut GamePacket) {
         match packet {
-            ServerboundGamePacket::ContainerClick(p) => {
-                for (_, stack) in p.changed_slots.iter_mut() {
+            GamePacket::ContainerClick(click) => {
+                for (_, stack) in &mut click.changed_slots {
                     self.remap_hashed(stack);
                 }
-                self.remap_hashed(&mut p.carried_item);
+                self.remap_hashed(&mut click.carried);
             }
-            ServerboundGamePacket::SetCreativeModeSlot(p) => {
-                remap_stack(self.from_native, &mut p.item_stack);
-                if let ItemStack::Present(data) = &mut p.item_stack {
-                    strip_untranslatable_components(self.from_native, data);
-                }
+            // A wire version with an item grammar translates the frame.
+            GamePacket::SetCreativeModeSlot { stack, .. } if !self.translates_items() => {
+                self.remap_creative_stack(stack);
             }
             _ => {}
         }
     }
 
-    pub(super) fn remap_hashed(&self, stack: &mut HashedStack) {
-        use ClientRegistry as R;
-        let Some(item) = &mut stack.0 else { return };
-        if !remap_with(self.from_native, R::Item, &mut item.kind) {
-            stack.0 = None;
-            return;
-        }
-        item.components
-            .added_components
-            .retain_mut(|(kind, _)| remap_with(self.from_native, R::DataComponentType, kind));
-        item.components
-            .removed_components
-            .retain_mut(|kind| remap_with(self.from_native, R::DataComponentType, kind));
+    pub(super) fn remap_hashed(&self, stack: &mut Option<HashedStack>) {
+        let component = |id: u32| {
+            self.from_native
+                .remap(ClientRegistry::DataComponentType, id)
+        };
+        *stack = stack.take().and_then(|mut stack| {
+            stack.item = self.from_native.remap(ClientRegistry::Item, stack.item)?;
+            stack.added = stack
+                .added
+                .iter()
+                .filter_map(|&(id, hash)| Some((component(id)?, hash)))
+                .collect();
+            stack.removed = stack
+                .removed
+                .iter()
+                .filter_map(|&id| component(id))
+                .collect();
+            Some(stack)
+        });
+    }
+
+    /// A creative stack for a wire version without an item grammar: its
+    /// item remapped, or the stack emptied when the version lacks the item.
+    /// Component values can't be rewritten without the grammar, so a patch
+    /// touching a component the version numbers differently is cleared
+    /// rather than sent misencoded.
+    fn remap_creative_stack(&self, stack: &mut Option<pomme_protocol::item::ItemStack>) {
+        *stack = stack.take().and_then(|mut stack| {
+            stack.item = self.from_native.remap(ClientRegistry::Item, stack.item)?;
+            let translates = |id: u32| {
+                self.from_native
+                    .remap(ClientRegistry::DataComponentType, id)
+                    == Some(id)
+            };
+            let added = stack.patch.added.iter().map(|(id, _)| *id);
+            if !added
+                .chain(stack.patch.removed.iter().copied())
+                .all(translates)
+            {
+                tracing::warn!(
+                    "Dropping creative item components the wire version numbers differently"
+                );
+                stack.patch = Default::default();
+            }
+            Some(stack)
+        });
     }
 }

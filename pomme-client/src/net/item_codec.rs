@@ -16,7 +16,6 @@ use azalea_inventory::components::{
     UseRemainder,
 };
 use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
-use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
 use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -69,15 +68,6 @@ pub(super) fn item_packet_ids() -> ItemPacketIds {
     })
 }
 
-/// A native `set_creative_mode_slot` frame, with the stack in vanilla's
-/// layout.
-pub fn creative_slot_frame(packet: &ServerboundSetCreativeModeSlot) -> Vec<u8> {
-    pomme_protocol::wire::encode_set_creative_mode_slot(
-        packet.slot_num as i16,
-        from_azalea(&packet.item_stack).as_ref(),
-    )
-}
-
 /// A decoded stack as azalea's value; an item azalea doesn't know is empty.
 pub fn to_azalea(stack: &item::ItemStack) -> ItemStack {
     let Some(kind) = ItemKind::from_u32(stack.item) else {
@@ -95,6 +85,30 @@ pub fn azalea_patch(patch: &ComponentPatch) -> DataComponentPatch {
     let bytes = azalea_patch_bytes(patch);
     DataComponentPatch::azalea_read(&mut Cursor::new(&bytes[..]))
         .expect("every component was validated through azalea")
+}
+
+/// `HashedStack.create`: the stack with each component value replaced by
+/// its hash; `None` when empty.
+pub fn hashed_stack(
+    stack: &ItemStack,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> Option<pomme_protocol::serverbound::HashedStack> {
+    let data = stack.as_present()?;
+    let mut hashed = pomme_protocol::serverbound::HashedStack {
+        item: data.kind.to_u32(),
+        count: data.count,
+        added: Vec::new(),
+        removed: Vec::new(),
+    };
+    for (kind, value) in data.component_patch.iter() {
+        match value {
+            Some(value) => hashed
+                .added
+                .push((kind.to_u32(), value.crc_hash(registries).0 as i32)),
+            None => hashed.removed.push(kind.to_u32()),
+        }
+    }
+    Some(hashed)
 }
 
 /// An azalea stack in vanilla's layout, for encoding; `None` when empty.
@@ -467,10 +481,11 @@ mod tests {
         let bundle = ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents {
             items: vec![ItemStack::new(ItemKind::Bread, 2)],
         });
-        let frame = creative_slot_frame(&ServerboundSetCreativeModeSlot {
-            slot_num: 36,
-            item_stack: bundle,
-        });
+        let frame = pomme_protocol::serverbound::GamePacket::SetCreativeModeSlot {
+            slot: 36,
+            stack: from_azalea(&bundle),
+        }
+        .encode();
         let mut expected = Vec::new();
         var(
             &mut expected,
