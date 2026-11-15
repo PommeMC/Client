@@ -217,7 +217,7 @@ impl SkyPipeline {
             resources,
             &resource_id!("minecraft:textures/environment/celestial/sun.png"),
         );
-        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR);
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let sun_set = util::create_texture_group(device, tex_layout, sun.handle(), sampler);
 
         let moon_phase_ids = [
