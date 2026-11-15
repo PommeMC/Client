@@ -156,7 +156,7 @@ ci-lint:
 
 # Tests, in the dev profile (dependencies are optimised there).
 ci-test:
-    @cargo nextest run -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p ingame-test
+    @cargo nextest run -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p azalea-registry -p azalea-inventory -p ingame-test
     @cargo nextest run -p pomme-client --no-default-features
 
 # SteelMC's crate, the client with it, and the test that boots a real world.
