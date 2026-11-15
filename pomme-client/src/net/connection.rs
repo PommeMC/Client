@@ -1187,7 +1187,7 @@ async fn game_loop(
 }
 
 /// `start_configuration`, which carries nothing.
-const START_CONFIGURATION: super::RawRead<()> =
+pub(super) const START_CONFIGURATION: super::RawRead<()> =
     |name, _| (name == "start_configuration").then_some(Ok(()));
 
 /// The frame one queued outbound item writes, if any.

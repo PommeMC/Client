@@ -308,6 +308,12 @@ impl Session {
             read?;
             return self.chunk_sections(&raw, blocks);
         }
+        if let Some(read) = super::read_raw_frame(&raw, super::connection::START_CONFIGURATION) {
+            return read.map_err(|e| e.to_string());
+        }
+        if let Some(read) = super::read_raw_frame(&raw, pomme_protocol::tags::read) {
+            return read.map(drop).map_err(|e| e.to_string());
+        }
         decode::<ClientboundGamePacket>(&raw).map(drop)
     }
 
