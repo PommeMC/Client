@@ -1150,13 +1150,7 @@ async fn game_loop(
                     }
                     forward_tags(event_tx, &p.tags);
                 }
-                handle_game_packet(
-                    &packet,
-                    &sender,
-                    event_tx,
-                    &configured.registries,
-                    &shared_tree,
-                );
+                handle_game_packet(&packet, event_tx, &configured.registries, &shared_tree);
             }
             Err(e) => skip_malformed_packet(e)?,
         }

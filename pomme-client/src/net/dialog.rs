@@ -31,8 +31,7 @@ const KNOWN_LINK_TYPES: [&str; 10] = [
 ];
 
 /// Decodes the dialog packets pomme reads itself; `false` when `raw` is none
-/// of them. A malformed one is consumed with a warning. Play's
-/// `show_dialog`/`clear_dialog` are left to azalea.
+/// of them. A malformed one is consumed with a warning.
 pub fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
     let mut pos = 0;
     let Some(id) = read_varint(raw, &mut pos) else {
@@ -46,10 +45,15 @@ pub fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], event_tx: &Sender<Netw
         "server_links" => {
             parse_server_links(raw, &mut pos).map(|links| NetworkEvent::ServerLinks { links })
         }
+        // Configuration's `CONTEXT_FREE_STREAM_CODEC` sends the dialog inline,
+        // play's `STREAM_CODEC` a `Holder<Dialog>`.
         "show_dialog" if configuration => {
             parse_inline_dialog(raw, &mut pos).map(|dialog| NetworkEvent::ShowDialog { dialog })
         }
-        "clear_dialog" if configuration => Ok(NetworkEvent::ClearDialog),
+        "show_dialog" => {
+            parse_dialog_holder(raw, &mut pos).map(|dialog| NetworkEvent::ShowDialog { dialog })
+        }
+        "clear_dialog" => Ok(NetworkEvent::ClearDialog),
         _ => return false,
     };
     match event.and_then(|event| ensure_end(raw, pos, name).map(|()| event)) {
@@ -90,6 +94,14 @@ fn validated_server_link_url(url: &str) -> Option<String> {
         .ok()
 }
 
+/// `ByteBufCodecs.holder`: 0 and an inline dialog, else a registry id plus 1.
+fn parse_dialog_holder(raw: &[u8], pos: &mut usize) -> Result<DialogReference, String> {
+    match read_varint(raw, pos).ok_or("dialog holder id")? {
+        0 => parse_inline_dialog(raw, pos),
+        id => Ok(DialogReference::ProtocolId(id - 1)),
+    }
+}
+
 /// Configuration's `ClientboundShowDialogPacket.CONTEXT_FREE_STREAM_CODEC`:
 /// always an inline dialog.
 fn parse_inline_dialog(raw: &[u8], pos: &mut usize) -> Result<DialogReference, String> {
@@ -107,10 +119,12 @@ mod tests {
     use super::*;
     use crate::chat_component::Content;
 
-    fn packet_id(phase: Phase, name: &str) -> u32 {
-        PacketTable::native()
-            .id(phase, Direction::Clientbound, name)
-            .unwrap()
+    /// A frame holding just packet `name`'s id.
+    fn frame(phase: Phase, name: &str) -> Vec<u8> {
+        let mut raw = Vec::new();
+        let id = PacketTable::native().id(phase, Direction::Clientbound, name);
+        write_varint(&mut raw, id.unwrap());
+        raw
     }
 
     fn write_string(out: &mut Vec<u8>, value: &str) {
@@ -131,8 +145,7 @@ mod tests {
     }
 
     fn links_packet(phase: Phase) -> Vec<u8> {
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(phase, "server_links"));
+        let mut raw = frame(phase, "server_links");
         write_varint(&mut raw, 4);
         // Known type 6 (website).
         raw.push(1);
@@ -181,8 +194,7 @@ mod tests {
 
     #[test]
     fn out_of_range_link_type_is_a_bug_report() {
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "server_links"));
+        let mut raw = frame(Phase::Game, "server_links");
         write_varint(&mut raw, 1);
         raw.push(1);
         write_varint(&mut raw, 42);
@@ -217,8 +229,7 @@ mod tests {
         let mut expected = NbtCompound::new();
         expected.insert("type", "minecraft:notice");
         expected.insert("title", "Rules");
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Configuration, "show_dialog"));
+        let mut raw = frame(Phase::Configuration, "show_dialog");
         NbtTag::Compound(expected.clone()).write(&mut raw);
         let events = decode(Phase::Configuration, &raw);
         let [NetworkEvent::ShowDialog { dialog }] = events.as_slice() else {
@@ -229,17 +240,51 @@ mod tests {
         };
         assert_eq!(tag, &NbtTag::Compound(expected));
 
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Configuration, "clear_dialog"));
+        let raw = frame(Phase::Configuration, "clear_dialog");
         assert!(matches!(
             decode(Phase::Configuration, &raw).as_slice(),
             [NetworkEvent::ClearDialog]
         ));
+    }
 
-        // Play's holder form stays with azalea.
-        let mut raw = Vec::new();
-        write_varint(&mut raw, packet_id(Phase::Game, "clear_dialog"));
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        assert!(!handle_raw_dialog_packet(Phase::Game, &raw, &tx));
+    #[test]
+    fn play_dialogs_are_holders() {
+        use pomme_protocol::vanilla_fixtures::{case, registry_id};
+
+        let play = |name| {
+            let mut raw = frame(Phase::Game, "show_dialog");
+            raw.extend(case(name));
+            decode(Phase::Game, &raw)
+        };
+        let events = play("show_dialog/inline");
+        let [NetworkEvent::ShowDialog { dialog }] = events.as_slice() else {
+            panic!("expected one show_dialog event");
+        };
+        let DialogReference::Holder(crate::chat_component::DialogHolder::Nbt(NbtTag::Compound(
+            nbt,
+        ))) = dialog
+        else {
+            panic!("expected an inline dialog");
+        };
+        assert_eq!(
+            nbt.string("type")
+                .map(|s| s.to_str().into_owned())
+                .as_deref(),
+            Some("minecraft:server_links")
+        );
+
+        let server_links = registry_id("dialog", "minecraft:server_links");
+        assert!(matches!(
+            play("show_dialog/reference").as_slice(),
+            [NetworkEvent::ShowDialog {
+                dialog: DialogReference::ProtocolId(id)
+            }] if *id == server_links
+        ));
+
+        let raw = frame(Phase::Game, "clear_dialog");
+        assert!(matches!(
+            decode(Phase::Game, &raw).as_slice(),
+            [NetworkEvent::ClearDialog]
+        ));
     }
 }

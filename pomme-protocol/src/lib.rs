@@ -22,12 +22,14 @@ pub mod packets;
 pub mod player;
 pub mod player_info;
 pub mod registries;
+pub mod resource_pack;
 pub mod scoreboard;
 pub mod section;
 pub mod sound;
 #[cfg(any(test, feature = "vanilla-fixtures"))]
 pub mod vanilla_fixtures;
 pub mod version;
+pub mod waypoint;
 pub mod wire;
 
 pub use known_packs::{KnownPack, KnownPackTable};

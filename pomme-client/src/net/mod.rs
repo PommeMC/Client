@@ -25,12 +25,14 @@ mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
 pub mod resolve;
+mod resource_pack_wire;
 mod scoreboard_wire;
 pub mod sender;
 mod session;
 mod sound_wire;
 pub mod stream;
 pub mod translate;
+mod waypoint_wire;
 #[cfg(test)]
 mod wire_corpus;
 
@@ -206,8 +208,8 @@ pub enum NetworkEvent {
         slots: Vec<(EquipmentSlot, ItemStack)>,
     },
     Waypoint {
-        operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
-        waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
+        operation: pomme_protocol::waypoint::WaypointOperation,
+        waypoint: pomme_protocol::waypoint::TrackedWaypoint,
     },
     EntityAttributesUpdate {
         entity_id: i32,
