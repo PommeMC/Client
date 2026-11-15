@@ -2,12 +2,11 @@
 
 use std::sync::Arc;
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived;
 use azalea_registry::builtin::BlockEntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::chunk::{self, BlockEntityInfo, ChunkPacket};
 use pomme_protocol::codec::DecodeResult;
+use pomme_protocol::serverbound::GamePacket;
 use simdnbt::owned::NbtCompound;
 
 use super::block_wire::{block_entity_nbt, native_block_entity_type};
@@ -92,11 +91,9 @@ pub(super) fn handle_raw_chunk_packet(
                 // `handleChunkBatchFinished` is one of the few handlers it
                 // doesn't defer to the main thread.
                 batch_size_calculator.on_batch_finished(size);
-                sender.send(ServerboundGamePacket::ChunkBatchReceived(
-                    ServerboundChunkBatchReceived {
-                        desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
-                    },
-                ));
+                sender.send(GamePacket::ChunkBatchReceived {
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
+                });
             }
             ChunkPacket::CacheCenter { x, z } => {
                 send_ordered(event_tx, NetworkEvent::ChunkCacheCenter { x, z });

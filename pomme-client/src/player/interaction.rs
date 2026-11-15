@@ -7,15 +7,11 @@ use azalea_inventory::components::{
     KineticWeapon, MinimumAttackCharge, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
-use azalea_protocol::packets::game::ServerboundGamePacket;
-pub use azalea_protocol::packets::game::s_interact::InteractionHand;
-use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
-use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
-use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
-use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::HolderSet;
 use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3};
+pub use pomme_protocol::serverbound::InteractionHand;
+use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
@@ -914,23 +910,19 @@ impl InteractionState {
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> UseResult {
         self.seq += 1;
-        sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+        sender.send(GamePacket::UseItemOn {
             hand,
-            block_hit: BlockHit {
-                block_pos: hit.block_pos.into(),
+            hit: BlockHit {
+                pos: hit.block_pos.into(),
                 direction: hit.face.into(),
-                location: azalea_core::position::Vec3::new(
-                    hit.hit_point.x,
-                    hit.hit_point.y,
-                    hit.hit_point.z,
-                ),
+                location: hit.hit_point,
                 // TODO: true when the ray started inside the shape, which
                 // scaffolding placement reads.
                 inside: false,
                 world_border: false,
             },
-            seq: self.seq,
-        }));
+            sequence: self.seq as i32,
+        });
         // TODO: other interactive blocks (beacon, loom, ...)
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
@@ -986,12 +978,12 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) -> UseResult {
         self.seq += 1;
-        sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
+        sender.send(GamePacket::UseItem {
             hand,
-            seq: self.seq,
+            sequence: self.seq as i32,
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
-        }));
+        });
         if self.item_cooldowns.is_on_cooldown(stack) {
             return UseResult::Pass;
         }
@@ -1577,11 +1569,9 @@ impl InteractionState {
     pub fn ensure_has_sent_carried_item(&mut self, sender: &PacketSender, selected_slot: u8) {
         if selected_slot != self.carried_slot {
             self.carried_slot = selected_slot;
-            sender.send(ServerboundGamePacket::SetCarriedItem(
-                ServerboundSetCarriedItem {
-                    slot: selected_slot as u16,
-                },
-            ));
+            sender.send(GamePacket::SetCarriedItem {
+                slot: i16::from(selected_slot),
+            });
         }
     }
 
@@ -2188,14 +2178,12 @@ fn send_action(
     direction: Direction,
     seq: u32,
 ) {
-    sender.send(ServerboundGamePacket::PlayerAction(
-        ServerboundPlayerAction {
-            action,
-            pos: pos.into(),
-            direction: direction.into(),
-            seq,
-        },
-    ));
+    sender.send(GamePacket::PlayerAction {
+        action,
+        pos: pos.into(),
+        direction: direction.into(),
+        sequence: seq as i32,
+    });
 }
 
 /// Reports a swing from using an item, block or entity where the wire
@@ -2207,8 +2195,7 @@ pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
 }
 
 pub(crate) fn send_swing(sender: &PacketSender, hand: InteractionHand) {
-    use azalea_protocol::packets::game::s_swing::ServerboundSwing;
-    sender.send(ServerboundGamePacket::Swing(ServerboundSwing { hand }));
+    sender.send(GamePacket::Swing { hand });
 }
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
@@ -2366,10 +2353,7 @@ mod tests {
         let Outbound::Packet(packet) = rx.try_recv().expect("slot change packet") else {
             panic!("expected structured packet");
         };
-        let ServerboundGamePacket::SetCarriedItem(packet) = *packet else {
-            panic!("expected SetCarriedItem");
-        };
-        assert_eq!(packet.slot, 5);
+        assert_eq!(*packet, GamePacket::SetCarriedItem { slot: 5 });
     }
 
     #[test]
@@ -2748,7 +2732,7 @@ mod tests {
         let Outbound::Packet(packet) = rx.try_recv().expect("use packet") else {
             panic!("expected structured packet");
         };
-        assert!(matches!(*packet, ServerboundGamePacket::UseItemOn(_)));
+        assert!(matches!(*packet, GamePacket::UseItemOn { .. }));
         assert!(rx.try_recv().is_err());
     }
 

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use azalea_protocol::packets::game::{ServerboundGamePacket, s_resource_pack};
+use pomme_protocol::serverbound::{GamePacket, ResourcePackAction};
 
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::{GameState, section_bits};
@@ -287,14 +287,10 @@ fn drive(
                     game.set_server_view_distance(distance);
                 }
                 NetworkEvent::ResourcePackPush { id, .. } => {
-                    connection
-                        .packet_tx
-                        .send(ServerboundGamePacket::ResourcePack(
-                            s_resource_pack::ServerboundResourcePack {
-                                id,
-                                action: s_resource_pack::Action::Declined,
-                            },
-                        ));
+                    connection.packet_tx.send(GamePacket::ResourcePack {
+                        id: id.as_u128(),
+                        action: ResourcePackAction::Declined,
+                    });
                 }
                 NetworkEvent::Disconnected { reason } => {
                     tracing::error!("Disconnected: {reason}");

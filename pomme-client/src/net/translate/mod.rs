@@ -195,8 +195,9 @@
 //!   1.21.5 split into splash/lingering
 //! - serverbound `set_creative_mode_slot` wrote item component values bare,
 //!   where 1.21.5 length-prefixes each one
-//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); untranslated — see the
-//!   azalea-divergence list
+//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); the prefixes are stripped
+//!   on the way out. A version without an item grammar keeps a creative stack's
+//!   components only when it numbers every one of them as 26.2 does
 //!
 //! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
 //! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
@@ -372,30 +373,17 @@
 //! components whose value layout changed (`pot_decorations`, inline `trim` or
 //! `instrument`, a `teleport_randomly` consume effect) misdecodes the same
 //! way, and recipe displays keep their items in wire space.
-//!
-//! Depends on azalea diverging from 26.2: these translations are correct only
-//! because azalea encodes or decodes something differently from the reference,
-//! so fixing azalea — or replacing it with pomme's own codec — breaks the older
-//! versions unless the matching rewrite lands at the same time. Each site
-//! carries a `TODO` pointing here.
-//! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's (native sessions and the
-//!   versions with an item grammar encode it with pomme's grammar instead; see
-//!   `net::item_codec`)
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::Profile;
-use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_registry::Registry;
-use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
+use pomme_protocol::serverbound::{GamePacket, HashedStack};
 pub use pomme_protocol::version::joinable;
 use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
@@ -662,6 +650,9 @@ struct Ids764 {
 /// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
+    /// Native + wire ids for the creative slot's undelimited stack.
+    creative_slot_id: u32,
+    creative_slot_old_id: u32,
     /// Native-space serverbound `chat` id and the wire version's, for the
     /// last-seen checksum strip.
     chat_id: u32,

@@ -4,8 +4,7 @@
 
 use std::time::Instant;
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity;
+use pomme_protocol::serverbound::GamePacket;
 use uuid::Uuid;
 
 use super::common;
@@ -245,9 +244,9 @@ impl SpectatorMenu {
             }
             Activation::Teleport(uuid) => {
                 // Vanilla PlayerMenuItem: send and leave the menu open.
-                sender.send(ServerboundGamePacket::TeleportToEntity(
-                    ServerboundTeleportToEntity { uuid },
-                ));
+                sender.send(GamePacket::TeleportToEntity {
+                    uuid: uuid.as_u128(),
+                });
                 false
             }
         }

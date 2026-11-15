@@ -1,10 +1,9 @@
 //! In-game `resource_pack_push` and `resource_pack_pop`, decoded by pomme.
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_resource_pack::{Action, ServerboundResourcePack};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::resource_pack::{self, ResourcePackPacket};
+use pomme_protocol::serverbound::{GamePacket, ResourcePackAction};
 
 use super::NetworkEvent;
 use super::handler::send_ordered;
@@ -38,12 +37,10 @@ pub(super) fn handle_raw_resource_pack_packet(
                             required,
                         },
                     );
-                    sender.send(ServerboundGamePacket::ResourcePack(
-                        ServerboundResourcePack {
-                            id,
-                            action: Action::Accepted,
-                        },
-                    ));
+                    sender.send(GamePacket::ResourcePack {
+                        id: id.as_u128(),
+                        action: ResourcePackAction::Accepted,
+                    });
                 }
                 ResourcePackPacket::Pop { id } => {
                     let id = id.map(uuid::Uuid::from_u128);

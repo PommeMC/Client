@@ -287,6 +287,13 @@ impl GameIds {
             }),
             v769: (protocol <= 769).then(|| Ids769 {
                 player_chat_id: id(Clientbound, "player_chat"),
+                creative_slot_id: id(Serverbound, "set_creative_mode_slot"),
+                creative_slot_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "set_creative_mode_slot",
+                ),
                 chat_id: id(Serverbound, "chat"),
                 chat_old_id: required_id(table, Phase::Game, Serverbound, "chat"),
                 chat_command_signed_id: id(Serverbound, "chat_command_signed"),

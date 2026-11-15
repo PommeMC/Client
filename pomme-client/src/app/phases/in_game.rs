@@ -4,11 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
-use azalea_protocol::packets::game::{
-    ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
-};
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
+use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::input::{Action, InputKey, KeyBindings};
@@ -1034,13 +1032,11 @@ impl GameState {
     /// the screen closes.
     pub fn close_sign_editor(&mut self, packet_tx: &crate::net::sender::PacketSender) {
         if let Some(editor) = self.sign_editor.take() {
-            packet_tx.send(ServerboundGamePacket::SignUpdate(
-                azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
-                    pos: editor.pos.into(),
-                    is_front_text: editor.is_front_text,
-                    lines: editor.messages,
-                },
-            ));
+            packet_tx.send(GamePacket::SignUpdate {
+                pos: editor.pos.into(),
+                is_front_text: editor.is_front_text,
+                lines: editor.messages,
+            });
         }
     }
 
@@ -1429,13 +1425,9 @@ impl GameState {
                         .and_then(GameMode::from_id)
                         .unwrap_or(GameMode::Creative)
                 };
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ChangeGameMode(
-                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
-                        mode: target,
-                    },
-                ));
+                connection.packet_tx.send(GamePacket::ChangeGameMode {
+                    mode: u32::from(target.to_id()),
+                });
                 true
             }
             _ if bindings.matches(Action::DebugDebugOptions, &input) => {
@@ -1512,13 +1504,9 @@ impl GameState {
             if switcher.selected != self.player.game_mode
                 && let Some(mode) = GameMode::from_id(switcher.selected)
             {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ChangeGameMode(
-                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
-                        mode,
-                    },
-                ));
+                connection.packet_tx.send(GamePacket::ChangeGameMode {
+                    mode: u32::from(mode.to_id()),
+                });
             }
             self.f3_chord_consumed = false;
             return;
@@ -1582,17 +1570,9 @@ impl GameState {
             );
         }
 
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::ClientInformation(
-                ServerboundClientInformation {
-                    client_information: crate::net::client_information(
-                        render_distance as u8,
-                        chat_options,
-                        skin_options,
-                    ),
-                },
-            ));
+        connection.packet_tx.send(GamePacket::ClientInformation(
+            crate::net::client_information(render_distance as u8, chat_options, skin_options),
+        ));
     }
 
     /// Marks a whole column for remeshing as new content.
@@ -2401,13 +2381,10 @@ fn toggle_bundle_selection(
 }
 
 fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
-    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
-    sender.send(ServerboundGamePacket::BundleItemSelected(
-        ServerboundBundleItemSelected {
-            slot_id: i32::from(slot),
-            selected_item_index: selected as u32,
-        },
-    ));
+    sender.send(GamePacket::BundleItemSelected {
+        slot: i32::from(slot),
+        index: selected,
+    });
 }
 
 /// Vanilla `MultiPlayerGameMode.handleCreativeModeItemAdd`: the creative
@@ -2449,19 +2426,13 @@ fn send_creative_slot(
     slot_num: u16,
     item: azalea_inventory::ItemStack,
 ) -> bool {
-    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-
     if !crate::player::is_creative(game.player.game_mode) {
         return false;
     }
-    connection
-        .packet_tx
-        .send(ServerboundGamePacket::SetCreativeModeSlot(
-            ServerboundSetCreativeModeSlot {
-                slot_num,
-                item_stack: item,
-            },
-        ));
+    connection.packet_tx.send(GamePacket::SetCreativeModeSlot {
+        slot: slot_num as i16,
+        stack: crate::net::item_codec::from_azalea(&item),
+    });
     true
 }
 
@@ -2477,9 +2448,6 @@ pub(crate) fn send_container_clicks(
     use azalea_inventory::ItemStack;
     use azalea_inventory::operations::{
         ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
-    };
-    use azalea_protocol::packets::game::s_container_click::{
-        HashedStack, ServerboundContainerClick,
     };
 
     use crate::player::menu_click;
@@ -2559,23 +2527,35 @@ pub(crate) fn send_container_clicks(
             }
         };
 
-        let mut click = ServerboundContainerClick {
-            container_id,
-            state_id,
-            slot_num: op.slot_num().map(|s| s as i16).unwrap_or(-999),
-            button_num: op.button_num(),
-            click_type: op.click_type(),
-            changed_slots: Default::default(),
-            carried_item: HashedStack::from_item_stack(&carried, &game.registries),
-        };
-        for (s, item) in &changed {
-            click
-                .changed_slots
-                .insert(*s, HashedStack::from_item_stack(item, &game.registries));
-        }
+        let hashed = |item| crate::net::item_codec::hashed_stack(item, &game.registries);
         connection
             .packet_tx
-            .send(ServerboundGamePacket::ContainerClick(click));
+            .send(GamePacket::ContainerClick(ContainerClick {
+                container_id,
+                state_id: state_id as i32,
+                slot: op.slot_num().map(|s| s as i16).unwrap_or(-999),
+                button: op.button_num() as i8,
+                input: container_input(op.click_type()),
+                changed_slots: changed
+                    .iter()
+                    .map(|(s, item)| (*s as i16, hashed(item)))
+                    .collect(),
+                carried: hashed(&carried),
+            }));
+    }
+}
+
+/// The wire's `ContainerInput` for a click.
+fn container_input(click: azalea_inventory::operations::ClickType) -> ContainerInput {
+    use azalea_inventory::operations::ClickType;
+    match click {
+        ClickType::Pickup => ContainerInput::Pickup,
+        ClickType::QuickMove => ContainerInput::QuickMove,
+        ClickType::Swap => ContainerInput::Swap,
+        ClickType::Clone => ContainerInput::Clone,
+        ClickType::Throw => ContainerInput::Throw,
+        ClickType::QuickCraft => ContainerInput::QuickCraft,
+        ClickType::PickupAll => ContainerInput::PickupAll,
     }
 }
 
@@ -2590,7 +2570,6 @@ fn crafter_slot_clicked(
     op: &azalea_inventory::operations::ClickOperation,
 ) {
     use azalea_inventory::operations::{ClickOperation, PickupClick};
-    use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
 
     use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
 
@@ -2636,13 +2615,11 @@ fn crafter_slot_clicked(
     c.data[slot] = if enable { 0 } else { 1 };
     connection
         .packet_tx
-        .send(ServerboundGamePacket::ContainerSlotStateChanged(
-            ServerboundContainerSlotStateChanged {
-                slot_id: slot as u32,
-                container_id: c.id,
-                new_state: enable,
-            },
-        ));
+        .send(GamePacket::ContainerSlotStateChanged {
+            slot: slot as i32,
+            container_id: c.id,
+            new_state: enable,
+        });
     // `player.playSound`: a local sound at the player, in the players source.
     audio.play_world_sound(
         &crate::audio::SoundRef::event("ui.button.click"),
@@ -3259,11 +3236,10 @@ pub fn update_game(
         }
     }
     if let Some((id, command)) = game.chat.take_suggestion_request() {
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::CommandSuggestion(
-                ServerboundCommandSuggestion { id, command },
-            ));
+        connection.packet_tx.send(GamePacket::CommandSuggestion {
+            id: id as i32,
+            command,
+        });
     }
 
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
@@ -4184,12 +4160,7 @@ pub fn update_game(
                     gfx.renderer.menu_text_width(s, common::FONT_SIZE)
                 })
         {
-            use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::RenameItem(ServerboundRenameItem {
-                    name,
-                }));
+            connection.packet_tx.send(GamePacket::RenameItem { name });
         }
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
         let (mut effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
@@ -4388,15 +4359,10 @@ pub fn update_game(
                 }
             };
             if let Some(button_id) = result.button {
-                use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ContainerButtonClick(
-                        ServerboundContainerButtonClick {
-                            container_id: container.id,
-                            button_id,
-                        },
-                    ));
+                connection.packet_tx.send(GamePacket::ContainerButtonClick {
+                    container_id: container.id,
+                    button_id: button_id as i32,
+                });
             }
             (
                 result.clicked_outside,
@@ -5436,12 +5402,9 @@ pub fn update_game(
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
     {
-        use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
         connection
             .packet_tx
-            .send(ServerboundGamePacket::ContainerClose(
-                ServerboundContainerClose { container_id: prev },
-            ));
+            .send(GamePacket::ContainerClose { container_id: prev });
     }
     game.container_was_open = open_menu;
     if let Some((_, slot, _)) = stop_hovering {

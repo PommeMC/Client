@@ -4,11 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput;
-use azalea_protocol::packets::game::{
-    ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
-};
 use glam::{FloatExt, dvec3};
+use pomme_protocol::serverbound::{
+    ClientCommand, GamePacket, Input, MoveFlags, PlayerCommand, ResourcePackAction,
+};
 use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
@@ -689,18 +688,15 @@ impl GameState {
 
         // Vanilla `handleMovePlayer` acks and echoes the pose even
         // when mounted (a 26.3 wire folds the two).
-        connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
-            azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
-        ));
         connection
             .packet_tx
-            .send(ServerboundGamePacket::MovePlayerPosRot(
-            azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                pos: self.player.position.into(),
-                look_direction: self.player.look_dir.into(),
-                flags: Default::default(),
-            },
-        ));
+            .send(GamePacket::AcceptTeleportation { id: id as i32 });
+        connection.packet_tx.send(GamePacket::MovePlayerPosRot {
+            pos: self.player.position.into(),
+            y_rot: self.player.look_dir.y_rot_deg(),
+            x_rot: self.player.look_dir.x_rot_deg(),
+            flags: Default::default(),
+        });
         self.interaction.on_teleport();
         correction.is_some()
     }
@@ -943,8 +939,8 @@ fn resolve_player_position_correction(
     })
 }
 
-fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput {
-    ServerboundPlayerInput {
+fn serverbound_player_input(state: &PlayerInputState) -> Input {
+    Input {
         forward: state.forward,
         backward: state.backward,
         left: state.left,
@@ -1630,11 +1626,7 @@ impl AppCore {
         }
         connection
             .packet_tx
-            .send(ServerboundGamePacket::ClientCommand(
-                ServerboundClientCommand {
-                    action: s_client_command::Action::PerformRespawn,
-                },
-            ));
+            .send(GamePacket::ClientCommand(ClientCommand::PerformRespawn));
 
         game.death_confirm = false;
         game.respawn_sent = true;
@@ -2325,12 +2317,11 @@ impl AppCore {
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = new_look_dir;
                     renderer.reset_camera(game.player.eye_pos(), new_look_dir);
-                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerRot(
-                        azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot {
-                            look_direction: new_look_dir.into(),
-                            flags: Default::default(),
-                        },
-                    ));
+                    connection.packet_tx.send(GamePacket::MovePlayerRot {
+                        y_rot: new_look_dir.y_rot_deg(),
+                        x_rot: new_look_dir.x_rot_deg(),
+                        flags: Default::default(),
+                    });
                 }
                 NetworkEvent::PlayerHealth {
                     health,
@@ -2628,12 +2619,9 @@ impl AppCore {
                         // loom, ...). Until then tell the server we
                         // closed the menu so its container state stays
                         // consistent.
-                        use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
                         connection
                             .packet_tx
-                            .send(ServerboundGamePacket::ContainerClose(
-                                ServerboundContainerClose { container_id },
-                            ));
+                            .send(GamePacket::ContainerClose { container_id });
                     }
                 }
                 // Vanilla `handleMoveVehicle`: the vehicle this client moves
@@ -3706,7 +3694,6 @@ impl AppCore {
             let pending = self.pending_pack_download.take().unwrap();
             let result = pending.handle.join();
 
-            use azalea_protocol::packets::game::s_resource_pack;
             let action = match result {
                 Err(_) => {
                     tracing::error!("Resource pack {} thread panicked", pending.id);
@@ -3716,14 +3703,14 @@ impl AppCore {
                                 .into(),
                         );
                     }
-                    s_resource_pack::Action::FailedDownload
+                    ResourcePackAction::FailedDownload
                 }
                 Ok(Err(e)) => {
                     tracing::error!("Resource pack {} failed: {e}", pending.id);
                     if pending.required {
                         disconnect_reason = Some(format!("Required resource pack failed: {e}"));
                     }
-                    s_resource_pack::Action::FailedDownload
+                    ResourcePackAction::FailedDownload
                 }
                 Ok(Ok(path)) => {
                     // Vanilla acknowledges SuccessfullyLoaded only after the
@@ -3744,7 +3731,7 @@ impl AppCore {
                     match reload {
                         Ok(()) => {
                             tracing::info!("Resource pack {} loaded successfully", pending.id);
-                            s_resource_pack::Action::SuccessfullyLoaded
+                            ResourcePackAction::SuccessfullyLoaded
                         }
                         Err(error) => {
                             tracing::error!(%error, id = %pending.id, "Resource pack reload failed");
@@ -3752,20 +3739,16 @@ impl AppCore {
                                 disconnect_reason =
                                     Some(format!("Required resource pack failed: {error}"));
                             }
-                            s_resource_pack::Action::FailedReload
+                            ResourcePackAction::FailedReload
                         }
                     }
                 }
             };
 
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::ResourcePack(
-                    s_resource_pack::ServerboundResourcePack {
-                        id: pending.id,
-                        action,
-                    },
-                ));
+            connection.packet_tx.send(GamePacket::ResourcePack {
+                id: pending.id.as_u128(),
+                action,
+            });
         }
 
         let player_chunk = game.player_chunk();
@@ -3836,17 +3819,13 @@ impl AppCore {
         }
 
         game.client_loaded = true;
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::PlayerLoaded(
-                azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
-            ));
+        connection.packet_tx.send(GamePacket::PlayerLoaded);
     }
 
     pub fn send_pong(connection: &ConnectionHandle, id: u32) {
-        connection.packet_tx.send(ServerboundGamePacket::Pong(
-            azalea_protocol::packets::game::s_pong::ServerboundPong { id },
-        ));
+        connection
+            .packet_tx
+            .send(GamePacket::Pong { id: id as i32 });
     }
 
     /// Marks the end of the client tick (1.21.2+). Must be the last packet of
@@ -3855,11 +3834,7 @@ impl AppCore {
     /// Vanilla `Minecraft.tick` sends it for every tick a level exists,
     /// including the ones spent on the loading screen.
     pub fn send_client_tick_end(connection: &ConnectionHandle) {
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::ClientTickEnd(
-                s_client_tick_end::ServerboundClientTickEnd,
-            ));
+        connection.packet_tx.send(GamePacket::ClientTickEnd);
     }
 
     pub fn tick_physics(
@@ -4119,16 +4094,11 @@ impl AppCore {
                 p.jump_riding_ticks = -10;
                 // Vanilla also calls vehicle.onPlayerJump() for client horse
                 // physics; pomme has no vehicle physics, the server moves us.
-                use azalea_protocol::packets::game::s_player_command as cmd;
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::PlayerCommand(
-                        cmd::ServerboundPlayerCommand {
-                            id: azalea_core::entity_id::MinecraftEntityId(p.entity_id),
-                            action: cmd::Action::StartRidingJump,
-                            data: (p.jump_riding_scale * 100.0).floor() as u32,
-                        },
-                    ));
+                connection.packet_tx.send(GamePacket::PlayerCommand {
+                    entity: p.entity_id,
+                    action: PlayerCommand::StartRidingJump,
+                    data: (p.jump_riding_scale * 100.0).floor() as i32,
+                });
             } else if !p.was_jump_pressed && jump_held {
                 p.jump_riding_ticks = 0;
                 p.jump_riding_scale = 0.0;
@@ -4344,13 +4314,9 @@ impl AppCore {
     // abilities packet if rejected.
     fn send_abilities_packet(connection: &ConnectionHandle, game: &mut GameState) {
         if game.player.abilities_dirty {
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::PlayerAbilities(
-                azalea_protocol::packets::game::s_player_abilities::ServerboundPlayerAbilities {
-                    is_flying: game.player.flying,
-                },
-            ));
+            connection.packet_tx.send(GamePacket::PlayerAbilities {
+                flying: game.player.flying,
+            });
             game.player.abilities_dirty = false;
         }
     }
@@ -4364,9 +4330,7 @@ impl AppCore {
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
 
         if current != game.last_sent_input {
-            sender.send(ServerboundGamePacket::PlayerInput(
-                serverbound_player_input(&current),
-            ));
+            sender.send(GamePacket::PlayerInput(serverbound_player_input(&current)));
             game.last_sent_input = current;
         }
     }
@@ -4376,26 +4340,22 @@ impl AppCore {
         &self,
         connection: &ConnectionHandle,
         game: &GameState,
-        action: azalea_protocol::packets::game::s_player_command::Action,
+        action: PlayerCommand,
     ) {
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::PlayerCommand(
-                azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
-                    action,
-                    data: 0,
-                },
-            ));
+        connection.packet_tx.send(GamePacket::PlayerCommand {
+            entity: game.player.entity_id,
+            action,
+            data: 0,
+        });
     }
 
     pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sprinting = game.player.sprinting;
         if sprinting != game.was_sprinting {
             let action = if sprinting {
-                azalea_protocol::packets::game::s_player_command::Action::StartSprinting
+                PlayerCommand::StartSprinting
             } else {
-                azalea_protocol::packets::game::s_player_command::Action::StopSprinting
+                PlayerCommand::StopSprinting
             };
             self.send_player_command(connection, game, action);
             game.was_sprinting = sprinting;
@@ -4404,11 +4364,7 @@ impl AppCore {
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
     pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, game: &GameState) {
-        self.send_player_command(
-            connection,
-            game,
-            azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
-        );
+        self.send_player_command(connection, game, PlayerCommand::StopSleeping);
     }
 
     /// Vanilla `AbstractBoat.tick` for the boat the player steers, which
@@ -4436,19 +4392,14 @@ impl AppCore {
     /// `LocalPlayer.sendChanges` for a passenger: its look, then the vehicle
     /// it moves and its sprint.
     fn send_passenger_packets(&self, connection: &ConnectionHandle, game: &mut GameState) {
-        use azalea_protocol::common::movements::MoveFlags;
-        use azalea_protocol::packets::game::*;
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::MovePlayerRot(
-                ServerboundMovePlayerRot {
-                    look_direction: game.player.look_dir.into(),
-                    flags: MoveFlags {
-                        on_ground: game.player.on_ground,
-                        horizontal_collision: game.player.horizontal_collision,
-                    },
-                },
-            ));
+        connection.packet_tx.send(GamePacket::MovePlayerRot {
+            y_rot: game.player.look_dir.y_rot_deg(),
+            x_rot: game.player.look_dir.x_rot_deg(),
+            flags: MoveFlags {
+                on_ground: game.player.on_ground,
+                horizontal_collision: game.player.horizontal_collision,
+            },
+        });
         if let Some(boat) = game
             .steered_boat()
             .and_then(|id| game.entity_store.living.get(&id))
@@ -4460,8 +4411,6 @@ impl AppCore {
 
     pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
-        use azalea_protocol::common::movements::MoveFlags;
-        use azalea_protocol::packets::game::*;
 
         let pos = game.player.position;
         let look_dir = game.player.look_dir;
@@ -4481,33 +4430,27 @@ impl AppCore {
         };
 
         if pos_changed && rot_changed {
-            sender.send(ServerboundGamePacket::MovePlayerPosRot(
-                ServerboundMovePlayerPosRot {
-                    pos: pos.into(),
-                    look_direction: look_dir.into(),
-                    flags,
-                },
-            ));
+            sender.send(GamePacket::MovePlayerPosRot {
+                pos: pos.into(),
+                y_rot: look_dir.y_rot_deg(),
+                x_rot: look_dir.x_rot_deg(),
+                flags,
+            });
         } else if pos_changed {
-            sender.send(ServerboundGamePacket::MovePlayerPos(
-                ServerboundMovePlayerPos {
-                    pos: pos.into(),
-                    flags,
-                },
-            ));
+            sender.send(GamePacket::MovePlayerPos {
+                pos: pos.into(),
+                flags,
+            });
         } else if rot_changed {
-            sender.send(ServerboundGamePacket::MovePlayerRot(
-                ServerboundMovePlayerRot {
-                    look_direction: look_dir.into(),
-                    flags,
-                },
-            ));
+            sender.send(GamePacket::MovePlayerRot {
+                y_rot: look_dir.y_rot_deg(),
+                x_rot: look_dir.x_rot_deg(),
+                flags,
+            });
         } else if game.player.on_ground != game.last_sent_on_ground
             || game.player.horizontal_collision != game.last_sent_horizontal_collision
         {
-            sender.send(ServerboundGamePacket::MovePlayerStatusOnly(
-                ServerboundMovePlayerStatusOnly { flags },
-            ));
+            sender.send(GamePacket::MovePlayerStatusOnly { flags });
         }
 
         if pos_changed {

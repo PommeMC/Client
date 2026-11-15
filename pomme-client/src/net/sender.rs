@@ -1,14 +1,14 @@
-use azalea_protocol::packets::game::ServerboundGamePacket;
+use pomme_protocol::serverbound::GamePacket;
 use tokio::sync::mpsc;
 
 use crate::recipe::{RecipeBookType, RecipeDisplayId};
 
-/// An outbound game packet: either an azalea-serialized packet or bytes
-/// pre-encoded by `net::wire` (varint packet id + body), or chat work the
-/// network loop signs and tracks. Chat shares the queue so it applies in
-/// game-thread order, like vanilla's single-threaded `ClientPacketListener`.
+/// An outbound game packet, bytes pre-encoded by `net::wire` (varint packet
+/// id + body), or chat work the network loop signs and tracks. Chat shares the
+/// queue so it applies in game-thread order, like vanilla's single-threaded
+/// `ClientPacketListener`.
 pub enum Outbound {
-    Packet(Box<ServerboundGamePacket>),
+    Packet(Box<GamePacket>),
     Raw(Vec<u8>),
     /// Typed chat, or a command with its leading `/`.
     ChatInput(String),
@@ -41,7 +41,7 @@ impl PacketSender {
         Self { tx }
     }
 
-    pub fn send(&self, packet: ServerboundGamePacket) {
+    pub fn send(&self, packet: GamePacket) {
         self.queue(Outbound::Packet(Box::new(packet)));
     }
 
