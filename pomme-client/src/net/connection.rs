@@ -1,5 +1,4 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::login::c_hello::ClientboundHello;
 use azalea_protocol::packets::login::s_hello::ServerboundHello;
@@ -9,6 +8,7 @@ use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPa
 use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
 use pomme_protocol::serverbound::GamePacket;
+use pomme_protocol::status::ClientIntent;
 use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
@@ -150,7 +150,7 @@ pub async fn connect_to_server(
             let wire = negotiate_wire_version(&server_addr, protocol).await?;
             select_block_protocol(&event_tx, wire);
             (
-                super::resolve::connect(&server_addr, ClientIntention::Login).await?,
+                super::resolve::connect(&server_addr, ClientIntent::Login).await?,
                 wire,
             )
         }
@@ -161,8 +161,7 @@ pub async fn connect_to_server(
             adopt_wire_protocol(protocol);
             select_block_protocol(&event_tx, protocol);
             let mut conn = Conn::from_memory(end);
-            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
-                .await?;
+            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntent::Login).await?;
             (conn, protocol)
         }
     };
@@ -334,7 +333,7 @@ async fn negotiate_wire_version(
         None => {
             let probe = async {
                 let (status, _) = super::resolve::request_status(server_addr).await.ok()?;
-                Some(status.version.protocol)
+                Some(status.version?.protocol)
             };
             tokio::time::timeout(std::time::Duration::from_secs(5), probe)
                 .await
@@ -1521,7 +1520,10 @@ mod tests {
         async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
             peer: &mut Conn,
         ) -> P {
-            peer.read_packet().await.unwrap()
+            deserialize_packet(&mut std::io::Cursor::new(
+                &peer.reader.read().await.unwrap(),
+            ))
+            .unwrap()
         }
 
         let (client_end, server_end) = memory_pipes();

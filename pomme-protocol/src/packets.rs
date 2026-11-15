@@ -451,6 +451,14 @@ mod tests {
             t.id(Phase::Handshake, Direction::Serverbound, "intention"),
             Some(0)
         );
+        for (dir, name, id) in [
+            (Direction::Serverbound, "status_request", 0),
+            (Direction::Serverbound, "ping_request", 1),
+            (Direction::Clientbound, "status_response", 0),
+            (Direction::Clientbound, "pong_response", 1),
+        ] {
+            assert_eq!(t.id(Phase::Status, dir, name), Some(id), "{name}");
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
             Some(0x40)

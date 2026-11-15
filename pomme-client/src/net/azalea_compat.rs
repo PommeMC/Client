@@ -146,6 +146,78 @@ fn chat_encoders_round_trip_through_azalea() {
 }
 
 #[test]
+fn handshake_and_status_match_azalea() {
+    use azalea_protocol::packets::ClientIntention;
+    use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+    use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
+    use azalea_protocol::packets::status::c_pong_response::ClientboundPongResponse;
+    use azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse;
+    use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
+    use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
+    use azalea_protocol::packets::status::{ClientboundStatusPacket, ServerboundStatusPacket};
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::status::{self, ClientIntent, Intention, StatusPacket};
+
+    let intention = Intention {
+        protocol_version: 776,
+        host: "play.example.org".into(),
+        port: 25565,
+        intent: ClientIntent::Transfer,
+    };
+    let azalea = ServerboundHandshakePacket::Intention(ServerboundIntention {
+        protocol_version: 776,
+        hostname: "play.example.org".into(),
+        port: 25565,
+        intention: ClientIntention::Transfer,
+    });
+    assert_eq!(*serialize_packet(&azalea).unwrap(), intention.encode());
+    assert_eq!(
+        *serialize_packet(&ServerboundStatusPacket::StatusRequest(
+            ServerboundStatusRequest {}
+        ))
+        .unwrap(),
+        status::encode_status_request()
+    );
+    assert_eq!(
+        *serialize_packet(&ServerboundStatusPacket::PingRequest(
+            ServerboundPingRequest { time: 77 }
+        ))
+        .unwrap(),
+        status::encode_ping_request(77)
+    );
+
+    let pong = serialize_packet(&ClientboundStatusPacket::PongResponse(
+        ClientboundPongResponse { time: 77 },
+    ))
+    .unwrap();
+    assert_eq!(status::read_frame(&pong), Ok(StatusPacket::Pong(77)));
+
+    // The same payload through both readers.
+    let json = r#"{"description":{"text":"hi"},"players":{"max":20,"online":3,"sample":[]},
+        "version":{"name":"26.2","protocol":776}}"#;
+    let mut frame = vec![0];
+    wire::write_utf(&mut frame, json);
+    let ClientboundStatusPacket::StatusResponse(ClientboundStatusResponse {
+        players, version, ..
+    }) = azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frame[..])).unwrap()
+    else {
+        panic!("not a status response");
+    };
+    let Ok(StatusPacket::Response(ours)) = status::read_frame(&frame) else {
+        panic!("not a status response");
+    };
+    let (ours_players, ours_version) = (ours.players.unwrap(), ours.version.unwrap());
+    assert_eq!(
+        (players.online, players.max),
+        (ours_players.online, ours_players.max)
+    );
+    assert_eq!(
+        (version.name, version.protocol),
+        (ours_version.name, ours_version.protocol)
+    );
+}
+
+#[test]
 fn packet_ids_match_azalea() {
     use azalea_protocol::packets::game::{s_attack, s_interact};
 

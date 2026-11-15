@@ -28,6 +28,7 @@ pub mod scoreboard;
 pub mod section;
 pub mod serverbound;
 pub mod sound;
+pub mod status;
 pub mod tags;
 #[cfg(any(test, feature = "vanilla-fixtures"))]
 pub mod vanilla_fixtures;

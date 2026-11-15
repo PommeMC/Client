@@ -136,6 +136,7 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE));
 
         lifecycle(dimensionTypes, clocks);
+        status();
         sections();
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
@@ -213,6 +214,32 @@ public final class CodecOracle {
     }
 
     /// The serverbound game packets pomme encodes itself.
+    private static void status() {
+        long time = 0x0123456789abcdefL;
+        encode("handshake/intention",
+                net.minecraft.network.protocol.handshake.ClientIntentionPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.handshake.ClientIntentionPacket(776, "play.example.org", 25565,
+                        net.minecraft.network.protocol.handshake.ClientIntent.LOGIN));
+        encode("status/ping_request",
+                net.minecraft.network.protocol.ping.ServerboundPingRequestPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.ping.ServerboundPingRequestPacket(time));
+        encode("status/pong_response",
+                net.minecraft.network.protocol.ping.ClientboundPongResponsePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.ping.ClientboundPongResponsePacket(time));
+        var players = new net.minecraft.network.protocol.status.ServerStatus.Players(20, 1, List.of(
+                new net.minecraft.server.players.NameAndId(new UUID(time, 0xfedcba9876543210L), "Player")));
+        encode("status/status_response",
+                net.minecraft.network.protocol.status.ClientboundStatusResponsePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.status.ClientboundStatusResponsePacket(
+                        new net.minecraft.network.protocol.status.ServerStatus(Component.literal("A Minecraft Server"),
+                                java.util.Optional.of(players),
+                                java.util.Optional.of(new net.minecraft.network.protocol.status.ServerStatus.Version(
+                                        "26.2", 776)),
+                                java.util.Optional.of(new net.minecraft.network.protocol.status.ServerStatus.Favicon(
+                                        new byte[] {1, 2, 3})),
+                                true)));
+    }
+
     private static void serverbound() {
         UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
         BlockPos pos = new BlockPos(-12, 70, 345);

@@ -15,7 +15,7 @@ use std::io::{self, Cursor};
 
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
 use azalea_protocol::packets::{Packet, ProtocolPacket};
-use azalea_protocol::read::{ReadPacketError, deserialize_packet, read_raw_packet};
+use azalea_protocol::read::{ReadPacketError, read_raw_packet};
 use azalea_protocol::write::{serialize_packet, write_raw_packet};
 use tokio::io::{ReadHalf, SimplexStream, WriteHalf};
 use tokio::net::TcpStream;
@@ -156,13 +156,6 @@ impl Conn {
         }
     }
 
-    pub async fn read_packet<P: ProtocolPacket + Debug>(
-        &mut self,
-    ) -> Result<P, Box<ReadPacketError>> {
-        let raw = self.reader.read().await?;
-        deserialize_packet(&mut Cursor::new(&raw))
-    }
-
     pub async fn write_packet<P: ProtocolPacket + Debug>(
         &mut self,
         packet: impl Packet<P>,
@@ -189,9 +182,7 @@ impl Conn {
 
 #[cfg(test)]
 mod tests {
-    use azalea_protocol::packets::status::ServerboundStatusPacket;
-    use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
-    use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
+    use pomme_protocol::status::{encode_ping_request as ping, encode_status_request};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
@@ -206,14 +197,6 @@ mod tests {
     fn conn_and_wire() -> (Conn, ReadHalf<SimplexStream>, WriteHalf<SimplexStream>) {
         let (client, server) = memory_pipes();
         (Conn::from_memory(client), server.rx, server.tx)
-    }
-
-    fn ping(time: u64) -> ServerboundStatusPacket {
-        ServerboundStatusPacket::PingRequest(ServerboundPingRequest { time })
-    }
-
-    fn status_request() -> ServerboundStatusPacket {
-        ServerboundStatusPacket::StatusRequest(ServerboundStatusRequest {})
     }
 
     #[test]
@@ -237,8 +220,8 @@ mod tests {
         assert_eq!(reader.buffer.position(), 1000);
     }
 
-    async fn recv(conn: &mut Conn) -> ServerboundStatusPacket {
-        conn.read_packet().await.unwrap()
+    async fn recv(conn: &mut Conn) -> Vec<u8> {
+        conn.reader.read().await.unwrap().into_vec()
     }
 
     #[tokio::test]
@@ -252,7 +235,7 @@ mod tests {
                 a.set_compression_threshold(threshold);
                 b.set_compression_threshold(threshold);
             }
-            a.write_packet(ping(7)).await.unwrap();
+            a.writer.write(&ping(7)).await.unwrap();
             assert_eq!(recv(&mut b).await, ping(7), "threshold {threshold:?}");
         }
     }
@@ -264,8 +247,8 @@ mod tests {
         a.set_encryption_key(key);
         b.set_encryption_key(key);
         // Two packets: the stream cipher must stay in step across frames.
-        a.write_packet(ping(1)).await.unwrap();
-        a.write_packet(ping(2)).await.unwrap();
+        a.writer.write(&ping(1)).await.unwrap();
+        a.writer.write(&ping(2)).await.unwrap();
         assert_eq!(recv(&mut b).await, ping(1));
         assert_eq!(recv(&mut b).await, ping(2));
     }
@@ -273,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn frame_is_length_then_id() {
         let (mut conn, mut wire_rx, _peer_tx) = conn_and_wire();
-        conn.write_packet(status_request()).await.unwrap();
+        conn.writer.write(&encode_status_request()).await.unwrap();
 
         let mut frame = [0u8; 2];
         wire_rx.read_exact(&mut frame).await.unwrap();
@@ -289,7 +272,7 @@ mod tests {
         }
 
         for _ in 0..2 {
-            assert_eq!(recv(&mut conn).await, status_request());
+            assert_eq!(recv(&mut conn).await, encode_status_request());
         }
     }
 }

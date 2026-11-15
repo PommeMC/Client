@@ -1915,8 +1915,7 @@ mod tests {
             "server".into(),
             PingState::Success {
                 motd: Vec::new(),
-                online: 0,
-                max: 0,
+                players: Some((0, 0)),
                 latency_ms: 0,
                 version: String::new(),
                 protocol: 0,

@@ -373,8 +373,7 @@ pub(super) fn push_server_status(
         }
         PingState::Success {
             motd,
-            online,
-            max,
+            players,
             latency_ms,
             version,
             compat,
@@ -413,7 +412,11 @@ pub(super) fn push_server_status(
             let status_text = if incompatible {
                 version.clone()
             } else {
-                format!("{online}/{max}")
+                // Vanilla `multiplayer.status.unknown` when the count is absent.
+                players.map_or_else(
+                    || "???".to_owned(),
+                    |(online, max)| format!("{online}/{max}"),
+                )
             };
             let status_color = if incompatible { COL_RED } else { COL_DARK_DIM };
             let pw = text_width_fn(&status_text, fs);
