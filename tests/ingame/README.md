@@ -203,6 +203,13 @@ chunk_arenas = { vertices = 65536, max = 1 }  # chunk arenas this small, this
 wait_ms = 1000
 
 [[step]]
+wait_ticks = 20                               # game ticks rather than time;
+                                              # the commands after it run on
+                                              # the frame it ends, so each
+                                              # reaches the same tick every
+                                              # run, as `wait_ms` can't promise
+
+[[step]]
 frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # report line gives the frame
                                               # rate, its 1% low, the render

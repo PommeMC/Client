@@ -64,6 +64,7 @@ struct StepFile {
     scroll: Option<f32>,
     text: Option<String>,
     wait_ms: Option<u64>,
+    wait_ticks: Option<u64>,
     frame_times: Option<FrameTimes>,
     screenshot: Option<String>,
     /// Leaves chat in a `screenshot`, which otherwise clears it first.
@@ -335,6 +336,9 @@ struct AtLeast {
 enum Step {
     Run(Command),
     Wait(Duration),
+    /// Game ticks, counted from the step's first frame. The commands after
+    /// it run on the frame it ends, so each reaches the same tick every run.
+    WaitTicks(u64),
     FrameTimes(Duration),
     Screenshot {
         name: String,
@@ -432,6 +436,9 @@ impl StepFile {
         }
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
+        }
+        if let Some(ticks) = self.wait_ticks {
+            steps.push(Step::WaitTicks(ticks));
         }
         if let Some(FrameTimes { ms }) = self.frame_times {
             steps.push(Step::FrameTimes(Duration::from_millis(ms)));
@@ -563,6 +570,8 @@ pub struct Script {
     started: Instant,
     next: usize,
     step_started: Option<Instant>,
+    /// The game tick a `wait_ticks` step started on.
+    tick_started: Option<u64>,
     /// The screenshot the current step is waiting on.
     pending_shot: Option<PathBuf>,
     /// The frames a `frame_times` step has seen, and when the last was.
@@ -589,6 +598,7 @@ impl Script {
             started: Instant::now(),
             next: 0,
             step_started: None,
+            tick_started: None,
             pending_shot: None,
             samples: Vec::new(),
             last_frame: None,
@@ -598,6 +608,28 @@ impl Script {
 
     /// Advances the script by one frame; `Some(exit code)` once it's done.
     pub fn tick(&mut self, core: &mut AppCore, phase: &mut AppPhase) -> Option<i32> {
+        let mut on_tick = false;
+        loop {
+            let step = self.next;
+            if let Some(code) = self.advance(core, phase) {
+                return Some(code);
+            }
+            let finished = self.next > step;
+            on_tick |= finished && matches!(self.steps[step], Step::WaitTicks(_));
+            // What follows a `wait_ticks` shares its frame: commands, and the
+            // next `wait_ticks`, which counts from the tick this one ended on.
+            let follows = matches!(
+                self.steps.get(self.next),
+                Some(Step::Run(_) | Step::WaitTicks(_))
+            );
+            if !(on_tick && finished && follows) {
+                return None;
+            }
+        }
+    }
+
+    /// Runs the current step; `Some(exit code)` once the script is done.
+    fn advance(&mut self, core: &mut AppCore, phase: &mut AppPhase) -> Option<i32> {
         if !matches!(phase, AppPhase::InGame { .. }) {
             let joined = self.next > 0 || self.step_started.is_some();
             if joined {
@@ -629,6 +661,13 @@ impl Script {
                 Outcome::Screenshot(_) => unreachable!("screenshots are their own step"),
             },
             Step::Wait(duration) => (started.elapsed() >= *duration).then_some(Ok(())),
+            Step::WaitTicks(ticks) => match &*phase {
+                AppPhase::InGame { game, .. } => {
+                    let from = *self.tick_started.get_or_insert(game.tick_count);
+                    (game.tick_count.wrapping_sub(from) >= *ticks).then_some(Ok(()))
+                }
+                _ => unreachable!("wait_ticks doesn't run outside a world"),
+            },
             Step::FrameTimes(duration) => {
                 let now = Instant::now();
                 if let (Some(last), AppPhase::InGame { gfx, .. }) = (self.last_frame, &*phase) {
@@ -680,6 +719,7 @@ impl Script {
         });
         self.next += 1;
         self.step_started = None;
+        self.tick_started = None;
         self.pending_shot = None;
         self.samples.clear();
         self.last_frame = None;
@@ -1049,6 +1089,13 @@ fn ensure(holds: bool, seen: impl FnOnce() -> String) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::harness::protocol::{Bind, ClickKind, Hand, OptionSet, Press};
+
+    #[test]
+    fn parses_a_tick_wait() {
+        let (steps, _) = parse("[[step]]\nwait_ticks = 20").unwrap();
+        assert_eq!(steps, [Step::WaitTicks(20)]);
+        assert!(!steps[0].runs_anywhere());
+    }
 
     #[test]
     fn parses_every_step_kind() {
