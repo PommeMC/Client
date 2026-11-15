@@ -138,12 +138,8 @@ async fn ping_server(
     spawned_gen: u64,
 ) {
     let result = async {
-        use azalea_protocol::address::ServerAddr;
-
-        let server_addr: ServerAddr = address
-            .as_str()
-            .try_into()
-            .map_err(|_| format!("Invalid address: {address}"))?;
+        let server_addr = crate::net::address::ServerAddr::parse(&address)
+            .ok_or_else(|| format!("Invalid address: {address}"))?;
         let (status, mut conn) = crate::net::resolve::request_status(&server_addr)
             .await
             .map_err(|e| format!("{address}: {e}"))?;

@@ -70,10 +70,9 @@ parking_lot = "0.13"
 bytemuck = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"
+# SRV records, which the system resolver can't look up.
+hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
 azalea-buf = "0.16"
-# `connecting` and `online-mode` only gate azalea's own connection type, which
-# pomme replaced with net::conn; authentication goes straight to azalea-auth.
-azalea-protocol = { version = "0.16", default-features = false }
 azalea-crypto = "0.16"
 azalea-auth = "0.16"
 azalea-entity = "0.16"
@@ -134,3 +133,7 @@ paranoid-android = "0.2"
 
 [dev-dependencies]
 pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }
+# The other side of the packet cross-checks (`net/azalea_compat.rs`), and the
+# server end of the join test. `connecting` and `online-mode` only gate
+# azalea's own connection type.
+azalea-protocol = { version = "0.16", default-features = false }

@@ -1,5 +1,3 @@
-use azalea_protocol::address::ServerAddr;
-use azalea_protocol::read::ReadPacketError;
 use crossbeam_channel::Sender;
 use pomme_protocol::configuration::{ConfigPacket, ServerboundConfig};
 use pomme_protocol::lifecycle::LifecyclePacket;
@@ -12,6 +10,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::NetworkEvent;
+use super::address::ServerAddr;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::config_wire::{ConfigFrame, Registries};
@@ -30,7 +29,7 @@ pub enum ConnectionError {
     Connect(std::io::Error),
 
     #[error("packet read error: {0}")]
-    Read(#[from] Box<ReadPacketError>),
+    Read(#[from] super::frame::FrameError),
 
     #[error("packet read error: {0}")]
     Decode(#[from] pomme_protocol::codec::DecodeError),
@@ -144,10 +143,8 @@ pub async fn connect_to_server(
 
     let (mut conn, wire) = match transport {
         Transport::Remote { server, protocol } => {
-            let server_addr: ServerAddr = server
-                .as_str()
-                .try_into()
-                .map_err(|_| ConnectionError::InvalidAddress(server.clone()))?;
+            let server_addr = ServerAddr::parse(&server)
+                .ok_or_else(|| ConnectionError::InvalidAddress(server.clone()))?;
             let wire = negotiate_wire_version(&server_addr, protocol).await?;
             select_block_protocol(&event_tx, wire);
             (
@@ -518,13 +515,7 @@ async fn config_sequence(
         } else {
             tokio::select! {
                 raw = conn.reader.read() => {
-                    let raw = match raw {
-                        Ok(raw) => raw,
-                        Err(e) => {
-                            skip_malformed_packet(e)?;
-                            continue;
-                        }
-                    };
+                    let raw = raw?;
                     super::capture::record(Phase::Configuration, &raw);
                     let frames = match conn.translation.as_deref() {
                         Some(t) => t.translate_config_frame(raw),
@@ -913,13 +904,7 @@ async fn game_loop(
                 raw = conn.reader.read() => raw,
             }
         };
-        let raw = match raw {
-            Ok(raw) => raw,
-            Err(e) => {
-                skip_malformed_packet(e)?;
-                continue;
-            }
-        };
+        let raw = raw?;
         super::capture::record(Phase::Game, &raw);
         if let Some(flag) = translation.and_then(|t| t.server_data_secure_chat(&raw)) {
             super::lifecycle_wire::send_secure_chat(flag, event_tx);
@@ -1138,20 +1123,6 @@ async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), Conne
         None => frame,
     };
     Ok(conn.writer.write(&frame).await?)
-}
-
-/// Recoverable decode errors skip the packet; anything else tears down the
-/// connection.
-fn skip_malformed_packet(err: Box<ReadPacketError>) -> Result<(), ConnectionError> {
-    match &*err {
-        ReadPacketError::Parse { .. }
-        | ReadPacketError::UnknownPacketId { .. }
-        | ReadPacketError::LeftoverData { .. } => {
-            tracing::warn!("Skipping malformed packet: {err}");
-            Ok(())
-        }
-        _ => Err(err.into()),
-    }
 }
 
 fn friendly_error_reason(err: &ConnectionError) -> String {

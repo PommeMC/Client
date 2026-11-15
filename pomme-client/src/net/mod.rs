@@ -1,3 +1,4 @@
+pub mod address;
 mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
@@ -17,6 +18,7 @@ mod dialog;
 mod entity_data;
 mod entity_wire;
 mod environment_wire;
+pub mod frame;
 pub mod handler;
 pub(crate) mod http;
 mod hud_wire;
