@@ -7,6 +7,7 @@ members = [
     "pomme-auth",
     "pomme-install",
     "pomme-client",
+    "pomme-particle-macros",
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-registry",

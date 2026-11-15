@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -16,34 +15,15 @@ use super::super::single_quad_particle::{
     SingleQuadParticle, extract_camera_quad, randomized_quad_size,
 };
 use super::super::types::{ParticleLimit, SimpleParticleType};
-use crate::physics::aabb::Aabb;
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
 
 // Source FallingParticle configured by NectarFallProvider, not a separate Java
 // class.
-pub struct NectarFallParticle {
-    position: DVec3,
-    previous_position: DVec3,
-    velocity: DVec3,
-    bounds: Aabb,
-    width: f32,
-    height: f32,
-    removed: bool,
-    on_ground: bool,
-    stopped_by_collision: bool,
-    has_physics: bool,
-    age: u32,
-    lifetime: u32,
-    quad_size: f32,
-    color: [f32; 3],
-    alpha: f32,
-    roll: f32,
-    previous_roll: f32,
-    sprite: AtlasRegion,
-    gravity: f32,
-}
+#[pomme_particle_macros::particle_accessors(exclude(friction, speed_up_when_y_motion_is_blocked,))]
+#[pomme_particle_macros::quad_accessors]
+pub struct NectarFallParticle {}
 
 impl NectarFallParticle {
     fn new(position: DVec3, sprite: AtlasRegion) -> Self {
@@ -75,12 +55,8 @@ impl NectarFallParticle {
 }
 
 impl Particle for NectarFallParticle {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    crate::particles::accessors::forward_particle_accessors!(NectarFallParticle);
+
     fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle> {
         Some(self)
     }
@@ -138,48 +114,15 @@ impl Particle for NectarFallParticle {
         }
     }
 
-    fn remove(&mut self) {
-        self.removed = true;
-    }
-    fn is_alive(&self) -> bool {
-        !self.removed
-    }
     fn get_group(&self) -> ParticleRenderType {
         ParticleRenderType::SingleQuads
     }
     fn get_particle_limit(&self) -> Option<ParticleLimit> {
         None
     }
-    fn get_pos(&self) -> DVec3 {
-        self.position
-    }
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
-    }
-    fn get_previous_pos(&self) -> DVec3 {
-        self.previous_position
-    }
-    fn get_velocity(&self) -> DVec3 {
-        self.velocity
-    }
-    fn set_velocity(&mut self, velocity: DVec3) {
-        self.velocity = velocity;
-    }
-    fn get_age(&self) -> u32 {
-        self.age
-    }
-    fn get_lifetime(&self) -> u32 {
-        self.lifetime
-    }
-    fn set_lifetime(&mut self, lifetime: u32) {
-        self.lifetime = lifetime;
-    }
-    fn get_bounding_box(&self) -> Aabb {
-        self.bounds
-    }
-    fn set_bounding_box(&mut self, bounds: Aabb) {
-        self.bounds = bounds;
     }
     fn set_size(&mut self, width: f32, height: f32) {
         if width != self.width || height != self.height {
@@ -192,24 +135,14 @@ impl Particle for NectarFallParticle {
         self.quad_size *= factor;
         self.set_size(0.2_f32 * factor, 0.2_f32 * factor);
     }
-    fn has_physics(&self) -> bool {
-        self.has_physics
-    }
-    fn set_has_physics(&mut self, enabled: bool) {
-        self.has_physics = enabled;
-    }
     fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
         world.get_light_coords(self.position)
     }
 }
 
 impl SingleQuadParticle for NectarFallParticle {
-    fn get_sprite(&self) -> AtlasRegion {
-        self.sprite
-    }
-    fn set_sprite(&mut self, sprite: AtlasRegion) {
-        self.sprite = sprite;
-    }
+    crate::particles::accessors::forward_quad_accessors!(NectarFallParticle);
+
     fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet) {
         if !self.removed {
             self.sprite = sprites.get(self.age, self.lifetime);
@@ -222,24 +155,6 @@ impl SingleQuadParticle for NectarFallParticle {
             self.sprite.v_min,
             self.sprite.v_max,
         ]
-    }
-    fn get_color(&self) -> [f32; 3] {
-        self.color
-    }
-    fn set_color(&mut self, color: [f32; 3]) {
-        self.color = color;
-    }
-    fn get_alpha(&self) -> f32 {
-        self.alpha
-    }
-    fn set_alpha(&mut self, alpha: f32) {
-        self.alpha = alpha;
-    }
-    fn get_roll(&self) -> f32 {
-        self.roll
-    }
-    fn set_roll(&mut self, roll: f32) {
-        self.roll = roll;
     }
     fn get_facing(&self) -> ParticleFacing {
         ParticleFacing::Camera

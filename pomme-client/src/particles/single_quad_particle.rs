@@ -16,7 +16,10 @@ pub trait SingleQuadParticle: Particle {
     fn set_sprite(&mut self, sprite: AtlasRegion);
     /// Explicit opt-in by concrete tick code; not automatic base ticking.
     fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet);
-    fn get_uv(&self) -> [f32; 4];
+    fn get_uv(&self) -> [f32; 4] {
+        let sprite = self.get_sprite();
+        [sprite.u_min, sprite.u_max, sprite.v_min, sprite.v_max]
+    }
     fn get_color(&self) -> [f32; 3];
     fn get_render_color(&self, _partial_tick: f32) -> [f32; 3] {
         self.get_color()
@@ -26,7 +29,9 @@ pub trait SingleQuadParticle: Particle {
     fn set_alpha(&mut self, alpha: f32);
     fn get_roll(&self) -> f32;
     fn set_roll(&mut self, roll: f32);
-    fn get_facing(&self) -> ParticleFacing;
+    fn get_facing(&self) -> ParticleFacing {
+        ParticleFacing::Camera
+    }
     fn get_quad_size(&self, partial_tick: f32) -> f32;
     fn get_layer(&self) -> ParticleLayer;
     /// Read-only simulation access; append zero or more owned quad entries to

@@ -1,12 +1,9 @@
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, resized_bounds,
-};
+use super::super::particle::{Particle, ParticleRef, bounds_at, move_without_collision, resized_bounds};
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{
     ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
@@ -18,29 +15,21 @@ use super::super::single_quad_particle::{
     SingleQuadParticle, extract_camera_quad, randomized_quad_size,
 };
 use super::super::types::{ParticleLimit, SimpleParticleType};
-use crate::physics::aabb::Aabb;
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
 
+#[pomme_particle_macros::particle_accessors(exclude(
+    on_ground,
+    stopped_by_collision,
+    gravity,
+    friction,
+    speed_up_when_y_motion_is_blocked,
+))]
+#[pomme_particle_macros::quad_accessors(exclude(alpha,))]
 pub struct FlyTowardsPositionParticle {
-    position: DVec3,
-    previous_position: DVec3,
     anchor: DVec3,
-    velocity: DVec3,
-    bounds: Aabb,
-    width: f32,
-    height: f32,
-    removed: bool,
-    has_physics: bool,
-    age: u32,
-    lifetime: u32,
-    quad_size: f32,
-    color: [f32; 3],
     alpha: Cell<f32>,
-    roll: f32,
-    previous_roll: f32,
-    sprite: AtlasRegion,
 }
 
 impl FlyTowardsPositionParticle {
@@ -77,12 +66,8 @@ impl FlyTowardsPositionParticle {
 }
 
 impl Particle for FlyTowardsPositionParticle {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    crate::particles::accessors::forward_particle_accessors!(FlyTowardsPositionParticle);
+
     fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle> {
         Some(self)
     }
@@ -109,48 +94,15 @@ impl Particle for FlyTowardsPositionParticle {
     fn move_by(&mut self, _world: &LevelContext<'_>, displacement: DVec3) {
         move_without_collision(&mut self.bounds, &mut self.position, displacement);
     }
-    fn remove(&mut self) {
-        self.removed = true;
-    }
-    fn is_alive(&self) -> bool {
-        !self.removed
-    }
     fn get_group(&self) -> ParticleRenderType {
         ParticleRenderType::SingleQuads
     }
     fn get_particle_limit(&self) -> Option<ParticleLimit> {
         None
     }
-    fn get_pos(&self) -> DVec3 {
-        self.position
-    }
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
-    }
-    fn get_previous_pos(&self) -> DVec3 {
-        self.previous_position
-    }
-    fn get_velocity(&self) -> DVec3 {
-        self.velocity
-    }
-    fn set_velocity(&mut self, velocity: DVec3) {
-        self.velocity = velocity;
-    }
-    fn get_age(&self) -> u32 {
-        self.age
-    }
-    fn get_lifetime(&self) -> u32 {
-        self.lifetime
-    }
-    fn set_lifetime(&mut self, lifetime: u32) {
-        self.lifetime = lifetime;
-    }
-    fn get_bounding_box(&self) -> Aabb {
-        self.bounds
-    }
-    fn set_bounding_box(&mut self, bounds: Aabb) {
-        self.bounds = bounds;
     }
     fn set_size(&mut self, width: f32, height: f32) {
         if width != self.width || height != self.height {
@@ -163,12 +115,6 @@ impl Particle for FlyTowardsPositionParticle {
         self.quad_size *= factor;
         self.set_size(0.2 * factor, 0.2 * factor);
     }
-    fn has_physics(&self) -> bool {
-        self.has_physics
-    }
-    fn set_has_physics(&mut self, enabled: bool) {
-        self.has_physics = enabled;
-    }
     fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
         let base = world.get_light_coords(self.position);
         ParticleLight {
@@ -179,12 +125,8 @@ impl Particle for FlyTowardsPositionParticle {
 }
 
 impl SingleQuadParticle for FlyTowardsPositionParticle {
-    fn get_sprite(&self) -> AtlasRegion {
-        self.sprite
-    }
-    fn set_sprite(&mut self, sprite: AtlasRegion) {
-        self.sprite = sprite;
-    }
+    crate::particles::accessors::forward_quad_accessors!(FlyTowardsPositionParticle);
+
     fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet) {
         if !self.removed {
             self.sprite = sprites.get(self.age, self.lifetime);
@@ -198,23 +140,11 @@ impl SingleQuadParticle for FlyTowardsPositionParticle {
             self.sprite.v_max,
         ]
     }
-    fn get_color(&self) -> [f32; 3] {
-        self.color
-    }
-    fn set_color(&mut self, color: [f32; 3]) {
-        self.color = color;
-    }
     fn get_alpha(&self) -> f32 {
         self.alpha.get()
     }
     fn set_alpha(&mut self, alpha: f32) {
         self.alpha.set(alpha);
-    }
-    fn get_roll(&self) -> f32 {
-        self.roll
-    }
-    fn set_roll(&mut self, roll: f32) {
-        self.roll = roll;
     }
     fn get_facing(&self) -> ParticleFacing {
         ParticleFacing::Camera
