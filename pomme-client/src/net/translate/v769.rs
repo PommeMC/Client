@@ -4,7 +4,6 @@ impl Ids769 {
     pub(super) fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
             i if i == self.player_chat_id => translate_player_chat,
-            i if i == self.update_advancements_id => translate_update_advancements,
             _ => return None,
         })
     }
@@ -88,15 +87,5 @@ pub(super) fn translate_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> 
     wire::write_varint(&mut out, id);
     wire::write_varint(&mut out, 0);
     out.extend_from_slice(payload);
-    Some(out)
-}
-
-/// Rewrites `update_advancements`: 1.21.5 appended a `showAdvancements`
-/// bool, true in every vanilla send path.
-pub(super) fn translate_update_advancements(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(payload.len() + 2);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(payload);
-    out.push(1);
     Some(out)
 }

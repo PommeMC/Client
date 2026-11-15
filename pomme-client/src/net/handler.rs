@@ -1,5 +1,4 @@
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::{Sender, TrySendError};
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -8,11 +7,9 @@ use super::NetworkEvent;
 use super::commands::SharedCommandTree;
 use super::sender::PacketSender;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
-use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
-use crate::ui::text::format_text_spans;
 use crate::world::block::BlockStateTable;
 
 /// Queues an event the game thread must not lose, blocking while the queue is
@@ -33,69 +30,6 @@ pub(super) fn send_ordered(event_tx: &Sender<NetworkEvent>, event: NetworkEvent)
             }
             _ => block(),
         }
-    }
-}
-
-pub fn handle_game_packet(packet: &ClientboundGamePacket, event_tx: &Sender<NetworkEvent>) {
-    match packet {
-        ClientboundGamePacket::UpdateAdvancements(p) => {
-            use azalea_protocol::packets::game::c_update_advancements::FrameType;
-
-            use crate::ui::toast;
-            let added = p
-                .added
-                .iter()
-                .map(|holder| {
-                    (
-                        holder.id.to_string(),
-                        toast::AdvancementData {
-                            display: holder.value.display.as_deref().map(|d| {
-                                toast::AdvancementDisplay {
-                                    title: format_text_spans(&d.title, [1.0; 4]),
-                                    frame: match d.frame {
-                                        FrameType::Task => toast::AdvancementFrame::Task,
-                                        FrameType::Challenge => toast::AdvancementFrame::Challenge,
-                                        FrameType::Goal => toast::AdvancementFrame::Goal,
-                                    },
-                                    show_toast: d.show_toast,
-                                    icon_item: match &d.icon {
-                                        azalea_inventory::ItemStack::Present(data) => {
-                                            Some(item_resource_name(data.kind))
-                                        }
-                                        azalea_inventory::ItemStack::Empty => None,
-                                    },
-                                }
-                            }),
-                            requirements: holder.value.requirements.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let progress = p
-                .progress
-                .iter()
-                .map(|(id, criteria)| {
-                    (
-                        id.to_string(),
-                        criteria
-                            .iter()
-                            .map(|(name, c)| (name.clone(), c.date.is_some()))
-                            .collect(),
-                    )
-                })
-                .collect();
-            send_ordered(
-                event_tx,
-                NetworkEvent::AdvancementsUpdate(Box::new(toast::AdvancementsUpdate {
-                    reset: p.reset,
-                    added,
-                    removed: p.removed.iter().map(|id| id.to_string()).collect(),
-                    progress,
-                    show_advancements: p.show_advancements,
-                })),
-            );
-        }
-        _other => {}
     }
 }
 

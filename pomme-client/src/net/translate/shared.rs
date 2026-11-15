@@ -643,23 +643,6 @@ pub(super) fn rewrite_previous_game_type(
     Some(out)
 }
 
-/// Advances past a `DisplayInfo` body: two NBT components, an
-/// `ItemStackTemplate` (item, count, component patch), a varint type, an
-/// i32 flag set and a background identifier when its bit 0 is set.
-pub(super) fn skip_display_info(cur: &mut Cursor<&[u8]>, remaps: &RegistryRemaps) -> Option<()> {
-    skip_nbt(cur)?; // title
-    skip_nbt(cur)?; // description
-    varint_span(cur)?; // item
-    varint_span(cur)?; // count
-    copy_component_patch(cur, &mut Vec::new(), remaps)?;
-    varint_span(cur)?; // type
-    let flags = read_i32(cur)?;
-    if flags & 1 != 0 {
-        skip_utf(cur)?; // background
-    }
-    Some(())
-}
-
 pub(super) fn read_f64s<const N: usize>(cur: &mut Cursor<&[u8]>) -> Option<[f64; N]> {
     let mut v = [0.0; N];
     for c in &mut v {

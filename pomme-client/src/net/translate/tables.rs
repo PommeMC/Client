@@ -122,8 +122,8 @@ impl Translation {
             if v777.is_some_and(|v| id == v.level_particles_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_particles_777));
             }
-            if v777.is_some_and(|v| id == v.update_advancements_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_advancements_777));
+            if id == ids.update_advancements_id {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_advancements));
             }
             if id == ids.commands_id {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_commands));
@@ -207,6 +207,13 @@ impl GameIds {
             .expect("embedded serializer table"),
             set_entity_data_id: id(Clientbound, "set_entity_data"),
             commands_id: id(Clientbound, "commands"),
+            update_advancements_id: id(Clientbound, "update_advancements"),
+            advancements: AdvancementLayout {
+                icon_count_first: protocol <= 774,
+                old_profile: protocol <= 772,
+                position_after_entry: protocol >= 777,
+                append_show: protocol <= 769,
+            },
             wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
             v774: (protocol <= 774).then(|| Ids774 {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
@@ -226,7 +233,6 @@ impl GameIds {
                 respawn_id: id(Clientbound, "respawn"),
                 animate_id: id(Clientbound, "animate"),
                 level_particles_id: id(Clientbound, "level_particles"),
-                update_advancements_id: id(Clientbound, "update_advancements"),
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 light_update_id: id(Clientbound, "light_update"),
                 player_chat_id: id(Clientbound, "player_chat"),
@@ -281,7 +287,6 @@ impl GameIds {
             }),
             v769: (protocol <= 769).then(|| Ids769 {
                 player_chat_id: id(Clientbound, "player_chat"),
-                update_advancements_id: id(Clientbound, "update_advancements"),
                 chat_id: id(Serverbound, "chat"),
                 chat_old_id: required_id(table, Phase::Game, Serverbound, "chat"),
                 chat_command_signed_id: id(Serverbound, "chat_command_signed"),

@@ -21,7 +21,6 @@ use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::{self, ComponentPatch, ItemCodec, Shape};
-use pomme_protocol::version::NATIVE;
 use pomme_protocol::wire::write_varint;
 use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase};
 
@@ -46,13 +45,6 @@ pub(super) const DROPPED: &[&str] = &[
     "tropical_fish/pattern",
     "rabbit/variant",
 ];
-
-/// Whether this session speaks the native protocol. Translated sessions
-/// keep azalea's decode of `update_advancements`, whose icon layout differs
-/// by version.
-pub(super) fn native_session() -> bool {
-    crate::version::session_protocol() == NATIVE.protocol
-}
 
 /// The native clientbound packets the item-gated raw handlers own.
 #[derive(Clone, Copy)]

@@ -1950,25 +1950,6 @@ fn translate_player_chat_769() {
     assert_eq!(p.body.content, "hi");
 }
 
-/// 1.21.5 appended `showAdvancements` to `update_advancements`; the shim
-/// synthesizes true.
-#[test]
-fn translate_update_advancements_769() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(769, Direction::Clientbound, "update_advancements"),
-    );
-    old.push(1); // reset
-    old.extend_from_slice(&[0, 0, 0]); // no added/removed/progress
-
-    let ClientboundGamePacket::UpdateAdvancements(p) = translate_and_decode(769, old) else {
-        panic!("wrong packet");
-    };
-    assert!(p.reset);
-    assert!(p.show_advancements);
-}
-
 /// A 26.2 `container_click` carries hashed stacks; 1.21.4 wants full item
 /// stacks, reconstructed bare (`ServerboundContainerClickPacket` in both
 /// references).
@@ -4784,84 +4765,136 @@ fn translate_level_particles_777() {
     }
 }
 
-/// 26.3's `update_advancements` sends each advancement's screen position
-/// after the entry rather than inside its `DisplayInfo`, and sends one even
-/// without a display.
+/// One `update_advancements` entry as protocol `protocol` lays it out: a
+/// display whose icon is `item` (a name in that version's registry) unless
+/// `item` is `None`, one requirement, and the screen position (1.5, -2).
+fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let mut out = Vec::new();
+    wire::write_utf(&mut out, name);
+    out.push(0); // no parent
+    out.push(u8::from(item.is_some()));
+    if let Some(item) = item {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let item = registry_id(table, ClientRegistry::Item, item);
+        for text in ["Title", "Description"] {
+            out.extend_from_slice(&[8, 0, text.len() as u8]);
+            out.extend_from_slice(text.as_bytes());
+        }
+        // Through 1.21.11 the icon is an `ItemStack`, count first.
+        if protocol <= 774 {
+            out.push(1);
+            wire::write_varint(&mut out, item);
+        } else {
+            wire::write_varint(&mut out, item);
+            out.push(1);
+        }
+        out.extend_from_slice(&[0, 0]); // empty patch
+        out.push(2); // goal
+        out.extend_from_slice(&2i32.to_be_bytes()); // show toast, no background
+    }
+    let position = [1.5f32.to_be_bytes(), (-2.0f32).to_be_bytes()].concat();
+    // 26.3 sends the position after the entry, display or not.
+    if item.is_some() && protocol < 777 {
+        out.extend_from_slice(&position);
+    }
+    out.push(1); // one requirement group
+    out.push(1);
+    wire::write_utf(&mut out, "a");
+    out.push(0); // no telemetry
+    if protocol >= 777 {
+        out.extend_from_slice(&position);
+    }
+    out
+}
+
+/// An `update_advancements` frame for `protocol` adding `entries`.
+fn advancements_frame(protocol: i32, id: u32, entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    wire::write_varint(&mut out, id);
+    out.push(1); // reset
+    wire::write_varint(&mut out, entries.len() as u32);
+    out.extend(entries.iter().flatten());
+    out.extend_from_slice(&[0, 0]); // no removals, no progress
+    // 1.21.5 appended `showAdvancements`.
+    if protocol >= 770 {
+        out.push(1);
+    }
+    out
+}
+
+/// Every translated version's `update_advancements` lands as the frame a
+/// 26.2 server sends: the icon an `ItemStackTemplate` in native ids, the
+/// position inside the display, `showAdvancements` set.
 #[test]
-fn translate_update_advancements_777() {
-    use azalea_buf::AzBuf;
-    use azalea_inventory::{ItemStack, ItemStackData};
-    use azalea_protocol::packets::game::c_update_advancements::{
-        Advancement, AdvancementHolder, ClientboundUpdateAdvancements, DisplayInfo, FrameType,
+fn translate_update_advancements_to_native() {
+    let native_id = table_id(Phase::Game, Direction::Clientbound, "update_advancements");
+    let entries = |protocol| {
+        vec![
+            advancement_entry(protocol, "minecraft:story/root", Some("wooden_pickaxe")),
+            advancement_entry(protocol, "minecraft:story/mine_stone", None),
+        ]
     };
-
-    let displayed = AdvancementHolder {
-        id: "minecraft:story/root".into(),
-        value: Advancement {
-            parent_id: None,
-            display: Some(Box::new(DisplayInfo {
-                title: azalea_chat::FormattedText::default(),
-                description: azalea_chat::FormattedText::default(),
-                icon: ItemStack::Present(ItemStackData {
-                    count: 1,
-                    kind: azalea_registry::builtin::ItemKind::Stone,
-                    component_patch: Default::default(),
-                }),
-                frame: FrameType::Task,
-                show_toast: true,
-                hidden: false,
-                background: Some(
-                    "minecraft:textures/gui/advancements/backgrounds/stone.png".into(),
-                ),
-                x: 1.5,
-                y: -2.0,
-            })),
-            requirements: vec![vec!["a".into()]],
-            sends_telemetry_event: false,
-        },
-    };
-    let bare = AdvancementHolder {
-        id: "minecraft:story/mine_stone".into(),
-        value: Advancement {
-            parent_id: Some("minecraft:story/root".into()),
-            display: None,
-            requirements: vec![],
-            sends_telemetry_event: true,
-        },
-    };
-    let packet = ClientboundGamePacket::UpdateAdvancements(ClientboundUpdateAdvancements {
-        reset: true,
-        added: vec![displayed.clone(), bare.clone()],
-        removed: vec![],
-        progress: Default::default(),
-        show_advancements: true,
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "update_advancements"),
+    // 26.1's frame is the native one but for its ids.
+    let expected = advancements_frame(
+        775,
+        native_id,
+        &entries(pomme_protocol::version::NATIVE.protocol),
     );
-    old.push(1); // reset
-    wire::write_varint(&mut old, 2);
-    // The displayed holder ends in its one requirement (4 bytes) and the
-    // telemetry bool; the position pair precedes those in the native form.
-    let mut holder = Vec::new();
-    displayed.azalea_write(&mut holder).unwrap();
-    let (body, tail) = holder.split_at(holder.len() - 5);
-    let (display, position) = body.split_at(body.len() - 8);
-    old.extend_from_slice(display);
-    old.extend_from_slice(tail);
-    old.extend_from_slice(position);
-    bare.azalea_write(&mut old).unwrap();
-    old.extend_from_slice(&[0; 8]); // a position without a display
-    old.extend_from_slice(&[0, 0, 1]); // no removals, no progress, show
+    for protocol in [766, 769, 772, 774, 775, 777] {
+        let old = advancements_frame(
+            protocol,
+            old_id(protocol, Direction::Clientbound, "update_advancements"),
+            &entries(protocol),
+        );
+        let translated = translation_for(protocol)
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap();
+        assert_eq!(&translated[..], &expected[..], "{protocol}");
+    }
 
+    let mut r = pomme_protocol::codec::Reader::new(&expected);
+    r.varint().unwrap();
+    let update = super::advancement_wire::read_update(&expected[r.pos()..]).unwrap();
+    assert!(update.show_advancements);
+    let display = update.added[0].1.display.as_ref().unwrap();
+    assert_eq!(display.icon_item.as_deref(), Some("wooden_pickaxe"));
+    assert!(update.added[1].1.display.is_none());
+}
+
+/// An icon the native version lacks (26.3 `poplar_log`) takes its display
+/// with it; the entry and the ones after it stay.
+#[test]
+fn advancement_with_unmapped_icon_loses_its_display_777() {
+    let old = advancements_frame(
+        777,
+        old_id(777, Direction::Clientbound, "update_advancements"),
+        &[
+            advancement_entry(777, "minecraft:a", Some("poplar_log")),
+            advancement_entry(777, "minecraft:b", Some("stone")),
+        ],
+    );
     let translated = translation_for(777)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
-    assert_eq!(&translated[..], &frame[..]);
+    let expected = advancements_frame(
+        775,
+        table_id(Phase::Game, Direction::Clientbound, "update_advancements"),
+        &[
+            advancement_entry(
+                pomme_protocol::version::NATIVE.protocol,
+                "minecraft:a",
+                None,
+            ),
+            advancement_entry(
+                pomme_protocol::version::NATIVE.protocol,
+                "minecraft:b",
+                Some("stone"),
+            ),
+        ],
+    );
+    assert_eq!(&translated[..], &expected[..]);
 }
 
 /// 26.3 appended the `dye_color` serializer (43); an entry using it drops

@@ -49,17 +49,26 @@ pub(super) fn translate_item_stack_template(
     out: &mut Vec<u8>,
     ctx: RecipeCtx<'_>,
 ) -> Option<()> {
-    // A non-empty `ItemStack` has a positive count; a template only rejects 0.
-    let (item, count) = if ctx.layout.item_stack_count_first {
-        let count = var_i32(cur).filter(|&count| count > 0)?;
-        (var_u32(cur)?, count)
-    } else {
-        let item = var_u32(cur)?;
-        (item, var_i32(cur).filter(|&count| count != 0)?)
-    };
+    let (item, count) = read_item_and_count(cur, ctx.layout.item_stack_count_first)?;
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
     wire::write_varint(out, count as u32);
     translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
+}
+
+/// The item and count leading a non-empty `ItemStack` (`count_first`) or an
+/// `ItemStackTemplate`. A stack's count is positive; a template only rejects
+/// zero.
+pub(super) fn read_item_and_count(
+    cur: &mut Cursor<&[u8]>,
+    count_first: bool,
+) -> Option<(u32, i32)> {
+    if count_first {
+        let count = var_i32(cur).filter(|&count| count > 0)?;
+        Some((var_u32(cur)?, count))
+    } else {
+        let item = var_u32(cur)?;
+        Some((item, var_i32(cur).filter(|&count| count != 0)?))
+    }
 }
 
 /// Remaps an item stack's component patch into the native registry space.

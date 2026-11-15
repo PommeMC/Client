@@ -213,14 +213,22 @@ impl Translation {
         translate_level_particles_777(id, payload, ids.wire_registries, self.to_native)
     }
 
-    /// Rewrites the advancements 777 payload into the native layout.
-    pub(super) fn rewrite_advancements_777(
+    /// Rewrites the advancements payload into the native layout.
+    pub(super) fn rewrite_advancements(
         &self,
         id: u32,
         payload: &[u8],
         _state: &mut SessionState,
     ) -> Option<Vec<u8>> {
-        translate_update_advancements_777(id, payload, self.to_native)
+        let ids = self.game_ids.as_ref()?;
+
+        translate_update_advancements(
+            id,
+            payload,
+            ids.advancements,
+            ids.items.as_ref(),
+            self.to_native,
+        )
     }
 
     /// Rewrites the commands payload into the native layout.
