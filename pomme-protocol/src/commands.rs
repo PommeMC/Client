@@ -2,6 +2,7 @@
 //! server's Brigadier tree as a flat node list and the root's index.
 
 use crate::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
+use crate::registries::{ClientRegistry, RegistryTable};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandsPacket {
@@ -42,8 +43,8 @@ pub enum NodeStub {
     },
 }
 
-/// An `ArgumentTypeInfo.Template`, its variant in `ArgumentTypeInfos`
-/// registration order (the `command_argument_type` registry id).
+/// An `ArgumentTypeInfo.Template`, one variant per `command_argument_type`
+/// entry.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ArgumentType {
     Bool,
@@ -195,19 +196,22 @@ fn read_node(r: &mut Reader) -> DecodeResult<Node> {
 fn argument_type(r: &mut Reader) -> DecodeResult<ArgumentType> {
     use ArgumentType as A;
     let registry = |r: &mut Reader| r.identifier().map(str::to_owned);
-    Ok(match r.varint()? {
-        0 => A::Bool,
-        1 => A::Float(bounds(r, Reader::f32)?),
-        2 => A::Double(bounds(r, Reader::f64)?),
-        3 => A::Integer(bounds(r, Reader::i32)?),
-        4 => A::Long(bounds(r, Reader::i64)?),
-        5 => A::String(match r.varint()? {
+    let name = RegistryTable::native()
+        .name_of(ClientRegistry::CommandArgumentType, r.varint()?)
+        .ok_or_else(|| r.error("unknown command argument type"))?;
+    Ok(match name {
+        "brigadier:bool" => A::Bool,
+        "brigadier:float" => A::Float(bounds(r, Reader::f32)?),
+        "brigadier:double" => A::Double(bounds(r, Reader::f64)?),
+        "brigadier:integer" => A::Integer(bounds(r, Reader::i32)?),
+        "brigadier:long" => A::Long(bounds(r, Reader::i64)?),
+        "brigadier:string" => A::String(match r.varint()? {
             0 => StringType::SingleWord,
             1 => StringType::QuotablePhrase,
             2 => StringType::GreedyPhrase,
             _ => return Err(r.error("unknown string argument type")),
         }),
-        6 => {
+        "entity" => {
             // EntityArgument.java:184
             let flags = r.u8()?;
             A::Entity(EntityArgument {
@@ -215,70 +219,70 @@ fn argument_type(r: &mut Reader) -> DecodeResult<ArgumentType> {
                 players_only: flags & 2 != 0,
             })
         }
-        7 => A::GameProfile,
-        8 => A::BlockPos,
-        9 => A::ColumnPos,
-        10 => A::Vec3,
-        11 => A::Vec2,
-        12 => A::BlockState,
-        13 => A::BlockPredicate,
-        14 => A::ItemStack,
-        15 => A::ItemPredicate,
-        16 => A::TeamColor,
-        17 => A::HexColor,
-        18 => A::Component,
-        19 => A::Style,
-        20 => A::Message,
-        21 => A::NbtCompoundTag,
-        22 => A::NbtTag,
-        23 => A::NbtPath,
-        24 => A::Objective,
-        25 => A::ObjectiveCriteria,
-        26 => A::Operation,
-        27 => A::Particle,
-        28 => A::Angle,
-        29 => A::Rotation,
-        30 => A::ScoreboardSlot,
+        "game_profile" => A::GameProfile,
+        "block_pos" => A::BlockPos,
+        "column_pos" => A::ColumnPos,
+        "vec3" => A::Vec3,
+        "vec2" => A::Vec2,
+        "block_state" => A::BlockState,
+        "block_predicate" => A::BlockPredicate,
+        "item_stack" => A::ItemStack,
+        "item_predicate" => A::ItemPredicate,
+        "team_color" => A::TeamColor,
+        "hex_color" => A::HexColor,
+        "component" => A::Component,
+        "style" => A::Style,
+        "message" => A::Message,
+        "nbt_compound_tag" => A::NbtCompoundTag,
+        "nbt_tag" => A::NbtTag,
+        "nbt_path" => A::NbtPath,
+        "objective" => A::Objective,
+        "objective_criteria" => A::ObjectiveCriteria,
+        "operation" => A::Operation,
+        "particle" => A::Particle,
+        "angle" => A::Angle,
+        "rotation" => A::Rotation,
+        "scoreboard_slot" => A::ScoreboardSlot,
         // ScoreHolderArgument.java:217
-        31 => A::ScoreHolder {
+        "score_holder" => A::ScoreHolder {
             allows_multiple: r.u8()? & 1 != 0,
         },
-        32 => A::Swizzle,
-        33 => A::Team,
-        34 => A::ItemSlot,
-        35 => A::ItemSlots,
-        36 => A::Identifier,
-        37 => A::Function,
-        38 => A::EntityAnchor,
-        39 => A::IntRange,
-        40 => A::FloatRange,
-        41 => A::Dimension,
-        42 => A::GameMode,
-        43 => A::Time { min: r.i32()? },
-        44 => A::ResourceOrTag {
+        "swizzle" => A::Swizzle,
+        "team" => A::Team,
+        "item_slot" => A::ItemSlot,
+        "item_slots" => A::ItemSlots,
+        "resource_location" => A::Identifier,
+        "function" => A::Function,
+        "entity_anchor" => A::EntityAnchor,
+        "int_range" => A::IntRange,
+        "float_range" => A::FloatRange,
+        "dimension" => A::Dimension,
+        "gamemode" => A::GameMode,
+        "time" => A::Time { min: r.i32()? },
+        "resource_or_tag" => A::ResourceOrTag {
             registry: registry(r)?,
         },
-        45 => A::ResourceOrTagKey {
+        "resource_or_tag_key" => A::ResourceOrTagKey {
             registry: registry(r)?,
         },
-        46 => A::Resource {
+        "resource" => A::Resource {
             registry: registry(r)?,
         },
-        47 => A::ResourceKey {
+        "resource_key" => A::ResourceKey {
             registry: registry(r)?,
         },
-        48 => A::ResourceSelector {
+        "resource_selector" => A::ResourceSelector {
             registry: registry(r)?,
         },
-        49 => A::TemplateMirror,
-        50 => A::TemplateRotation,
-        51 => A::Heightmap,
-        52 => A::LootTable,
-        53 => A::LootPredicate,
-        54 => A::LootModifier,
-        55 => A::Dialog,
-        56 => A::Uuid,
-        _ => return Err(r.error("unknown command argument type")),
+        "template_mirror" => A::TemplateMirror,
+        "template_rotation" => A::TemplateRotation,
+        "heightmap" => A::Heightmap,
+        "loot_table" => A::LootTable,
+        "loot_predicate" => A::LootPredicate,
+        "loot_modifier" => A::LootModifier,
+        "dialog" => A::Dialog,
+        "uuid" => A::Uuid,
+        _ => return Err(r.error("command argument type pomme doesn't know")),
     })
 }
 
@@ -456,6 +460,21 @@ mod tests {
     fn an_unknown_argument_type_fails_to_decode() {
         let bytes = [1, TYPE_ARGUMENT, 0, 1, b'x', 57, 0];
         assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn every_native_argument_type_is_known() {
+        let table = RegistryTable::native();
+        for (id, name) in table
+            .names(ClientRegistry::CommandArgumentType)
+            .iter()
+            .enumerate()
+        {
+            // Zeros cover every type's properties: no bounds, the first
+            // string type, no flags, a zero `time` minimum, an empty key.
+            let bytes = [id as u8, 0, 0, 0, 0];
+            assert!(argument_type(&mut Reader::new(&bytes)).is_ok(), "{name}");
+        }
     }
 
     #[test]
