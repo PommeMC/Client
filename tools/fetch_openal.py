@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import platform
 import sys
+import sysconfig
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -81,6 +82,11 @@ def host_classifier():
     return None
 
 
+def is_musl():
+    """True when Python runs on musl; the pinned natives are glibc-only."""
+    return "musl" in (sysconfig.get_config_var("HOST_GNU_TYPE") or "")
+
+
 def fetch_jar(version, classifier, expected_sha256):
     """Downloads the jar unless a verified copy is already cached."""
     name = f"lwjgl-openal-{version}-{classifier}.jar"
@@ -122,6 +128,14 @@ def main():
         "(release packaging, where a silent miss would ship a mute build)",
     )
     args = parser.parse_args()
+
+    if args.classifier is None and is_musl():
+        print(
+            "musl host: the pinned LWJGL OpenAL is glibc-only, skipping the download. "
+            "Audio needs a system OpenAL Soft (libopenal) installed.",
+            file=sys.stderr,
+        )
+        return
 
     version, natives, _ = read_manifest()
     classifier = args.classifier or host_classifier()
