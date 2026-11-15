@@ -23,6 +23,8 @@ use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, Scoreboard
 use pomme_protocol::sound::{self, SoundPacket};
 use pomme_protocol::wire;
 
+use super::RawRead;
+
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
     PacketTable::native().id(phase, dir, name).unwrap()
 }
@@ -577,9 +579,6 @@ fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<
 }
 
 /// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
-type RawRead<P> =
-    fn(&str, &mut pomme_protocol::codec::Reader) -> Option<pomme_protocol::codec::DecodeResult<P>>;
-
 /// A native 26.2 game frame for packet `name`, decoded with `read`.
 fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     let mut r = pomme_protocol::codec::Reader::new(frame);
@@ -2579,13 +2578,12 @@ fn translate_merchant_offers_765() {
     wire::write_varint(&mut old, 30); // villager xp
     old.extend_from_slice(&[1, 1]); // show progress, can restock
 
-    let ClientboundGamePacket::MerchantOffers(p) = translate_decode_and_remap(765, old) else {
+    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(765, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.container_id, 1);
     let offer = &p.offers[0];
     assert_eq!(offer.base_cost_a.count, 3);
-    assert_eq!(offer.base_cost_a.item, SHIFTED_ITEM_KIND);
     assert!(offer.cost_b.is_none());
     assert_eq!(offer.uses, 5);
     assert_eq!(offer.max_uses, 12);

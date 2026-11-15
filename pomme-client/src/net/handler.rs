@@ -376,7 +376,8 @@ pub(crate) fn decode_raw_game_packet(
 /// Packets the client doesn't act on yet, skipped by id without decoding.
 // TODO: `cookie_request` expects a `cookie_response`, which pomme never
 // sends; the rest are features pomme lacks (world border, maps, trading,
-// ticking state, transfers, debug renderers and more).
+// ticking state, transfers, debug renderers and more). Trading on a
+// pre-1.20.5 server also needs its offers' item ids remapped to native.
 const IGNORED_PACKETS: &[&str] = &[
     "award_stats",
     "block_destruction",

@@ -33,7 +33,6 @@ impl Translation {
     /// version's id space; `false` drops the packet (its subject no longer
     /// exists, e.g. the bed block entity removed in 26.2).
     pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
-        use ClientRegistry as R;
         match packet {
             ClientboundGamePacket::SetEntityData(p) => {
                 // `translate_entity_data` already remaps item-stack values
@@ -47,23 +46,6 @@ impl Translation {
                         }
                     }
                 }
-                true
-            }
-            ClientboundGamePacket::MerchantOffers(_) if self.translates_items() => true,
-            ClientboundGamePacket::MerchantOffers(p) => {
-                // An `ItemCost` has no empty form, so an untranslatable base
-                // cost drops the offer rather than the whole trade list.
-                p.offers.retain_mut(|offer| {
-                    remap_stack(self.to_native, &mut offer.result);
-                    if offer
-                        .cost_b
-                        .as_mut()
-                        .is_some_and(|c| !remap_with(self.to_native, R::Item, &mut c.item))
-                    {
-                        offer.cost_b = None;
-                    }
-                    remap_with(self.to_native, R::Item, &mut offer.base_cost_a.item)
-                });
                 true
             }
             _ => true,

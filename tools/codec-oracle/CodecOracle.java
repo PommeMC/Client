@@ -12,6 +12,7 @@ import com.google.gson.JsonObject;
 import com.mojang.serialization.Lifecycle;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
+import it.unimi.dsi.fastutil.ints.IntList;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -53,6 +54,7 @@ import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
 import net.minecraft.network.protocol.common.ClientboundShowDialogPacket;
+import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
@@ -78,6 +80,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.dialog.Dialog;
 import net.minecraft.server.dialog.Dialogs;
+import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
@@ -180,6 +183,14 @@ public final class CodecOracle {
         encode("show_dialog/inline", ClientboundShowDialogPacket.STREAM_CODEC::encode,
                 new ClientboundShowDialogPacket(Holder.direct(serverLinks.value())));
         commands();
+        Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
+        blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
+        blockTags.put(Identifier.withDefaultNamespace("empty"), IntList.of());
+        encode("update_tags/two_registries", ClientboundUpdateTagsPacket.STREAM_CODEC::encode,
+                new ClientboundUpdateTagsPacket(Map.of(
+                        Registries.BLOCK, new TagNetworkSerialization.NetworkPayload(blockTags),
+                        Registries.DIALOG, new TagNetworkSerialization.NetworkPayload(Map.of(
+                                Identifier.withDefaultNamespace("pause_screen_additions"), IntList.of(2))))));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());

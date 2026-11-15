@@ -44,6 +44,7 @@ use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
+use pomme_protocol::codec::{DecodeResult, Reader};
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::MetaValue;
@@ -64,24 +65,28 @@ pub struct PacketLightData {
     pub empty_block_y_mask: crate::world::light::BitSet,
 }
 
-/// Decodes a native game packet with `read`, which returns `None` for the
-/// packets it doesn't own; a frame with bytes left over is malformed.
-fn read_raw_packet<P>(
-    packet_id: u32,
-    payload: &[u8],
-    read: fn(
-        &str,
-        &mut pomme_protocol::codec::Reader,
-    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
-) -> Option<pomme_protocol::codec::DecodeResult<P>> {
+/// A pomme-protocol `read`: decodes packet `name`, or `None` if it isn't one
+/// the reader owns.
+type RawRead<P> = fn(&str, &mut Reader) -> Option<DecodeResult<P>>;
+
+/// Decodes a native game packet with `read`; a frame with bytes left over is
+/// malformed.
+fn read_raw_packet<P>(packet_id: u32, payload: &[u8], read: RawRead<P>) -> Option<DecodeResult<P>> {
     use pomme_protocol::{Direction, PacketTable, Phase};
 
     let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
-    let mut r = pomme_protocol::codec::Reader::new(payload);
+    let mut r = Reader::new(payload);
     Some(read(name, &mut r)?.and_then(|packet| {
         r.ensure_eof()?;
         Ok(packet)
     }))
+}
+
+/// [`read_raw_packet`] on a whole native game frame, its id first.
+fn read_raw_frame<P>(raw: &[u8], read: RawRead<P>) -> Option<DecodeResult<P>> {
+    let mut r = Reader::new(raw);
+    let id = r.varint().ok()?;
+    read_raw_packet(id, &raw[r.pos()..], read)
 }
 
 /// A `GameType` id as the client stores it; `GameType.byId` maps an unknown id
