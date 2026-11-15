@@ -1,0 +1,9 @@
+[package]
+name = "typegen"
+description = "Generates pomme-registry's entry lists and tags from a reference version's data-generator output."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde_json = { workspace = true }

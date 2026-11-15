@@ -1,6 +1,6 @@
 //! The copper golem's client-side sound: `CopperGolem.playHeadSpinSound`.
 
-use azalea_registry::builtin::EntityKind;
+use pomme_registry::builtin::EntityKind;
 
 use crate::app::phases::in_game::GameState;
 use crate::audio::{AudioEngine, CATEGORY_NEUTRAL, SoundRef};

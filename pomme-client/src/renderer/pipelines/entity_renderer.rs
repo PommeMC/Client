@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot, Equippable};
-use azalea_registry::builtin::EntityKind;
+use pomme_registry::builtin::EntityKind;
 use serde::Deserialize;
 
 use crate::entity::components::Position;
@@ -4164,7 +4164,7 @@ pub(super) fn create_pipeline(
 mod tests {
     use azalea_inventory::ItemStack;
     use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
@@ -4326,7 +4326,7 @@ mod tests {
         assert_eq!(layers[1].dye, ArmorDye::None);
     }
 
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};
 
@@ -4468,7 +4468,7 @@ mod tests {
 
     #[test]
     fn death_fall_matches_vanilla_boundaries_and_flip_overrides() {
-        use azalea_registry::builtin::EntityKind;
+        use pomme_registry::builtin::EntityKind;
 
         assert_eq!(super::death_fall_degrees(0.0, EntityKind::Zombie), 0.0);
         assert_eq!(super::death_fall_degrees(1.0, EntityKind::Zombie), 0.0);

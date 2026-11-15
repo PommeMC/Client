@@ -9,9 +9,6 @@ use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Holder;
-use azalea_registry::builtin::SoundEvent;
-use azalea_registry::identifier::Identifier;
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
@@ -22,6 +19,9 @@ use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
 use pomme_protocol::sound::{self, SoundPacket};
 use pomme_protocol::wire;
+use pomme_registry::Holder;
+use pomme_registry::builtin::SoundEvent;
+use pomme_registry::identifier::Identifier;
 
 use super::RawRead;
 
@@ -43,8 +43,8 @@ fn native_matches_azalea() {
 #[test]
 fn entity_dimensions_match_azalea() {
     use azalea_entity::dimensions::EntityDimensions as AzaleaDimensions;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::EntityKind;
 
     use crate::entity::dimensions::EntityDimensions;
 
@@ -902,8 +902,8 @@ fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
 /// never gets remapped decodes as the wrong item rather than passing by
 /// identity.
 const SHIFTED_ITEM: u8 = 27;
-const SHIFTED_ITEM_KIND: azalea_registry::builtin::ItemKind =
-    azalea_registry::builtin::ItemKind::GrassBlock;
+const SHIFTED_ITEM_KIND: pomme_registry::builtin::ItemKind =
+    pomme_registry::builtin::ItemKind::GrassBlock;
 
 /// Exactly the joinable non-native protocols build a translation: a version
 /// with embedded tables but no `TRANSLATED` entry (the staging state while
@@ -964,7 +964,7 @@ fn translate_game_login_26_1() {
     use azalea_core::game_type::{GameMode, OptionalGameType};
     use azalea_protocol::packets::game::ClientboundGamePacket;
     use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     let packet = ClientboundGamePacket::Login(ClientboundLogin {
         player_id: MinecraftEntityId(7),
@@ -977,7 +977,7 @@ fn translate_game_login_26_1() {
         show_death_screen: true,
         do_limited_crafting: false,
         common: azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-            dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
+            dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
             dimension: "minecraft:overworld".into(),
             seed: 42,
             game_type: GameMode::Survival,
@@ -1089,10 +1089,10 @@ fn translate_set_player_team_26_1_reset_color() {
 
 /// Every native registry id must match the runtime enum used by remapping.
 #[test]
-fn registry_table_matches_azalea() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::*;
+fn registry_table_matches_the_registry_enums() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::*;
 
     let mut mismatches = Vec::new();
     macro_rules! check {
@@ -1106,9 +1106,10 @@ fn registry_table_matches_azalea() {
             for (id, name) in names.iter().enumerate() {
                 let value = $kind::from_u32(id as u32).expect("builtin id");
                 assert_eq!(value.to_u32(), id as u32);
-                let azalea = value.to_str().trim_start_matches("minecraft:");
-                if azalea != name {
-                    mismatches.push((stringify!($kind), azalea.to_owned(), name.clone()));
+                // The table drops the default namespace, as `toShortString`.
+                let entry = value.to_str().trim_start_matches("minecraft:");
+                if entry != name {
+                    mismatches.push((stringify!($kind), entry.to_owned(), name.clone()));
                 }
             }
         }};
@@ -1135,20 +1136,7 @@ fn registry_table_matches_azalea() {
             ClientRegistry::SoundEvent => check!(SoundEvent, SoundEvent),
         }
     }
-    // azalea names brigadier's own argument types in the minecraft namespace;
-    // vanilla registers them as brigadier:* (ArgumentTypeInfos.bootstrap).
-    let brigadier = ["bool", "float", "double", "integer", "long", "string"];
-    let expected: Vec<_> = brigadier
-        .iter()
-        .map(|t| {
-            (
-                "CommandArgumentKind",
-                t.to_string(),
-                format!("brigadier:{t}"),
-            )
-        })
-        .collect();
-    assert_eq!(mismatches, expected);
+    assert_eq!(mismatches, []);
 }
 
 /// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
@@ -1156,8 +1144,8 @@ fn registry_table_matches_azalea() {
 /// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::EntityKind;
 
     // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
     assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
@@ -2287,7 +2275,7 @@ fn translate_disguised_chat_765() {
 /// The registry id behind a decoded chat-type holder; a direct (inline) one
 /// means the holder bump was missed.
 fn chat_kind(bound: &azalea_protocol::packets::game::c_player_chat::ChatTypeBound) -> u32 {
-    use azalea_registry::{Holder, Registry};
+    use pomme_registry::{Holder, Registry};
     match &bound.chat_type {
         Holder::Reference(kind) => kind.to_u32(),
         Holder::Direct(_) => panic!("chat type decoded as an inline value"),
@@ -2698,7 +2686,7 @@ fn translate_update_attributes_766() {
     assert_eq!(p.values.len(), 1);
     assert_eq!(
         p.values[0].attribute,
-        azalea_registry::builtin::Attribute::MaxHealth
+        pomme_registry::builtin::Attribute::MaxHealth
     );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
@@ -2774,7 +2762,7 @@ fn translate_container_set_content_765() {
         ContainerPacket::Content {
             container_id: 1,
             state_id: 2,
-            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            items: vec![pomme_stack(pomme_registry::builtin::ItemKind::Stone, 3)],
             carried: None,
         }
     );
@@ -2782,10 +2770,10 @@ fn translate_container_set_content_765() {
 
 /// `count` of `kind` with no components, as pomme decodes it.
 fn pomme_stack(
-    kind: azalea_registry::builtin::ItemKind,
+    kind: pomme_registry::builtin::ItemKind,
     count: i32,
 ) -> Option<pomme_protocol::item::ItemStack> {
-    use azalea_registry::Registry;
+    use pomme_registry::Registry;
 
     Some(pomme_protocol::item::ItemStack {
         item: kind.to_u32(),
@@ -2822,12 +2810,12 @@ fn translate_set_equipment_765() {
 }
 
 /// A wire-version item id as the native item, as `container_wire` remaps it.
-fn native_item(protocol: i32, id: u32) -> Option<azalea_registry::builtin::ItemKind> {
-    use azalea_registry::Registry;
+fn native_item(protocol: i32, id: u32) -> Option<pomme_registry::builtin::ItemKind> {
+    use pomme_registry::Registry;
 
     let native =
         translation_for(protocol).remap_to_native(pomme_protocol::ClientRegistry::Item, id);
-    native.and_then(azalea_registry::builtin::ItemKind::from_u32)
+    native.and_then(pomme_registry::builtin::ItemKind::from_u32)
 }
 
 /// The `-2` sentinel's stack, split into `set_player_inventory`, keeps its
@@ -2857,9 +2845,9 @@ fn translate_set_player_inventory_remaps_765() {
 /// below the native one.
 #[test]
 fn remap_menu_763() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::MenuKind;
     use pomme_protocol::{ClientRegistry, RegistryTable};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::MenuKind;
 
     let anvil = RegistryTable::for_protocol(763)
         .unwrap()
@@ -2959,7 +2947,7 @@ fn translate_merchant_offers_777() {
     let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(777, old) else {
         panic!("wrong packet");
     };
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
     let kept: Vec<_> = p
         .offers
         .iter()
@@ -3025,7 +3013,7 @@ fn translate_update_attributes_765() {
     assert_eq!(p.values.len(), 1);
     assert_eq!(
         p.values[0].attribute,
-        azalea_registry::builtin::Attribute::MaxHealth
+        pomme_registry::builtin::Attribute::MaxHealth
     );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
@@ -3112,14 +3100,14 @@ fn entity_data_entries(
 /// The item of an entry's stack; `None` for an empty one.
 fn entity_data_item(
     entry: &pomme_protocol::entity_data::DataValue,
-) -> Option<azalea_registry::builtin::ItemKind> {
-    use azalea_registry::Registry;
+) -> Option<pomme_registry::builtin::ItemKind> {
+    use pomme_registry::Registry;
 
     let pomme_protocol::entity_data::Value::Item(stack) = &entry.value else {
         panic!("wrong value");
     };
     let stack = stack.as_ref()?;
-    Some(azalea_registry::builtin::ItemKind::from_u32(stack.item).expect("a native item"))
+    Some(pomme_registry::builtin::ItemKind::from_u32(stack.item).expect("a native item"))
 }
 
 /// `translate_entity_data` already remaps item stacks, so the read must not
@@ -3131,7 +3119,7 @@ fn entity_data_item_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        Some(azalea_registry::builtin::ItemKind::OakLog)
+        Some(pomme_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -3143,7 +3131,7 @@ fn entity_data_item_with_components_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        Some(azalea_registry::builtin::ItemKind::OakLog)
+        Some(pomme_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -3197,14 +3185,14 @@ fn translate_container_set_slot_765() {
     assert_eq!(
         read("set_cursor_item", build(-1, 0)),
         ContainerPacket::Cursor {
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
     assert_eq!(
         read("set_player_inventory", build(-2, 7)),
         ContainerPacket::PlayerInventory {
             slot: 7,
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
     assert_eq!(
@@ -3213,7 +3201,7 @@ fn translate_container_set_slot_765() {
             container_id: 3,
             state_id: 2,
             slot: 1,
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
 }
@@ -3330,7 +3318,7 @@ fn translate_container_set_slot_777() {
     );
     old.extend_from_slice(&0x123456i32.to_be_bytes());
 
-    let mut item = pomme_stack(azalea_registry::builtin::ItemKind::Diamond, 1).unwrap();
+    let mut item = pomme_stack(pomme_registry::builtin::ItemKind::Diamond, 1).unwrap();
     item.patch.added.push((
         registry_id(
             native_table,
@@ -4388,10 +4376,9 @@ fn translate_add_player_763() {
     let native =
         translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
     assert_eq!(
-        native.and_then(
-            <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32
-        ),
-        Some(azalea_registry::builtin::EntityKind::Player)
+        native
+            .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32),
+        Some(pomme_registry::builtin::EntityKind::Player)
     );
     assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
     let angle = pomme_protocol::entity::unpack_degrees;
@@ -4453,7 +4440,7 @@ fn translate_container_set_content_763() {
         ContainerPacket::Content {
             container_id: 1,
             state_id: 2,
-            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            items: vec![pomme_stack(pomme_registry::builtin::ItemKind::Stone, 3)],
             carried: None,
         }
     );
@@ -4929,10 +4916,10 @@ fn translate_explode_777() {
 fn azalea_spawn_info(
     previous: Option<azalea_core::game_type::GameMode>,
 ) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-        dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
+        dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
         dimension: "minecraft:overworld".into(),
         seed: 42,
         game_type: azalea_core::game_type::GameMode::Survival,
@@ -6224,8 +6211,8 @@ fn pomme_data_value(
 ) -> Option<pomme_protocol::entity_data::Value> {
     use azalea_buf::AzBuf;
     use azalea_entity::EntityDataValue;
-    use azalea_registry::{DataRegistry, Registry};
     use pomme_protocol::entity_data::{Value, Variant};
+    use pomme_registry::{DataRegistry, Registry};
 
     Some(match value {
         EntityDataValue::Byte(v) => Value::Byte(*v),
@@ -6379,7 +6366,7 @@ fn entity_packets_match_azalea() {
         ClientboundGamePacket::AddEntity(c_add_entity::ClientboundAddEntity {
             id,
             uuid: uuid::Uuid::from_u128(42),
-            entity_type: azalea_registry::builtin::EntityKind::Zombie,
+            entity_type: pomme_registry::builtin::EntityKind::Zombie,
             position,
             movement: LpVec3::from(movement),
             x_rot: -64,
@@ -6393,8 +6380,8 @@ fn entity_packets_match_azalea() {
     };
     assert_eq!(uuid, 42);
     assert_eq!(
-        <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32(entity_type),
-        Some(azalea_registry::builtin::EntityKind::Zombie)
+        <pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32(entity_type),
+        Some(pomme_registry::builtin::EntityKind::Zombie)
     );
     assert_eq!(p, dvec(position));
     assert!((m - dvec(movement)).abs().max_element() < 1e-3);
@@ -6652,9 +6639,9 @@ fn player_packets_match_azalea() {
     use azalea_protocol::packets::game::c_game_event::EventType;
     use azalea_protocol::packets::game::c_player_abilities::PlayerAbilitiesFlags;
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{Attribute, MobEffect};
     use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{Attribute, MobEffect};
 
     let decode = |name, packet| decode_azalea(name, packet, player::read);
     let cases = [
@@ -6844,9 +6831,9 @@ fn block_packets_match_azalea() {
     use azalea_block::BlockState;
     use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{BlockEntityKind, BlockKind};
     use pomme_protocol::block::{self, BlockPacket};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{BlockEntityKind, BlockKind};
 
     let decode = |name, packet| decode_azalea(name, packet, block::read);
     let pos = BlockPos::new(-3, -60, 4);
@@ -6946,9 +6933,9 @@ fn chunk_packets_match_azalea() {
     use azalea_core::heightmap_kind::HeightmapKind;
     use azalea_core::position::ChunkPos;
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::BlockEntityKind;
     use pomme_protocol::chunk::{BlockEntityInfo, ChunkBiomes, LightData};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::BlockEntityKind;
 
     let decode = |name, packet| decode_azalea(name, packet, chunk::read);
     let light_data = || c_light_update::ClientboundLightUpdatePacketData {
@@ -7081,8 +7068,8 @@ fn container_packets_match_azalea() {
     use azalea_inventory::components::EquipmentSlot;
     use azalea_inventory::{ItemStack, ItemStackData};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{ItemKind, MenuKind};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{ItemKind, MenuKind};
 
     let decode = |name, packet| decode_azalea(name, packet, container::read);
     let azalea_stack = |kind, count| {
@@ -7706,8 +7693,8 @@ fn lifecycle_packets_match_azalea() {
     use azalea_core::game_type::GameMode;
     use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::DataRegistry;
     use pomme_protocol::lifecycle::{ClockState, Login, SpawnInfo};
+    use pomme_registry::DataRegistry;
 
     let decode = |name, packet| decode_azalea(name, packet, lifecycle::read);
     let spawn = SpawnInfo {
@@ -7820,7 +7807,7 @@ fn lifecycle_packets_match_azalea() {
             ClientboundGamePacket::SetTime(c_set_time::ClientboundSetTime {
                 game_time: 100,
                 clock_updates: [(
-                    azalea_registry::data::WorldClock::new_raw(1),
+                    pomme_registry::data::WorldClock::new_raw(1),
                     c_set_time::ClockState {
                         total_ticks: 6000,
                         partial_tick: 0.5,

@@ -10,7 +10,7 @@ use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 
 use crate::player::inventory::{ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START};
 use crate::recipe::RecipeBookState;

@@ -3,11 +3,11 @@
 //! and only `block_entity_data`'s type needs a registry remap.
 
 use azalea_block::BlockState;
-use azalea_registry::Registry;
-use azalea_registry::builtin::BlockEntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::block::{self, BlockPacket};
 use pomme_protocol::codec::DecodeResult;
+use pomme_registry::Registry;
+use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use super::NetworkEvent;

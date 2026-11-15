@@ -8,8 +8,8 @@ use azalea_inventory::components::{
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::{DataComponentKind, ItemKind, Potion};
-use azalea_registry::{DataRegistry, DataRegistryKey, Holder, Registry};
+use pomme_registry::builtin::{DataComponentKind, ItemKind, Potion};
+use pomme_registry::{DataRegistry, DataRegistryKey, Holder, Registry};
 
 use super::common::{
     FONT_SIZE, WHITE, hit_test, push_item_decorations, push_item_glyph, push_tooltip,
@@ -1257,10 +1257,10 @@ fn direct_trim_pattern_name(pattern: &TrimPatternHolder) -> String {
     match pattern {
         TrimPatternHolder::Direct { description, .. } => description.plain_text(),
         TrimPatternHolder::Reference(id) => {
-            let Some(key) = azalea_registry::data::TrimPatternKey::ALL.get(*id as usize) else {
+            let Some(key) = pomme_registry::data::TrimPatternKey::ALL.get(*id as usize) else {
                 return format!("Trim Pattern #{id}");
             };
-            let ident: azalea_registry::identifier::Identifier = key.clone().into_ident();
+            let ident: pomme_registry::identifier::Identifier = key.clone().into_ident();
             let translation_key = format!("trim_pattern.minecraft.{}", ident.path());
             crate::lang::translate(&translation_key)
                 .map(str::to_owned)
@@ -1272,17 +1272,17 @@ fn direct_trim_pattern_name(pattern: &TrimPatternHolder) -> String {
 }
 
 fn direct_trim_material_name(
-    material: &Holder<azalea_registry::data::TrimMaterial, components::DirectTrimMaterial>,
+    material: &Holder<pomme_registry::data::TrimMaterial, components::DirectTrimMaterial>,
 ) -> String {
     match material {
         Holder::Direct(material) => material.description.to_string(),
         Holder::Reference(material) => {
             let Some(key) =
-                azalea_registry::data::TrimMaterialKey::ALL.get(material.protocol_id() as usize)
+                pomme_registry::data::TrimMaterialKey::ALL.get(material.protocol_id() as usize)
             else {
                 return format!("Trim Material #{}", material.protocol_id() as usize);
             };
-            let ident: azalea_registry::identifier::Identifier = key.clone().into_ident();
+            let ident: pomme_registry::identifier::Identifier = key.clone().into_ident();
             let translation_key = format!("trim_material.minecraft.{}", ident.path());
             crate::lang::translate(&translation_key)
                 .map(str::to_owned)
@@ -1422,7 +1422,7 @@ fn ingredient_items<'a>(
 
 #[derive(Clone, Debug, PartialEq)]
 struct ResolvedDirectTrim {
-    material: Holder<azalea_registry::data::TrimMaterial, components::DirectTrimMaterial>,
+    material: Holder<pomme_registry::data::TrimMaterial, components::DirectTrimMaterial>,
     pattern: TrimPatternHolder,
 }
 
@@ -1900,7 +1900,7 @@ fn apply_trim(
     {
         let trim = Trim {
             material: *material,
-            pattern: azalea_registry::data::TrimPattern::new_raw(*pattern),
+            pattern: pomme_registry::data::TrimPattern::new_raw(*pattern),
         };
         if base.direct_trim.is_none()
             && base.stack.get_component::<Trim>().as_deref() == Some(&trim)
@@ -2152,7 +2152,7 @@ enum GhostSlotRole {
 }
 
 fn vanilla_fuel_items(tags: &ItemTags) -> Vec<u32> {
-    use azalea_registry::builtin::ItemKind as I;
+    use pomme_registry::builtin::ItemKind as I;
 
     fn push_item(out: &mut Vec<u32>, seen: &mut HashSet<u32>, item: I) {
         let id = item.to_u32();
@@ -3000,7 +3000,7 @@ mod tests {
     fn player_craftability_excludes_armor_offhand_and_damaged_stacks() {
         use azalea_inventory::DataComponentPatch;
         use azalea_inventory::components::{Damage, DataComponentUnion};
-        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
         let diamond = ItemKind::Diamond.to_u32();
         let mut slots = vec![ItemStack::Empty; 46];
@@ -3031,7 +3031,7 @@ mod tests {
 
     #[test]
     fn furnace_craftability_counts_output_container_stack() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let diamond = ItemKind::Diamond.to_u32();
         let mut slots = vec![ItemStack::Empty; 39];
@@ -3109,7 +3109,7 @@ mod tests {
 
     #[test]
     fn vanilla_fuel_items_preserve_tag_order_and_exclude_non_flammable_wood() {
-        use azalea_registry::builtin::ItemKind as I;
+        use pomme_registry::builtin::ItemKind as I;
 
         let oak = I::OakLog.to_u32();
         let mangrove = I::MangroveLog.to_u32();
@@ -3195,7 +3195,7 @@ mod tests {
 
     #[test]
     fn grouped_recipe_tooltip_appends_explicit_more_line_to_full_stack_tooltip() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let stack = ResolvedSlotStack::plain(ItemStackData::new(ItemKind::OakPlanks, 1));
         let mut lines = stack_tooltip_lines(&stack);
@@ -3309,7 +3309,7 @@ mod tests {
         use azalea_chat::FormattedText;
         use azalea_inventory::DataComponentPatch;
         use azalea_inventory::components::{CustomName, DataComponentUnion, Lore};
-        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
         let mut patch = DataComponentPatch::default();
         unsafe {
@@ -3554,7 +3554,7 @@ mod tests {
 
     #[test]
     fn with_any_potion_resolves_component_bearing_stacks() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let book = RecipeBookState::default();
         let slot =
@@ -3572,7 +3572,7 @@ mod tests {
 
     #[test]
     fn only_with_component_uses_effective_dye_defaults() {
-        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::OnlyWithComponent {
@@ -3590,7 +3590,7 @@ mod tests {
 
     #[test]
     fn only_with_component_supports_non_dye_default_components() {
-        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::OnlyWithComponent {
@@ -3613,7 +3613,7 @@ mod tests {
 
     #[test]
     fn dyed_demo_writes_vanilla_dyed_color_component() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::Dyed {
@@ -3632,7 +3632,7 @@ mod tests {
 
     #[test]
     fn smithing_trim_demo_writes_trim_component() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::SmithingTrim {
@@ -3652,7 +3652,7 @@ mod tests {
 
     #[test]
     fn direct_trim_pattern_is_preserved_in_resolved_stack_and_tooltip() {
-        use azalea_registry::builtin::ItemKind;
+        use pomme_registry::builtin::ItemKind;
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::SmithingTrim {
@@ -3687,7 +3687,7 @@ mod tests {
         use azalea_inventory::components::{
             AssetInfo, DataComponentUnion, DirectTrimMaterial, MaterialAssetGroup,
         };
-        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
         let mut patch = DataComponentPatch::default();
         let direct_material = DirectTrimMaterial {

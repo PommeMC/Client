@@ -2,7 +2,7 @@ use std::fmt::{self, Debug};
 use std::io::{self, Cursor, Write};
 
 use azalea_buf::{AzBuf, AzBufVar, BufReadError};
-use azalea_registry::builtin::BlockKind;
+use pomme_registry::builtin::BlockKind;
 
 use crate::Property;
 

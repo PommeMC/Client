@@ -8,7 +8,7 @@ pub const NO_SELECTION: i32 = -1;
 /// Vanilla `ItemTags.BUNDLES`: the items `BundleItem` and `BundleMouseActions`
 /// act on.
 pub fn is_bundle(data: &ItemStackData) -> bool {
-    azalea_registry::tags::items::BUNDLES.contains(&data.kind)
+    pomme_registry::tags::items::BUNDLES.contains(&data.kind)
 }
 
 pub fn contents(data: &ItemStackData) -> Option<std::borrow::Cow<'_, BundleContents>> {
@@ -23,7 +23,7 @@ pub fn set_contents(stack: &mut ItemStack, contents: BundleContents) {
     // SAFETY: the union was constructed from BundleContents.
     unsafe {
         data.component_patch.unchecked_insert_component(
-            azalea_registry::builtin::DataComponentKind::BundleContents,
+            pomme_registry::builtin::DataComponentKind::BundleContents,
             Some(component),
         );
     }
@@ -298,7 +298,7 @@ pub fn push_tooltip(
     let scale = crate::ui::common::FONT_SIZE * gui_scale;
     let contents_shown = display.is_none_or(|d| {
         !d.hidden_components
-            .contains(&azalea_registry::builtin::DataComponentKind::BundleContents)
+            .contains(&pomme_registry::builtin::DataComponentKind::BundleContents)
     });
     let image = contents(data)
         .filter(|_| contents_shown)
@@ -329,7 +329,7 @@ pub fn push_tooltip(
 
 #[cfg(test)]
 mod tests {
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
 
     use super::*;
 

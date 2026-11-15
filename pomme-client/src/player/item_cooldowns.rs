@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::UseCooldown;
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 
 use super::interaction::stack_component;
 

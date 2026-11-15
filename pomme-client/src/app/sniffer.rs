@@ -1,8 +1,8 @@
 //! The sniffer's client-side sounds and particles: `SnifferSoundInstance`
 //! (entity event 63) and the client half of `Sniffer.tick`.
 
-use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
+use pomme_registry::builtin::EntityKind;
 
 use crate::app::phases::in_game::GameState;
 use crate::audio::{AudioEngine, CATEGORY_NEUTRAL, SoundRef};

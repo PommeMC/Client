@@ -2,13 +2,13 @@
 //! from them.
 
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_registry::identifier::Identifier;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::configuration::{self, ConfigPacket, RegistryData};
 use pomme_protocol::lifecycle::{self, LifecyclePacket};
 use pomme_protocol::resource_pack::{self, ResourcePackPacket};
 use pomme_protocol::tags::{self, Tags};
 use pomme_protocol::{Direction, KnownPack, PacketTable, Phase};
+use pomme_registry::identifier::Identifier;
 use simdnbt::owned::NbtTag;
 
 /// A configuration packet pomme acts on, by the module that reads it.

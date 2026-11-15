@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use azalea_inventory::components::{AttributeModifiers, MaxDamage, Rarity};
 use azalea_inventory::default_components::get_default_component;
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 use simdnbt::owned::{NbtCompound, NbtTag};
 
 use super::common;
@@ -2632,13 +2632,13 @@ fn stack_json(
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> serde_json::Value {
     use azalea_inventory::components::{Enchantments, StoredEnchantments};
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     let stack = azalea_inventory::ItemStack::Present(data.clone())
         .with_component::<Enchantments>(None)
         .with_component::<StoredEnchantments>(None);
     let mut value = serde_json::to_value(&stack).unwrap_or_default();
-    let names = |levels: &std::collections::HashMap<azalea_registry::data::Enchantment, i32>| {
+    let names = |levels: &std::collections::HashMap<pomme_registry::data::Enchantment, i32>| {
         levels
             .iter()
             .filter_map(|(enchantment, level)| {
@@ -5094,7 +5094,7 @@ mod tests {
             EquipmentSlotGroup,
         };
         let entry = AttributeModifiersEntry {
-            kind: azalea_registry::builtin::Attribute::Armor,
+            kind: pomme_registry::builtin::Attribute::Armor,
             modifier: AttributeModifier {
                 id: "minecraft:a".into(),
                 amount: 1.0,

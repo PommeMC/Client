@@ -1,6 +1,6 @@
 use azalea_inventory::components::EquipmentSlot;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 
 pub const PLAYER_SLOTS: usize = 46;
 pub const HOTBAR_START: usize = 36;
@@ -146,7 +146,7 @@ fn non_empty(stack: &ItemStack) -> Option<&ItemStackData> {
 
 /// Vanilla `Item.canFitInsideContainerItems`: false only for shulker boxes.
 pub fn can_fit_inside_container_items(kind: ItemKind) -> bool {
-    !azalea_registry::tags::items::SHULKER_BOXES.contains(&kind)
+    !pomme_registry::tags::items::SHULKER_BOXES.contains(&kind)
 }
 
 pub fn item_resource_name(kind: ItemKind) -> String {

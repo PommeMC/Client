@@ -1,317 +1,64 @@
-#![doc = include_str!("../README.md")]
-// The `AzBuf` derive writes `field: field` for every field it reads.
-#![allow(clippy::redundant_field_names)]
+//! The game's registries as Rust types.
+//!
+//! [`builtin`] holds the registries fixed per game version (items, entity
+//! types, sounds), each an enum in protocol-id order. [`data`] holds the ones
+//! a server sends on join (biomes, enchantments), each an id plus the keys the
+//! game's own data pack names. [`tags`] holds the data pack's tags.
+//!
+//! The entries are generated from `reference/<version>` by `tools/typegen`
+//! (`just typegen <version>`); everything else is hand-written.
 
-// `tools/typegen` generates the contents of the macros in `builtin` and
-// `data`; what surrounds them is hand-written, so the registry enums can
-// carry doc comments.
+#[macro_use]
+mod macros;
 
+#[cfg(feature = "azalea")]
+mod azalea;
 pub mod builtin;
 pub mod data;
 pub mod identifier;
 pub mod tags;
 
-use std::fmt::{self, Debug};
 use std::hash::Hash;
-use std::io::{self, Cursor, Write};
 
-use azalea_buf::{AzBuf, AzBufVar, BufReadError};
-#[cfg(feature = "serde")]
-use serde::Serialize;
-use simdnbt::FromNbtTag;
-use simdnbt::borrow::NbtTag;
+pub use identifier::Identifier;
 
-use crate::identifier::Identifier;
-
-// TODO: remove this next update
-macro_rules! define_deprecated_builtin {
-    ($($r:ident) *) => {
-        $(
-            #[doc(hidden)]
-            #[deprecated = concat!("moved to `azalea_registry::builtin::", stringify!($r), "`")]
-            pub type $r = builtin::$r;
-        )*
-    };
-}
-define_deprecated_builtin!(Activity Attribute BlockEntityKind BlockPredicateKind ChunkStatus CommandArgumentKind CustomStat EntityKind FloatProviderKind Fluid GameEvent HeightProviderKind IntProviderKind LootConditionKind LootFunctionKind LootNbtProviderKind LootNumberProviderKind LootPoolEntryKind LootScoreProviderKind MemoryModuleKind MobEffect ParticleKind PointOfInterestKind PosRuleTest PositionSourceKind Potion RecipeSerializer RecipeKind RuleTest SensorKind SoundEvent StatKind VillagerProfession VillagerKind WorldgenBiomeSource WorldgenBlockStateProviderKind WorldgenCarver WorldgenChunkGenerator WorldgenDensityFunctionKind WorldgenFeature WorldgenFeatureSizeKind WorldgenFoliagePlacerKind WorldgenMaterialCondition WorldgenMaterialRule WorldgenPlacementModifierKind WorldgenRootPlacerKind WorldgenStructurePiece WorldgenStructurePlacement WorldgenStructurePoolElement WorldgenStructureProcessor WorldgenStructureKind WorldgenTreeDecoratorKind WorldgenTrunkPlacerKind RuleBlockEntityModifier CreativeModeTab MenuKind WorldgenPoolAliasBinding TriggerKind NumberFormatKind DataComponentKind EntitySubPredicateKind MapDecorationKind EnchantmentEffectComponentKind EnchantmentEntityEffectKind EnchantmentLevelBasedValueKind EnchantmentLocationBasedEffectKind EnchantmentProviderKind EnchantmentValueEffectKind DecoratedPotPattern ConsumeEffectKind RecipeBookCategory RecipeDisplay SlotDisplay TicketKind TestEnvironmentDefinitionKind TestFunction TestInstanceKind DataComponentPredicateKind SpawnConditionKind DialogBodyKind DialogKind InputControlKind DialogActionKind DebugSubscription IncomingRpcMethods OutgoingRpcMethods AttributeKind EnvironmentAttribute GameRule PermissionCheckKind PermissionKind SlotSourceKind);
-macro_rules! define_deprecated_data {
-    ($($r:ident) *) => {
-        $(
-            #[doc(hidden)]
-            #[deprecated = concat!("moved to `azalea_registry::data::", stringify!($r), "`")]
-            pub type $r = data::$r;
-        )*
-    };
-}
-define_deprecated_data!(Enchantment DamageKind Dialog WolfSoundVariant CowVariant ChickenVariant FrogVariant CatVariant PigVariant PaintingVariant WolfVariant ZombieNautilusVariant Biome);
-
-#[doc(hidden)]
-#[deprecated = "renamed to `azalea_registry::builtin::ItemKind`"]
-pub type Item = builtin::ItemKind;
-#[doc(hidden)]
-#[deprecated = "renamed to `azalea_registry::builtin::BlockKind`"]
-pub type Block = builtin::BlockKind;
-#[doc(hidden)]
-#[deprecated = "renamed to `azalea_registry::data::DimensionKind`"]
-pub type DimensionType = data::DimensionKind;
-
-pub trait Registry: AzBuf + PartialEq + PartialOrd + Ord + Copy + Hash
-where
-    Self: Sized,
-{
-    fn from_u32(value: u32) -> Option<Self>;
+/// A registry whose entries are known by numeric id on the wire.
+pub trait Registry: Copy + Ord + Hash {
+    fn from_u32(id: u32) -> Option<Self>;
     fn to_u32(&self) -> u32;
 }
 
-/// A registry that might not be present.
-///
-/// This is transmitted as a single varint in the protocol.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct OptionalRegistry<T: Registry>(pub Option<T>);
-
-impl<T: Registry> AzBuf for OptionalRegistry<T> {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        Ok(OptionalRegistry(match u32::azalea_read_var(buf)? {
-            0 => None,
-            value => Some(
-                T::from_u32(value - 1)
-                    .ok_or(BufReadError::UnexpectedEnumVariant { id: value as i32 })?,
-            ),
-        }))
-    }
-    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        match &self.0 {
-            None => 0u32.azalea_write_var(buf),
-            Some(value) => (value.to_u32() + 1).azalea_write_var(buf),
-        }
-    }
-}
-
-/// A registry that will either take an ID or a resource location.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum CustomRegistry<D: Registry, C: AzBuf> {
-    Direct(D),
-    Custom(C),
-}
-
-impl<D: Registry, C: AzBuf> AzBuf for CustomRegistry<D, C> {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let direct_registry = OptionalRegistry::<D>::azalea_read(buf)?;
-        if let Some(direct_registry) = direct_registry.0 {
-            return Ok(CustomRegistry::Direct(direct_registry));
-        }
-        Ok(CustomRegistry::Custom(C::azalea_read(buf)?))
-    }
-    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        match self {
-            CustomRegistry::Direct(direct_registry) => {
-                // write the id + 1
-                (direct_registry.to_u32() + 1).azalea_write_var(buf)
-            }
-            CustomRegistry::Custom(custom_registry) => {
-                // write 0, then the custom registry
-                0u32.azalea_write_var(buf)?;
-                custom_registry.azalea_write(buf)
-            }
-        }
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum HolderSet<D: Registry, Identifier: AzBuf> {
-    Direct {
-        contents: Vec<D>,
-    },
-    Named {
-        key: Identifier,
-        contents: Vec<Identifier>,
-    },
-}
-impl<D: Registry, Identifier: AzBuf> AzBuf for HolderSet<D, Identifier> {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let size = i32::azalea_read_var(buf)?.wrapping_sub(1);
-        if size == -1 {
-            let key = Identifier::azalea_read(buf)?;
-            Ok(Self::Named {
-                key,
-                contents: Vec::new(),
-            })
-        } else {
-            let mut contents = Vec::new();
-            for _ in 0..size {
-                contents.push(D::azalea_read(buf)?);
-            }
-            Ok(Self::Direct { contents })
-        }
-    }
-    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        match self {
-            Self::Direct { contents } => {
-                (contents.len() as i32 + 1).azalea_write_var(buf)?;
-                for item in contents {
-                    item.azalea_write(buf)?;
-                }
-            }
-            Self::Named { key, contents: _ } => {
-                0i32.azalea_write_var(buf)?;
-                key.azalea_write(buf)?;
-            }
-        }
-        Ok(())
-    }
-}
-impl<D: Registry + Debug, Identifier: AzBuf + Debug> Debug for HolderSet<D, Identifier> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Direct { contents } => f.debug_list().entries(contents).finish(),
-            Self::Named { key, contents } => f
-                .debug_struct("Named")
-                .field("key", key)
-                .field("contents", contents)
-                .finish(),
-        }
-    }
-}
-impl<D: Registry, Identifier: AzBuf> From<Vec<D>> for HolderSet<D, Identifier> {
-    fn from(contents: Vec<D>) -> Self {
-        Self::Direct { contents }
-    }
-}
-#[cfg(feature = "serde")]
-impl<D: Registry + Serialize, Identifier: AzBuf + Serialize> Serialize
-    for HolderSet<D, Identifier>
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Direct { contents } => {
-                if contents.len() == 1 {
-                    contents[0].serialize(serializer)
-                } else {
-                    contents.serialize(serializer)
-                }
-            }
-            Self::Named { key, contents: _ } => key.serialize(serializer),
-        }
-    }
-}
-impl<D: Registry, Identifier: AzBuf> Default for HolderSet<D, Identifier> {
-    fn default() -> Self {
-        Self::Direct {
-            contents: Vec::new(),
-        }
-    }
-}
-impl<D: Registry, Identifier: AzBuf + From<D> + PartialEq> HolderSet<D, Identifier> {
-    pub fn contains(&self, value: D) -> bool {
-        match self {
-            HolderSet::Direct { contents } => contents.contains(&value),
-            HolderSet::Named { key: _, contents } => contents.contains(&Identifier::from(value)),
-        }
-    }
-}
-
-/// A reference to either a registry or a custom value (usually something with
-/// an `Identifier`).
-pub enum Holder<R: Registry, Direct: AzBuf> {
-    Reference(R),
-    Direct(Direct),
-}
-impl<R: Registry, Direct: AzBuf> AzBuf for Holder<R, Direct> {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let id = u32::azalea_read_var(buf)?;
-        if id == 0 {
-            Ok(Self::Direct(Direct::azalea_read(buf)?))
-        } else {
-            let id = id - 1;
-            let Some(value) = R::from_u32(id) else {
-                return Err(BufReadError::UnexpectedEnumVariant { id: id as i32 });
-            };
-            Ok(Self::Reference(value))
-        }
-    }
-    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        match self {
-            Self::Reference(value) => (value.to_u32() + 1).azalea_write_var(buf),
-            Self::Direct(value) => {
-                0u32.azalea_write_var(buf)?;
-                value.azalea_write(buf)
-            }
-        }
-    }
-}
-impl<R: Registry + Debug, Direct: AzBuf + Debug> Debug for Holder<R, Direct> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Reference(value) => f.debug_tuple("Reference").field(value).finish(),
-            Self::Direct(value) => f.debug_tuple("Direct").field(value).finish(),
-        }
-    }
-}
-impl<R: Registry + Clone, Direct: AzBuf + Clone> Clone for Holder<R, Direct> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Reference(value) => Self::Reference(*value),
-            Self::Direct(value) => Self::Direct(value.clone()),
-        }
-    }
-}
-impl<R: Registry + PartialEq, Direct: AzBuf + PartialEq> PartialEq for Holder<R, Direct> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Reference(a), Self::Reference(b)) => a == b,
-            (Self::Direct(a), Self::Direct(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-impl<R: Registry + Default, Direct: AzBuf> Default for Holder<R, Direct> {
-    fn default() -> Self {
-        Self::Reference(R::default())
-    }
-}
-#[cfg(feature = "serde")]
-impl<R: Registry + Serialize, Direct: AzBuf + Serialize> Serialize for Holder<R, Direct> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Reference(value) => value.serialize(serializer),
-            Self::Direct(value) => value.serialize(serializer),
-        }
-    }
-}
-
-impl<R: Registry + FromNbtTag, Direct: AzBuf + FromNbtTag> FromNbtTag for Holder<R, Direct> {
-    fn from_nbt_tag(tag: NbtTag) -> Option<Self> {
-        if let Some(reference) = R::from_nbt_tag(tag) {
-            return Some(Self::Reference(reference));
-        };
-        Direct::from_nbt_tag(tag).map(Self::Direct)
-    }
-}
-
-/// A registry which has its values decided by the server in the
-/// `ClientboundRegistryData` packet.
-///
-/// These can be resolved into their actual values with
-/// `ResolvableDataRegistry` from azalea-core.
-pub trait DataRegistry: AzBuf + PartialEq + PartialOrd + Ord + Copy + Hash {
+/// A registry a server sends on join, so an id means nothing until that
+/// connection's entries are known.
+pub trait DataRegistry: Copy + Ord + Hash {
+    /// The registry's path, like `worldgen/biome`.
     const NAME: &'static str;
     type Key: DataRegistryKey;
 
     fn protocol_id(&self) -> u32;
     fn new_raw(id: u32) -> Self;
 }
+
+impl<T: DataRegistry> Registry for T {
+    fn from_u32(id: u32) -> Option<Self> {
+        Some(Self::new_raw(id))
+    }
+
+    fn to_u32(&self) -> u32 {
+        self.protocol_id()
+    }
+}
+
+/// A data registry's entry by name: one the game's data pack has, or any
+/// other identifier.
 pub trait DataRegistryKey {
     type Borrow<'a>: DataRegistryKeyRef<'a>;
 
     fn from_ident(ident: Identifier) -> Self;
     fn into_ident(self) -> Identifier;
 }
+
+/// A [`DataRegistryKey`] borrowing its identifier.
 pub trait DataRegistryKeyRef<'a> {
     type Owned: DataRegistryKey;
 
@@ -319,12 +66,120 @@ pub trait DataRegistryKeyRef<'a> {
     fn from_ident(ident: &'a Identifier) -> Self;
     fn into_ident(self) -> Identifier;
 }
-impl<T: DataRegistry> Registry for T {
-    fn from_u32(value: u32) -> Option<Self> {
-        Some(Self::new_raw(value))
+
+/// Vanilla `Holder`: a registry entry, or a value sent in its place.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Holder<R, Direct> {
+    Reference(R),
+    Direct(Direct),
+}
+
+impl<R: Default, Direct> Default for Holder<R, Direct> {
+    fn default() -> Self {
+        Self::Reference(R::default())
+    }
+}
+
+/// Vanilla `HolderSet`: a list of registry entries, or a tag naming them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HolderSet<R, Key> {
+    Direct {
+        contents: Vec<R>,
+    },
+    /// `contents` is empty until the tag is resolved.
+    Named {
+        key: Key,
+        contents: Vec<Key>,
+    },
+}
+
+impl<R, Key> Default for HolderSet<R, Key> {
+    fn default() -> Self {
+        Self::Direct {
+            contents: Vec::new(),
+        }
+    }
+}
+
+impl<R, Key> From<Vec<R>> for HolderSet<R, Key> {
+    fn from(contents: Vec<R>) -> Self {
+        Self::Direct { contents }
+    }
+}
+
+impl<R: PartialEq, Key: From<R> + PartialEq> HolderSet<R, Key> {
+    pub fn contains(&self, value: R) -> bool {
+        match self {
+            Self::Direct { contents } => contents.contains(&value),
+            Self::Named { contents, .. } => contents.contains(&Key::from(value)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtin::{EntityKind, ItemKind};
+    use super::data::{Biome, BiomeKey};
+    use super::*;
+
+    #[test]
+    fn a_builtin_entry_is_its_protocol_id_and_its_name() {
+        assert_eq!(ItemKind::Air.to_u32(), 0);
+        assert_eq!(ItemKind::from_u32(1), Some(ItemKind::Stone));
+        assert_eq!(ItemKind::Stone.to_str(), "minecraft:stone");
+        assert_eq!(ItemKind::Stone.to_string(), "minecraft:stone");
+        assert_eq!("stone".parse(), Ok(ItemKind::Stone));
+        assert_eq!("minecraft:stone".parse(), Ok(ItemKind::Stone));
+        assert_eq!("other:stone".parse::<ItemKind>(), Err(()));
+        assert_eq!("not_an_item".parse::<ItemKind>(), Err(()));
     }
 
-    fn to_u32(&self) -> u32 {
-        self.protocol_id()
+    #[test]
+    fn an_entry_outside_the_default_namespace_keeps_its_own() {
+        use super::builtin::CommandArgumentKind;
+        assert_eq!(CommandArgumentKind::Bool.to_str(), "brigadier:bool");
+        assert_eq!("brigadier:bool".parse(), Ok(CommandArgumentKind::Bool));
+        assert_eq!("bool".parse::<CommandArgumentKind>(), Err(()));
+        assert_eq!(CommandArgumentKind::Entity.to_str(), "minecraft:entity");
+    }
+
+    #[test]
+    fn every_id_round_trips_and_the_one_past_the_end_is_none() {
+        for (id, &kind) in EntityKind::ALL.iter().enumerate() {
+            assert_eq!(kind.to_u32(), id as u32);
+            assert_eq!(EntityKind::from_u32(id as u32), Some(kind));
+            assert_eq!(kind.to_str().parse(), Ok(kind));
+        }
+        assert_eq!(EntityKind::from_u32(EntityKind::ALL.len() as u32), None);
+        assert_eq!(EntityKind::try_from(u32::MAX), Err(()));
+    }
+
+    #[test]
+    fn a_data_registry_is_an_opaque_id_with_named_keys() {
+        assert_eq!(Biome::NAME, "worldgen/biome");
+        assert_eq!(Biome::from_u32(7).map(|b| b.to_u32()), Some(7));
+        let plains = Identifier::new("minecraft:plains");
+        assert_eq!(BiomeKey::from(plains.clone()), BiomeKey::Plains);
+        assert_eq!(Identifier::from(<BiomeKey>::Plains), plains);
+        let custom = Identifier::new("mod:swamp");
+        assert_eq!(
+            BiomeKey::from(custom.clone()),
+            BiomeKey::Other(custom.clone())
+        );
+        assert_eq!(Identifier::from(BiomeKey::Other(custom.clone())), custom);
+        assert_eq!(<BiomeKey<&Identifier>>::from(&plains), BiomeKey::Plains);
+    }
+
+    #[test]
+    fn a_holder_set_holds_its_entries_or_a_tags() {
+        let direct: HolderSet<ItemKind, Identifier> = vec![ItemKind::Stone].into();
+        assert!(direct.contains(ItemKind::Stone));
+        assert!(!direct.contains(ItemKind::Air));
+        let named = HolderSet::<ItemKind, Identifier>::Named {
+            key: Identifier::new("planks"),
+            contents: vec![Identifier::new("oak_planks")],
+        };
+        assert!(named.contains(ItemKind::OakPlanks));
+        assert!(!named.contains(ItemKind::Stone));
     }
 }

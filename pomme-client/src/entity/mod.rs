@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::EntityKind;
 use dimensions::EntityDimensions;
 use glam::DVec3;
+use pomme_registry::builtin::EntityKind;
 
 use crate::attribute::AttributeMap;
 use crate::entity::components::{LookDirection, Position};
@@ -2826,7 +2826,7 @@ fn probes_water(kind: &EntityKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
 
     use super::*;
 

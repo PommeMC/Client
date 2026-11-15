@@ -2,8 +2,8 @@ use azalea_inventory::components::{
     CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
 };
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::ItemKind;
-use azalea_registry::tags::items::BUNDLES;
+use pomme_registry::builtin::ItemKind;
+use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
@@ -1252,7 +1252,7 @@ pub struct SliderResult {
 mod tests {
     use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
     use azalea_inventory::{ItemStack, ItemStackData};
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,

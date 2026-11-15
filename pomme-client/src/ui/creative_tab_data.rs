@@ -1,4 +1,4 @@
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 
 pub static BUILDING_BLOCKS_ITEMS: &[ItemKind] = &[
     ItemKind::OakLog,

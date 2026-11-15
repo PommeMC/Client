@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{CustomData, Tool as WireTool};
-use azalea_registry::builtin::{BlockKind, DataComponentKind, ItemKind};
-use azalea_registry::identifier::Identifier;
-use azalea_registry::{HolderSet, Registry};
 use pomme_protocol::version::NATIVE;
+use pomme_registry::builtin::{BlockKind, DataComponentKind, ItemKind};
+use pomme_registry::identifier::Identifier;
+use pomme_registry::{HolderSet, Registry};
 
 use crate::world::block::{BlockStateTable, BlockTags};
 

@@ -1,0 +1,14 @@
+[package]
+name = "azalea-registry"
+description = "pomme-registry under the name the azalea crates still in the tree depend on."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+pomme-registry = { path = "..", features = ["azalea"] }
+
+[features]
+# Upstream's feature, which its dependents turn on; always on here.
+serde = []
+default = ["serde"]

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use azalea_registry::builtin::BlockKind;
+use pomme_registry::builtin::BlockKind;
 
 use crate::{BlockBehavior, BlockState, BlockTrait, InvalidPropertyError};
 

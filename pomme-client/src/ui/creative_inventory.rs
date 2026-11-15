@@ -8,7 +8,7 @@ use azalea_inventory::components::{
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
+use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,

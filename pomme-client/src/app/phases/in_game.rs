@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
+use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::input::{Action, InputKey, KeyBindings};
@@ -135,7 +135,7 @@ pub struct OpenContainer {
     pub id: i32,
     pub title: String,
     #[cfg(feature = "test-harness")]
-    pub menu: azalea_registry::builtin::MenuKind,
+    pub menu: pomme_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
     /// Menu slots in container indices; `inv_slots()` are backed by the
     /// player inventory.
@@ -5605,7 +5605,7 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     use super::{
         hand_visible, item_stack_seed, should_render_local_player, sleeping_head_pitch_deg,

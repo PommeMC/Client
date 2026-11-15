@@ -1,8 +1,8 @@
 //! Entity hitbox sizes: vanilla `EntityType.Builder.sized` for every type
 //! registered in `EntityTypes.java`.
 
-use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
+use pomme_registry::builtin::EntityKind;
 
 use crate::physics::aabb::Aabb;
 use crate::physics::movement::{DEG_TO_RAD, mth_cos, mth_sin};

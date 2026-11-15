@@ -2714,7 +2714,7 @@ fn chest_parts(y: f32) -> [EntityPart; 3] {
 /// The model for a boat `kind` and, for a boat (not a raft), its water patch
 /// alone, sharing its part list as overlays do.
 pub fn bake_boat(
-    kind: azalea_registry::builtin::EntityKind,
+    kind: pomme_registry::builtin::EntityKind,
 ) -> (BakedEntityModel, Option<BakedEntityModel>) {
     let raft = crate::entity::is_raft(kind);
     let mut parts = if raft { raft_parts() } else { boat_parts() };

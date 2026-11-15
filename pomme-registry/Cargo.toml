@@ -1,16 +1,16 @@
 [package]
-name = "azalea-registry"
-description = "Pomme's fork of azalea-registry; its tables are generated from the reference by tools/registrygen."
-version = "0.16.0+mc26.2"
+name = "pomme-registry"
+description = "The game's registries as Rust types, generated from the reference by tools/typegen."
+version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [dependencies]
-azalea-buf = { version = "0.16.0", default-features = false }
-azalea-registry-macros = { path = "azalea-registry-macros" }
-serde = { version = "1.0.228", optional = true, features = ["derive"] }
-simdnbt = "0.10.0"
+azalea-buf = { version = "0.16.0", default-features = false, optional = true }
+serde = { workspace = true, optional = true }
+simdnbt = { version = "0.10.0", optional = true }
 
 [features]
-serde = ["azalea-registry-macros/serde", "dep:serde"]
-default = ["serde"]
+# The traits the azalea crates still in the tree read these types through;
+# see `src/azalea.rs`. Goes when they do.
+azalea = ["dep:azalea-buf", "dep:serde", "dep:simdnbt"]

@@ -431,7 +431,7 @@ name = "azalea-block"
 version = "0.16.0+mc26.2"
 dependencies = [
  "azalea-buf",
- "azalea-registry",
+ "pomme-registry",
 ]
 
 [[package]]
@@ -624,18 +624,7 @@ dependencies = [
 name = "azalea-registry"
 version = "0.16.0+mc26.2"
 dependencies = [
- "azalea-buf",
- "azalea-registry-macros",
- "serde",
- "simdnbt",
-]
-
-[[package]]
-name = "azalea-registry-macros"
-version = "0.16.0+mc26.2"
-dependencies = [
- "quote",
- "syn 2.0.117",
+ "pomme-registry",
 ]
 
 [[package]]
@@ -4546,7 +4535,6 @@ dependencies = [
  "azalea-entity",
  "azalea-inventory",
  "azalea-protocol",
- "azalea-registry",
  "base64 0.23.1",
  "bytemuck",
  "chrono",
@@ -4581,6 +4569,7 @@ dependencies = [
  "pomme-gpu-allocator",
  "pomme-install",
  "pomme-protocol",
+ "pomme-registry",
  "pomme-singleplayer",
  "pyronyx",
  "rand 0.10.3",
@@ -4660,6 +4649,15 @@ dependencies = [
  "glam",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pomme-registry"
+version = "0.1.0"
+dependencies = [
+ "azalea-buf",
+ "serde",
+ "simdnbt",
 ]
 
 [[package]]
@@ -6803,6 +6801,13 @@ name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
+
+[[package]]
+name = "typegen"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "typenum"

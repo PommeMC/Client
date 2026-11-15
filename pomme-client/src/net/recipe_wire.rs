@@ -1,13 +1,13 @@
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use azalea_registry::Registry;
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
+use pomme_registry::Registry;
+use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::handler::send_ordered;
 use crate::net::NetworkEvent;
@@ -377,7 +377,7 @@ fn slot_first_item(slot: &SlotDisplay) -> Option<String> {
         SlotDisplay::WithRemainder { input, .. } => return slot_first_item(input),
         SlotDisplay::Composite(contents) => return contents.iter().find_map(slot_first_item),
     };
-    azalea_registry::builtin::ItemKind::from_u32(id).map(item_resource_name)
+    pomme_registry::builtin::ItemKind::from_u32(id).map(item_resource_name)
 }
 
 /// A length-prefixed list of `read` elements.

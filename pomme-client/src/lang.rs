@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, RwLock};
 
-use azalea_registry::builtin::ItemKind;
+use pomme_registry::builtin::ItemKind;
 
 use crate::player::inventory::item_resource_name;
 use crate::resources::{ResourceId, ResourceManager};

@@ -127,7 +127,7 @@ pub(super) fn translate_cooldown_767(
     let mut p = 0;
     let item = wire::read_varint(payload, &mut p)?;
     let item =
-        azalea_registry::builtin::ItemKind::from_u32(remaps.remap(ClientRegistry::Item, item)?)?;
+        pomme_registry::builtin::ItemKind::from_u32(remaps.remap(ClientRegistry::Item, item)?)?;
     let mut out = Vec::with_capacity(payload.len() + 32);
     wire::write_varint(&mut out, id);
     wire::write_utf(&mut out, &item.to_string());

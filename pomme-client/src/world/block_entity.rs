@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use azalea_registry::builtin::BlockEntityKind;
+use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use crate::chat_component::{Component, list_elements};

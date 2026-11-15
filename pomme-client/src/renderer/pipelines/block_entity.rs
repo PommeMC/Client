@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use azalea_registry::builtin::BlockEntityKind;
+use pomme_registry::builtin::BlockEntityKind;
 
 use crate::position::BlockPos;
 use crate::renderer::camera::CameraUniform;
