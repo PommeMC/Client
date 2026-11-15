@@ -111,7 +111,9 @@ pub struct Worn<'a> {
 /// `SwingSource.CLIENT` success.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum UseResult {
-    Success { swing: bool },
+    Success {
+        swing: bool,
+    },
     Pass,
     Fail,
     /// The item's block use cannot PASS, but its exact SUCCESS/FAIL is
