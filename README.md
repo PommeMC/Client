@@ -8,7 +8,7 @@
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license"></a>
   </p>
   <p align="center">
-    <a href="#download"><b>Download</b></a> · <a href="https://discord.gg/ucBA55bHPR"><b>Discord</b></a> · <a href="./BUILDING.md"><b>Build from source</b></a> · <a href="./CONTRIBUTING.md"><b>Contributing</b></a>
+    <a href="#download"><b>Download</b></a> · <a href="https://pomme.rs"><b>Website</b></a> · <a href="https://discord.gg/ucBA55bHPR"><b>Discord</b></a> · <a href="./BUILDING.md"><b>Build from source</b></a> · <a href="./CONTRIBUTING.md"><b>Contributing</b></a>
   </p>
 </p>
 
@@ -28,6 +28,8 @@ Get Pomme from the [latest release](https://github.com/PommeMC/Client/releases/l
 - **macOS (Apple Silicon)**: `pomme-client-macos-arm64.dmg`, then drag Pomme to Applications
 - **Linux x64**: `pomme-client-linux-x64-gnu.AppImage`
 
+Or get the right build for your system from [pomme.rs](https://pomme.rs/#download).
+
 It signs you in with your Microsoft account and keeps itself up to date. You
 need to own Minecraft: Java Edition. The builds aren't signed yet, so the first
 launch needs one extra step, described in the release notes.
@@ -40,7 +42,8 @@ Early Android and iOS builds build from source: see [BUILDING.md](./BUILDING.md)
 - **Vanilla behaviour**: physics, rendering, menus and networking are ported line
   by line from the decompiled game, and checked against it.
 - **Tested against real servers**: scripted [in-game tests](./tests/ingame/README.md)
-  run the client against a vanilla 26.2 server and screenshot the results.
+  run the client against a vanilla 26.2 server and screenshot the results, with
+  the [latest results](https://pomme.rs/parity) published on pomme.rs.
 - **Many versions, one client**: per-version protocol tables are generated from
   each version's decompiled source, and other versions are translated to 26.2.
 
@@ -49,6 +52,10 @@ Early Android and iOS builds build from source: see [BUILDING.md](./BUILDING.md)
 > report them in [Issues](https://github.com/PommeMC/Client/issues) or on Discord.
 
 ## Features
+
+<p align="center">
+  <img width="100%" alt="Pomme flying over a jungle" src="https://github.com/user-attachments/assets/c35e717e-3535-4f4f-9539-9e62dd482e04" />
+</p>
 
 - **Rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water and lava, mobs with skins, particles, weather, clouds and sky
 - **Singleplayer**: worlds run on [SteelMC](https://github.com/Steel-Foundation/SteelMC), a Rust server embedded in the client
@@ -80,8 +87,9 @@ the client standalone, and the development commands.
 ## Contributing
 
 Contributions are welcome.
-Please open an issue first to discuss what you'd like to change, and see
-[CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow.
+Please open an issue first to discuss what you'd like to change, or pick up a
+[good first issue](https://github.com/PommeMC/Client/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22),
+and see [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow.
 
 ## License
 
