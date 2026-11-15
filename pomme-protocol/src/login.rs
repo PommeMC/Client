@@ -72,14 +72,19 @@ impl ServerboundLogin {
             }
             Self::LoginAcknowledged => {}
             Self::CookieResponse { key, payload } => {
-                write_utf(&mut buf, key);
-                buf.push(u8::from(payload.is_some()));
-                if let Some(payload) = payload {
-                    byte_array(&mut buf, payload);
-                }
+                cookie_response(&mut buf, key, payload.as_deref());
             }
         }
         buf
+    }
+}
+
+/// `ServerboundCookieResponsePacket`'s body, the same in every phase.
+pub(crate) fn cookie_response(buf: &mut Vec<u8>, key: &str, payload: Option<&[u8]>) {
+    write_utf(buf, key);
+    buf.push(u8::from(payload.is_some()));
+    if let Some(payload) = payload {
+        byte_array(buf, payload);
     }
 }
 

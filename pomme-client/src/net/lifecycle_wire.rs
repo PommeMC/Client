@@ -63,7 +63,8 @@ fn read_native(raw: &[u8], name: &str) -> Option<DecodeResult<LifecyclePacket>> 
     super::read_raw_packet(id, &raw[r.pos()..], lifecycle::read)
 }
 
-fn disconnect_reason(nbt: &[u8]) -> String {
+/// A disconnect reason, a text component as NBT, as plain text.
+pub(super) fn disconnect_reason(nbt: &[u8]) -> String {
     super::chat::read_component(nbt, &mut 0)
         .map(|reason| reason.plain_text())
         .unwrap_or_default()

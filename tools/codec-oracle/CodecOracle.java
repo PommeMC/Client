@@ -138,6 +138,7 @@ public final class CodecOracle {
         lifecycle(dimensionTypes, clocks);
         status();
         login();
+        configuration();
         sections();
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
@@ -276,6 +277,40 @@ public final class CodecOracle {
                 new net.minecraft.network.protocol.login.ClientboundCustomQueryPacket(300,
                         new net.minecraft.network.protocol.login.custom.DiscardedQueryPayload(Identifier.withDefaultNamespace("query"))));
         encode("login/clientbound/cookie_request",
+                net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket(cookie));
+    }
+
+    private static void configuration() {
+        Identifier cookie = Identifier.withDefaultNamespace("session");
+        List<net.minecraft.server.packs.repository.KnownPack> packs = List.of(
+                new net.minecraft.server.packs.repository.KnownPack("minecraft", "core", "26.2"));
+        encode("configuration/serverbound/finish_configuration",
+                net.minecraft.network.protocol.configuration.ServerboundFinishConfigurationPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.configuration.ServerboundFinishConfigurationPacket.INSTANCE);
+        encode("configuration/serverbound/select_known_packs",
+                net.minecraft.network.protocol.configuration.ServerboundSelectKnownPacks.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.configuration.ServerboundSelectKnownPacks(packs));
+        encode("configuration/serverbound/cookie_response",
+                net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket(cookie, new byte[] {1, 2, 3}));
+
+        net.minecraft.nbt.CompoundTag overworld = new net.minecraft.nbt.CompoundTag();
+        overworld.putInt("height", 384);
+        encode("configuration/clientbound/registry_data",
+                net.minecraft.network.protocol.configuration.ClientboundRegistryDataPacket.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.configuration.ClientboundRegistryDataPacket(Registries.DIMENSION_TYPE, List.of(
+                        new net.minecraft.core.RegistrySynchronization.PackedRegistryEntry(
+                                Identifier.withDefaultNamespace("overworld"), java.util.Optional.of(overworld)),
+                        new net.minecraft.core.RegistrySynchronization.PackedRegistryEntry(
+                                Identifier.withDefaultNamespace("the_nether"), java.util.Optional.empty()))));
+        encode("configuration/clientbound/select_known_packs",
+                net.minecraft.network.protocol.configuration.ClientboundSelectKnownPacks.STREAM_CODEC::encode,
+                new net.minecraft.network.protocol.configuration.ClientboundSelectKnownPacks(packs));
+        encode("configuration/clientbound/finish_configuration",
+                net.minecraft.network.protocol.configuration.ClientboundFinishConfigurationPacket.STREAM_CODEC::encode,
+                net.minecraft.network.protocol.configuration.ClientboundFinishConfigurationPacket.INSTANCE);
+        encode("configuration/clientbound/cookie_request",
                 net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket(cookie));
     }

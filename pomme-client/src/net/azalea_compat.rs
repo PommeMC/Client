@@ -218,6 +218,124 @@ fn handshake_and_status_match_azalea() {
 }
 
 #[test]
+fn configuration_packets_match_azalea() {
+    use azalea_protocol::packets::config::{
+        ClientboundConfigPacket, ServerboundConfigPacket, c_cookie_request, c_finish_configuration,
+        c_keep_alive, c_ping, c_registry_data, c_select_known_packs, s_cookie_response,
+        s_finish_configuration, s_keep_alive, s_pong,
+    };
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::configuration::{ConfigPacket, ServerboundConfig};
+    use pomme_protocol::serverbound::GamePacket;
+
+    use super::config_wire::{self, ConfigFrame};
+
+    let key = Identifier::new("minecraft:session");
+    let common = |packet: GamePacket| packet.encode_in(Phase::Configuration).unwrap();
+    let pairs = [
+        (
+            ServerboundConfigPacket::FinishConfiguration(
+                s_finish_configuration::ServerboundFinishConfiguration {},
+            ),
+            ServerboundConfig::FinishConfiguration.encode(),
+        ),
+        (
+            ServerboundConfigPacket::CookieResponse(s_cookie_response::ServerboundCookieResponse {
+                key: key.clone(),
+                payload: None,
+            }),
+            ServerboundConfig::CookieResponse {
+                key: key.to_string(),
+                payload: None,
+            }
+            .encode(),
+        ),
+        (
+            ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive { id: 77 }),
+            common(GamePacket::KeepAlive { id: 77 }),
+        ),
+        (
+            ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: 5 }),
+            common(GamePacket::Pong { id: 5 }),
+        ),
+    ];
+    for (azalea, ours) in pairs {
+        assert_eq!(*serialize_packet(&azalea).unwrap(), ours, "{azalea:?}");
+    }
+
+    let read = |packet: ClientboundConfigPacket| {
+        config_wire::read(&serialize_packet(&packet).unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    let mut plains = simdnbt::owned::NbtCompound::new();
+    plains.insert("has_precipitation", simdnbt::owned::NbtTag::Byte(1));
+    let registry = read(ClientboundConfigPacket::RegistryData(
+        c_registry_data::ClientboundRegistryData {
+            registry_id: Identifier::new("minecraft:worldgen/biome"),
+            entries: vec![
+                (Identifier::new("minecraft:plains"), Some(plains)),
+                (Identifier::new("minecraft:desert"), None),
+            ],
+        },
+    ));
+    let ConfigFrame::Config(ConfigPacket::RegistryData(data)) = registry else {
+        panic!("not registry data");
+    };
+    assert_eq!(data.registry, "minecraft:worldgen/biome");
+    let entries: Vec<_> = data
+        .entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.data.is_some()))
+        .collect();
+    assert_eq!(
+        entries,
+        [("minecraft:plains", true), ("minecraft:desert", false)]
+    );
+
+    let pack =
+        |namespace: &str| azalea_protocol::packets::config::s_select_known_packs::KnownPack {
+            namespace: namespace.into(),
+            id: "core".into(),
+            version: "26.2".into(),
+        };
+    let offered = read(ClientboundConfigPacket::SelectKnownPacks(
+        c_select_known_packs::ClientboundSelectKnownPacks {
+            known_packs: vec![pack("minecraft"), pack("pomme")],
+        },
+    ));
+    assert!(matches!(
+        offered,
+        ConfigFrame::Config(ConfigPacket::SelectKnownPacks(packs))
+            if packs.len() == 2 && packs[1].namespace == "pomme" && packs[1].version == "26.2"
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::FinishConfiguration(
+            c_finish_configuration::ClientboundFinishConfiguration
+        )),
+        ConfigFrame::Config(ConfigPacket::FinishConfiguration)
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::CookieRequest(
+            c_cookie_request::ClientboundCookieRequest { key }
+        )),
+        ConfigFrame::Config(ConfigPacket::CookieRequest(key)) if key == "minecraft:session"
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::KeepAlive(
+            c_keep_alive::ClientboundKeepAlive { id: 77 }
+        )),
+        ConfigFrame::Lifecycle(LifecyclePacket::KeepAlive(77))
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::Ping(c_ping::ClientboundPing {
+            id: 5
+        })),
+        ConfigFrame::Lifecycle(LifecyclePacket::Ping(5))
+    ));
+}
+
+#[test]
 fn login_packets_match_azalea() {
     use azalea_protocol::packets::login::{
         ClientboundLoginPacket, ServerboundLoginPacket, c_cookie_request, c_custom_query, c_hello,
@@ -2518,8 +2636,6 @@ fn translate_move_player_flags_767() {
 /// get it stripped in the game phase and in configuration.
 #[test]
 fn strip_particle_status_767() {
-    use azalea_protocol::packets::config::{ServerboundConfigPacket, s_client_information};
-
     let information = super::client_information(
         8,
         crate::ui::chat::ChatOptions::default(),
@@ -2536,8 +2652,8 @@ fn strip_particle_status_767() {
         out
     };
 
-    let game =
-        pomme_protocol::serverbound::GamePacket::ClientInformation(information.clone()).encode();
+    let information = pomme_protocol::serverbound::GamePacket::ClientInformation(information);
+    let game = information.encode();
     for protocol in [767, 763] {
         let old = old_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
@@ -2547,14 +2663,7 @@ fn strip_particle_status_767() {
         );
     }
 
-    let config = Vec::from(
-        azalea_protocol::write::serialize_packet(&ServerboundConfigPacket::ClientInformation(
-            s_client_information::ServerboundClientInformation {
-                information: super::connection::azalea_client_information(&information),
-            },
-        ))
-        .unwrap(),
-    );
+    let config = information.encode_in(Phase::Configuration).unwrap();
     for protocol in [767, 764] {
         let old = config_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
@@ -4498,35 +4607,42 @@ fn embedded_known_pack_elements_deserialize_through_azalea() {
     }
 }
 
-/// The reply's fields go out as namespace, id, version (`KnownPack`'s stream
-/// codec), and pomme claims vanilla's core pack at the native version.
+/// Pomme claims vanilla's core pack at the native version, and its reply
+/// goes out as azalea writes the same packs.
 #[test]
-fn select_known_packs_reply_is_byte_exact() {
-    use azalea_buf::AzBuf;
+fn select_known_packs_reply_matches_azalea() {
+    use azalea_protocol::packets::config::ServerboundConfigPacket;
     use azalea_protocol::packets::config::s_select_known_packs::{
-        KnownPack, ServerboundSelectKnownPacks,
+        KnownPack as AzaleaPack, ServerboundSelectKnownPacks,
     };
+    use pomme_protocol::KnownPack;
+    use pomme_protocol::configuration::ServerboundConfig;
 
     let core_of = |namespace: &str| KnownPack {
         namespace: namespace.to_owned(),
         id: "core".to_owned(),
         version: pomme_protocol::version::NATIVE.name.to_owned(),
     };
-    let offered = vec![core_of("minecraft"), core_of("pomme")];
+    let offered = [core_of("minecraft"), core_of("pomme")];
     let known_packs =
         crate::net::known_packs::select_packs(pomme_protocol::version::NATIVE.protocol, &offered);
     assert_eq!(known_packs, offered[..1]);
 
-    let mut bytes = Vec::new();
-    ServerboundSelectKnownPacks { known_packs }
-        .azalea_write(&mut bytes)
-        .unwrap();
-    let mut expected = vec![1]; // one pack
-    for field in ["minecraft", "core", pomme_protocol::version::NATIVE.name] {
-        expected.push(field.len() as u8);
-        expected.extend_from_slice(field.as_bytes());
-    }
-    assert_eq!(bytes, expected);
+    let azalea = ServerboundConfigPacket::SelectKnownPacks(ServerboundSelectKnownPacks {
+        known_packs: known_packs
+            .iter()
+            .cloned()
+            .map(|p| AzaleaPack {
+                namespace: p.namespace,
+                id: p.id,
+                version: p.version,
+            })
+            .collect(),
+    });
+    assert_eq!(
+        *azalea_protocol::write::serialize_packet(&azalea).unwrap(),
+        ServerboundConfig::SelectKnownPacks(known_packs).encode()
+    );
 }
 
 /// 26.3's clientbound insertions shift ids, and the layouts 26.2 rewrote

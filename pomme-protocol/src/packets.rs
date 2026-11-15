@@ -514,6 +514,28 @@ mod tests {
                 assert_eq!(t.id(Phase::Login, dir, name), Some(id as u32), "{name}");
             }
         }
+        for (dir, name, id) in [
+            (Direction::Serverbound, "client_information", 0),
+            (Direction::Serverbound, "cookie_response", 1),
+            (Direction::Serverbound, "custom_payload", 2),
+            (Direction::Serverbound, "finish_configuration", 3),
+            (Direction::Serverbound, "keep_alive", 4),
+            (Direction::Serverbound, "pong", 5),
+            (Direction::Serverbound, "resource_pack", 6),
+            (Direction::Serverbound, "select_known_packs", 7),
+            (Direction::Clientbound, "cookie_request", 0),
+            (Direction::Clientbound, "disconnect", 2),
+            (Direction::Clientbound, "finish_configuration", 3),
+            (Direction::Clientbound, "keep_alive", 4),
+            (Direction::Clientbound, "ping", 5),
+            (Direction::Clientbound, "registry_data", 7),
+            (Direction::Clientbound, "resource_pack_pop", 8),
+            (Direction::Clientbound, "resource_pack_push", 9),
+            (Direction::Clientbound, "update_tags", 13),
+            (Direction::Clientbound, "select_known_packs", 14),
+        ] {
+            assert_eq!(t.id(Phase::Configuration, dir, name), Some(id), "{name}");
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
             Some(0x40)

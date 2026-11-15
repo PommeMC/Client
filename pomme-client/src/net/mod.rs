@@ -9,6 +9,7 @@ pub mod chunk_batch;
 pub(crate) mod chunk_wire;
 pub mod commands;
 mod commands_wire;
+mod config_wire;
 pub mod conn;
 pub mod connection;
 mod container_wire;
