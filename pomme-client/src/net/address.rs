@@ -27,7 +27,9 @@ impl ServerAddr {
                     return None;
                 }
                 match after.strip_prefix(':') {
-                    Some(port) => (host, port),
+                    // Digits only here; a bare `host:port` may carry a sign.
+                    Some(port) if port.bytes().all(|b| b.is_ascii_digit()) => (host, port),
+                    Some(_) => return None,
                     None if after.is_empty() => (host, ""),
                     None => return None,
                 }
@@ -105,6 +107,7 @@ mod tests {
             "[::1]25565",
             "[host]:25565",
             "[::1]:port",
+            "[::1]:-0",
         ] {
             assert_eq!(parse(input), None, "{input:?}");
         }
