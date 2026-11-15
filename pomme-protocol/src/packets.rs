@@ -319,6 +319,8 @@ mod tests {
             (Direction::Clientbound, "resource_pack_push", 81),
             (Direction::Clientbound, "waypoint", 138),
             (Direction::Clientbound, "commands", 16),
+            (Direction::Clientbound, "update_tags", 134),
+            (Direction::Clientbound, "start_configuration", 118),
         ] {
             assert_eq!(t.id(Phase::Game, dir, name), Some(id), "{name}");
         }

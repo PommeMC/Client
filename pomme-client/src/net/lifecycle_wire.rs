@@ -28,8 +28,7 @@ pub(super) fn handle_raw_lifecycle_packet(
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    let read: fn(&str, &mut Reader) -> Option<DecodeResult<LifecyclePacket>> = |name, r| match name
-    {
+    let read: super::RawRead<LifecyclePacket> = |name, r| match name {
         "login" => None,
         _ => lifecycle::read(name, r),
     };

@@ -1,0 +1,24 @@
+# `/reload` resends every registry's tags in the game phase (`update_tags`).
+# The client reads them and stays in the game, with commands still working.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/reload"
+
+[[step]]
+expect = { chat = "Reloading!" }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:oak_log"
+
+[[step]]
+expect = { slot = 36, item = "oak_log" }
+timeout_ms = 10000
+
+[[step]]
+chat = "/clear @s"

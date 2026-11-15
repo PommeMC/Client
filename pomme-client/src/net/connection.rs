@@ -1,6 +1,7 @@
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
+use azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_protocol::packets::login::c_hello::ClientboundHello;
 use azalea_protocol::packets::login::s_hello::ServerboundHello;
@@ -9,6 +10,7 @@ use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAckno
 use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
 use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
+use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -620,16 +622,16 @@ async fn config_sequence(
                 registry_holder.append(p.registry_id, entries);
             }
             ClientboundConfigPacket::UpdateTags(p) => {
+                let tags = config_tags(&p.tags);
                 // A later packet replaces an earlier one's tags per registry.
-                if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
+                if let Some(tags) = registry_tags(&tags, DIALOG_REGISTRY) {
                     received_dialog_tags = Some(tags);
                 }
-                if let Some(tags) =
-                    registry_tags(&p.tags, &super::environment_wire::TIMELINE_REGISTRY.into())
+                if let Some(tags) = registry_tags(&tags, super::environment_wire::TIMELINE_REGISTRY)
                 {
                     received_timeline_tags = Some(tags);
                 }
-                forward_tags(event_tx, &p.tags);
+                forward_tags(event_tx, &tags);
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -858,8 +860,10 @@ pub(super) fn chat_types_from_registry_holder(
 }
 
 /// The registry the dialog glyphs and holders resolve against.
+const DIALOG_REGISTRY: &str = "minecraft:dialog";
+
 fn dialog_registry_key() -> azalea_registry::identifier::Identifier {
-    "minecraft:dialog".into()
+    DIALOG_REGISTRY.into()
 }
 
 fn dialog_registry(
@@ -882,40 +886,52 @@ fn dialog_registry(
 
 /// One registry's tags from an `update_tags` packet, if it has any.
 fn registry_tags(
-    tags: &azalea_protocol::common::tags::TagMap,
-    registry: &azalea_registry::identifier::Identifier,
+    tags: &Tags,
+    registry: &str,
 ) -> Option<std::collections::HashMap<String, Vec<usize>>> {
-    let tags = tags.0.get(registry)?;
     Some(
-        tags.iter()
-            .map(|tag| {
-                let entries = tag
-                    .elements
+        tags.get(registry)?
+            .iter()
+            .map(|(name, elements)| {
+                let entries = elements
                     .iter()
                     .filter_map(|&id| usize::try_from(id).ok())
                     .collect();
-                (tag.name.to_string(), entries)
+                (name.clone(), entries)
             })
             .collect(),
     )
 }
 
-/// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
-/// any.
-fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
+/// Forwards the item and `minecraft:block` tags of an `update_tags` packet.
+fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &Tags) {
     send_ordered(
         event_tx,
         NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
     );
-    let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
-    let Some(tags) = tags.0.get(&key) else {
+    let Some(tags) = tags.get("minecraft:block") else {
         return;
     };
     let tags = tags
         .iter()
-        .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+        .map(|(name, elements)| (name.clone(), elements.clone()))
         .collect();
     send_ordered(event_tx, NetworkEvent::BlockTags { tags });
+}
+
+/// azalea's configuration-phase tags in pomme's shape.
+// TODO: read configuration's `update_tags` raw with the rest of the phase.
+fn config_tags(tags: &azalea_protocol::common::tags::TagMap) -> Tags {
+    tags.0
+        .iter()
+        .map(|(registry, tags)| {
+            let tags = tags
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+                .collect();
+            (registry.to_string(), tags)
+        })
+        .collect()
 }
 
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
@@ -1084,64 +1100,65 @@ async fn game_loop(
         {
             continue;
         }
-        match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
-            Ok(mut packet) => {
-                if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
-                    // Vanilla clears the client level before acknowledging
-                    // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition, block tags don't. Whatever the
-                    // game queued goes first, then the pending chat
-                    // acknowledgement.
-                    // TODO: chat events still in flight to the game thread
-                    // miss this ack; the next login resets the tracker anyway.
-                    send_ordered(event_tx, NetworkEvent::Reconfiguring);
-                    while let Ok(out) = outbound_rx.try_recv() {
-                        if let Some(frame) =
-                            outbound_frame(out, translation, &mut chat, &shared_tree)?
-                        {
-                            write_game_frame(&mut conn.writer, translation, frame).await?;
-                        }
-                    }
-                    if let Some(frame) = chat.flush_ack() {
+        match super::read_raw_frame(&raw, START_CONFIGURATION) {
+            Some(Ok(())) => {
+                // Vanilla clears the client level before acknowledging
+                // (ClientPacketListener.handleConfigurationStart); chat
+                // survives the transition, block tags don't. Whatever the
+                // game queued goes first, then the pending chat
+                // acknowledgement.
+                // TODO: chat events still in flight to the game thread
+                // miss this ack; the next login resets the tracker anyway.
+                send_ordered(event_tx, NetworkEvent::Reconfiguring);
+                while let Ok(out) = outbound_rx.try_recv() {
+                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)?
+                    {
                         write_game_frame(&mut conn.writer, translation, frame).await?;
                     }
-                    let ack = ServerboundGamePacket::ConfigurationAcknowledged(
-                        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
-                    );
-                    write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
-                    let next = config_sequence(
-                        &mut conn,
-                        view_distance,
-                        chat_options,
-                        skin_options,
+                }
+                if let Some(frame) = chat.flush_ack() {
+                    write_game_frame(&mut conn.writer, translation, frame).await?;
+                }
+                let ack = ServerboundGamePacket::ConfigurationAcknowledged(
+                    ServerboundConfigurationAcknowledged,
+                );
+                write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
+                let next = config_sequence(
+                    &mut conn,
+                    view_distance,
+                    chat_options,
+                    skin_options,
+                    event_tx,
+                    &mut outbound_rx,
+                    Some(&configured),
+                )
+                .await?;
+                if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
+                    chat_types = chat_types_from_registry_holder(&next.registries);
+                    send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
+                    send_ordered(
                         event_tx,
-                        &mut outbound_rx,
-                        Some(&configured),
-                    )
-                    .await?;
-                    if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
-                        chat_types = chat_types_from_registry_holder(&next.registries);
-                        send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
-                        send_ordered(
-                            event_tx,
-                            NetworkEvent::BiomeColors {
-                                colors: extract_biome_climate(&next.registries),
-                            },
-                        );
-                    }
-                    if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
-                        send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
-                    }
-                    configured = next;
-                    continue;
+                        NetworkEvent::BiomeColors {
+                            colors: extract_biome_climate(&next.registries),
+                        },
+                    );
                 }
-                if let Some(t) = translation
-                    && !t.remap_inbound(&mut packet)
-                {
-                    continue;
+                if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
+                    send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
                 }
-                if let ClientboundGamePacket::UpdateTags(p) = &packet {
-                    if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
+                configured = next;
+                continue;
+            }
+            Some(Err(e)) => {
+                tracing::warn!("Skipping malformed start_configuration packet: {e}");
+                continue;
+            }
+            None => {}
+        }
+        if let Some(tags) = super::read_raw_frame(&raw, pomme_protocol::tags::read) {
+            match tags {
+                Ok(tags) => {
+                    if let Some(tags) = registry_tags(&tags, DIALOG_REGISTRY) {
                         configured.dialogs =
                             std::sync::Arc::new(configured.dialogs.with_tags(tags));
                         send_ordered(
@@ -1149,7 +1166,18 @@ async fn game_loop(
                             NetworkEvent::DialogRegistry(configured.dialogs.clone()),
                         );
                     }
-                    forward_tags(event_tx, &p.tags);
+                    forward_tags(event_tx, &tags);
+                }
+                Err(e) => tracing::warn!("Skipping malformed update_tags packet: {e}"),
+            }
+            continue;
+        }
+        match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
+            Ok(mut packet) => {
+                if let Some(t) = translation
+                    && !t.remap_inbound(&mut packet)
+                {
+                    continue;
                 }
                 handle_game_packet(&packet, event_tx, &configured.registries);
             }
@@ -1157,6 +1185,10 @@ async fn game_loop(
         }
     }
 }
+
+/// `start_configuration`, which carries nothing.
+const START_CONFIGURATION: super::RawRead<()> =
+    |name, _| (name == "start_configuration").then_some(Ok(()));
 
 /// The frame one queued outbound item writes, if any.
 fn outbound_frame(
@@ -1306,6 +1338,63 @@ mod tests {
     use pomme_protocol::version::NATIVE;
 
     use super::*;
+
+    /// Game-phase `update_tags` and `start_configuration` read raw, and the
+    /// tags match what configuration's azalea path hands the same helpers.
+    #[test]
+    fn game_tags_and_start_configuration_read_raw() {
+        use azalea_protocol::common::tags::{TagMap, Tags as AzaleaTags};
+        use azalea_protocol::packets::game::{c_start_configuration, c_update_tags};
+
+        let tag = |name: &str, elements: Vec<i32>| AzaleaTags {
+            name: name.into(),
+            elements,
+        };
+        let map = TagMap(
+            [
+                (
+                    "minecraft:block".into(),
+                    vec![tag("minecraft:logs", vec![1, 300])],
+                ),
+                (
+                    DIALOG_REGISTRY.into(),
+                    vec![tag("minecraft:pause_screen_additions", vec![2])],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let frame = azalea_protocol::write::serialize_packet(&ClientboundGamePacket::UpdateTags(
+            c_update_tags::ClientboundUpdateTags { tags: map.clone() },
+        ))
+        .unwrap();
+        let tags = crate::net::read_raw_frame(&frame, pomme_protocol::tags::read)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tags, config_tags(&map));
+        assert!(crate::net::read_raw_frame(&frame, START_CONFIGURATION).is_none());
+
+        assert_eq!(
+            registry_tags(&tags, DIALOG_REGISTRY),
+            Some([("minecraft:pause_screen_additions".to_owned(), vec![2])].into())
+        );
+        let (tx, rx) = crossbeam_channel::unbounded();
+        forward_tags(&tx, &tags);
+        assert!(rx.try_iter().any(|event| matches!(
+            event,
+            NetworkEvent::BlockTags { tags } if tags == [("minecraft:logs".to_owned(), vec![1, 300])]
+        )));
+
+        let frame =
+            azalea_protocol::write::serialize_packet(&ClientboundGamePacket::StartConfiguration(
+                c_start_configuration::ClientboundStartConfiguration,
+            ))
+            .unwrap();
+        assert!(matches!(
+            crate::net::read_raw_frame(&frame, START_CONFIGURATION),
+            Some(Ok(()))
+        ));
+    }
 
     /// A server that accepts pomme's known-pack claim sends the biomes as ids
     /// alone; the climate the mesher colours with then comes entirely from the

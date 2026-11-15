@@ -1,12 +1,12 @@
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use azalea_protocol::common::tags::TagMap;
 use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
+use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 
 use super::handler::send_ordered;
@@ -21,18 +21,13 @@ use crate::ui::toast::RecipeToastEntry;
 
 const MAX_COLLECTION: usize = 65_536;
 
-pub fn item_tags(tags: &TagMap) -> ItemTags {
-    let Some(items) = tags
-        .iter()
-        .find(|(registry, _)| registry.to_string() == "minecraft:item")
-        .map(|(_, tags)| tags)
-    else {
+pub fn item_tags(tags: &Tags) -> ItemTags {
+    let Some(items) = tags.get("minecraft:item") else {
         return ItemTags::default();
     };
 
-    ItemTags::from_entries(items.iter().map(|tag| {
-        let elements = tag
-            .elements
+    ItemTags::from_entries(items.iter().map(|(name, elements)| {
+        let elements = elements
             .iter()
             .filter_map(|id| {
                 let id = u32::try_from(*id).ok()?;
@@ -42,7 +37,7 @@ pub fn item_tags(tags: &TagMap) -> ItemTags {
                 }
             })
             .collect();
-        (tag.name.to_string(), elements)
+        (name.clone(), elements)
     }))
 }
 
