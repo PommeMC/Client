@@ -2,7 +2,7 @@
 //! the client (`Mob.tickHeadTurn` runs `clientTick` in place of
 //! `LivingEntity`'s turn).
 
-use azalea_registry::builtin::EntityKind;
+use pomme_registry::builtin::EntityKind;
 
 use super::wrap_degrees;
 

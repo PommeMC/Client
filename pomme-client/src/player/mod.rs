@@ -907,7 +907,7 @@ mod tests {
         player.inventory.set_slot(
             crate::player::inventory::HOTBAR_START,
             azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
-                azalea_registry::builtin::ItemKind::Stone,
+                pomme_registry::builtin::ItemKind::Stone,
                 4,
             )),
         );
@@ -990,7 +990,7 @@ mod tests {
         player.inventory.set_slot(
             crate::player::inventory::HOTBAR_START,
             azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
-                azalea_registry::builtin::ItemKind::Stone,
+                pomme_registry::builtin::ItemKind::Stone,
                 4,
             )),
         );

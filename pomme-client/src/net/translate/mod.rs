@@ -379,7 +379,6 @@ use std::sync::{Mutex, OnceLock};
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::Profile;
-use azalea_registry::Registry;
 use glam::DVec3;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
@@ -389,6 +388,7 @@ use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
+use pomme_registry::Registry;
 
 use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
 

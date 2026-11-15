@@ -8,8 +8,8 @@ use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
     ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
 };
-use azalea_registry::Registry as AzaleaRegistry;
-use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
+use pomme_registry::Registry as AzaleaRegistry;
+use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";

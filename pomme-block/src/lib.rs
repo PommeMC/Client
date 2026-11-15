@@ -12,10 +12,10 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use azalea_registry::builtin::BlockKind;
 pub use behavior::BlockBehavior;
 // re-exported for convenience
 pub use block_state::BlockState;
+use pomme_registry::builtin::BlockKind;
 pub use range::BlockStates;
 
 /// A trait that's implemented on block structs.

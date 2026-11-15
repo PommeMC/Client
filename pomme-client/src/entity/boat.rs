@@ -131,7 +131,7 @@ pub fn passenger_attachment(
 }
 
 /// Vanilla `AbstractBoat.getMaxPassengers`.
-pub fn max_passengers(kind: azalea_registry::builtin::EntityKind) -> usize {
+pub fn max_passengers(kind: pomme_registry::builtin::EntityKind) -> usize {
     if crate::entity::is_chest_boat(kind) {
         1
     } else {

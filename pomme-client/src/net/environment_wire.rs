@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_registry::identifier::Identifier;
 use glam::{Vec3, Vec4};
+use pomme_registry::identifier::Identifier;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
 use crate::world::environment::{

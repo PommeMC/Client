@@ -16,12 +16,12 @@ use azalea_inventory::components::{
     UseRemainder,
 };
 use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
-use azalea_registry::Registry;
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::{self, ComponentPatch, ItemCodec, Shape};
 use pomme_protocol::wire::write_varint;
 use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase};
+use pomme_registry::Registry;
+use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 /// Components azalea can't hold faithfully that pomme doesn't read; they're
 /// dropped rather than misdecoded.

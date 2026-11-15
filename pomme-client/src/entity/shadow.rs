@@ -1,7 +1,7 @@
 //! Vanilla entity shadow sizes: each `EntityRenderer` subclass's
 //! `shadowRadius`/`shadowStrength` (26.2), with the overrides that scale them.
 
-use azalea_registry::builtin::EntityKind;
+use pomme_registry::builtin::EntityKind;
 
 use super::LivingEntity;
 use crate::attribute::{AttributeKind, AttributeMap};

@@ -325,7 +325,7 @@ fn mouth_item_texture(e: &crate::entity::LivingEntity) -> Option<String> {
 /// (the sound is the server's broadcast).
 fn panda_eating_particles(game: &mut GameState, camera_pos: glam::DVec3) {
     for e in game.entity_store.living.values() {
-        if e.entity_type != azalea_registry::builtin::EntityKind::Panda || !e.panda.eat_particles {
+        if e.entity_type != pomme_registry::builtin::EntityKind::Panda || !e.panda.eat_particles {
             continue;
         }
         let Some(texture) = mouth_item_texture(e) else {
@@ -2557,7 +2557,7 @@ impl AppCore {
                     title,
                 } => {
                     use azalea_inventory::ItemStack;
-                    use azalea_registry::builtin::MenuKind;
+                    use pomme_registry::builtin::MenuKind;
 
                     use crate::app::phases::in_game::ContainerScreen;
                     use crate::ui::furnace::FurnaceVariant;
@@ -2910,7 +2910,7 @@ impl AppCore {
                     game.chunk_store.block_entities.remove_column(chunk_pos);
                     game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
                     for (pos, kind, nbt) in entries {
-                        if kind == azalea_registry::builtin::BlockEntityKind::Piston {
+                        if kind == pomme_registry::builtin::BlockEntityKind::Piston {
                             let piston = crate::world::piston::MovingPiston::from_nbt(
                                 &nbt,
                                 game.block_registry.block_state_table(),
@@ -3128,7 +3128,7 @@ impl AppCore {
                             LookDirection::new(y_rot, x_rot_deg),
                             uuid,
                         );
-                        if entity_type == azalea_registry::builtin::EntityKind::Player {
+                        if entity_type == pomme_registry::builtin::EntityKind::Player {
                             let textures = game
                                 .tab_list
                                 .players
@@ -3137,7 +3137,7 @@ impl AppCore {
                             self.queue_player_skin(uuid, textures);
                         }
                     }
-                    if entity_type == azalea_registry::builtin::EntityKind::Item {
+                    if entity_type == pomme_registry::builtin::EntityKind::Item {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
                     }
@@ -4610,7 +4610,7 @@ fn worn_for<'a>(
 ) -> crate::player::interaction::Worn<'a> {
     use azalea_core::registry_holder::components::PreventArmorChange;
     use azalea_inventory::components::{Enchantments, Equippable};
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     let Some(equippable) = stack
         .and_then(|s| s.get_component::<Equippable>())

@@ -7,12 +7,12 @@ use azalea_inventory::components::{
     KineticWeapon, MinimumAttackCharge, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
-use azalea_registry::HolderSet;
-use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3};
 pub use pomme_protocol::serverbound::InteractionHand;
 use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
+use pomme_registry::HolderSet;
+use pomme_registry::builtin::{EntityKind, ItemKind};
 
 use crate::app::input::{self, InputState};
 use crate::attribute::{AttributeKind, AttributeMap};

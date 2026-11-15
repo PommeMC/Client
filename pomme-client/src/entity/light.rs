@@ -1,7 +1,7 @@
 //! Vanilla `EntityRenderer.getPackedLightCoords`: an entity's light, read at
 //! its light probe (the eye), with each renderer's `getBlockLightLevel`.
 
-use azalea_registry::builtin::EntityKind;
+use pomme_registry::builtin::EntityKind;
 
 use crate::entity::components::Position;
 use crate::renderer::chunk::block_lighter::{LightLevels, LightSource};

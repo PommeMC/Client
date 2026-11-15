@@ -4,12 +4,12 @@
 
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::Registry;
-use azalea_registry::builtin::MenuKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::{ClientRegistry, item};
+use pomme_registry::Registry;
+use pomme_registry::builtin::MenuKind;
 
 use super::NetworkEvent;
 use super::handler::send_ordered;

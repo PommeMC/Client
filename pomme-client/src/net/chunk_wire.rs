@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use azalea_registry::builtin::BlockEntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::chunk::{self, BlockEntityInfo, ChunkPacket};
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::serverbound::GamePacket;
+use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use super::block_wire::{block_entity_nbt, native_block_entity_type};

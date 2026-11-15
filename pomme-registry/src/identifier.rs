@@ -1,159 +1,92 @@
-//! An arbitrary identifier or resource location.
+//! Vanilla `Identifier`: a namespace and a path, written `namespace:path`.
 
-use std::fmt::{self, Debug, Display};
+use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::io::{self, Cursor, Write};
-use std::num::NonZeroUsize;
 use std::str::FromStr;
 
-use azalea_buf::{AzBuf, BufReadError};
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use simdnbt::owned::NbtTag;
-use simdnbt::{FromNbtTag, ToNbtTag};
+/// `Identifier.DEFAULT_NAMESPACE`.
+pub const DEFAULT_NAMESPACE: &str = "minecraft";
 
-/// An identifier, like `minecraft:stone` or `brigadier:number`.
+/// A namespaced name, like `minecraft:stone`.
 ///
-/// All registry variants can be converted to an identifier.
-///
-/// This was formerly called a `ResourceLocation`.
-#[doc(alias = "ResourceLocation")]
+/// Unlike vanilla's, any character is accepted: what a server names is kept
+/// as sent rather than refused.
 #[derive(Clone, Default, Eq)]
 pub struct Identifier {
-    // empty namespaces aren't allowed so NonZero is fine.
-    colon_index: Option<NonZeroUsize>,
-    inner: Box<str>,
+    /// As written, without the default namespace when it was left out.
+    text: Box<str>,
+    /// Where the path starts in `text`: past the colon when it names a
+    /// namespace.
+    path_at: usize,
 }
 
-const _: () = assert!(size_of::<Identifier>() == 24);
-
-static DEFAULT_NAMESPACE: &str = "minecraft";
-// static REALMS_NAMESPACE: &str = "realms";
-
 impl Identifier {
-    pub fn new(resource_string: impl Into<String>) -> Identifier {
-        let mut resource_string = resource_string.into();
-
-        let colon_index = resource_string.find(':');
-        let colon_index = if let Some(colon_index) = colon_index {
-            if colon_index == 0 {
-                resource_string = resource_string.split_off(1);
+    /// `Identifier.parse`: the namespace is what precedes the first colon,
+    /// and the default one when there is no colon or nothing before it.
+    pub fn new(text: impl Into<String>) -> Self {
+        let mut text = text.into();
+        let path_at = match text.find(':') {
+            Some(0) => {
+                text.remove(0);
+                0
             }
-            NonZeroUsize::new(colon_index)
-        } else {
-            None
+            Some(colon) => colon + 1,
+            None => 0,
         };
-
         Self {
-            colon_index,
-            inner: resource_string.into(),
+            text: text.into(),
+            path_at,
         }
     }
 
     pub fn namespace(&self) -> &str {
-        if let Some(colon_index) = self.colon_index {
-            &self.inner[0..colon_index.get()]
-        } else {
-            DEFAULT_NAMESPACE
+        match self.path_at {
+            0 => DEFAULT_NAMESPACE,
+            path_at => &self.text[..path_at - 1],
         }
     }
+
     pub fn path(&self) -> &str {
-        if let Some(colon_index) = self.colon_index {
-            &self.inner[(colon_index.get() + 1)..]
-        } else {
-            &self.inner
-        }
+        &self.text[self.path_at..]
     }
 }
+
 impl PartialEq for Identifier {
     fn eq(&self, other: &Self) -> bool {
-        self.namespace() == other.namespace() && self.path() == other.path()
+        self.path() == other.path() && self.namespace() == other.namespace()
     }
 }
+
 impl Hash for Identifier {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let namespace = self.namespace();
-        if namespace != DEFAULT_NAMESPACE {
-            namespace.hash(state);
-        }
+        self.namespace().hash(state);
         self.path().hash(state);
     }
 }
 
-impl Display for Identifier {
+impl fmt::Display for Identifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.colon_index.is_some() {
-            write!(f, "{}", self.inner)
-        } else {
-            write!(f, "{DEFAULT_NAMESPACE}:{}", self.inner)
-        }
+        write!(f, "{}:{}", self.namespace(), self.path())
     }
 }
-impl Debug for Identifier {
+
+impl fmt::Debug for Identifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self}")
+        fmt::Display::fmt(self, f)
     }
 }
+
 impl FromStr for Identifier {
-    type Err = &'static str;
+    type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Identifier::new(s))
+        Ok(Self::new(s))
     }
 }
+
 impl From<&str> for Identifier {
     fn from(s: &str) -> Self {
-        Identifier::new(s)
-    }
-}
-
-impl AzBuf for Identifier {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let location_string = String::azalea_read(buf)?;
-        Ok(Identifier::new(&location_string))
-    }
-    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        self.to_string().azalea_write(buf)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl Serialize for Identifier {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> Deserialize<'de> for Identifier {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        if s.contains(':') {
-            Ok(Identifier::new(&s))
-        } else {
-            Err(de::Error::invalid_value(
-                de::Unexpected::Str(&s),
-                &"a valid Identifier",
-            ))
-        }
-    }
-}
-
-impl FromNbtTag for Identifier {
-    fn from_nbt_tag(tag: simdnbt::borrow::NbtTag) -> Option<Self> {
-        tag.string().and_then(|s| s.to_str().parse().ok())
-    }
-}
-
-impl ToNbtTag for Identifier {
-    fn to_nbt_tag(self) -> NbtTag {
-        NbtTag::String(self.to_string().into())
+        Self::new(s)
     }
 }
 
@@ -161,43 +94,29 @@ impl ToNbtTag for Identifier {
 mod tests {
     use super::*;
 
-    #[test]
-    fn basic_identifier() {
-        let r = Identifier::new("abcdef:ghijkl");
-        assert_eq!(r.namespace(), "abcdef");
-        assert_eq!(r.path(), "ghijkl");
-    }
-    #[test]
-    fn no_namespace() {
-        let r = Identifier::new("azalea");
-        assert_eq!(r.namespace(), "minecraft");
-        assert_eq!(r.path(), "azalea");
-    }
-    #[test]
-    fn colon_start() {
-        let r = Identifier::new(":azalea");
-        assert_eq!(r.namespace(), "minecraft");
-        assert_eq!(r.path(), "azalea");
-    }
-    #[test]
-    fn colon_end() {
-        let r = Identifier::new("azalea:");
-        assert_eq!(r.namespace(), "azalea");
-        assert_eq!(r.path(), "");
+    fn parts(text: &str) -> (String, String) {
+        let ident = Identifier::new(text);
+        (ident.namespace().to_owned(), ident.path().to_owned())
     }
 
     #[test]
-    fn azbuf_identifier() {
-        let mut buf = Vec::new();
-        Identifier::new("minecraft:dirt")
-            .azalea_write(&mut buf)
-            .unwrap();
+    fn the_namespace_is_what_precedes_the_first_colon() {
+        assert_eq!(parts("mod:thing"), ("mod".into(), "thing".into()));
+        assert_eq!(parts("mod:a:b"), ("mod".into(), "a:b".into()));
+        assert_eq!(parts("mod:"), ("mod".into(), "".into()));
+    }
 
-        let mut buf = Cursor::new(&buf[..]);
+    #[test]
+    fn the_namespace_defaults_when_left_out_or_empty() {
+        assert_eq!(parts("stone"), ("minecraft".into(), "stone".into()));
+        assert_eq!(parts(":stone"), ("minecraft".into(), "stone".into()));
+    }
 
-        assert_eq!(
-            Identifier::azalea_read(&mut buf).unwrap(),
-            Identifier::new("minecraft:dirt")
-        );
+    #[test]
+    fn it_prints_with_its_namespace_and_compares_by_both_parts() {
+        assert_eq!(Identifier::new("stone").to_string(), "minecraft:stone");
+        assert_eq!(Identifier::new("mod:stone").to_string(), "mod:stone");
+        assert_eq!(Identifier::new("stone"), Identifier::new("minecraft:stone"));
+        assert_ne!(Identifier::new("stone"), Identifier::new("mod:stone"));
     }
 }

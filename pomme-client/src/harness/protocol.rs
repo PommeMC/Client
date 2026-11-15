@@ -407,7 +407,7 @@ pub struct EntitiesInfo {
 }
 
 pub fn entities(game: &GameState) -> EntitiesInfo {
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     let living = game
         .entity_store

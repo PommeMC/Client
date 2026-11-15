@@ -3,12 +3,12 @@
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::Registry;
-use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::entity_data::{DataValue, Value, Variant};
 use pomme_protocol::item::ItemCodec;
+use pomme_registry::Registry;
+use pomme_registry::builtin::EntityKind;
 
 use super::handler::{send_ordered, variant_index};
 use super::translate::Translation;

@@ -1,7 +1,7 @@
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::{Sender, TrySendError};
 use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_registry::builtin::EntityKind;
 
 use super::NetworkEvent;
 use super::commands::SharedCommandTree;
@@ -80,7 +80,7 @@ pub(super) fn variant_index(
     // pack pomme claimed are filled in first (`net::known_packs`).
     let Some((ident, nbt)) = registry_holder
         .extra
-        .get(&azalea_registry::identifier::Identifier::new(registry))
+        .get(&pomme_registry::identifier::Identifier::new(registry))
         .and_then(|r| r.map.get_index(protocol_id as usize))
     else {
         return fallback;

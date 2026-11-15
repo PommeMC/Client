@@ -5,12 +5,12 @@
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_core::registry_holder::dimension_type::DimensionKindElement;
-use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
 use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::{Direction, PacketTable, Phase};
+use pomme_registry::identifier::Identifier;
 
 use super::chat_security::ProfileKeyServices;
 use super::handler::send_ordered;

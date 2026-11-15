@@ -2,11 +2,11 @@
 //! every session: translated frames already carry the native layout, and
 //! only `add_entity`'s entity type needs a registry remap.
 
-use azalea_registry::Registry;
-use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::entity::{self, EntityPacket};
+use pomme_registry::Registry;
+use pomme_registry::builtin::EntityKind;
 
 use super::NetworkEvent;
 use super::handler::send_ordered;

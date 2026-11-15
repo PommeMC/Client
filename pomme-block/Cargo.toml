@@ -7,4 +7,4 @@ license = "MIT"
 
 [dependencies]
 azalea-buf = { version = "0.16.0", default-features = false }
-azalea-registry = { version = "0.16.0", default-features = false }
+pomme-registry = { path = "../pomme-registry", features = ["azalea"] }

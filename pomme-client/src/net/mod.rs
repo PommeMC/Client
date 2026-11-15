@@ -45,9 +45,9 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::MetaValue;
@@ -252,7 +252,7 @@ pub enum NetworkEvent {
     },
     OpenScreen {
         container_id: i32,
-        menu_type: azalea_registry::builtin::MenuKind,
+        menu_type: pomme_registry::builtin::MenuKind,
         title: String,
     },
     OpenSignEditor {

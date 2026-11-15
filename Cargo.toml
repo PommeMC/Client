@@ -9,13 +9,15 @@ members = [
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-registry",
+    "pomme-registry/azalea-compat",
     "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
     "tools/blockgen",
     "tools/ingame-test",
-    "tools/protogen"
+    "tools/protogen",
+    "tools/typegen"
 ]
 # Steel is its own workspace; pomme-singleplayer reaches into it by path.
 exclude = ["third_party/SteelMC"]
@@ -52,8 +54,8 @@ tracing-subscriber = "0.3"
 # azalea lags crates.io releases; pin the head of its merged 26.2 PR
 # (azalea-rs/azalea#332) from git, since that branch was deleted.
 # azalea-block is replaced by the pomme-block shim (pomme owns block data),
-# and azalea-registry and azalea-inventory by the pomme-registry and
-# pomme-inventory forks (pomme generates their tables); the second patch
+# azalea-registry by pomme-registry under that name (its `azalea-compat`
+# crate), and azalea-inventory by the pomme-inventory fork; the second patch
 # table substitutes them under the azalea git workspace's own path
 # dependencies too.
 [patch.crates-io]
@@ -65,12 +67,12 @@ azalea-entity = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b
 azalea-block = { path = "pomme-block" }
 azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-registry = { path = "pomme-registry" }
+azalea-registry = { path = "pomme-registry/azalea-compat" }
 azalea-inventory = { path = "pomme-inventory" }
 
 [patch."https://github.com/azalea-rs/azalea"]
 azalea-block = { path = "pomme-block" }
-azalea-registry = { path = "pomme-registry" }
+azalea-registry = { path = "pomme-registry/azalea-compat" }
 azalea-inventory = { path = "pomme-inventory" }
 
 [profile.dev]

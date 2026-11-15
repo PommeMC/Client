@@ -136,9 +136,10 @@ License: MIT.
 
 `pomme-block` is a data-free shim patched in place of azalea-block, keeping its
 public types so the rest of azalea compiles while block semantics come from
-Pomme's own per-version tables. `pomme-registry` and `pomme-inventory` are
-forks of azalea-registry and azalea-inventory, patched in the same way, whose
-tables Pomme generates from the game's own data. Other azalea crates remain
+Pomme's own per-version tables. `pomme-inventory` is a fork of
+azalea-inventory, patched in the same way, whose default components Pomme
+generates from the game's own data with a port of azalea's generator
+(`tools/typegen/default_components.py`). Other azalea crates remain
 dependencies.
 
 Source: <https://github.com/azalea-rs/azalea>

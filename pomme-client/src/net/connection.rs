@@ -636,7 +636,7 @@ pub(crate) fn biome_registry(
 ) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
     holder
         .extra
-        .get(&azalea_registry::identifier::Identifier::new(
+        .get(&pomme_registry::identifier::Identifier::new(
             "minecraft:worldgen/biome",
         ))
 }
@@ -730,7 +730,7 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
 pub(super) fn chat_types_from_registry_holder(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> super::chat::ChatTypeRegistry {
-    let key: azalea_registry::identifier::Identifier = "minecraft:chat_type".into();
+    let key: pomme_registry::identifier::Identifier = "minecraft:chat_type".into();
     let entries = holder
         .extra
         .get(&key)
@@ -742,7 +742,7 @@ pub(super) fn chat_types_from_registry_holder(
 /// The registry the dialog glyphs and holders resolve against.
 const DIALOG_REGISTRY: &str = "minecraft:dialog";
 
-fn dialog_registry_key() -> azalea_registry::identifier::Identifier {
+fn dialog_registry_key() -> pomme_registry::identifier::Identifier {
     DIALOG_REGISTRY.into()
 }
 
@@ -1223,7 +1223,7 @@ mod tests {
     /// embedded elements.
     #[test]
     fn filled_biome_entries_carry_their_climate() {
-        use azalea_registry::identifier::Identifier;
+        use pomme_registry::identifier::Identifier;
 
         let holder = crate::net::known_packs::filled_holder("worldgen/biome");
         let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
