@@ -39,7 +39,9 @@ pub trait Particle: Any {
     fn remove(&mut self);
     fn is_alive(&self) -> bool;
     fn get_group(&self) -> ParticleRenderType;
-    fn get_particle_limit(&self) -> Option<ParticleLimit>;
+    fn get_particle_limit(&self) -> Option<ParticleLimit> {
+        None
+    }
     fn get_pos(&self) -> DVec3;
     fn set_pos(&mut self, position: DVec3);
     fn get_previous_pos(&self) -> DVec3;
@@ -54,7 +56,9 @@ pub trait Particle: Any {
     fn scale(&mut self, factor: f32);
     fn has_physics(&self) -> bool;
     fn set_has_physics(&mut self, enabled: bool);
-    fn get_light_coords(&self, world: &LevelContext<'_>, partial_tick: f32) -> ParticleLight;
+    fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
+        world.get_light_coords(self.get_pos())
+    }
 }
 
 pub(super) fn bounds_at(position: DVec3, width: f32, height: f32) -> Aabb {

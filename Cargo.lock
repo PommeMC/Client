@@ -4136,6 +4136,7 @@ dependencies = [
  "pomme-gpu-allocator",
  "pomme-install",
  "pomme-item",
+ "pomme-particle-macros",
  "pomme-protocol",
  "pomme-registry",
  "pomme-singleplayer",
@@ -4221,6 +4222,15 @@ dependencies = [
  "pomme-text",
  "serde_json",
  "simdnbt",
+]
+
+[[package]]
+name = "pomme-particle-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

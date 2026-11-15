@@ -23,6 +23,7 @@
     reason = "Particle contracts beyond root ownership/ticking await producer and renderer adoption"
 )]
 
+mod accessors;
 pub(crate) mod block_particle_option;
 mod builtin;
 mod contract_exemplars;

@@ -1,6 +1,5 @@
 //! Concrete Vanilla GustSeed behavior, using the existing NoRender group.
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -8,26 +7,18 @@ use glam::DVec3;
 
 use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, resized_bounds};
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{ParticleLight, ParticleRenderType};
+use super::super::render::ParticleRenderType;
 use super::super::single_quad_particle::SingleQuadParticle;
-use super::super::types::{ParticleLimit, ParticleType, SimpleParticleType};
-use crate::physics::aabb::Aabb;
+use super::super::types::{ParticleType, SimpleParticleType};
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
 
+#[pomme_particle_macros::particle_accessors(exclude(
+    gravity,
+    friction,
+    speed_up_when_y_motion_is_blocked,
+))]
 pub struct GustSeedParticle {
-    position: DVec3,
-    previous_position: DVec3,
-    velocity: DVec3,
-    bounds: Aabb,
-    width: f32,
-    height: f32,
-    removed: bool,
-    on_ground: bool,
-    stopped_by_collision: bool,
-    has_physics: bool,
-    age: u32,
-    lifetime: u32,
     random: fastrand::Rng,
     scatter_scale: f64,
     tick_delay: usize,
@@ -69,13 +60,7 @@ impl GustSeedParticle {
 }
 
 impl Particle for GustSeedParticle {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    crate::particles::accessors::forward_particle_accessors!();
 
     fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle> {
         None
@@ -137,61 +122,13 @@ impl Particle for GustSeedParticle {
         }
     }
 
-    fn remove(&mut self) {
-        self.removed = true;
-    }
-
-    fn is_alive(&self) -> bool {
-        !self.removed
-    }
-
     fn get_group(&self) -> ParticleRenderType {
         ParticleRenderType::NoRender
-    }
-
-    fn get_particle_limit(&self) -> Option<ParticleLimit> {
-        None
-    }
-
-    fn get_pos(&self) -> DVec3 {
-        self.position
     }
 
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
-    }
-
-    fn get_previous_pos(&self) -> DVec3 {
-        self.previous_position
-    }
-
-    fn get_velocity(&self) -> DVec3 {
-        self.velocity
-    }
-
-    fn set_velocity(&mut self, velocity: DVec3) {
-        self.velocity = velocity;
-    }
-
-    fn get_age(&self) -> u32 {
-        self.age
-    }
-
-    fn get_lifetime(&self) -> u32 {
-        self.lifetime
-    }
-
-    fn set_lifetime(&mut self, lifetime: u32) {
-        self.lifetime = lifetime;
-    }
-
-    fn get_bounding_box(&self) -> Aabb {
-        self.bounds
-    }
-
-    fn set_bounding_box(&mut self, bounds: Aabb) {
-        self.bounds = bounds;
     }
 
     fn set_size(&mut self, width: f32, height: f32) {
@@ -204,18 +141,6 @@ impl Particle for GustSeedParticle {
 
     fn scale(&mut self, factor: f32) {
         self.set_size(0.2 * factor, 0.2 * factor);
-    }
-
-    fn has_physics(&self) -> bool {
-        self.has_physics
-    }
-
-    fn set_has_physics(&mut self, enabled: bool) {
-        self.has_physics = enabled;
-    }
-
-    fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
     }
 }
 
