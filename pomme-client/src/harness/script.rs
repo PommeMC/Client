@@ -318,17 +318,20 @@ struct ChatExpect {
     chat: String,
 }
 
-/// The recipe book knows at least `at_least` recipes.
+/// The recipe book; each field is checked when given.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecipesExpect {
-    recipes: AtLeast,
+    recipes: RecipesFields,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AtLeast {
-    at_least: usize,
+struct RecipesFields {
+    /// At least this many recipes known.
+    at_least: Option<usize>,
+    /// This many still highlighted as new.
+    highlighted: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1026,11 +1029,14 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                 .any(|line| line.contains(chat.as_str())),
             || format!("no chat line containing {chat:?}"),
         ),
-        Expect::Recipes(RecipesExpect {
-            recipes: AtLeast { at_least },
-        }) => {
+        Expect::Recipes(RecipesExpect { recipes: want }) => {
             let known = game.recipe_book.known_in_vanilla_order().len();
-            ensure(known >= *at_least, || format!("{known} recipes known"))
+            let highlighted = game.recipe_book.highlight.len();
+            ensure(
+                want.at_least.is_none_or(|n| known >= n)
+                    && want.highlighted.is_none_or(|n| highlighted == n),
+                || format!("{known} recipes known, {highlighted} highlighted"),
+            )
         }
     }
 }
