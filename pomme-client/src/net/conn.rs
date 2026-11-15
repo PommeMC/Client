@@ -77,6 +77,7 @@ impl RawReader {
         let bytes = self.buffer.get_mut();
         if consumed == bytes.len() {
             bytes.clear();
+            bytes.shrink_to(MIN);
             self.buffer.set_position(0);
             return;
         }

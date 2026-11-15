@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use hickory_resolver::config::{GOOGLE, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::proto::rr::RData;
+use hickory_resolver::proto::rr::{Name, RData};
 use hickory_resolver::{Resolver, TokioResolver};
 use pomme_protocol::status::{self, ClientIntent, Intention, ServerStatus, StatusPacket};
 use thiserror::Error;
@@ -26,6 +26,12 @@ use super::conn::Conn;
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ResolveError(String);
+
+impl ResolveError {
+    fn new(why: impl ToString) -> Self {
+        Self(why.to_string())
+    }
+}
 
 static RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
     Resolver::builder_tokio()
@@ -48,14 +54,14 @@ async fn resolve_address(server: &ServerAddr) -> Result<SocketAddr, ResolveError
     if let Ok(ip) = server.host.parse() {
         return Ok(SocketAddr::new(ip, server.port));
     }
-    let lookup = RESOLVER
-        .lookup_ip(server.host.as_str())
-        .await
-        .map_err(|e| ResolveError(e.to_string()))?;
+    // As ASCII: read as UTF-8, a name with an underscore in it (an SRV
+    // target can have one) is refused.
+    let name = Name::from_ascii(&server.host).map_err(ResolveError::new)?;
+    let lookup = RESOLVER.lookup_ip(name).await.map_err(ResolveError::new)?;
     let ip = lookup
         .iter()
         .next()
-        .ok_or_else(|| ResolveError("No A/AAAA record found".into()))?;
+        .ok_or_else(|| ResolveError::new("No A/AAAA record found"))?;
     Ok(SocketAddr::new(ip, server.port))
 }
 
@@ -100,7 +106,7 @@ pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, 
             tokio::net::lookup_host((server.host.as_str(), server.port)),
         ),
     );
-    let primary = primary.unwrap_or_else(|_| Err(ResolveError("resolution timed out".into())));
+    let primary = primary.unwrap_or_else(|_| Err(ResolveError::new("resolution timed out")));
     let extra: Vec<SocketAddr> = extra
         .ok()
         .and_then(Result::ok)

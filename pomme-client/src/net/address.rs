@@ -39,10 +39,10 @@ impl ServerAddr {
         };
         let port = match port {
             "" => DEFAULT_PORT,
-            // `Ints.tryParse` takes no sign but a minus, which is then out of
-            // range.
+            // `Ints.tryParse` takes a minus sign but no plus, then the value
+            // has to be a port.
             port if port.starts_with('+') => return None,
-            port => port.parse().ok()?,
+            port => u16::try_from(port.parse::<i32>().ok()?).ok()?,
         };
         (!host.is_empty()).then(|| Self {
             host: host.to_owned(),
@@ -78,6 +78,7 @@ mod tests {
             addr("play.example.org", 25570)
         );
         assert_eq!(parse("127.0.0.1:1"), addr("127.0.0.1", 1));
+        assert_eq!(parse("host:-0"), addr("host", 0));
     }
 
     #[test]
@@ -96,6 +97,7 @@ mod tests {
             ":25565",
             "host:port",
             "host:65536",
+            "host:99999999999",
             "host:-1",
             "host:+25565",
             "host: 25565",

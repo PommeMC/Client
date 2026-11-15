@@ -76,9 +76,10 @@ pub fn unpack(frame: &[u8], compressed: bool) -> Result<Box<[u8]>, FrameError> {
         )));
     }
     let mut packet = Vec::with_capacity(declared);
-    // One byte past the declared size, to tell a longer payload apart.
+    // Vanilla inflates into a buffer of the declared size, so a longer
+    // payload is cut off there and only a shorter one is an error.
     ZlibDecoder::new(body)
-        .take(declared as u64 + 1)
+        .take(declared as u64)
         .read_to_end(&mut packet)
         .map_err(|e| FrameError::Compression(e.to_string()))?;
     if packet.len() != declared {
@@ -176,17 +177,16 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_that_isnt_its_declared_size_is_an_error() {
+    fn a_payload_shorter_than_declared_is_an_error_and_a_longer_one_is_cut() {
         let wire = pack(&[7; 64], Some(1)).unwrap();
         let (frame, _) = split(&wire).unwrap().unwrap();
-        for declared in [63, 65] {
+        let with_size = |declared| {
             let mut frame = frame.to_vec();
             frame[0] = declared;
-            assert!(matches!(
-                unpack(&frame, true),
-                Err(FrameError::Compression(_))
-            ));
-        }
+            unpack(&frame, true)
+        };
+        assert!(matches!(with_size(65), Err(FrameError::Compression(_))));
+        assert_eq!(*with_size(63).unwrap(), [7; 63]);
         // Not a zlib stream at all.
         assert!(matches!(
             unpack(&[4, 1, 2, 3, 4], true),
