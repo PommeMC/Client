@@ -8,6 +8,8 @@ members = [
     "pomme-client",
     "pomme-gpu-allocator",
     "pomme-block",
+    "pomme-registry",
+    "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
@@ -49,9 +51,11 @@ tracing-subscriber = "0.3"
 
 # azalea lags crates.io releases; pin the head of its merged 26.2 PR
 # (azalea-rs/azalea#332) from git, since that branch was deleted.
-# azalea-block is replaced by the pomme-block shim (pomme owns block data);
-# the second patch table substitutes it under the azalea git workspace's own
-# path dependencies too.
+# azalea-block is replaced by the pomme-block shim (pomme owns block data),
+# and azalea-registry and azalea-inventory by the pomme-registry and
+# pomme-inventory forks (pomme generates their tables); the second patch
+# table substitutes them under the azalea git workspace's own path
+# dependencies too.
 [patch.crates-io]
 azalea-buf = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-protocol = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
@@ -61,11 +65,13 @@ azalea-entity = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b
 azalea-block = { path = "pomme-block" }
 azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-registry = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-registry = { path = "pomme-registry" }
+azalea-inventory = { path = "pomme-inventory" }
 
 [patch."https://github.com/azalea-rs/azalea"]
 azalea-block = { path = "pomme-block" }
+azalea-registry = { path = "pomme-registry" }
+azalea-inventory = { path = "pomme-inventory" }
 
 [profile.dev]
 opt-level = 1

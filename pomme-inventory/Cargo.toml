@@ -1,0 +1,20 @@
+[package]
+name = "azalea-inventory"
+description = "Pomme's fork of azalea-inventory; its default components are generated from the reference by tools/registrygen."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+azalea-auth = { version = "0.16.0", default-features = false }
+azalea-buf = { version = "0.16.0", default-features = false }
+azalea-chat = { version = "0.16.0", default-features = false, features = ["azalea-buf"] }
+# azalea-core uses bevy_ecs without gating it on its feature.
+azalea-core = { version = "0.16.0", default-features = false, features = ["bevy_ecs", "serde"] }
+azalea-inventory-macros = { path = "azalea-inventory-macros" }
+azalea-registry = { version = "0.16.0", default-features = false, features = ["serde"] }
+indexmap = "2.14.0"
+serde = "1.0.228"
+simdnbt = "0.10.0"
+tracing = "0.1.44"
+uuid = "1.23.1"

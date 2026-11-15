@@ -546,7 +546,6 @@ dependencies = [
 [[package]]
 name = "azalea-inventory"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?rev=ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "azalea-auth",
  "azalea-buf",
@@ -564,7 +563,6 @@ dependencies = [
 [[package]]
 name = "azalea-inventory-macros"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?rev=ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -625,7 +623,6 @@ dependencies = [
 [[package]]
 name = "azalea-registry"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?rev=ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "azalea-buf",
  "azalea-registry-macros",
@@ -636,7 +633,6 @@ dependencies = [
 [[package]]
 name = "azalea-registry-macros"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?rev=ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "quote",
  "syn 2.0.117",
