@@ -1,0 +1,16 @@
+[package]
+name = "azalea-registry"
+description = "Pomme's fork of azalea-registry; its tables are generated from the reference by tools/registrygen."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+azalea-buf = { version = "0.16.0", default-features = false }
+azalea-registry-macros = { path = "azalea-registry-macros" }
+serde = { version = "1.0.228", optional = true, features = ["derive"] }
+simdnbt = "0.10.0"
+
+[features]
+serde = ["azalea-registry-macros/serde", "dep:serde"]
+default = ["serde"]

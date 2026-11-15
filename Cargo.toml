@@ -8,6 +8,8 @@ members = [
     "pomme-client",
     "pomme-gpu-allocator",
     "pomme-block",
+    "pomme-registry",
+    "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
@@ -61,11 +63,13 @@ azalea-entity = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b
 azalea-block = { path = "pomme-block" }
 azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-registry = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-registry = { path = "pomme-registry" }
+azalea-inventory = { path = "pomme-inventory" }
 
 [patch."https://github.com/azalea-rs/azalea"]
 azalea-block = { path = "pomme-block" }
+azalea-registry = { path = "pomme-registry" }
+azalea-inventory = { path = "pomme-inventory" }
 
 [profile.dev]
 opt-level = 1
