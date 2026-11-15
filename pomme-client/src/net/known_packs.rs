@@ -3,9 +3,8 @@
 //! The fill has to happen before azalea's registry holder, which drops a
 //! data-less entry and shifts every later entry's protocol id.
 
-use azalea_protocol::packets::config::s_select_known_packs::KnownPack;
 use azalea_registry::identifier::Identifier;
-use pomme_protocol::KnownPackTable;
+use pomme_protocol::{KnownPack, KnownPackTable};
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
 /// Vanilla `KnownPacksManager.trySelectingPacks`: the offered packs this

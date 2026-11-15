@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::text::{TextSpan, format_text_spans};
+use crate::ui::text::{TextSpan, format_text_spans, text_from_json};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -40,8 +40,8 @@ pub enum PingState {
     Pinging,
     Success {
         motd: Vec<TextSpan>,
-        online: i32,
-        max: i32,
+        /// Online and maximum players; `None` when the server reports neither.
+        players: Option<(i32, i32)>,
         latency_ms: u64,
         version: String,
         /// The server's protocol number, reused at join time to skip the
@@ -137,9 +137,6 @@ async fn ping_server(
     generation: PingGeneration,
     spawned_gen: u64,
 ) {
-    use azalea_protocol::packets::status::ClientboundStatusPacket;
-    use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
-
     let result = async {
         use azalea_protocol::address::ServerAddr;
 
@@ -157,46 +154,48 @@ async fn ping_server(
             .unwrap_or_default()
             .as_millis() as u64;
 
-        conn.write_packet(ServerboundPingRequest { time })
+        conn.writer
+            .write(&pomme_protocol::status::encode_ping_request(time as i64))
             .await
             .map_err(|e| format!("Ping request failed: {e}"))?;
 
-        let _ = conn
-            .read_packet::<ClientboundStatusPacket>()
+        crate::net::resolve::read_status(&mut conn)
             .await
             .map_err(|e| format!("Pong failed: {e}"))?;
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
         // Vanilla MOTD base color: 0x808080.
-        let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
-        let version = status.version.name.clone();
+        let motd = format_text_spans(&text_from_json(&status.description), [0.5, 0.5, 0.5, 1.0]);
+        // Vanilla `ServerStatusPinger`: a status without a version is "Old",
+        // protocol 0.
+        let (version, protocol) = status
+            .version
+            .map_or_else(|| ("Old".to_owned(), 0), |v| (v.name, v.protocol));
         // Keyed to the native version, not the launched one.
-        let compat = if status.version.protocol == pomme_protocol::version::NATIVE.protocol {
+        let compat = if protocol == pomme_protocol::version::NATIVE.protocol {
             Compat::Native
-        } else if crate::net::translate::joinable(status.version.protocol) {
-            let protocol = status.version.protocol;
+        } else if crate::net::translate::joinable(protocol) {
             tokio::task::spawn_blocking(move || crate::net::translate::prewarm(protocol));
             Compat::Translated
         } else {
             Compat::Incompatible
         };
-        let (online, max) = (status.players.online, status.players.max);
 
         let favicon_rgba = status.favicon.as_deref().and_then(decode_favicon);
+        let players = status.players.as_ref().map(|p| (p.online, p.max));
         let player_names: Vec<String> = status
             .players
-            .sample
-            .iter()
-            .map(|p| p.name.clone())
+            .into_iter()
+            .flat_map(|p| p.sample)
+            .map(|p| p.name)
             .collect();
 
         Ok(PingState::Success {
             motd,
-            online,
-            max,
+            players,
             latency_ms,
             version,
-            protocol: status.version.protocol,
+            protocol,
             compat,
             favicon_rgba,
             player_names,

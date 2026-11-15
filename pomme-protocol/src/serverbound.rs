@@ -4,7 +4,7 @@
 use glam::DVec3;
 
 use crate::item::ItemStack;
-use crate::packets::{Direction as Bound, PacketTable, Phase};
+use crate::packets::{PacketTable, Phase};
 use crate::wire::{write_block_pos, write_utf, write_varint};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -324,9 +324,7 @@ impl GamePacket {
     /// The native frame of a packet `phase` shares with the game phase (the
     /// common packets); `None` when `phase` has no such packet.
     pub fn encode_in(&self, phase: Phase) -> Option<Vec<u8>> {
-        let id = PacketTable::native().id(phase, Bound::Serverbound, self.name())?;
-        let mut buf = Vec::new();
-        write_varint(&mut buf, id);
+        let mut buf = PacketTable::native().serverbound_frame(phase, self.name())?;
         self.write(&mut buf);
         Some(buf)
     }
@@ -563,6 +561,7 @@ fn hashed_stack(buf: &mut Vec<u8>, stack: Option<&HashedStack>) {
 mod tests {
     use super::*;
     use crate::codec::Reader;
+    use crate::packets::Direction as Bound;
     use crate::registries::{ClientRegistry, RegistryTable};
     use crate::vanilla_fixtures::case;
 

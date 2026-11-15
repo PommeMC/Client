@@ -130,7 +130,8 @@ fn entry(r: &mut Reader, actions: Actions) -> DecodeResult<Entry> {
     Ok(entry)
 }
 
-fn property(r: &mut Reader) -> DecodeResult<Property> {
+/// A `ByteBufCodecs.GAME_PROFILE_PROPERTIES` entry.
+pub(crate) fn property(r: &mut Reader) -> DecodeResult<Property> {
     Ok(Property {
         name: r.utf(64)?.to_owned(),
         value: r.utf(MAX_STRING_LENGTH)?.to_owned(),

@@ -1,14 +1,11 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::packets::ClientIntention;
-use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
-use azalea_protocol::packets::login::c_hello::ClientboundHello;
-use azalea_protocol::packets::login::s_hello::ServerboundHello;
-use azalea_protocol::packets::login::s_key::ServerboundKey;
-use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
-use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
-use azalea_protocol::read::{ReadPacketError, deserialize_packet};
+use azalea_protocol::read::ReadPacketError;
 use crossbeam_channel::Sender;
+use pomme_protocol::configuration::{ConfigPacket, ServerboundConfig};
+use pomme_protocol::lifecycle::LifecyclePacket;
+use pomme_protocol::login::{self, LoginPacket, ServerboundLogin};
 use pomme_protocol::serverbound::GamePacket;
+use pomme_protocol::status::ClientIntent;
 use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
@@ -17,6 +14,7 @@ use tokio::sync::mpsc;
 use super::NetworkEvent;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
+use super::config_wire::{ConfigFrame, Registries};
 use super::conn::{Conn, MemoryEnd, RawWriter};
 use super::handler::{handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
@@ -33,6 +31,9 @@ pub enum ConnectionError {
 
     #[error("packet read error: {0}")]
     Read(#[from] Box<ReadPacketError>),
+
+    #[error("packet read error: {0}")]
+    Decode(#[from] pomme_protocol::codec::DecodeError),
 
     #[error("packet write error: {0}")]
     Write(#[from] std::io::Error),
@@ -150,7 +151,7 @@ pub async fn connect_to_server(
             let wire = negotiate_wire_version(&server_addr, protocol).await?;
             select_block_protocol(&event_tx, wire);
             (
-                super::resolve::connect(&server_addr, ClientIntention::Login).await?,
+                super::resolve::connect(&server_addr, ClientIntent::Login).await?,
                 wire,
             )
         }
@@ -161,8 +162,7 @@ pub async fn connect_to_server(
             adopt_wire_protocol(protocol);
             select_block_protocol(&event_tx, protocol);
             let mut conn = Conn::from_memory(end);
-            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
-                .await?;
+            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntent::Login).await?;
             (conn, protocol)
         }
     };
@@ -170,11 +170,11 @@ pub async fn connect_to_server(
     conn.translation =
         super::translate::TranslationSession::for_protocol(wire).map(std::sync::Arc::new);
 
-    let hello = ServerboundLoginPacket::Hello(ServerboundHello {
+    let frame = ServerboundLogin::Hello {
         name: username.clone(),
-        profile_id: uuid,
-    });
-    let frame = serialize_frame(&hello)?;
+        profile_id: uuid.as_u128(),
+    }
+    .encode();
     let frame = match conn.translation.as_deref() {
         Some(t) => t.translate_outbound_login_frame(frame),
         None => frame,
@@ -200,7 +200,7 @@ pub async fn connect_to_server(
         .as_deref()
         .is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write_packet(ServerboundLoginAcknowledged {}).await?;
+        send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
     }
 
     let joined = if no_config {
@@ -272,8 +272,6 @@ struct Configured {
 /// game loop to replay. That frame is the first the server sends after the
 /// profile (`PlayerList.placeNewPlayer`), with no acknowledgement in between.
 async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionError> {
-    use azalea_core::registry_holder::RegistryHolder;
-
     let login = conn.reader.read().await?;
     super::capture::record(Phase::Game, &login);
     let translation = conn
@@ -293,19 +291,19 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         ));
     };
 
-    let mut registry_holder = RegistryHolder::default();
+    let mut registries = Registries::default();
     for frame in frames {
-        match deserialize_packet::<ClientboundConfigPacket>(&mut std::io::Cursor::new(&frame)) {
-            Ok(ClientboundConfigPacket::RegistryData(p)) => {
-                registry_holder.append(p.registry_id, p.entries);
-            }
-            Ok(_) => {}
-            Err(e) => skip_malformed_packet(e)?,
+        if let Some(ConfigFrame::Config(ConfigPacket::RegistryData(data))) =
+            super::config_wire::read_or_skip(&frame)
+        {
+            registries
+                .append_or_skip(crate::version::session_protocol(), data)
+                .map_err(ConnectionError::Disconnected)?;
         }
     }
     Ok(Joined {
         configured: Configured {
-            registries: std::sync::Arc::new(registry_holder),
+            registries: std::sync::Arc::new(registries.holder),
             dialogs: Default::default(),
         },
         deferred_login: Some(login),
@@ -334,7 +332,7 @@ async fn negotiate_wire_version(
         None => {
             let probe = async {
                 let (status, _) = super::resolve::request_status(server_addr).await.ok()?;
-                Some(status.version.protocol)
+                Some(status.version?.protocol)
             };
             tokio::time::timeout(std::time::Duration::from_secs(5), probe)
                 .await
@@ -396,58 +394,57 @@ async fn login_sequence(
     access_token: Option<&str>,
 ) -> Result<uuid::Uuid, ConnectionError> {
     loop {
-        // Read the raw frame ourselves so older-version layouts can be
-        // rewritten before the typed decode (26.1's login_finished lacks the
-        // trailing session id).
+        // Older-version layouts are rewritten before the decode (26.1's
+        // login_finished lacks the trailing session id).
         let raw = conn.reader.read().await?;
         super::capture::record(Phase::Login, &raw);
         let raw = match conn.translation.as_deref() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
         };
-        let packet: ClientboundLoginPacket = deserialize_packet(&mut std::io::Cursor::new(&raw))?;
+        let packet = login::read_frame(&raw)?;
         tracing::info!("Login packet: {:?}", std::mem::discriminant(&packet));
         match packet {
-            ClientboundLoginPacket::Hello(p) => {
-                handle_encryption(conn, &p, uuid, access_token).await?;
+            LoginPacket::Hello(hello) => {
+                handle_encryption(conn, &hello, uuid, access_token).await?;
             }
-            ClientboundLoginPacket::LoginCompression(p) => {
-                conn.set_compression_threshold(p.compression_threshold);
-                tracing::info!(
-                    "Compression enabled (threshold: {})",
-                    p.compression_threshold
-                );
+            LoginPacket::Compression(threshold) => {
+                conn.set_compression_threshold(threshold);
+                tracing::info!("Compression enabled (threshold: {threshold})");
             }
-            ClientboundLoginPacket::LoginFinished(p) => {
-                tracing::info!(
-                    "Login success: {} ({})",
-                    p.game_profile.name,
-                    p.game_profile.uuid
-                );
-                return Ok(p.game_profile.uuid);
+            LoginPacket::Finished(finished) => {
+                let id = uuid::Uuid::from_u128(finished.profile.id);
+                tracing::info!("Login success: {} ({id})", finished.profile.name);
+                return Ok(id);
             }
-            ClientboundLoginPacket::LoginDisconnect(p) => {
-                return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            LoginPacket::Disconnect(reason) => {
+                let reason = crate::ui::text::text_from_json(&reason);
+                return Err(ConnectionError::Disconnected(reason.to_string()));
             }
-            ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write_packet(
-                    azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
-                        key: p.key,
-                        payload: None,
-                    },
+            // TODO: vanilla answers from the cookies an earlier transfer stored.
+            LoginPacket::CookieRequest(key) => {
+                send_login(
+                    conn,
+                    ServerboundLogin::CookieResponse { key, payload: None },
                 )
                 .await?;
             }
-            _ => {
-                tracing::debug!("Login packet: {:?}", std::mem::discriminant(&packet));
+            // Vanilla `handleCustomQuery`: every query is answered as not
+            // understood, which a server waiting on one needs to carry on.
+            LoginPacket::CustomQuery { transaction_id } => {
+                send_login(conn, ServerboundLogin::CustomQueryAnswer { transaction_id }).await?;
             }
         }
     }
 }
 
+async fn send_login(conn: &mut Conn, packet: ServerboundLogin) -> std::io::Result<()> {
+    conn.writer.write(&packet.encode()).await
+}
+
 async fn handle_encryption(
     conn: &mut Conn,
-    hello: &ClientboundHello,
+    hello: &login::Hello,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
 ) -> Result<(), ConnectionError> {
@@ -471,11 +468,11 @@ async fn handle_encryption(
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write_packet(ServerboundKey {
-        key_bytes: e.encrypted_public_key,
+    let key = ServerboundLogin::Key {
+        key: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    })
-    .await?;
+    };
+    send_login(conn, key).await?;
 
     conn.set_encryption_key(e.secret_key);
     tracing::info!("Encryption enabled");
@@ -494,12 +491,8 @@ async fn config_sequence(
     // returns the original registries unchanged in that case).
     previous: Option<&Configured>,
 ) -> Result<Configured, ConnectionError> {
-    use azalea_core::registry_holder::RegistryHolder;
-    use azalea_protocol::packets::config::*;
-
-    let mut registry_holder = RegistryHolder::default();
-    let mut received_registry_data = false;
-    let mut selected_known_packs = false;
+    let protocol = crate::version::session_protocol();
+    let mut registries = Registries::default();
     let mut received_dialog_tags = None;
     let mut received_timeline_tags = None;
 
@@ -507,32 +500,17 @@ async fn config_sequence(
     // listener; a reconfiguration sends neither.
     if previous.is_none() {
         // Some servers key off the brand.
-        write_config_packet(
-            conn,
-            ServerboundConfigPacket::CustomPayload(s_custom_payload::ServerboundCustomPayload {
-                identifier: "minecraft:brand".into(),
-                data: super::brand_payload().into(),
-            }),
-        )
-        .await?;
-
-        write_config_packet(
-            conn,
-            ServerboundConfigPacket::ClientInformation(
-                s_client_information::ServerboundClientInformation {
-                    information: azalea_client_information(&super::client_information(
-                        view_distance,
-                        chat_options,
-                        skin_options,
-                    )),
-                },
-            ),
-        )
-        .await?;
+        let brand = GamePacket::CustomPayload {
+            id: "minecraft:brand".into(),
+            data: super::brand_payload(),
+        };
+        write_config_packet(conn, &brand).await?;
+        let information = super::client_information(view_distance, chat_options, skin_options);
+        write_config_packet(conn, &GamePacket::ClientInformation(information)).await?;
     }
 
-    // Config frames are read raw so older wire versions translate (765's
-    // registry_data fans out into several frames, hence the queue).
+    // Older wire versions translate each frame first (765's registry_data
+    // fans out into several, hence the queue).
     let mut pending = std::collections::VecDeque::new();
     loop {
         let packet = if let Some(packet) = pending.pop_front() {
@@ -560,12 +538,7 @@ async fn config_sequence(
                         ) {
                             continue;
                         }
-                        match deserialize_packet::<ClientboundConfigPacket>(
-                            &mut std::io::Cursor::new(&frame),
-                        ) {
-                            Ok(packet) => pending.push_back(packet),
-                            Err(e) => skip_malformed_packet(e)?,
-                        }
+                        pending.extend(super::config_wire::read_or_skip(&frame));
                     }
                     continue;
                 }
@@ -580,9 +553,8 @@ async fn config_sequence(
                         }
                     } else if let Outbound::Packet(packet) = outbound
                         && matches!(*packet, GamePacket::ResourcePack { .. })
-                        && let Some(frame) = packet.encode_in(Phase::Configuration)
                     {
-                        write_config_frame(conn, frame).await?;
+                        write_config_packet(conn, &packet).await?;
                     }
                     // Anything else is discarded: vanilla defers its outbound
                     // queue, but pomme's game keeps ticking through a
@@ -592,24 +564,10 @@ async fn config_sequence(
             }
         };
         match packet {
-            ClientboundConfigPacket::RegistryData(p) => {
-                received_registry_data = true;
-                // The server omits the data of every entry the pack we claimed
-                // carries, so fill those in before azalea drops them.
-                let entries = if selected_known_packs {
-                    super::known_packs::fill_known_entries(
-                        crate::version::session_protocol(),
-                        &p.registry_id,
-                        p.entries,
-                    )
-                    .map_err(ConnectionError::Disconnected)?
-                } else {
-                    p.entries
-                };
-                registry_holder.append(p.registry_id, entries);
-            }
-            ClientboundConfigPacket::UpdateTags(p) => {
-                let tags = config_tags(&p.tags);
+            ConfigFrame::Config(ConfigPacket::RegistryData(data)) => registries
+                .append_or_skip(protocol, data)
+                .map_err(ConnectionError::Disconnected)?,
+            ConfigFrame::Tags(tags) => {
                 // A later packet replaces an earlier one's tags per registry.
                 if let Some(tags) = registry_tags(&tags, DIALOG_REGISTRY) {
                     received_dialog_tags = Some(tags);
@@ -620,48 +578,21 @@ async fn config_sequence(
                 }
                 forward_tags(event_tx, &tags);
             }
-            ClientboundConfigPacket::SelectKnownPacks(p) => {
-                // Vanilla `handleSelectKnownPacks`: claim the offered packs we
-                // have ourselves, so the server can skip their registry data.
-                let known_packs = super::known_packs::select_packs(
-                    crate::version::session_protocol(),
-                    &p.known_packs,
-                );
-                selected_known_packs = !known_packs.is_empty();
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::SelectKnownPacks(
-                        s_select_known_packs::ServerboundSelectKnownPacks { known_packs },
-                    ),
-                )
-                .await?;
+            ConfigFrame::Config(ConfigPacket::SelectKnownPacks(offered)) => {
+                let known = registries.select_packs(protocol, &offered);
+                write_config_frame(conn, ServerboundConfig::SelectKnownPacks(known).encode())
+                    .await?;
             }
-            ClientboundConfigPacket::KeepAlive(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive {
-                        id: p.id,
-                    }),
-                )
-                .await?;
+            ConfigFrame::Lifecycle(LifecyclePacket::KeepAlive(id)) => {
+                write_config_packet(conn, &GamePacket::KeepAlive { id }).await?;
             }
-            ClientboundConfigPacket::Ping(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: p.id }),
-                )
-                .await?;
+            ConfigFrame::Lifecycle(LifecyclePacket::Ping(id)) => {
+                write_config_packet(conn, &GamePacket::Pong { id }).await?;
             }
-            ClientboundConfigPacket::FinishConfiguration(_) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::FinishConfiguration(
-                        s_finish_configuration::ServerboundFinishConfiguration {},
-                    ),
-                )
-                .await?;
+            ConfigFrame::Config(ConfigPacket::FinishConfiguration) => {
+                write_config_frame(conn, ServerboundConfig::FinishConfiguration.encode()).await?;
                 return Ok(match previous {
-                    Some(previous) if !received_registry_data => Configured {
+                    Some(previous) if !registries.received => Configured {
                         registries: previous.registries.clone(),
                         dialogs: match received_dialog_tags {
                             Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
@@ -672,67 +603,38 @@ async fn config_sequence(
                     // keep the previous resolution.
                     _ => {
                         super::environment_wire::resolve_timeline_tags(
-                            &mut registry_holder,
+                            &mut registries.holder,
                             &received_timeline_tags.unwrap_or_default(),
                         );
                         Configured {
                             dialogs: std::sync::Arc::new(dialog_registry(
-                                &registry_holder,
+                                &registries.holder,
                                 received_dialog_tags.unwrap_or_default(),
                             )),
-                            registries: std::sync::Arc::new(registry_holder),
+                            registries: std::sync::Arc::new(registries.holder),
                         }
                     }
                 });
             }
-            ClientboundConfigPacket::Disconnect(p) => {
-                return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            ConfigFrame::Lifecycle(LifecyclePacket::Disconnect(reason)) => {
+                return Err(ConnectionError::Disconnected(
+                    super::lifecycle_wire::disconnect_reason(&reason),
+                ));
             }
-            ClientboundConfigPacket::CookieRequest(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::CookieResponse(
-                        s_cookie_response::ServerboundCookieResponse {
-                            key: p.key,
-                            payload: None,
-                        },
-                    ),
-                )
-                .await?;
+            // TODO: vanilla answers from the cookies an earlier transfer stored.
+            ConfigFrame::Config(ConfigPacket::CookieRequest(key)) => {
+                let response = ServerboundConfig::CookieResponse { key, payload: None };
+                write_config_frame(conn, response.encode()).await?;
             }
-            ClientboundConfigPacket::ResourcePackPush(p) => {
-                tracing::info!(
-                    "Server pushing resource pack {} (required: {})",
-                    p.id,
-                    p.required
-                );
-                send_ordered(
-                    event_tx,
-                    NetworkEvent::ResourcePackPush {
-                        id: p.id,
-                        url: p.url.clone(),
-                        hash: p.hash.clone(),
-                        required: p.required,
-                    },
-                );
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::ResourcePack(
-                        s_resource_pack::ServerboundResourcePack {
-                            id: p.id,
-                            action: s_resource_pack::Action::Accepted,
-                        },
-                    ),
-                )
-                .await?;
+            ConfigFrame::ResourcePack(packet) => {
+                if let Some(reply) =
+                    super::resource_pack_wire::handle_resource_pack_packet(packet, event_tx)
+                {
+                    write_config_packet(conn, &reply).await?;
+                }
             }
-            ClientboundConfigPacket::ResourcePackPop(p) => {
-                tracing::info!("Server popping resource pack {:?}", p.id);
-                send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
-            }
-            _ => {
-                tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
-            }
+            // The other lifecycle packets belong to the game phase.
+            ConfigFrame::Lifecycle(_) => {}
         }
     }
 }
@@ -904,62 +806,6 @@ fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &Tags) {
         .map(|(name, elements)| (name.clone(), elements.clone()))
         .collect();
     send_ordered(event_tx, NetworkEvent::BlockTags { tags });
-}
-
-/// azalea's configuration-phase tags in pomme's shape.
-// TODO: read configuration's `update_tags` raw with the rest of the phase.
-fn config_tags(tags: &azalea_protocol::common::tags::TagMap) -> Tags {
-    tags.0
-        .iter()
-        .map(|(registry, tags)| {
-            let tags = tags
-                .iter()
-                .map(|tag| (tag.name.to_string(), tag.elements.clone()))
-                .collect();
-            (registry.to_string(), tags)
-        })
-        .collect()
-}
-
-/// Pomme's client information as azalea's configuration packet carries it.
-// TODO: send configuration's `client_information` with pomme's encoder.
-pub(super) fn azalea_client_information(
-    info: &pomme_protocol::serverbound::ClientInformation,
-) -> azalea_protocol::common::client_information::ClientInformation {
-    use azalea_entity::HumanoidArm;
-    use azalea_protocol::common::client_information::*;
-    let part = |bit: u8| info.model_customisation & (1 << bit) != 0;
-    ClientInformation {
-        language: info.language.clone(),
-        view_distance: info.view_distance,
-        chat_visibility: match info.chat_visibility {
-            0 => ChatVisibility::Full,
-            1 => ChatVisibility::System,
-            _ => ChatVisibility::Hidden,
-        },
-        chat_colors: info.chat_colors,
-        model_customization: ModelCustomization {
-            cape: part(0),
-            jacket: part(1),
-            left_sleeve: part(2),
-            right_sleeve: part(3),
-            left_pants: part(4),
-            right_pants: part(5),
-            hat: part(6),
-        },
-        main_hand: if info.main_hand == 1 {
-            HumanoidArm::Right
-        } else {
-            HumanoidArm::Left
-        },
-        text_filtering_enabled: info.text_filtering_enabled,
-        allows_listing: info.allows_listing,
-        particle_status: match info.particle_status {
-            0 => ParticleStatus::All,
-            1 => ParticleStatus::Decreased,
-            _ => ParticleStatus::Minimal,
-        },
-    }
 }
 
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
@@ -1252,14 +1098,6 @@ fn custom_click_frame(
         .ok()
 }
 
-fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
-    packet: &P,
-) -> Result<Vec<u8>, ConnectionError> {
-    azalea_protocol::write::serialize_packet(packet)
-        .map(Vec::from)
-        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
-}
-
 /// Writes one native-layout frame, translating it for other wire versions.
 async fn write_game_frame(
     writer: &mut RawWriter,
@@ -1276,17 +1114,17 @@ async fn write_game_frame(
     Ok(())
 }
 
-/// Writes one native-layout configuration packet, translating it for other
-/// wire versions (767 down: id remaps, suppression of packets the wire version
-/// lacks, and the few layout rewrites in `translate_outbound_config_frame`).
-async fn write_config_packet(
-    conn: &mut Conn,
-    packet: ServerboundConfigPacket,
-) -> Result<(), ConnectionError> {
-    write_config_frame(conn, serialize_frame(&packet)?).await
+/// Writes a packet configuration shares with the game phase.
+async fn write_config_packet(conn: &mut Conn, packet: &GamePacket) -> Result<(), ConnectionError> {
+    let frame = packet
+        .encode_in(Phase::Configuration)
+        .unwrap_or_else(|| panic!("{} isn't a configuration packet", packet.name()));
+    write_config_frame(conn, frame).await
 }
 
-/// [`write_config_packet`] for an already-encoded native-layout frame.
+/// Writes one native-layout configuration frame, translating it for other
+/// wire versions (767 down: id remaps, suppression of packets the wire version
+/// lacks, and the few layout rewrites in `translate_outbound_config_frame`).
 async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), ConnectionError> {
     let frame = match conn
         .translation
@@ -1340,8 +1178,7 @@ mod tests {
 
     use super::*;
 
-    /// Game-phase `update_tags` and `start_configuration` read raw, and the
-    /// tags match what configuration's azalea path hands the same helpers.
+    /// Game-phase `update_tags` and `start_configuration` read raw.
     #[test]
     fn game_tags_and_start_configuration_read_raw() {
         use azalea_protocol::common::tags::{TagMap, Tags as AzaleaTags};
@@ -1368,13 +1205,24 @@ mod tests {
             .collect(),
         );
         let frame = azalea_protocol::write::serialize_packet(&ClientboundGamePacket::UpdateTags(
-            c_update_tags::ClientboundUpdateTags { tags: map.clone() },
+            c_update_tags::ClientboundUpdateTags { tags: map },
         ))
         .unwrap();
         let tags = crate::net::read_raw_frame(&frame, pomme_protocol::tags::read)
             .unwrap()
             .unwrap();
-        assert_eq!(tags, config_tags(&map));
+        let expected: Tags = [
+            (
+                "minecraft:block".to_owned(),
+                [("minecraft:logs".to_owned(), vec![1, 300])].into(),
+            ),
+            (
+                DIALOG_REGISTRY.to_owned(),
+                [("minecraft:pause_screen_additions".to_owned(), vec![2])].into(),
+            ),
+        ]
+        .into();
+        assert_eq!(tags, expected);
         assert!(crate::net::read_raw_frame(&frame, START_CONFIGURATION).is_none());
 
         assert_eq!(
@@ -1510,8 +1358,11 @@ mod tests {
     async fn joins_an_integrated_server_over_the_pipe() {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+        use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
+        use azalea_protocol::read::deserialize_packet;
         use uuid::Uuid;
 
         use crate::net::conn::memory_pipes;
@@ -1521,7 +1372,18 @@ mod tests {
         async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
             peer: &mut Conn,
         ) -> P {
-            peer.read_packet().await.unwrap()
+            deserialize_packet(&mut std::io::Cursor::new(
+                &peer.reader.read().await.unwrap(),
+            ))
+            .unwrap()
+        }
+
+        async fn send<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+            peer: &mut Conn,
+            packet: &P,
+        ) {
+            let frame = azalea_protocol::write::serialize_packet(packet).unwrap();
+            peer.writer.write(&frame).await.unwrap();
         }
 
         let (client_end, server_end) = memory_pipes();
@@ -1557,12 +1419,11 @@ mod tests {
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
 
-        peer.write_packet(ClientboundLoginFinished {
+        let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
             game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
             session_id: Uuid::nil(),
-        })
-        .await
-        .unwrap();
+        });
+        send(&mut peer, &finished).await;
 
         assert!(matches!(
             sent(&mut peer).await,
@@ -1577,9 +1438,8 @@ mod tests {
             ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
         ));
 
-        peer.write_packet(ClientboundFinishConfiguration)
-            .await
-            .unwrap();
+        let finish = ClientboundConfigPacket::FinishConfiguration(ClientboundFinishConfiguration);
+        send(&mut peer, &finish).await;
 
         assert!(matches!(
             sent(&mut peer).await,

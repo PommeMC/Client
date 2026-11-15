@@ -7,18 +7,15 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 
-use azalea_core::registry_holder::RegistryHolder;
-use azalea_protocol::packets::ProtocolPacket;
-use azalea_protocol::packets::config::ClientboundConfigPacket;
-use azalea_protocol::packets::login::ClientboundLoginPacket;
-use azalea_protocol::read::deserialize_packet;
 use pomme_protocol::chunk::ChunkPacket;
+use pomme_protocol::configuration::ConfigPacket;
 use pomme_protocol::section::Section;
 use pomme_protocol::version::{ProtocolVersion, tested_versions};
 use pomme_protocol::{Direction, PacketTable, Phase};
 
 use super::chat::{ChatPacketError, InboundChat};
 use super::chunk_batch::ChunkBatchSizeCalculator;
+use super::config_wire::{ConfigFrame, Registries};
 use super::sender::PacketSender;
 use super::translate::TranslationSession;
 use crate::world::block::BlockStateTable;
@@ -143,16 +140,10 @@ fn replay(version: &ProtocolVersion) -> Vec<(String, String)> {
     failures
 }
 
-/// azalea's typed decode, as the connection falls back to.
-fn decode<P: ProtocolPacket + std::fmt::Debug>(frame: &[u8]) -> Result<P, String> {
-    deserialize_packet(&mut std::io::Cursor::new(frame)).map_err(|e| e.to_string())
-}
-
 /// The connection state the readers consult, built up as the frames arrive.
 struct Session {
     protocol: i32,
-    registries: RegistryHolder,
-    known_packs: bool,
+    registries: Registries,
     inbound_chat: InboundChat,
     config_less_login: bool,
     sender: PacketSender,
@@ -174,8 +165,7 @@ impl Session {
         let (events, events_rx) = crossbeam_channel::unbounded();
         Self {
             protocol,
-            registries: RegistryHolder::default(),
-            known_packs: false,
+            registries: Registries::default(),
             inbound_chat: InboundChat::for_protocol(protocol),
             config_less_login: true,
             sender: PacketSender::new(out_tx),
@@ -198,7 +188,9 @@ impl Session {
             Some(t) => t.translate_login_frame(frame.into()),
             None => frame.into(),
         };
-        decode::<ClientboundLoginPacket>(&frame).map(drop)
+        pomme_protocol::login::read_frame(&frame)
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 
     fn config(
@@ -221,23 +213,16 @@ impl Session {
 
     /// The registry state `connection.rs`'s config loop keeps.
     fn configure(&mut self, frame: &[u8]) -> Result<(), String> {
-        match decode::<ClientboundConfigPacket>(frame)? {
-            ClientboundConfigPacket::RegistryData(p) => {
-                let entries = if self.known_packs {
-                    super::known_packs::fill_known_entries(
-                        self.protocol,
-                        &p.registry_id,
-                        p.entries,
-                    )?
-                } else {
-                    p.entries
-                };
-                self.registries.append(p.registry_id, entries);
+        match super::config_wire::read(frame) {
+            Some(Ok(ConfigFrame::Config(ConfigPacket::RegistryData(data)))) => {
+                self.registries
+                    .append(self.protocol, data)
+                    .map_err(|e| e.to_string())?;
             }
-            ClientboundConfigPacket::SelectKnownPacks(p) => {
-                self.known_packs =
-                    !super::known_packs::select_packs(self.protocol, &p.known_packs).is_empty();
+            Some(Ok(ConfigFrame::Config(ConfigPacket::SelectKnownPacks(offered)))) => {
+                self.registries.select_packs(self.protocol, &offered);
             }
+            Some(Err(e)) => return Err(e.to_string()),
             _ => {}
         }
         Ok(())
@@ -269,7 +254,8 @@ impl Session {
             None => frame.into(),
         };
 
-        let chat_types = super::connection::chat_types_from_registry_holder(&self.registries);
+        let chat_types =
+            super::connection::chat_types_from_registry_holder(&self.registries.holder);
         match super::chat::handle_raw_chat_packet(
             &raw,
             &self.events,
@@ -284,7 +270,7 @@ impl Session {
         if let Some(login) = super::lifecycle_wire::read_login(&raw) {
             self.inbound_chat.reset();
             let login = login.map_err(|e| e.to_string())?;
-            super::lifecycle_wire::login_events(&login, &self.registries, &self.events);
+            super::lifecycle_wire::login_events(&login, &self.registries.holder, &self.events);
             self.sections = self.events_rx.try_iter().find_map(|event| match event {
                 super::NetworkEvent::DimensionInfo(dimension) => Some(dimension.height / 16),
                 _ => None,
@@ -298,7 +284,7 @@ impl Session {
         if let Some((_, read)) = super::handler::decode_raw_game_packet(
             &raw,
             blocks,
-            &self.registries,
+            &self.registries.holder,
             &self.sender,
             &self.commands,
             &mut self.batches,
@@ -331,7 +317,7 @@ impl Session {
         else {
             return Ok(());
         };
-        let biomes = super::connection::biome_count(&self.registries);
+        let biomes = super::connection::biome_count(&self.registries.holder);
         let expected = self
             .sections
             .ok_or("a chunk before the login's dimension")?;

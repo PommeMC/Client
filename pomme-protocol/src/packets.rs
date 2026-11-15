@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::codec::{DecodeResult, Reader};
 use crate::version::{EMBEDDED, NATIVE, ProtocolVersion};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,6 +122,33 @@ impl PacketTable {
 
     pub fn id(&self, phase: Phase, dir: Direction, name: &str) -> Option<u32> {
         self.direction(phase, dir).ids.get(name).copied()
+    }
+
+    /// The start of serverbound frame `name`, its packet id; `None` when
+    /// `phase` has no such packet.
+    pub(crate) fn serverbound_frame(&self, phase: Phase, name: &str) -> Option<Vec<u8>> {
+        let mut frame = Vec::new();
+        crate::wire::write_varint(&mut frame, self.id(phase, Direction::Serverbound, name)?);
+        Some(frame)
+    }
+
+    /// Decodes a whole clientbound frame of `phase`, its id first, with the
+    /// phase's `read`. An id `read` doesn't own is an error, as are bytes
+    /// left over.
+    pub(crate) fn read_clientbound<P>(
+        &self,
+        phase: Phase,
+        frame: &[u8],
+        read: fn(&str, &mut Reader) -> Option<DecodeResult<P>>,
+    ) -> DecodeResult<P> {
+        let mut r = Reader::new(frame);
+        let id = r.varint()?;
+        let packet = self
+            .name_of(phase, Direction::Clientbound, id)
+            .and_then(|name| read(name, &mut r))
+            .unwrap_or_else(|| Err(r.error("unknown packet")))?;
+        r.ensure_eof()?;
+        Ok(packet)
     }
 
     pub fn name_of(&self, phase: Phase, dir: Direction, id: u32) -> Option<&str> {
@@ -451,6 +479,63 @@ mod tests {
             t.id(Phase::Handshake, Direction::Serverbound, "intention"),
             Some(0)
         );
+        for (dir, name, id) in [
+            (Direction::Serverbound, "status_request", 0),
+            (Direction::Serverbound, "ping_request", 1),
+            (Direction::Clientbound, "status_response", 0),
+            (Direction::Clientbound, "pong_response", 1),
+        ] {
+            assert_eq!(t.id(Phase::Status, dir, name), Some(id), "{name}");
+        }
+        for (dir, names) in [
+            (
+                Direction::Serverbound,
+                &[
+                    "hello",
+                    "key",
+                    "custom_query_answer",
+                    "login_acknowledged",
+                    "cookie_response",
+                ][..],
+            ),
+            (
+                Direction::Clientbound,
+                &[
+                    "login_disconnect",
+                    "hello",
+                    "login_finished",
+                    "login_compression",
+                    "custom_query",
+                    "cookie_request",
+                ],
+            ),
+        ] {
+            for (id, name) in names.iter().enumerate() {
+                assert_eq!(t.id(Phase::Login, dir, name), Some(id as u32), "{name}");
+            }
+        }
+        for (dir, name, id) in [
+            (Direction::Serverbound, "client_information", 0),
+            (Direction::Serverbound, "cookie_response", 1),
+            (Direction::Serverbound, "custom_payload", 2),
+            (Direction::Serverbound, "finish_configuration", 3),
+            (Direction::Serverbound, "keep_alive", 4),
+            (Direction::Serverbound, "pong", 5),
+            (Direction::Serverbound, "resource_pack", 6),
+            (Direction::Serverbound, "select_known_packs", 7),
+            (Direction::Clientbound, "cookie_request", 0),
+            (Direction::Clientbound, "disconnect", 2),
+            (Direction::Clientbound, "finish_configuration", 3),
+            (Direction::Clientbound, "keep_alive", 4),
+            (Direction::Clientbound, "ping", 5),
+            (Direction::Clientbound, "registry_data", 7),
+            (Direction::Clientbound, "resource_pack_pop", 8),
+            (Direction::Clientbound, "resource_pack_push", 9),
+            (Direction::Clientbound, "update_tags", 13),
+            (Direction::Clientbound, "select_known_packs", 14),
+        ] {
+            assert_eq!(t.id(Phase::Configuration, dir, name), Some(id), "{name}");
+        }
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
             Some(0x40)
