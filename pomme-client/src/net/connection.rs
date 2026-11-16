@@ -1228,7 +1228,8 @@ mod tests {
     fn filled_biome_entries_carry_their_climate() {
         use pomme_registry::identifier::Identifier;
 
-        let holder = crate::net::known_packs::filled_holder("worldgen/biome");
+        let holder = crate::net::known_packs::filled_holder(NATIVE.protocol, "worldgen/biome")
+            .expect("biomes fill");
         let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
             .map
             .get_index_of(&Identifier::new("minecraft:plains"))

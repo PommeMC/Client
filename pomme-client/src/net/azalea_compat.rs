@@ -4573,24 +4573,40 @@ fn translate_tag_query_763() {
 /// Every element pomme embeds for `minecraft:core` has to survive azalea's
 /// registry holder: an entry it fails to deserialize is logged and skipped
 /// (`RegistryType::append_nbt`), which shifts the protocol id of every entry
-/// after it. Claiming the pack is only safe while this holds.
+/// after it. Claiming the pack is only safe while this holds, for every
+/// version with a table. A registry whose elements aren't compounds is left
+/// out whole, as it is when a server sends it.
 #[test]
 fn embedded_known_pack_elements_deserialize_through_azalea() {
-    for (registry, elements) in pomme_protocol::KnownPackTable::native().registries() {
-        let holder = crate::net::known_packs::filled_holder(registry);
-        let kept = match registry {
-            "dimension_type" => holder.dimension_type.map.len(),
-            "enchantment" => holder.enchantment.map.len(),
-            _ => holder.extra.values().map(|r| r.map.len()).sum(),
-        };
-        assert_eq!(kept, elements.count(), "{registry}: entries were dropped");
+    use crate::net::config_wire::RegistryError;
 
-        // The values have to survive the JSON -> NBT conversion too, not just
-        // the deserialize: `dimension_info` reads these two off the holder.
-        if registry == "dimension_type" {
-            let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
-            assert_eq!(overworld.height, 384);
-            assert_eq!(overworld.min_y, -64);
+    for protocol in [pomme_protocol::version::NATIVE.protocol, 777] {
+        let table = pomme_protocol::KnownPackTable::for_protocol(protocol).expect("a table");
+        for (registry, elements) in table.registries() {
+            let holder = match crate::net::known_packs::filled_holder(protocol, registry) {
+                Ok(holder) => holder,
+                Err(RegistryError::Unsupported(_)) if registry == "block_transformer" => continue,
+                Err(e) => panic!("{protocol} {registry}: {e}"),
+            };
+            let kept = match registry {
+                "dimension_type" => holder.dimension_type.map.len(),
+                "enchantment" => holder.enchantment.map.len(),
+                _ => holder.extra.values().map(|r| r.map.len()).sum(),
+            };
+            assert_eq!(
+                kept,
+                elements.count(),
+                "{protocol} {registry}: entries were dropped"
+            );
+
+            // The values have to survive the JSON -> NBT conversion too, not
+            // just the deserialize: `dimension_info` reads these two off the
+            // holder.
+            if registry == "dimension_type" {
+                let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
+                assert_eq!(overworld.height, 384);
+                assert_eq!(overworld.min_y, -64);
+            }
         }
     }
 }
