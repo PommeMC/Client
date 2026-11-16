@@ -415,8 +415,10 @@ async fn login_sequence(
                 return Ok(id);
             }
             LoginPacket::Disconnect(reason) => {
-                let reason = crate::ui::text::component_from_json(&reason);
-                return Err(ConnectionError::Disconnected(reason.plain_text()));
+                let reason = crate::ui::text::component_from_json(&reason).plain_text();
+                return Err(ConnectionError::Disconnected(
+                    crate::ui::text::strip_formatting(&reason),
+                ));
             }
             // TODO: vanilla answers from the cookies an earlier transfer stored.
             LoginPacket::CookieRequest(key) => {

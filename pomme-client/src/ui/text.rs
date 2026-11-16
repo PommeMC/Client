@@ -390,8 +390,6 @@ pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
     })
 }
 
-/// The spans as vanilla's `Font` draws them: legacy codes are decomposed in
-/// every string it renders, not only chat. Borrows when there are none.
 /// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
 pub(crate) fn strip_formatting(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -410,6 +408,8 @@ pub(crate) fn strip_formatting(text: &str) -> String {
     out
 }
 
+/// The spans as vanilla's `Font` draws them: legacy codes are decomposed in
+/// every string it renders, not only chat. Borrows when there are none.
 pub(crate) fn font_spans(spans: &[TextSpan]) -> Cow<'_, [TextSpan]> {
     if spans.iter().any(|span| span.text.contains(PREFIX_CODE)) {
         Cow::Owned(legacy_format_spans(spans, true))
