@@ -6,7 +6,7 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
@@ -138,11 +138,13 @@ impl Particle for NoteParticle {
     }
 
     fn set_size(&mut self, width: f32, height: f32) {
-        if width != self.width || height != self.height {
-            self.width = width;
-            self.height = height;
-            self.bounds = resized_bounds(self.bounds, width, height);
-        }
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
     }
 
     fn scale(&mut self, factor: f32) {

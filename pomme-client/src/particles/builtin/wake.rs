@@ -7,19 +7,16 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{
-    ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
-    QuadParticleRenderState,
-};
+use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
-    SingleQuadParticle, extract_camera_quad, randomized_quad_size,
+    SingleQuadParticle, extract_quantized_camera_quad, randomized_quad_size,
 };
-use super::super::types::{ParticleLimit, SimpleParticleType};
+use super::super::types::SimpleParticleType;
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
 
@@ -129,9 +126,6 @@ impl Particle for WakeParticle {
     fn get_group(&self) -> ParticleRenderType {
         ParticleRenderType::SingleQuads
     }
-    fn get_particle_limit(&self) -> Option<ParticleLimit> {
-        None
-    }
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
@@ -148,18 +142,17 @@ impl Particle for WakeParticle {
         self.remaining = lifetime.min(i32::MAX as u32) as i32;
     }
     fn set_size(&mut self, width: f32, height: f32) {
-        if width != self.width || height != self.height {
-            self.width = width;
-            self.height = height;
-            self.bounds = resized_bounds(self.bounds, width, height);
-        }
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
     }
     fn scale(&mut self, factor: f32) {
         self.quad_size *= factor;
         self.set_size(0.2_f32 * factor, 0.2_f32 * factor);
-    }
-    fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
     }
 }
 
@@ -170,17 +163,6 @@ impl SingleQuadParticle for WakeParticle {
         if !self.removed {
             self.sprite = sprites.get(0, self.get_lifetime());
         }
-    }
-    fn get_uv(&self) -> [f32; 4] {
-        [
-            self.sprite.u_min,
-            self.sprite.u_max,
-            self.sprite.v_min,
-            self.sprite.v_max,
-        ]
-    }
-    fn get_facing(&self) -> ParticleFacing {
-        ParticleFacing::Camera
     }
     fn get_quad_size(&self, _partial_tick: f32) -> f32 {
         self.quad_size
@@ -194,13 +176,7 @@ impl SingleQuadParticle for WakeParticle {
         view: &ParticleView<'_>,
         output: &mut Vec<QuadParticleRenderState>,
     ) {
-        let index = output.len();
-        extract_camera_quad(self, self.previous_roll, world, view, output);
-        if let Some(quad) = output.get_mut(index) {
-            quad.color = quad
-                .color
-                .map(|channel| (channel * 255.0_f32).floor() / 255.0_f32);
-        }
+        extract_quantized_camera_quad(self, self.previous_roll, world, view, output);
     }
 }
 

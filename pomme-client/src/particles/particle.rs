@@ -85,6 +85,22 @@ pub(super) fn resized_bounds(bounds: Aabb, width: f32, height: f32) -> Aabb {
     )
 }
 
+/// Update stored dimensions and resize bounds only when either dimension
+/// changes.
+pub(super) fn set_particle_size(
+    stored_width: &mut f32,
+    stored_height: &mut f32,
+    bounds: &mut Aabb,
+    width: f32,
+    height: f32,
+) {
+    if width != *stored_width || height != *stored_height {
+        *stored_width = width;
+        *stored_height = height;
+        *bounds = resized_bounds(*bounds, width, height);
+    }
+}
+
 pub(super) fn move_without_collision(bounds: &mut Aabb, position: &mut DVec3, displacement: DVec3) {
     *bounds = bounds.offset(displacement);
     *position = DVec3::new(

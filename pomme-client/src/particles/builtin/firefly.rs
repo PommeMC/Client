@@ -4,7 +4,7 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{
@@ -13,7 +13,7 @@ use super::super::render::{
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
-    SingleQuadParticle, extract_camera_quad, randomized_quad_size,
+    SingleQuadParticle, extract_quantized_camera_quad, randomized_quad_size,
 };
 use super::super::types::SimpleParticleType;
 use crate::position::BlockPos;
@@ -159,11 +159,13 @@ impl Particle for FireflyParticle {
         self.bounds = bounds_at(position, self.width, self.height);
     }
     fn set_size(&mut self, width: f32, height: f32) {
-        if width != self.width || height != self.height {
-            self.width = width;
-            self.height = height;
-            self.bounds = resized_bounds(self.bounds, width, height);
-        }
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
     }
     fn scale(&mut self, factor: f32) {
         self.quad_size *= factor;
@@ -198,13 +200,7 @@ impl SingleQuadParticle for FireflyParticle {
         view: &ParticleView<'_>,
         output: &mut Vec<QuadParticleRenderState>,
     ) {
-        let index = output.len();
-        extract_camera_quad(self, self.previous_roll, world, view, output);
-        if let Some(quad) = output.get_mut(index) {
-            quad.color = quad
-                .color
-                .map(|channel| (channel * 255.0_f32).floor() / 255.0_f32);
-        }
+        extract_quantized_camera_quad(self, self.previous_roll, world, view, output);
     }
 }
 
