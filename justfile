@@ -195,13 +195,7 @@ typegen version="26.2":
     ref="reference/{{ version }}"
     cargo run -p typegen -- "$ref" {{ version }} pomme-registry/src
     cargo fmt -p pomme-registry
-    out=target/default-components
-    sep=":"; if [ "${OS:-}" = "Windows_NT" ]; then sep=";"; fi
-    bin=""; if [ -n "${JAVA_HOME:-}" ]; then bin="$JAVA_HOME/bin/"; fi
-    mkdir -p "$out"
-    cp="$ref/server-{{ version }}.jar$sep$(find "$ref/libraries" -name '*.jar' | tr '\n' "$sep")"
-    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out" tools/codec-oracle/DefaultComponents.java
-    "${bin}java" -cp "$cp$out" DefaultComponents pomme-item/src/data/default-components.json
+    "{{ just_executable() }}" _oracle "$ref/server.jar" DefaultComponents pomme-item/src/data/default-components.json
 
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
@@ -214,16 +208,23 @@ codec-fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
     jar=$(cargo run -q -p ingame-test -- --fetch-server)
-    out=target/codec-oracle
+    "{{ just_executable() }}" _oracle "$jar" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
+
+# Compiles `tools/codec-oracle/<tool>.java` against the game classes and
+# libraries in a server bundler jar and runs it with `args`.
+_oracle jar tool +args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="target/codec-oracle/{{ tool }}"
     sep=":"; if [ "${OS:-}" = "Windows_NT" ]; then sep=";"; fi
     bin=""; if [ -n "${JAVA_HOME:-}" ]; then bin="$JAVA_HOME/bin/"; fi
     rm -rf "$out" && mkdir -p "$out/lib"
     # This unzip build doesn't glob archive members; list them explicitly.
-    unzip -Z1 "$jar" | grep -E '^META-INF/(versions|libraries)/.*\.jar$' \
-        | xargs unzip -qn "$jar" -d "$out/lib"
+    unzip -Z1 "{{ jar }}" | grep -E '^META-INF/(versions|libraries)/.*\.jar$' \
+        | xargs unzip -qn "{{ jar }}" -d "$out/lib"
     cp=$(find "$out/lib" -name '*.jar' | tr '\n' "$sep")
-    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" tools/codec-oracle/CodecOracle.java
-    "${bin}java" -cp "$cp$out/classes" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
+    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" "tools/codec-oracle/{{ tool }}.java"
+    "${bin}java" -cp "$cp$out/classes" {{ tool }} {{ args }}
 
 # JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"

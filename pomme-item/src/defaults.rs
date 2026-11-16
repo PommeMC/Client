@@ -59,6 +59,12 @@ fn unhex(hex: &str) -> Option<Box<[u8]>> {
         .collect()
 }
 
+/// Parses the data now rather than on the first lookup, which would stall
+/// whatever frame asked.
+pub fn prewarm() {
+    table();
+}
+
 /// `item`'s default components with their wire bytes, in component order.
 pub fn of(item: ItemKind) -> &'static [(DataComponentKind, Box<[u8]>)] {
     &table()[item.to_u32() as usize]
