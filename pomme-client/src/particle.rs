@@ -514,8 +514,6 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use azalea_protocol::common::client_information::ParticleStatus;
-
     use super::*;
     use crate::particles::{
         MappedParticleResources, ParticleAtlasSprites, ParticleDescription, ParticleEngine,
@@ -531,7 +529,7 @@ mod tests {
     use crate::world::block::block_colors::BlockColors;
     use crate::world::block::block_registry::BlockRegistry;
     use crate::world::block::particle_appearance::BlockParticleAppearance;
-    use crate::world::level::LevelContext;
+    use crate::world::level::{LevelContext, ParticleStatus};
 
     #[test]
     fn particles_take_vanilla_light_coords() {

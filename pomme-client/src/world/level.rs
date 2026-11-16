@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use azalea_block::BlockState;
-use azalea_protocol::common::client_information::ParticleStatus;
 use glam::DVec3;
 
 use super::block::block_registry::BlockRegistry;
@@ -23,6 +22,15 @@ use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::renderer::chunk::block_lighter::{WorldLight, light_coords};
 use crate::util::random_source::RandomSource;
+
+/// Vanilla particle quality used by the level's particle limiter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ParticleStatus {
+    #[default]
+    All,
+    Decreased,
+    Minimal,
+}
 
 /// Scoped world queries and callbacks; never retains a chunk snapshot.
 /// Camera, particle status, the persistent level random stream and the
