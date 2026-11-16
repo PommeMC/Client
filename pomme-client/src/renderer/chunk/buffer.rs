@@ -1728,6 +1728,9 @@ impl ChunkBufferStore {
         }
         let now_ms = self.now_ms();
 
+        // Without staging the batch is held to the same amount: the bytes
+        // written since the budget was last asked.
+        let mut direct = (0, 0);
         let mut taken = meshes.len();
         for (i, mesh) in meshes.iter().enumerate() {
             // The covered sections this job is authoritative for: reject any where
@@ -1759,16 +1762,20 @@ impl ChunkBufferStore {
                 .iter()
                 .map(|s| s.index_len() as usize * INDEX_SIZE as usize)
                 .sum();
-            let (stg_v, stg_i) = self.staging_used[slot];
-            if self.use_staging
-                && i > 0
-                && (stg_v + v_bytes > staging_half || stg_i + i_bytes > staging_half)
-                && started.elapsed() >= budget
-            {
-                // The rest go next frame, their waitlist claims still held.
-                taken = i;
-                break;
+            let (used_v, used_i) = if self.use_staging {
+                self.staging_used[slot]
+            } else {
+                direct
+            };
+            if i > 0 && (used_v + v_bytes > staging_half || used_i + i_bytes > staging_half) {
+                if started.elapsed() >= budget {
+                    // The rest go next frame, their waitlist claims still held.
+                    taken = i;
+                    break;
+                }
+                direct = (0, 0);
             }
+            direct = (direct.0 + v_bytes, direct.1 + i_bytes);
             // Placed or starved again below, they no longer hold the room.
             let unheld = self.waiting.settle(mesh.pos, &accepted);
 
