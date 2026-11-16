@@ -30,10 +30,10 @@ fn synchronized_registries(decompiled: &Path) -> Result<Vec<String>, Error> {
     registry_paths(list, &keys)
 }
 
-/// The path of every `Registries.<KEY>` `list` names, from the
-/// `<KEY> = Registries.createRegistryKey("<path>")` lines of `keys`.
+/// The path of every key `list` passes a `RegistryData` (`(Registries.<KEY>,`),
+/// from the `<KEY> = Registries.createRegistryKey("<path>")` lines of `keys`.
 fn registry_paths(list: &str, keys: &str) -> Result<Vec<String>, Error> {
-    const KEY: &str = "Registries.";
+    const KEY: &str = "(Registries.";
     list.match_indices(KEY)
         .map(|(at, _)| {
             let name = &list[at + KEY.len()..];
@@ -173,6 +173,13 @@ mod tests {
             registry_paths(list, KEYS).unwrap(),
             ["chat_type", "worldgen/biome"]
         );
+    }
+
+    #[test]
+    fn only_a_registry_datas_key_counts() {
+        let list = "new RegistryData<ChatType>(Registries.CHAT_TYPE, \
+                    BuiltInRegistries.BIOME.byNameCodec())";
+        assert_eq!(registry_paths(list, KEYS).unwrap(), ["chat_type"]);
     }
 
     #[test]
