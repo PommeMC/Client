@@ -906,7 +906,7 @@ mod tests {
         player.experience_progress = 0.75;
         player.inventory.set_slot(
             crate::player::inventory::HOTBAR_START,
-            azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            pomme_item::ItemStack::Present(pomme_item::ItemStackData::new(
                 pomme_registry::builtin::ItemKind::Stone,
                 4,
             )),
@@ -946,7 +946,7 @@ mod tests {
             player
                 .inventory
                 .slot(crate::player::inventory::HOTBAR_START),
-            azalea_inventory::ItemStack::Empty
+            pomme_item::ItemStack::Empty
         ));
         assert_eq!(player.food, 20);
         assert_eq!(player.saturation, 5.0);
@@ -989,7 +989,7 @@ mod tests {
         player.experience_progress = 0.75;
         player.inventory.set_slot(
             crate::player::inventory::HOTBAR_START,
-            azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            pomme_item::ItemStack::Present(pomme_item::ItemStackData::new(
                 pomme_registry::builtin::ItemKind::Stone,
                 4,
             )),
@@ -1020,7 +1020,7 @@ mod tests {
             player
                 .inventory
                 .slot(crate::player::inventory::HOTBAR_START),
-            azalea_inventory::ItemStack::Empty
+            pomme_item::ItemStack::Empty
         ));
         assert!(!player.flying);
         assert!(!player.in_water);

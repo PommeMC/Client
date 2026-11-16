@@ -4,16 +4,23 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{BundleContents, Equippable};
+use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
-use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
+use pomme_item::components::BundleContents;
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
-use crate::player::inventory::{ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START};
+use crate::net::item_codec::Components;
+use crate::player::inventory::{
+    ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START, CRAFT_INPUT_START, CRAFT_OUTPUT, MAIN_START, OFFHAND,
+};
 use crate::recipe::RecipeBookState;
+
+/// A menu's slots, in menu order.
+type Menu = Vec<ItemStack>;
 
 const BREWING_INPUT: &str = "minecraft:brewing_input";
 const BREWING_REAGENT: &str = "minecraft:brewing_reagent";
@@ -113,7 +120,7 @@ fn brewing_may_place(recipes: &RecipeBookState, s: usize, item: &ItemStackData) 
 /// depends on what the item may go in; `false` where it returns `EMPTY`,
 /// which ends the click.
 fn brewing_quick_move_from_player(kind: ContainerKind, menu: &mut Menu, s: usize) -> bool {
-    let Some(ItemStack::Present(clicked)) = menu.slot(s).cloned() else {
+    let Some(ItemStack::Present(clicked)) = menu.get(s).cloned() else {
         return false;
     };
     let may_place = |slot| kind.may_place(slot, &clicked);
@@ -259,83 +266,10 @@ impl ContainerKind<'_> {
         }
     }
 
+    /// `slots` as this menu's, padded or cut to its slot count.
     fn build_menu(self, slots: &[ItemStack]) -> Menu {
-        let mut menu = match self {
-            Self::Player => Menu::Player(Player::default()),
-            Self::CraftingTable => Menu::Crafting {
-                result: ItemStack::Empty,
-                grid: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Furnace => Menu::Furnace {
-                ingredient: ItemStack::Empty,
-                fuel: ItemStack::Empty,
-                result: ItemStack::Empty,
-                player: SlotList::default(),
-            },
-            Self::Chest { rows: 1 } => Menu::Generic9x1 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Chest { rows: 2 } => Menu::Generic9x2 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Chest { rows: 3 } => Menu::Generic9x3 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Chest { rows: 4 } => Menu::Generic9x4 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Chest { rows: 5 } => Menu::Generic9x5 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Chest { .. } => Menu::Generic9x6 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::ShulkerBox => Menu::ShulkerBox {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Anvil => Menu::Anvil {
-                first: ItemStack::Empty,
-                second: ItemStack::Empty,
-                result: ItemStack::Empty,
-                player: SlotList::default(),
-            },
-            Self::Enchantment => Menu::Enchantment {
-                item: ItemStack::Empty,
-                lapis: ItemStack::Empty,
-                player: SlotList::default(),
-            },
-            Self::Hopper => Menu::Hopper {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::Dispenser => Menu::Generic3x3 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-            Self::BrewingStand(_) => Menu::BrewingStand {
-                bottles: SlotList::default(),
-                ingredient: ItemStack::Empty,
-                fuel: ItemStack::Empty,
-                player: SlotList::default(),
-            },
-            Self::Crafter { .. } => Menu::Crafter3x3 {
-                contents: SlotList::default(),
-                player: SlotList::default(),
-            },
-        };
-        for (i, item) in slots.iter().enumerate() {
-            if let Some(s) = menu.slot_mut(i) {
-                *s = item.clone();
-            }
-        }
+        let mut menu = slots.to_vec();
+        menu.resize(self.slot_count(), ItemStack::Empty);
         menu
     }
 
@@ -441,7 +375,7 @@ pub fn apply_click(
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
         // Slots past azalea's menu (the crafter result) are left as they are.
-        let Some(after) = menu.slot(i) else {
+        let Some(after) = menu.get(i) else {
             continue;
         };
         if after == before {
@@ -568,7 +502,7 @@ fn apply_op(
             // Vanilla CLONE: creative only, empty cursor, fills to a full stack.
             if creative
                 && cursor.is_empty()
-                && let Some(ItemStack::Present(d)) = menu.slot(c.slot as usize)
+                && let Some(ItemStack::Present(d)) = menu.get(c.slot as usize)
             {
                 let mut full = d.clone();
                 full.count = full.kind.max_stack_size();
@@ -667,7 +601,6 @@ fn bundle_contents(stack: &ItemStack) -> Option<BundleContents> {
         .as_present()
         .filter(|d| crate::ui::bundle::is_bundle(d))
         .and_then(crate::ui::bundle::contents)
-        .map(std::borrow::Cow::into_owned)
 }
 
 /// Vanilla `BundleItem.overrideStackedOnOther`: the carried bundle clicked on
@@ -812,6 +745,55 @@ fn safe_insert(
     shrink(carried, take);
 }
 
+/// Vanilla `InventoryMenu.quickMoveStack`: the craft result goes to the
+/// inventory from its end, the craft grid and armor to its start, and an
+/// inventory slot to the item's free armor slot or the free offhand, else
+/// across between the main rows and the hotbar.
+fn player_quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
+    const INVENTORY: std::ops::Range<usize> = MAIN_START..OFFHAND;
+    const HOTBAR_START: usize = 36;
+    let free = |menu: &Menu, slot: usize| menu.get(slot).is_some_and(ItemStack::is_empty);
+    // `Player.getEquipmentSlotForItem`: what the item is worn in, if anything.
+    let worn_in = menu
+        .get(s)
+        .and_then(ItemStack::as_present)
+        .and_then(|item| item.get_component::<Equippable>())
+        .map(|equippable| equippable.slot);
+    let armor = worn_in.and_then(|slot| {
+        let at = ARMOR_START + ARMOR_EQUIPMENT.iter().position(|e| *e == slot)?;
+        free(menu, at).then_some(at)
+    });
+    let range = match (s, armor) {
+        (CRAFT_OUTPUT, _) => {
+            move_item_stack_to(kind, menu, s, INVENTORY, true);
+            return;
+        }
+        (CRAFT_INPUT_START..ARMOR_END, _) => INVENTORY,
+        (_, Some(armor)) => armor..armor + 1,
+        _ if worn_in == Some(EquipmentSlot::Offhand) && free(menu, OFFHAND) => OFFHAND..OFFHAND + 1,
+        (MAIN_START..HOTBAR_START, _) => HOTBAR_START..OFFHAND,
+        (HOTBAR_START..OFFHAND, _) => MAIN_START..HOTBAR_START,
+        _ => INVENTORY,
+    };
+    move_item_stack_to(kind, menu, s, range, false);
+}
+
+/// Vanilla `CraftingMenu.quickMoveStack`: the result goes to the inventory
+/// from its end, the grid to its start, and an inventory slot to the grid,
+/// else across between the main rows and the hotbar.
+fn crafting_quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
+    const GRID: std::ops::Range<usize> = 1..10;
+    const INVENTORY: std::ops::Range<usize> = 10..46;
+    const HOTBAR_START: usize = 37;
+    match s {
+        0 => move_item_stack_to(kind, menu, s, INVENTORY, true),
+        _ if !INVENTORY.contains(&s) => move_item_stack_to(kind, menu, s, INVENTORY, false),
+        _ if move_item_stack_to(kind, menu, s, GRID, false) => true,
+        _ if s < HOTBAR_START => move_item_stack_to(kind, menu, s, HOTBAR_START..46, false),
+        _ => move_item_stack_to(kind, menu, s, INVENTORY.start..HOTBAR_START, false),
+    };
+}
+
 /// Shift-click, repeating until it stops making progress (vanilla loops too).
 /// Chests move between the contents and player regions like `ChestMenu`
 /// (player-bound reversed); the anvil only ever tries the input slots
@@ -820,12 +802,11 @@ fn safe_insert(
 /// like `AbstractFurnaceMenu` (result reversed; player-slot clicks never get
 /// predicted); the brewing stand does too, player-bound reversed, and routes
 /// player slots by what each slot takes (`BrewingStandMenu`). The crafter
-/// routes like a chest (`CrafterMenu`). The player and crafting menus use
-/// azalea's `quick_move_stack`, whose routing matches vanilla closely enough
-/// for them.
+/// routes like a chest (`CrafterMenu`). The player and crafting menus route
+/// as [`player_quick_move`] and [`crafting_quick_move`] do.
 fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
-        let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
+        let before = menu.get(s).map(ItemStack::count).unwrap_or(0);
         if before == 0 {
             break;
         }
@@ -867,23 +848,22 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
                 if s < 2 {
                     move_item_stack_to(kind, menu, s, 2..menu.len(), true);
                 } else if menu
-                    .slot(s)
+                    .get(s)
                     .and_then(ItemStack::as_present)
                     .is_some_and(|d| d.kind == ItemKind::LapisLazuli)
                 {
                     move_item_stack_to(kind, menu, s, 1..2, true);
-                } else if menu.slot(0).is_some_and(ItemStack::is_empty)
+                } else if menu.first().is_some_and(ItemStack::is_empty)
                     && let ItemStack::Present(d) = take_slot(menu, s)
                 {
                     put_slot(menu, s, with_count(d.clone(), d.count - 1));
                     put_slot(menu, 0, with_count(d, 1));
                 }
             }
-            _ => {
-                menu.quick_move_stack(s);
-            }
+            ContainerKind::Player => player_quick_move(kind, menu, s),
+            ContainerKind::CraftingTable => crafting_quick_move(kind, menu, s),
         }
-        if menu.slot(s).map(ItemStack::count).unwrap_or(0) == before {
+        if menu.get(s).map(ItemStack::count).unwrap_or(0) == before {
             break;
         }
     }
@@ -916,7 +896,7 @@ fn move_item_stack_to(
             if moving.is_empty() {
                 break;
             }
-            if let Some(slot) = menu.slot_mut(i)
+            if let Some(slot) = menu.get_mut(i)
                 && same_item(slot, &moving)
                 && let ItemStack::Present(d) = slot
             {
@@ -934,7 +914,7 @@ fn move_item_stack_to(
             if !kind.may_place(i, &data) {
                 continue;
             }
-            if let Some(slot) = menu.slot_mut(i)
+            if let Some(slot) = menu.get_mut(i)
                 && slot.is_empty()
             {
                 let placed = data.count.min(kind.max_stack_size(i, &data));
@@ -966,8 +946,8 @@ fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
             if cursor.count() >= max {
                 break;
             }
-            let slot_count = menu.slot(s).map(ItemStack::count).unwrap_or(0);
-            if slot_count == 0 || !same_item(cursor, menu.slot(s).unwrap()) {
+            let slot_count = menu.get(s).map(ItemStack::count).unwrap_or(0);
+            if slot_count == 0 || !same_item(cursor, menu.get(s).unwrap()) {
                 continue;
             }
             if pass == 0 && slot_count >= max {
@@ -992,13 +972,13 @@ fn merge_into(dst: &mut ItemStack, src: &mut ItemStack) {
 }
 
 fn take_slot(menu: &mut Menu, s: usize) -> ItemStack {
-    menu.slot_mut(s)
+    menu.get_mut(s)
         .map(std::mem::take)
         .unwrap_or(ItemStack::Empty)
 }
 
 fn put_slot(menu: &mut Menu, s: usize, item: ItemStack) {
-    if let Some(sl) = menu.slot_mut(s) {
+    if let Some(sl) = menu.get_mut(s) {
         *sl = item;
     }
 }
@@ -1011,7 +991,7 @@ fn shrink(item: &mut ItemStack, n: i32) {
 }
 
 fn shrink_slot(menu: &mut Menu, s: usize, n: i32) {
-    if let Some(sl) = menu.slot_mut(s) {
+    if let Some(sl) = menu.get_mut(s) {
         shrink(sl, n);
     }
 }
@@ -1038,7 +1018,7 @@ mod bundle_tests {
     use crate::ui::bundle::Sound;
 
     fn bundle(items: Vec<ItemStack>) -> ItemStack {
-        ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items })
+        ItemStack::new(ItemKind::Bundle, 1).with(&BundleContents { items })
     }
 
     /// A right-click on a player-inventory bundle, with the hovered selection.
@@ -1135,13 +1115,91 @@ mod quick_move_tests {
 
             // Contents fill the player inventory from the end of the hotbar.
             quick_move(kind, &mut menu, 0);
-            assert!(menu.slot(0).is_some_and(ItemStack::is_empty));
-            assert_eq!(menu.slot(last).map(ItemStack::count), Some(5));
+            assert!(menu.first().is_some_and(ItemStack::is_empty));
+            assert_eq!(menu.get(last).map(ItemStack::count), Some(5));
 
             // The player inventory fills the contents from the first slot.
             quick_move(kind, &mut menu, last);
-            assert_eq!(menu.slot(0).map(ItemStack::count), Some(5));
+            assert_eq!(menu.first().map(ItemStack::count), Some(5));
         }
+    }
+
+    /// The menu after shift-clicking slot `s` of `kind` holding `slots`.
+    fn shift_clicked(kind: ContainerKind, slots: &[(usize, ItemStack)], s: usize) -> Menu {
+        let mut menu = vec![ItemStack::Empty; kind.slot_count()];
+        for (slot, stack) in slots {
+            menu[*slot] = stack.clone();
+        }
+        quick_move(kind, &mut menu, s);
+        menu
+    }
+
+    /// The slots of `menu` that hold something.
+    fn filled(menu: &Menu) -> Vec<(usize, ItemKind, i32)> {
+        let held = menu
+            .iter()
+            .enumerate()
+            .filter(|(_, stack)| stack.is_present());
+        held.map(|(slot, stack)| (slot, stack.kind(), stack.count()))
+            .collect()
+    }
+
+    #[test]
+    fn player_shift_clicks_equip_armor_and_cross_between_rows_and_hotbar() {
+        let kind = ContainerKind::Player;
+        let helmet = ItemStack::new(ItemKind::IronHelmet, 1);
+        let stone = ItemStack::new(ItemKind::Stone, 5);
+
+        // An armor piece goes to its own free slot, from the rows or the hotbar.
+        for from in [9, 36] {
+            let menu = shift_clicked(kind, &[(from, helmet.clone())], from);
+            assert_eq!(filled(&menu), [(5, ItemKind::IronHelmet, 1)]);
+        }
+        // With that slot taken it crosses like anything else.
+        let worn = (5, ItemStack::new(ItemKind::GoldenHelmet, 1));
+        let menu = shift_clicked(kind, &[worn, (9, helmet.clone())], 9);
+        assert_eq!(filled(&menu)[1], (36, ItemKind::IronHelmet, 1));
+        // A shield goes to the free offhand.
+        let shield = ItemStack::new(ItemKind::Shield, 1);
+        let menu = shift_clicked(kind, &[(9, shield)], 9);
+        assert_eq!(filled(&menu), [(45, ItemKind::Shield, 1)]);
+
+        let menu = shift_clicked(kind, &[(9, stone.clone())], 9);
+        assert_eq!(filled(&menu), [(36, ItemKind::Stone, 5)]);
+        let menu = shift_clicked(kind, &[(36, stone.clone())], 36);
+        assert_eq!(filled(&menu), [(9, ItemKind::Stone, 5)]);
+        // Worn armor and the craft grid go to the first free inventory slot.
+        for from in [1, 5] {
+            let menu = shift_clicked(kind, &[(from, helmet.clone())], from);
+            assert_eq!(filled(&menu), [(9, ItemKind::IronHelmet, 1)]);
+        }
+        let menu = shift_clicked(kind, &[(45, stone)], 45);
+        assert_eq!(filled(&menu), [(9, ItemKind::Stone, 5)]);
+    }
+
+    #[test]
+    fn crafting_table_shift_clicks_fill_the_grid_then_cross() {
+        let kind = ContainerKind::CraftingTable;
+        let stone = ItemStack::new(ItemKind::Stone, 5);
+
+        let menu = shift_clicked(kind, &[(10, stone.clone())], 10);
+        assert_eq!(filled(&menu), [(1, ItemKind::Stone, 5)]);
+        let menu = shift_clicked(kind, &[(1, stone.clone())], 1);
+        assert_eq!(filled(&menu), [(10, ItemKind::Stone, 5)]);
+
+        // With the grid full, the rows and the hotbar swap.
+        let wood = ItemStack::new(ItemKind::OakPlanks, 64);
+        let grid = (1..10).map(|slot| (slot, wood.clone()));
+        let from_rows: Vec<_> = grid.clone().chain([(10, stone.clone())]).collect();
+        assert_eq!(
+            filled(&shift_clicked(kind, &from_rows, 10))[9],
+            (37, ItemKind::Stone, 5)
+        );
+        let from_hotbar: Vec<_> = grid.chain([(37, stone)]).collect();
+        assert_eq!(
+            filled(&shift_clicked(kind, &from_hotbar, 37))[9],
+            (10, ItemKind::Stone, 5)
+        );
     }
 
     /// A predicted left click on `slot`.
@@ -1185,8 +1243,8 @@ mod quick_move_tests {
 
         // A shift-click from the hotbar skips the disabled first slot.
         quick_move(kind, &mut menu, 36);
-        assert!(menu.slot(0).is_some_and(ItemStack::is_empty));
-        assert_eq!(menu.slot(1).map(ItemStack::count), Some(5));
+        assert!(menu.first().is_some_and(ItemStack::is_empty));
+        assert_eq!(menu.get(1).map(ItemStack::count), Some(5));
 
         let mut cursor = ItemStack::new(ItemKind::Stone, 5);
         let empty = vec![ItemStack::Empty; kind.slot_count()];
@@ -1248,7 +1306,7 @@ mod quick_move_tests {
         slots[3] = ItemStack::new(ItemKind::NetherWart, 4);
         let mut menu = kind.build_menu(&slots);
         quick_move(kind, &mut menu, 3);
-        assert_eq!(menu.slot(40).map(ItemStack::count), Some(4));
+        assert_eq!(menu.get(40).map(ItemStack::count), Some(4));
     }
 
     #[test]

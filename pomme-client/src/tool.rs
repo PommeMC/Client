@@ -2,13 +2,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{CustomData, Tool as WireTool};
+use pomme_item::ItemStackData;
 use pomme_protocol::version::NATIVE;
 use pomme_registry::builtin::{BlockKind, DataComponentKind, ItemKind};
 use pomme_registry::identifier::Identifier;
 use pomme_registry::{HolderSet, Registry};
 
+use crate::net::item_codec::patched;
 use crate::world::block::{BlockStateTable, BlockTags};
 
 /// First protocol whose shears use the `shears_*_breaking_speed` tags (26.2).
@@ -29,7 +30,7 @@ fn legacy_mining_enchantments(stack: &ItemStackData, protocol: i32) -> LegacyMin
     if protocol > 766 {
         return LegacyMiningEnchantments::default();
     }
-    let Some(custom) = stack.component_patch.get::<CustomData>() else {
+    let Some(custom) = patched::<CustomData>(&stack.component_patch) else {
         return LegacyMiningEnchantments::default();
     };
 
@@ -409,10 +410,8 @@ pub fn stack_tool(stack: &ItemStackData, protocol: i32) -> Option<Cow<'static, T
         // TODO: Tool values on 766-773 (1.20.5 through 1.21.10) are skipped,
         // so server-customised tools there mine at the item's default speed.
         if protocol >= 774 {
-            return stack
-                .component_patch
-                .get::<WireTool>()
-                .map(|tool| Cow::Owned(from_wire(tool, protocol)));
+            return patched::<WireTool>(&stack.component_patch)
+                .map(|tool| Cow::Owned(from_wire(&tool, protocol)));
         }
     }
 
@@ -421,9 +420,10 @@ pub fn stack_tool(stack: &ItemStackData, protocol: i32) -> Option<Cow<'static, T
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{DataComponentUnion, ToolRule as WireToolRule};
+    use azalea_inventory::components::ToolRule as WireToolRule;
 
     use super::*;
+    use crate::net::item_codec::set_fork_component;
 
     fn test_tags() -> BlockTags {
         crate::world::block::block_tags_for_test(
@@ -522,13 +522,7 @@ mod tests {
         let custom = CustomData {
             nbt: Nbt::new("".into(), root),
         };
-        // SAFETY: the union variant matches DataComponentKind::CustomData.
-        unsafe {
-            stack.component_patch.unchecked_insert_component(
-                DataComponentKind::CustomData,
-                Some(DataComponentUnion::from(custom)),
-            );
-        }
+        set_fork_component(&mut stack.component_patch, custom);
         stack
     }
 
@@ -614,11 +608,7 @@ mod tests {
     #[test]
     fn translated_protocols_only_trust_layout_compatible_tool_patches() {
         let mut stack = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        unsafe {
-            stack
-                .component_patch
-                .unchecked_insert_component(DataComponentKind::Tool, None);
-        }
+        stack.component_patch.remove(DataComponentKind::Tool);
         assert!(stack_tool(&stack, NATIVE.protocol).is_none());
         assert!(stack_tool(&stack, 775).is_none());
         assert!(stack_tool(&stack, 774).is_none());
@@ -650,12 +640,7 @@ mod tests {
             damage_per_block: 1,
             can_destroy_blocks_in_creative: true,
         };
-        unsafe {
-            stack.component_patch.unchecked_insert_component(
-                DataComponentKind::Tool,
-                Some(DataComponentUnion::from(wire)),
-            );
-        }
+        set_fork_component(&mut stack.component_patch, wire);
 
         let tool = stack_tool(&stack, 775).expect("26.1 Tool patch");
         let tags = test_tags();
@@ -666,12 +651,7 @@ mod tests {
     #[test]
     fn explicit_tool_removal_suppresses_native_default() {
         let mut stack = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        // SAFETY: a None payload represents removal and carries no union value.
-        unsafe {
-            stack
-                .component_patch
-                .unchecked_insert_component(DataComponentKind::Tool, None);
-        }
+        stack.component_patch.remove(DataComponentKind::Tool);
         assert!(stack_tool(&stack, NATIVE.protocol).is_none());
     }
 
@@ -691,13 +671,7 @@ mod tests {
             damage_per_block: 7,
             can_destroy_blocks_in_creative: false,
         };
-        // SAFETY: the union variant matches DataComponentKind::Tool.
-        unsafe {
-            stack.component_patch.unchecked_insert_component(
-                DataComponentKind::Tool,
-                Some(DataComponentUnion::from(wire)),
-            );
-        }
+        set_fork_component(&mut stack.component_patch, wire);
 
         let tool = stack_tool(&stack, NATIVE.protocol).expect("explicit tool override");
         let tags = test_tags();

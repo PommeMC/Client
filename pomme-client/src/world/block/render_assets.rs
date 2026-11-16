@@ -4,13 +4,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
+    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
 };
+use pomme_item::ItemStackData;
+use pomme_item::components::ChargedProjectiles;
 use pomme_registry::Registry as AzaleaRegistry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
+
+use crate::net::item_codec::Components;
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
@@ -272,7 +275,7 @@ impl BlockRenderAssets {
     /// (vanilla `Charge` select property) if it bakes one, else `name`.
     pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
         let charge = stack
-            .get_component::<ChargedProjectiles>()
+            .component::<ChargedProjectiles>()
             .filter(|c| !c.items.is_empty())
             .map(|c| {
                 let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
@@ -735,8 +738,8 @@ mod load_progress_tests {
 
 #[cfg(test)]
 mod tint_tests {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::components::CustomModelData;
+    use pomme_item::ItemStack;
 
     use super::*;
 

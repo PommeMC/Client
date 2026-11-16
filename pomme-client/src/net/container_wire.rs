@@ -2,9 +2,9 @@
 //! session: translated frames already carry the native layout, and item and
 //! menu ids are remapped from the wire version's.
 
-use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use crossbeam_channel::Sender;
+use pomme_item::ItemStack;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::{ClientRegistry, item};
@@ -115,7 +115,7 @@ fn stack(stack: Option<item::ItemStack>) -> ItemStack {
             if !translated {
                 stack.item = native_id(ClientRegistry::Item, stack.item)?;
             }
-            Some(super::item_codec::to_azalea(&stack))
+            Some(ItemStack::from_wire(&stack))
         })
         .unwrap_or(ItemStack::Empty)
 }

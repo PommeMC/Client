@@ -6190,7 +6190,7 @@ fn entity_data_matches_azalea() {
         assert_eq!(ours.index, theirs.index);
         match (&ours.value, &theirs.value) {
             (Value::Item(Some(stack)), EntityDataValue::ItemStack(az)) => {
-                assert_eq!(&crate::net::item_codec::to_azalea(stack), az);
+                assert_eq!(&crate::net::item_codec::to_fork(stack), az);
             }
             // azalea re-encodes text as a compound; compare what it says.
             (Value::OptionalComponent(Some(nbt)), EntityDataValue::OptionalFormattedText(az)) => {

@@ -52,7 +52,7 @@ pub enum RecipeDisplay {
 pub struct ItemStackTemplate {
     pub item: u32,
     pub count: i32,
-    pub components: azalea_inventory::DataComponentPatch,
+    pub components: pomme_item::ComponentPatch,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use azalea_inventory::ItemStackData;
 use azalea_inventory::components::UseCooldown;
+use pomme_item::ItemStackData;
 use pomme_registry::builtin::ItemKind;
 
 use super::interaction::stack_component;

@@ -3,11 +3,11 @@ use std::time::{Duration, Instant};
 
 use azalea_inventory::components::{
     self, CustomName, Damage, DataComponentTrait, Dye, DyeColor, DyedColor, Enchantments,
-    EncodableDataComponent, PotionContents, ProvidesTrimMaterial, Trim,
+    PotionContents, ProvidesTrimMaterial, Trim,
 };
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::{DataComponentKind, ItemKind, Potion};
 use pomme_registry::{DataRegistry, DataRegistryKey, Holder, Registry};
 
@@ -18,6 +18,7 @@ use super::common::{
 use super::text::strip_formatting;
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::chat_component::ComponentText;
+use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,
@@ -1293,7 +1294,7 @@ fn direct_trim_material_name(
 }
 
 fn stack_tooltip_lines(stack: &ResolvedSlotStack) -> Vec<TooltipLine> {
-    let mut lines = match serde_json::to_value(&stack.stack) {
+    let mut lines = match crate::net::item_codec::stack_json(&stack.stack) {
         Ok(value) => crate::ui::chat::item_tooltip_lines(&value, None, false),
         Err(_) => vec![TooltipLine::new(
             super::common::item_display_name(&stack.stack),
@@ -1461,24 +1462,8 @@ fn display_result_stacks(
     slot_stacks(result, book)
 }
 
-fn with_component<T>(stack: ItemStackData, component: T) -> ItemStackData
-where
-    T: DataComponentTrait + EncodableDataComponent,
-{
-    match ItemStack::Present(stack).with_component(component) {
-        ItemStack::Present(stack) => stack,
-        ItemStack::Empty => unreachable!("a positive recipe-display stack cannot become empty"),
-    }
-}
-
 fn without_component<T: DataComponentTrait>(mut stack: ItemStackData) -> ItemStackData {
-    // SAFETY: `None` represents an explicit removal, so there is no union value
-    // whose runtime type needs to match the component kind.
-    unsafe {
-        stack
-            .component_patch
-            .unchecked_insert_component(T::KIND, None)
-    };
+    stack.component_patch.remove(T::KIND);
     stack
 }
 
@@ -1876,12 +1861,9 @@ fn apply_dye(mut target: ResolvedSlotStack, dye: DyeColor) -> ResolvedSlotStack 
     }
 
     target.stack.count = 1;
-    target.stack = with_component(
-        target.stack,
-        DyedColor {
-            rgb: (red << 16) | (green << 8) | blue,
-        },
-    );
+    target.stack = target.stack.with_component(DyedColor {
+        rgb: (red << 16) | (green << 8) | blue,
+    });
     target
 }
 
@@ -1909,7 +1891,7 @@ fn apply_trim(
             return None;
         }
         base.stack.count = 1;
-        base.stack = with_component(base.stack, trim);
+        base.stack = base.stack.with_component(trim);
         base.direct_trim = None;
         return Some(base);
     }
@@ -2010,13 +1992,10 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
                         break 'potions;
                     }
                     let mut stack = stack.clone();
-                    stack.stack = with_component(
-                        stack.stack,
-                        PotionContents {
-                            potion: Some(potion),
-                            ..PotionContents::default()
-                        },
-                    );
+                    stack.stack = stack.stack.with_component(PotionContents {
+                        potion: Some(potion),
+                        ..PotionContents::default()
+                    });
                     out.push(stack);
                 }
             }
@@ -2999,9 +2978,10 @@ mod tests {
 
     #[test]
     fn player_craftability_excludes_armor_offhand_and_damaged_stacks() {
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{Damage, DataComponentUnion};
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::Damage;
+        use pomme_registry::builtin::ItemKind;
+
+        use crate::net::item_codec::set_fork_component;
 
         let diamond = ItemKind::Diamond.to_u32();
         let mut slots = vec![ItemStack::Empty; 46];
@@ -3009,13 +2989,8 @@ mod tests {
         slots[45] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 3));
         assert!(!available_items(&slots, RecipeBookScreenSpec::player(0)).contains_key(&diamond));
 
-        let mut patch = DataComponentPatch::default();
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::Damage,
-                Some(DataComponentUnion::from(Damage { amount: 1 })),
-            );
-        }
+        let mut patch = pomme_item::ComponentPatch::default();
+        set_fork_component(&mut patch, Damage { amount: 1 });
         slots[9] = ItemStack::Present(ItemStackData {
             kind: ItemKind::Diamond,
             count: 4,
@@ -3308,25 +3283,24 @@ mod tests {
     #[test]
     fn search_matches_vanilla_plain_and_identifier_modes_with_components() {
         use azalea_chat::FormattedText;
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{CustomName, DataComponentUnion, Lore};
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::{CustomName, Lore};
+        use pomme_registry::builtin::ItemKind;
 
-        let mut patch = DataComponentPatch::default();
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::CustomName,
-                Some(DataComponentUnion::from(CustomName {
-                    name: FormattedText::from("Fancy Gem"),
-                })),
-            );
-            patch.unchecked_insert_component(
-                DataComponentKind::Lore,
-                Some(DataComponentUnion::from(Lore {
-                    lines: vec![FormattedText::from("Secret Recipe")],
-                })),
-            );
-        }
+        use crate::net::item_codec::set_fork_component;
+
+        let mut patch = pomme_item::ComponentPatch::default();
+        set_fork_component(
+            &mut patch,
+            CustomName {
+                name: FormattedText::from("Fancy Gem"),
+            },
+        );
+        set_fork_component(
+            &mut patch,
+            Lore {
+                lines: vec![FormattedText::from("Secret Recipe")],
+            },
+        );
         let entry = RecipeBookEntry {
             id: 9,
             display: RecipeDisplay::Shapeless {
@@ -3684,13 +3658,12 @@ mod tests {
     #[test]
     fn direct_trim_material_is_preserved_in_resolved_stack_and_tooltip() {
         use azalea_chat::FormattedText;
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{
-            AssetInfo, DataComponentUnion, DirectTrimMaterial, MaterialAssetGroup,
-        };
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::{AssetInfo, DirectTrimMaterial, MaterialAssetGroup};
+        use pomme_registry::builtin::ItemKind;
 
-        let mut patch = DataComponentPatch::default();
+        use crate::net::item_codec::set_fork_component;
+
+        let mut patch = pomme_item::ComponentPatch::default();
         let direct_material = DirectTrimMaterial {
             assets: MaterialAssetGroup {
                 assert_name: AssetInfo {
@@ -3700,14 +3673,12 @@ mod tests {
             },
             description: FormattedText::from("Test Material"),
         };
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::ProvidesTrimMaterial,
-                Some(DataComponentUnion::from(ProvidesTrimMaterial {
-                    value: Holder::Direct(direct_material),
-                })),
-            );
-        }
+        set_fork_component(
+            &mut patch,
+            ProvidesTrimMaterial {
+                value: Holder::Direct(direct_material),
+            },
+        );
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::SmithingTrim {

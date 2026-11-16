@@ -1315,7 +1315,7 @@ impl MenuGeometry {
                         SpriteId::BundleSlotBackground
                     };
                     sprite(vertices, back, x, y, 24.0 * px);
-                    if let azalea_inventory::ItemStack::Present(data) = &shown_items[visual] {
+                    if let pomme_item::ItemStack::Present(data) = &shown_items[visual] {
                         self.push_tooltip_item(
                             vertices,
                             drawn_objects,
@@ -1340,10 +1340,9 @@ impl MenuGeometry {
                     slot_number += 1;
                 }
             }
-            if let Some(azalea_inventory::ItemStack::Present(data)) =
-                usize::try_from(image.selected)
-                    .ok()
-                    .and_then(|i| items.get(i))
+            if let Some(pomme_item::ItemStack::Present(data)) = usize::try_from(image.selected)
+                .ok()
+                .and_then(|i| items.get(i))
             {
                 // `extractSelectedItemTooltip`: its own tooltip, centred above.
                 let name = crate::ui::common::styled_hover_name(data);
@@ -1431,7 +1430,7 @@ impl MenuGeometry {
         drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
         obfuscation_rng: &mut ObfuscationRng,
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
-        data: &azalea_inventory::ItemStackData,
+        data: &pomme_item::ItemStackData,
         item_tints: &[u32],
         (x, y): (f32, f32),
         scale: f32,
@@ -2226,7 +2225,7 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         item_name: String,
-        item_stack: Option<azalea_inventory::ItemStackData>,
+        item_stack: Option<pomme_item::ItemStackData>,
         /// Vanilla GUI `item(...)` supplies the local LivingEntity owner;
         /// `fakeItem(...)` supplies none. Team tint evaluation depends on this.
         use_player_team: bool,
@@ -2292,7 +2291,7 @@ pub enum MenuElement {
         x: f32,
         y: f32,
         title: Vec<TextSpan>,
-        items: Vec<azalea_inventory::ItemStack>,
+        items: Vec<pomme_item::ItemStack>,
         /// Per-item tint palettes, parallel to `items`; filled by the renderer.
         item_tints: Vec<Vec<u32>>,
         selected: i32,
@@ -5091,7 +5090,7 @@ struct TooltipBox {
 /// The bundle half of a `BundleTooltip` element.
 struct BundleImage<'a> {
     title: &'a [TextSpan],
-    items: &'a [azalea_inventory::ItemStack],
+    items: &'a [pomme_item::ItemStack],
     item_tints: &'a [Vec<u32>],
     selected: i32,
     weight: crate::ui::bundle::Frac,

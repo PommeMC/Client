@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use azalea_inventory::ItemStack;
+use pomme_item::ItemStack;
 
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, centred_title_x, gesture_result,

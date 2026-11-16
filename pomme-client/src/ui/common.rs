@@ -1,12 +1,13 @@
 use azalea_inventory::components::{
     CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
 };
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::chat_component::{Component, ComponentText};
+use crate::net::item_codec::Components;
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -1251,14 +1252,16 @@ pub struct SliderResult {
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
-    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_inventory::components::{Damage, MaxDamage, Unbreakable};
+    use pomme_item::components::BundleContents;
+    use pomme_item::{ItemStack, ItemStackData};
     use pomme_registry::builtin::ItemKind;
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
+    use crate::net::item_codec::Components;
     use crate::player::item_cooldowns::ItemCooldowns;
 
     #[test]
@@ -1470,7 +1473,7 @@ mod tests {
     }
 
     fn bundle(items: Vec<ItemStack>) -> ItemStackData {
-        present(ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items }))
+        present(ItemStack::new(ItemKind::Bundle, 1).with(&BundleContents { items }))
     }
 
     #[test]
