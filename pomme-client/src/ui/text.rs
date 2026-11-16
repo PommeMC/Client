@@ -159,6 +159,33 @@ impl TextSpan {
             ..self.clone()
         }
     }
+
+    /// Whether `other` is formatted as this span is, whatever their text.
+    pub fn same_style(&self, other: &Self) -> bool {
+        let Self {
+            text: _,
+            color,
+            bold,
+            italic,
+            strikethrough,
+            underline,
+            obfuscated,
+            shadow_color,
+            font,
+            inline_object,
+            component_style,
+        } = self;
+        *color == other.color
+            && *bold == other.bold
+            && *italic == other.italic
+            && *strikethrough == other.strikethrough
+            && *underline == other.underline
+            && *obfuscated == other.obfuscated
+            && *shadow_color == other.shadow_color
+            && *font == other.font
+            && *inline_object == other.inline_object
+            && *component_style == other.component_style
+    }
 }
 
 /// The spans' text without formatting.
