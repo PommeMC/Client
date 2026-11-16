@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::text::{TextSpan, format_text_spans, text_from_json};
+use crate::ui::text::{TextSpan, component_from_json, format_component_spans};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -161,7 +161,10 @@ async fn ping_server(
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
         // Vanilla MOTD base color: 0x808080.
-        let motd = format_text_spans(&text_from_json(&status.description), [0.5, 0.5, 0.5, 1.0]);
+        let motd = format_component_spans(
+            &component_from_json(&status.description),
+            [0.5, 0.5, 0.5, 1.0],
+        );
         // Vanilla `ServerStatusPinger`: a status without a version is "Old",
         // protocol 0.
         let (version, protocol) = status
