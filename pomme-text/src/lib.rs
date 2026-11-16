@@ -1064,7 +1064,8 @@ fn parse_color(value: &Value) -> Option<u32> {
     })
 }
 
-/// `ListTag`'s wrapper around an element of a mixed-type list.
+/// `ListTag`'s wrapper around an element of a mixed-type list, for building
+/// one as a server sends it. Only tests need to: readers unwrap it.
 pub fn wrapped(tag: NbtTag) -> NbtTag {
     let mut wrapper = NbtCompound::new();
     wrapper.insert(WRAPPER_MARKER, tag);
