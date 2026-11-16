@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::offset_of;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use glam::DVec3;
 
@@ -91,6 +92,20 @@ const MIN_SEGMENT: u32 = 64;
 /// Staging buffers in flight: one per frame that may still read one, and one
 /// written while they do.
 const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
+/// The longest gap between batches [`upload_budget`] counts, so a hitch
+/// doesn't buy the next batch a long one of its own.
+const MAX_UPLOAD_GAP: Duration = Duration::from_millis(100);
+
+/// How long a batch `since_last` after the one before may keep flushing and
+/// refilling a full staging buffer: a quarter of that gap. Vanilla's
+/// (`SectionRenderDispatcher`, 49 MiB a frame) takes whatever a frame has;
+/// this one is a fraction of it, and filled once a frame it ties the terrain
+/// loaded a second to the frame rate. At a high rate the budget is too short
+/// to flush in, and the rest waits a frame.
+fn upload_budget(since_last: Duration) -> Duration {
+    const UPLOAD_SHARE: u32 = 4;
+    since_last.min(MAX_UPLOAD_GAP) / UPLOAD_SHARE
+}
 
 /// Vanilla `LevelRenderer.compileSections`' `isNearby` distance, squared.
 const NEARBY_DIST_SQ: f32 = 768.0;
@@ -1355,6 +1370,8 @@ pub struct ChunkBufferStore {
     /// the `frame_seq` until which frames may still read it.
     staging_used: [(usize, usize); STAGING_SLOTS],
     staging_busy: [u64; STAGING_SLOTS],
+    /// When the last batch began, for [`upload_budget`].
+    last_batch: Instant,
     /// Staging copies to record as the next frame starts, by staging slot.
     pending_copies: Vec<(usize, ArenaCopy)>,
     /// Compaction's copies to record as the next frame starts, by source
@@ -1510,6 +1527,7 @@ impl ChunkBufferStore {
             staging,
             staging_used: [(0, 0); STAGING_SLOTS],
             staging_busy: [0; STAGING_SLOTS],
+            last_batch: Instant::now(),
             pending_copies: Vec::new(),
             pending_moves: Vec::new(),
             moved_from: Vec::new(),
@@ -1635,15 +1653,18 @@ impl ChunkBufferStore {
     /// Upload a batch of mesh results, each replacing the sections in its
     /// `mesh.replaced` range. The vertices go to this frame's staging buffer
     /// and the copies into the arenas are recorded as the frame starts, so a
-    /// streaming frame never waits for the GPU: a batch outgrowing the
-    /// staging buffer stops there, and the rest is the caller's to send next
-    /// frame. Also returns the starved sections that may fit now, per column,
-    /// for re-meshing.
+    /// streaming frame rarely waits for the GPU: a batch outgrowing the
+    /// staging buffer flushes it and carries on only within
+    /// [`upload_budget`], and the rest is the caller's to send next frame.
+    /// Also returns the starved sections that may fit now, per column, for
+    /// re-meshing.
     pub fn upload_batch(
         &mut self,
         device: &rhi::backend::Device,
         meshes: &[ChunkMeshData],
     ) -> ChunkUploads {
+        let started = Instant::now();
+        let budget = upload_budget(started - std::mem::replace(&mut self.last_batch, started));
         if meshes.is_empty() {
             return self.uploads(device, 0);
         }
@@ -1742,6 +1763,7 @@ impl ChunkBufferStore {
             if self.use_staging
                 && i > 0
                 && (stg_v + v_bytes > staging_half || stg_i + i_bytes > staging_half)
+                && started.elapsed() >= budget
             {
                 // The rest go next frame, their waitlist claims still held.
                 taken = i;
@@ -1865,9 +1887,10 @@ impl ChunkBufferStore {
                     .iter()
                     .map(|p| p.index_len as usize * INDEX_SIZE as usize)
                     .sum();
-                // Only the batch's first mesh gets here with the half short
-                // (an edit uploaded earlier in the frame); it alone fits a half
-                // (checked above), so a flush always makes room.
+                // The batch's first mesh gets here with the half short after
+                // an edit uploaded earlier in the frame, a later one inside
+                // the budget; it alone fits a half (checked above), so a
+                // flush always makes room.
                 let (stg_v, stg_i) = self.staging_used[slot];
                 if stg_v + mv > staging_half || stg_i + mi > staging_half {
                     self.flush_now(device);
@@ -3326,6 +3349,23 @@ mod tests {
     use std::collections::hash_map::Entry;
 
     use super::*;
+
+    #[test]
+    fn a_batch_may_upload_for_a_quarter_of_the_gap_since_the_last() {
+        let ms = Duration::from_millis;
+        // 30 fps, and uncapped, where the share is too short to flush in.
+        assert_eq!(
+            upload_budget(Duration::from_micros(33_332)),
+            Duration::from_micros(8_333)
+        );
+        assert_eq!(
+            upload_budget(Duration::from_micros(600)),
+            Duration::from_micros(150)
+        );
+        // A hitch counts as the longest gap.
+        assert_eq!(upload_budget(ms(100)), ms(25));
+        assert_eq!(upload_budget(ms(2_000)), ms(25));
+    }
 
     /// Every section's `meta_index` finds its own meta.
     fn indices_hold(lists: &Lists) {

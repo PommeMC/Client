@@ -1752,7 +1752,7 @@ impl GameState {
     pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
         let mut batch = std::mem::take(&mut self.pending_upload);
-        for mesh in self.mesh_dispatcher.drain_results() {
+        for mesh in self.mesh_dispatcher.drain_results(batch.len()) {
             // Stale meshes count too: worker time spent is worker time spent.
             if let Some(bench) = &mut self.chunk_load_bench {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);

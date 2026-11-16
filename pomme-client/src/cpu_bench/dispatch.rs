@@ -41,7 +41,7 @@ pub fn bench(c: &mut Criterion, assets: &Assets) {
                 let mut received = 0;
                 while received < columns.len() {
                     let before = received;
-                    received += dispatcher.drain_results().count();
+                    received += dispatcher.drain_results(0).count();
                     if received == before {
                         std::thread::yield_now();
                     }
