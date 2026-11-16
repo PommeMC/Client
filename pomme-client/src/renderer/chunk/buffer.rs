@@ -92,16 +92,16 @@ const MIN_SEGMENT: u32 = 64;
 /// Staging buffers in flight: one per frame that may still read one, and one
 /// written while they do.
 const STAGING_SLOTS: usize = MAX_FRAMES_IN_FLIGHT + 1;
-/// The longest gap between batches [`upload_budget`] counts, so a hitch
-/// doesn't buy the next batch a long one of its own.
+/// The longest gap between frames [`upload_budget`] counts, so a hitch
+/// doesn't buy the next frame's batch a long one of its own.
 const MAX_UPLOAD_GAP: Duration = Duration::from_millis(100);
 
-/// How long a batch `since_last` after the one before may keep flushing and
-/// refilling a full staging buffer: a quarter of that gap. Vanilla's
-/// (`SectionRenderDispatcher`, 49 MiB a frame) takes whatever a frame has;
-/// this one is a fraction of it, and filled once a frame it ties the terrain
-/// loaded a second to the frame rate. At a high rate the budget is too short
-/// to flush in, and the rest waits a frame.
+/// How long a batch may keep flushing and refilling a full staging buffer: a
+/// quarter of the time `since_last` frame. Vanilla's
+/// (`SectionRenderDispatcher`, 49 MiB a frame) takes whatever a frame has; this
+/// one is a fraction of it, and filled once a frame it ties the terrain loaded
+/// a second to the frame rate. At a high rate the budget is too short to flush
+/// in, and the rest waits a frame.
 fn upload_budget(since_last: Duration) -> Duration {
     const UPLOAD_SHARE: u32 = 4;
     since_last.min(MAX_UPLOAD_GAP) / UPLOAD_SHARE
@@ -1370,8 +1370,9 @@ pub struct ChunkBufferStore {
     /// the `frame_seq` until which frames may still read it.
     staging_used: [(usize, usize); STAGING_SLOTS],
     staging_busy: [u64; STAGING_SLOTS],
-    /// When the last batch began, for [`upload_budget`].
-    last_batch: Instant,
+    /// When the frame began, and the [`upload_budget`] its batches have.
+    frame_began: Instant,
+    upload_budget: Duration,
     /// Staging copies to record as the next frame starts, by staging slot.
     pending_copies: Vec<(usize, ArenaCopy)>,
     /// Compaction's copies to record as the next frame starts, by source
@@ -1527,7 +1528,8 @@ impl ChunkBufferStore {
             staging,
             staging_used: [(0, 0); STAGING_SLOTS],
             staging_busy: [0; STAGING_SLOTS],
-            last_batch: Instant::now(),
+            frame_began: Instant::now(),
+            upload_budget: Duration::ZERO,
             pending_copies: Vec::new(),
             pending_moves: Vec::new(),
             moved_from: Vec::new(),
@@ -1664,7 +1666,6 @@ impl ChunkBufferStore {
         meshes: &[ChunkMeshData],
     ) -> ChunkUploads {
         let started = Instant::now();
-        let budget = upload_budget(started - std::mem::replace(&mut self.last_batch, started));
         if meshes.is_empty() {
             return self.uploads(device, 0);
         }
@@ -1768,7 +1769,7 @@ impl ChunkBufferStore {
                 direct
             };
             if i > 0 && (used_v + v_bytes > staging_half || used_i + i_bytes > staging_half) {
-                if started.elapsed() >= budget {
+                if started.elapsed() >= self.upload_budget {
                     // The rest go next frame, their waitlist claims still held.
                     taken = i;
                     break;
@@ -2318,6 +2319,8 @@ impl ChunkBufferStore {
             self.flush_now(device);
         }
         self.frame_seq += 1;
+        let now = Instant::now();
+        self.upload_budget = upload_budget(now - std::mem::replace(&mut self.frame_began, now));
         while self
             .pending_free
             .front()
@@ -3358,7 +3361,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_batch_may_upload_for_a_quarter_of_the_gap_since_the_last() {
+    fn a_batch_may_upload_for_a_quarter_of_the_gap_between_frames() {
         let ms = Duration::from_millis;
         // 30 fps, and uncapped, where the share is too short to flush in.
         assert_eq!(
