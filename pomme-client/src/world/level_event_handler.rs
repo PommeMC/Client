@@ -324,7 +324,7 @@ pub(crate) fn enderman_teleportation_particles(
     portal: &SimpleParticleType,
 ) {
     let dimensions = crate::entity::dimensions::EntityDimensions::of(
-        azalea_registry::builtin::EntityKind::Enderman,
+        pomme_registry::builtin::EntityKind::Enderman,
     );
     let to_pos = unpack_difference_in_position(pos, data, [127; 3]);
     let random = level.get_random().clone();

@@ -3,7 +3,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_protocol::common::client_information::ParticleStatus;
 use glam::FloatExt as _;
 use pomme_item::components::EquipmentSlot;
 use pomme_protocol::serverbound::{ContainerClick, GamePacket};
@@ -63,7 +62,7 @@ use crate::world::block::model::CardinalLightType;
 use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
-use crate::world::level::LevelContext;
+use crate::world::level::{LevelContext, ParticleStatus};
 
 /// The F3 "Mesh gate" line: among in-frustum columns, the sections drawn and
 /// those skipped as occluded (the per-section occlusion win). Kept as each

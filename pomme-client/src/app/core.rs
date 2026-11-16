@@ -4,7 +4,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_protocol::common::client_information::ParticleStatus;
 use glam::{FloatExt, dvec3};
 use pomme_protocol::serverbound::{
     ClientCommand, GamePacket, Input, MoveFlags, PlayerCommand, ResourcePackAction,
@@ -60,7 +59,7 @@ use crate::world::block::block_registry::BlockDefinitions;
 use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::chunk::ChunkStore;
 use crate::world::environment::EnvironmentProbe;
-use crate::world::level::LevelContext;
+use crate::world::level::{LevelContext, ParticleStatus};
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,

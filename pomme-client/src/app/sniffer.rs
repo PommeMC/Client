@@ -3,7 +3,6 @@
 
 use std::rc::Rc;
 
-use azalea_protocol::common::client_information::ParticleStatus;
 use glam::DVec3;
 use pomme_registry::builtin::EntityKind;
 
@@ -19,7 +18,7 @@ use crate::world::block::block_colors::BlockColors;
 use crate::world::block::model::Direction;
 use crate::world::block::particle_appearance::BlockParticleAppearance;
 use crate::world::block::sound::block_sounds_for_id;
-use crate::world::level::LevelContext;
+use crate::world::level::{LevelContext, ParticleStatus};
 
 /// `ClientLevel.playLocalSound(Entity, ..)` with the sniffer's sound source.
 fn play_bound(

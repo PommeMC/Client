@@ -1,6 +1,6 @@
 use azalea_block::BlockState;
-use azalea_registry::builtin::BlockEntityKind;
 use glam::DVec3;
+use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use super::super::{Block, BlockData, PropMap};
