@@ -15,3 +15,16 @@ pub static SUPPORTS_SUGAR_CANE_ADJACENTLY: RegistryTag<Fluid> =
     RegistryTag::new(&[Fluid::FlowingWater, Fluid::Water]);
 
 pub static WATER: RegistryTag<Fluid> = RegistryTag::new(&[Fluid::FlowingWater, Fluid::Water]);
+
+/// The tag at this path under the `minecraft` namespace, like `mineable/axe`.
+pub fn named(path: &str) -> Option<RegistryTag<Fluid>> {
+    Some(match path {
+        "bubble_column_can_occupy" => BUBBLE_COLUMN_CAN_OCCUPY,
+        "lava" => LAVA,
+        "supports_frogspawn" => SUPPORTS_FROGSPAWN,
+        "supports_lily_pad" => SUPPORTS_LILY_PAD,
+        "supports_sugar_cane_adjacently" => SUPPORTS_SUGAR_CANE_ADJACENTLY,
+        "water" => WATER,
+        _ => return None,
+    })
+}

@@ -1,12 +1,13 @@
 //! Item stacks as the client holds them.
 //!
 //! A stack is an item, a count and a [`ComponentPatch`]: what it adds to or
-//! removes from the item's default components. Each added component is kept
-//! as the exact bytes its `STREAM_CODEC` wrote, so each goes back on the wire
-//! as it came and nothing a reader doesn't model is lost. [`components`]
-//! holds the values pomme reads out of those bytes.
+//! removes from the item's default components ([`defaults`]). Each added
+//! component is kept as the exact bytes its `STREAM_CODEC` wrote, so each goes
+//! back on the wire as it came and nothing a reader doesn't model is lost.
+//! [`components`] holds the values pomme reads out of those bytes.
 
 pub mod components;
+pub mod defaults;
 
 use pomme_protocol::item as wire;
 use pomme_registry::Registry;
@@ -72,6 +73,11 @@ impl ItemStack {
             Self::Empty => None,
             Self::Present(data) => Some(data),
         }
+    }
+
+    /// [`ItemStackData::component`]; `None` when empty.
+    pub fn component<T: components::Component>(&self) -> Option<T> {
+        self.as_present()?.component()
     }
 
     /// The stack with the component `value` set.
@@ -158,6 +164,41 @@ impl ItemStackData {
         }
     }
 
+    /// `DataComponentHolder.get` as the value's wire bytes: what the patch
+    /// sets, else the item's default, and nothing when the patch removes it.
+    pub fn component_bytes(&self, kind: DataComponentKind) -> Option<&[u8]> {
+        if self.component_patch.removes(kind) {
+            return None;
+        }
+        self.component_patch
+            .get(kind)
+            .or_else(|| defaults::get(self.kind, kind))
+    }
+
+    /// `DataComponentHolder.get`; `None` too for a value that doesn't read.
+    pub fn component<T: components::Component>(&self) -> Option<T> {
+        T::from_bytes(self.component_bytes(T::KIND)?)
+    }
+
+    /// `ItemStack.getComponents().keySet()`: every component the stack has,
+    /// in component order.
+    pub fn component_kinds(&self) -> Vec<DataComponentKind> {
+        let defaults = defaults::of(self.kind).iter().map(|(kind, _)| *kind);
+        let patched = self.component_patch.iter().map(|(kind, _)| kind);
+        let mut kinds: Vec<_> = defaults
+            .chain(patched)
+            .filter(|kind| !self.component_patch.removes(*kind))
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds
+    }
+
+    /// `DataComponentHolder.has`.
+    pub fn has_component(&self, kind: DataComponentKind) -> bool {
+        self.component_bytes(kind).is_some()
+    }
+
     /// `ItemStack.isSameItemSameComponents`.
     // TODO: compares each component's bytes, so two values that are equal
     // but written differently (a map's entries in another order) don't
@@ -236,14 +277,6 @@ impl ComponentPatch {
         entries.into_iter()
     }
 
-    /// The value `T` is set to; `None` when it isn't set or doesn't read.
-    pub fn read<T: components::Component>(&self) -> Option<T> {
-        let mut r = pomme_protocol::codec::Reader::new(self.get(T::KIND)?);
-        let value = T::read(&mut r).ok()?;
-        r.ensure_eof().ok()?;
-        Some(value)
-    }
-
     /// Sets `T` to `value`.
     pub fn write<T: components::Component>(&mut self, value: &T) {
         self.set(T::KIND, value.to_bytes());
@@ -281,6 +314,7 @@ impl ComponentPatch {
 
 #[cfg(test)]
 mod tests {
+    use super::components::Component;
     use super::*;
 
     const DAMAGE: DataComponentKind = DataComponentKind::Damage;
@@ -326,6 +360,50 @@ mod tests {
         patch.forget(LORE);
         patch.forget(DAMAGE);
         assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn a_component_is_the_patchs_or_the_items_default_unless_removed() {
+        use components::BundleContents;
+        const MAX_STACK_SIZE: DataComponentKind = DataComponentKind::MaxStackSize;
+
+        let mut pearl = ItemStackData::new(ItemKind::EnderPearl, 1);
+        assert_eq!(pearl.component_bytes(MAX_STACK_SIZE), Some(&[16][..]));
+        assert!(pearl.has_component(MAX_STACK_SIZE) && !pearl.has_component(DAMAGE));
+        pearl.component_patch.set(MAX_STACK_SIZE, [4]);
+        assert_eq!(pearl.component_bytes(MAX_STACK_SIZE), Some(&[4][..]));
+        pearl.component_patch.remove(MAX_STACK_SIZE);
+        assert_eq!(pearl.component_bytes(MAX_STACK_SIZE), None);
+
+        // A bundle starts empty; a stone has no contents at all.
+        let mut bundle = ItemStackData::new(ItemKind::Bundle, 1);
+        assert_eq!(
+            bundle.component::<BundleContents>(),
+            Some(BundleContents::default())
+        );
+        assert_eq!(
+            ItemStackData::new(ItemKind::Stone, 1).component::<BundleContents>(),
+            None
+        );
+        bundle.component_patch.remove(BundleContents::KIND);
+        assert_eq!(bundle.component::<BundleContents>(), None);
+    }
+
+    #[test]
+    fn the_kinds_a_stack_has_are_its_defaults_and_patch_less_removals() {
+        let mut stone = ItemStackData::new(ItemKind::Stone, 1);
+        let defaults = stone.component_kinds();
+        assert_eq!(defaults.len(), defaults::of(ItemKind::Stone).len());
+        assert!(defaults.contains(&DataComponentKind::MaxStackSize) && !defaults.contains(&DAMAGE));
+
+        stone.component_patch.set(DAMAGE, [1]);
+        stone
+            .component_patch
+            .remove(DataComponentKind::MaxStackSize);
+        let kinds = stone.component_kinds();
+        assert_eq!(kinds.len(), defaults.len());
+        assert!(kinds.contains(&DAMAGE) && !kinds.contains(&DataComponentKind::MaxStackSize));
+        assert!(kinds.is_sorted());
     }
 
     #[test]

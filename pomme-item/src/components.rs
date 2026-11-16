@@ -15,6 +15,14 @@ pub trait Component: Sized {
     fn read(r: &mut Reader) -> DecodeResult<Self>;
     fn write(&self, buf: &mut Vec<u8>);
 
+    /// The value `bytes` hold; `None` when they don't read as exactly one.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(bytes);
+        let value = Self::read(&mut r).ok()?;
+        r.ensure_eof().ok()?;
+        Some(value)
+    }
+
     /// The value as a patch holds it.
     fn to_bytes(&self) -> Box<[u8]> {
         let mut buf = Vec::new();
@@ -36,6 +44,25 @@ fn write_templates(buf: &mut Vec<u8>, items: &[ItemStack]) {
     write_varint(buf, templates.len() as u32);
     for template in &templates {
         wire::write_template(buf, template);
+    }
+}
+
+/// Vanilla `DataComponents.MAX_STACK_SIZE`: how many of the item a slot holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxStackSize {
+    pub count: i32,
+}
+
+impl Component for MaxStackSize {
+    const KIND: DataComponentKind = DataComponentKind::MaxStackSize;
+
+    fn read(r: &mut Reader) -> DecodeResult<Self> {
+        let count = r.var_i32()?;
+        Ok(Self { count })
+    }
+
+    fn write(&self, buf: &mut Vec<u8>) {
+        write_varint(buf, self.count as u32);
     }
 }
 
@@ -89,11 +116,8 @@ mod tests {
 
     use super::*;
 
-    fn read<T: Component>(bytes: &[u8]) -> DecodeResult<T> {
-        let mut r = Reader::new(bytes);
-        let value = T::read(&mut r)?;
-        r.ensure_eof()?;
-        Ok(value)
+    fn read<T: Component>(bytes: &[u8]) -> Option<T> {
+        T::from_bytes(bytes)
     }
 
     /// Two templates: item, count, then an empty patch's two zero counts.
@@ -105,6 +129,15 @@ mod tests {
             bytes.extend([count, 0, 0]);
         }
         bytes
+    }
+
+    #[test]
+    fn a_stack_size_is_a_varint() {
+        assert_eq!(
+            read::<MaxStackSize>(&[64]).unwrap(),
+            MaxStackSize { count: 64 }
+        );
+        assert_eq!(*MaxStackSize { count: 16 }.to_bytes(), [16]);
     }
 
     #[test]
@@ -141,6 +174,6 @@ mod tests {
         assert_eq!(charged.items.len(), 2);
         assert_eq!(*charged.to_bytes(), bytes[..]);
         // 1025 as a varint.
-        assert!(read::<ChargedProjectiles>(&[0x81, 0x08]).is_err());
+        assert!(read::<ChargedProjectiles>(&[0x81, 0x08]).is_none());
     }
 }

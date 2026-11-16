@@ -5,11 +5,11 @@
 //! never item dup/loss.
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
-use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use pomme_item::components::BundleContents;
+use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 

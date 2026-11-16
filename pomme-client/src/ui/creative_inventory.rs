@@ -2,13 +2,10 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{
-    Damage, Enchantments, EquipmentSlot, Equippable, MaxDamage, Rarity,
-};
-use azalea_inventory::default_components::get_default_component;
-use azalea_inventory::item::MaxStackSizeExt;
+use azalea_inventory::components::{EquipmentSlot, Equippable};
+use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
-use pomme_registry::builtin::{DataComponentKind, ItemKind};
+use pomme_registry::builtin::ItemKind;
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,
@@ -1051,79 +1048,6 @@ struct DragPreview {
 
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
 
-// Fixed list rather than `from_u32(0..)` so registry-ID shifts between MC
-// versions don't silently change counts.
-const TRACKED_COMPONENT_KINDS: &[DataComponentKind] = &[
-    DataComponentKind::MaxStackSize,
-    DataComponentKind::MaxDamage,
-    DataComponentKind::Damage,
-    DataComponentKind::ItemName,
-    DataComponentKind::ItemModel,
-    DataComponentKind::Lore,
-    DataComponentKind::Rarity,
-    DataComponentKind::Enchantments,
-    DataComponentKind::AttributeModifiers,
-    DataComponentKind::RepairCost,
-    DataComponentKind::EnchantmentGlintOverride,
-    DataComponentKind::Food,
-    DataComponentKind::Consumable,
-    DataComponentKind::UseRemainder,
-    DataComponentKind::UseCooldown,
-    DataComponentKind::Tool,
-    DataComponentKind::Weapon,
-    DataComponentKind::AttackRange,
-    DataComponentKind::Enchantable,
-    DataComponentKind::Equippable,
-    DataComponentKind::Repairable,
-    DataComponentKind::Glider,
-    DataComponentKind::BlocksAttacks,
-    DataComponentKind::DamageResistant,
-];
-
-pub(crate) fn total_component_count(data: &ItemStackData) -> usize {
-    TRACKED_COMPONENT_KINDS
-        .iter()
-        .filter(|&&kind| data.component_patch.has(kind) || default_has_component(data.kind, kind))
-        .count()
-}
-
-fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
-    macro_rules! check {
-        ($($ck:ident => $t:ty),* $(,)?) => {
-            match kind {
-                $( DataComponentKind::$ck => get_default_component::<$t>(item).is_some(), )*
-                _ => false,
-            }
-        };
-    }
-    check! {
-        MaxStackSize => azalea_inventory::components::MaxStackSize,
-        MaxDamage => MaxDamage,
-        Damage => Damage,
-        ItemName => azalea_inventory::components::ItemName,
-        ItemModel => azalea_inventory::components::ItemModel,
-        Lore => azalea_inventory::components::Lore,
-        Rarity => Rarity,
-        Enchantments => Enchantments,
-        AttributeModifiers => azalea_inventory::components::AttributeModifiers,
-        RepairCost => azalea_inventory::components::RepairCost,
-        EnchantmentGlintOverride => azalea_inventory::components::EnchantmentGlintOverride,
-        Food => azalea_inventory::components::Food,
-        Consumable => azalea_inventory::components::Consumable,
-        UseRemainder => azalea_inventory::components::UseRemainder,
-        UseCooldown => azalea_inventory::components::UseCooldown,
-        Tool => azalea_inventory::components::Tool,
-        Weapon => azalea_inventory::components::Weapon,
-        AttackRange => azalea_inventory::components::AttackRange,
-        Enchantable => azalea_inventory::components::Enchantable,
-        Equippable => azalea_inventory::components::Equippable,
-        Repairable => azalea_inventory::components::Repairable,
-        Glider => azalea_inventory::components::Glider,
-        BlocksAttacks => azalea_inventory::components::BlocksAttacks,
-        DamageResistant => azalea_inventory::components::DamageResistant,
-    }
-}
-
 fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
     static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
     static EMPTY: &[&str] = &[];
@@ -1353,7 +1277,8 @@ fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
         8 => EquipmentSlot::Feet,
         _ => return true,
     };
-    get_default_component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
+    crate::net::item_codec::default_component::<Equippable>(item.kind)
+        .is_some_and(|e| e.slot == required)
 }
 
 /// A drag can cover a slot only if the item may go there and the slot is empty

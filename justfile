@@ -185,15 +185,23 @@ serializergen version="26.2":
     python=$(command -v python3 || command -v python)
     PATH="{{ jdk }}:$PATH" "$python" tools/protogen/entity_serializers.py reference {{ version }} pomme-protocol/src/data/entity-serializers-{{ version }}.json
 
-# Regenerate pomme-registry's entries and tags (tools/typegen) and
-# pomme-inventory's default item components from a version's reference dir.
+# Regenerate pomme-registry's entries and tags (tools/typegen) and pomme-item's
+# default item components (tools/codec-oracle/DefaultComponents.java, run on
+# the reference server jar) from a version's reference dir. Needs Java 25 on
+# PATH or JAVA_HOME.
 typegen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo run -p typegen -- reference/{{ version }} {{ version }} pomme-registry/src
-    python=$(command -v python3 || command -v python)
-    "$python" tools/typegen/default_components.py reference/{{ version }}
-    cargo fmt -p pomme-registry -p azalea-inventory
+    ref="reference/{{ version }}"
+    cargo run -p typegen -- "$ref" {{ version }} pomme-registry/src
+    cargo fmt -p pomme-registry
+    out=target/default-components
+    sep=":"; if [ "${OS:-}" = "Windows_NT" ]; then sep=";"; fi
+    bin=""; if [ -n "${JAVA_HOME:-}" ]; then bin="$JAVA_HOME/bin/"; fi
+    mkdir -p "$out"
+    cp="$ref/server-{{ version }}.jar$sep$(find "$ref/libraries" -name '*.jar' | tr '\n' "$sep")"
+    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out" tools/codec-oracle/DefaultComponents.java
+    "${bin}java" -cp "$cp$out" DefaultComponents pomme-item/src/data/default-components.json
 
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":

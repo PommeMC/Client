@@ -1694,12 +1694,18 @@ fn swappable(stack: &ItemStackData) -> Option<Equippable> {
 }
 
 /// Vanilla `Equippable.canBeEquippedBy` for a player.
-// TODO: a tag of allowed entities is taken to include the player.
+// TODO: a tag is read as the game's data pack has it, not as the server
+// synced it, and one the data pack lacks is taken to include the player.
 pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
-    !matches!(
-        &equippable.allowed_entities,
-        Some(HolderSet::Direct { contents }) if !contents.contains(&EntityKind::Player)
-    )
+    const PLAYER: EntityKind = EntityKind::Player;
+    match &equippable.allowed_entities {
+        None => true,
+        Some(HolderSet::Direct { contents }) => contents.contains(&PLAYER),
+        Some(HolderSet::Named { key, .. }) => Some(key)
+            .filter(|key| key.namespace() == pomme_registry::identifier::DEFAULT_NAMESPACE)
+            .and_then(|key| pomme_registry::tags::entities::named(key.path()))
+            .is_none_or(|tag| tag.contains(&PLAYER)),
+    }
 }
 
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose

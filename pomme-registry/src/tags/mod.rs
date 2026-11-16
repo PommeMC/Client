@@ -57,6 +57,14 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_is_found_by_its_path() {
+        assert!(items::named("planks").is_some_and(|tag| tag.contains(&ItemKind::OakPlanks)));
+        let pickaxe = blocks::named("mineable/pickaxe").unwrap();
+        assert!(pickaxe.contains(&BlockKind::Stone));
+        assert!(items::named("no_such_tag").is_none());
+    }
+
+    #[test]
     fn entries_are_in_id_order_for_the_search() {
         for tag in [items::LOGS, items::PLANKS, items::SWORDS] {
             assert!(tag.is_sorted());

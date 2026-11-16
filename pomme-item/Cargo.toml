@@ -8,3 +8,4 @@ license = "GPL-3.0-or-later"
 [dependencies]
 pomme-protocol = { path = "../pomme-protocol" }
 pomme-registry = { path = "../pomme-registry" }
+serde_json = { workspace = true }
