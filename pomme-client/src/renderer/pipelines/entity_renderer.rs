@@ -1,14 +1,14 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_inventory::ItemStack;
-use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot, Equippable};
+use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
+use pomme_item::ItemStack;
 use pomme_registry::builtin::EntityKind;
 use serde::Deserialize;
 
 use crate::entity::components::Position;
 use crate::entity::dimensions;
+use crate::net::item_codec::Components;
 use crate::player::default_skin;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::{LightLevels, UNLIT_LANE};
@@ -64,23 +64,9 @@ pub struct ArmorRenderInfo {
     pub dyed_color: Option<u32>,
 }
 
-fn effective_item_component<'a, T: DataComponentTrait>(item: &'a ItemStack) -> Option<Cow<'a, T>> {
-    // Azalea's `get_component` currently falls back to the item default when
-    // the patch entry is an explicit removal (`kind -> None`). Vanilla's
-    // PatchedDataComponentMap keeps that state distinct from an absent patch.
-    if item
-        .component_patch()
-        .iter()
-        .any(|(kind, value)| kind == T::KIND && value.is_none())
-    {
-        return None;
-    }
-    item.get_component::<T>()
-}
-
 pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Option<ArmorRenderInfo> {
     let item = item?;
-    if effective_item_component::<Equippable>(item)?.slot != slot {
+    if item.get_component::<Equippable>()?.slot != slot {
         return None;
     }
     equipment_render_info(item)
@@ -89,10 +75,11 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
 /// The stack's equipment asset and dye, whatever its `Equippable` slot
 /// (vanilla `LlamaDecorLayer` checks only `assetId().isPresent()`).
 pub fn equipment_render_info(item: &ItemStack) -> Option<ArmorRenderInfo> {
-    let equippable = effective_item_component::<Equippable>(item)?;
+    let equippable = item.get_component::<Equippable>()?;
     let asset_id = equippable.asset_id.as_ref()?.to_string().into();
-    let dyed_color =
-        effective_item_component::<DyedColor>(item).map(|color| color.rgb as u32 & 0x00ff_ffff);
+    let dyed_color = item
+        .get_component::<DyedColor>()
+        .map(|color| color.rgb as u32 & 0x00ff_ffff);
     Some(ArmorRenderInfo {
         asset_id,
         dyed_color,
@@ -141,7 +128,7 @@ pub struct EntityRenderInfo {
     /// Indexed like [`ARMOR_SLOTS`].
     pub armor: [Option<ArmorRenderInfo>; 4],
     /// Vanilla `ArmedEntityRenderState`'s right then left hand items.
-    pub held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
+    pub held_items: [Option<(String, pomme_item::ItemStackData)>; 2],
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
@@ -4162,14 +4149,15 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
+    use pomme_item::ItemStack;
     use pomme_registry::builtin::ItemKind;
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
         armor_render_info, body_route, layer_route,
     };
+    use crate::net::item_codec::Components;
 
     /// `LlamaDecorLayer` takes any equippable asset, whatever its slot.
     #[test]

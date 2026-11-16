@@ -4568,6 +4568,7 @@ dependencies = [
  "pomme-dirs",
  "pomme-gpu-allocator",
  "pomme-install",
+ "pomme-item",
  "pomme-protocol",
  "pomme-registry",
  "pomme-singleplayer",
@@ -4641,6 +4642,14 @@ name = "pomme-ios"
 version = "0.1.0"
 dependencies = [
  "pomme-client",
+]
+
+[[package]]
+name = "pomme-item"
+version = "0.1.0"
+dependencies = [
+ "pomme-protocol",
+ "pomme-registry",
 ]
 
 [[package]]

@@ -1,6 +1,8 @@
-use azalea_inventory::components::{Bees, BundleContents, MaxStackSize, TooltipDisplay};
-use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_inventory::components::{Bees, MaxStackSize, TooltipDisplay};
+use pomme_item::components::BundleContents;
+use pomme_item::{ItemStack, ItemStackData};
 
+use crate::net::item_codec::Components;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 pub const NO_SELECTION: i32 = -1;
@@ -11,21 +13,13 @@ pub fn is_bundle(data: &ItemStackData) -> bool {
     pomme_registry::tags::items::BUNDLES.contains(&data.kind)
 }
 
-pub fn contents(data: &ItemStackData) -> Option<std::borrow::Cow<'_, BundleContents>> {
-    data.get_component::<BundleContents>()
+pub fn contents(data: &ItemStackData) -> Option<BundleContents> {
+    data.component::<BundleContents>()
 }
 
 pub fn set_contents(stack: &mut ItemStack, contents: BundleContents) {
-    let ItemStack::Present(data) = stack else {
-        return;
-    };
-    let component = azalea_inventory::components::DataComponentUnion::from(contents);
-    // SAFETY: the union was constructed from BundleContents.
-    unsafe {
-        data.component_patch.unchecked_insert_component(
-            pomme_registry::builtin::DataComponentKind::BundleContents,
-            Some(component),
-        );
+    if let ItemStack::Present(data) = stack {
+        data.component_patch.write(&contents);
     }
 }
 
@@ -302,7 +296,7 @@ pub fn push_tooltip(
     });
     let image = contents(data)
         .filter(|_| contents_shown)
-        .and_then(|contents| Some((weight(&contents.items)?, contents.into_owned().items)));
+        .and_then(|contents| Some((weight(&contents.items)?, contents.items)));
     elements.push(match image {
         Some((weight, items)) => MenuElement::BundleTooltip {
             x,

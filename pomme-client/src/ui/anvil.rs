@@ -4,13 +4,14 @@
 
 use std::time::Instant;
 
-use azalea_inventory::ItemStack;
+use pomme_item::ItemStack;
 
 use super::common::{FONT_SIZE, WHITE, push_field_text};
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, gesture_result, push_cursor_stack,
     push_panel,
 };
+use crate::net::item_codec::Components;
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};

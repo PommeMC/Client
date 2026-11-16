@@ -292,7 +292,7 @@ fn parse_item_stack_template(cur: &mut Cursor<&[u8]>) -> Result<ItemStackTemplat
     Ok(ItemStackTemplate {
         item: template.item,
         count: template.count,
-        components: super::item_codec::azalea_patch(&template.patch),
+        components: pomme_item::ComponentPatch::from_wire(&template.patch),
     })
 }
 

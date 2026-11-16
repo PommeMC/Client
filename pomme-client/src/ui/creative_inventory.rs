@@ -7,7 +7,7 @@ use azalea_inventory::components::{
 };
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
@@ -1083,9 +1083,7 @@ const TRACKED_COMPONENT_KINDS: &[DataComponentKind] = &[
 pub(crate) fn total_component_count(data: &ItemStackData) -> usize {
     TRACKED_COMPONENT_KINDS
         .iter()
-        .filter(|&&kind| {
-            data.component_patch.has_kind(kind) || default_has_component(data.kind, kind)
-        })
+        .filter(|&&kind| data.component_patch.has(kind) || default_has_component(data.kind, kind))
         .count()
 }
 

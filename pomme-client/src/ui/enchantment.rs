@@ -7,8 +7,8 @@
 use std::time::Instant;
 
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_inventory::ItemStack;
 use glam::FloatExt;
+use pomme_item::ItemStack;
 
 use super::common::{FONT_SIZE, WHITE, hit_test, rgb};
 use super::container::{

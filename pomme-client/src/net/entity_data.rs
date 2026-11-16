@@ -2,8 +2,8 @@
 //! translated frames already carry the native layout.
 
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_inventory::{ItemStack, ItemStackData};
 use crossbeam_channel::Sender;
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::entity_data::{DataValue, Value, Variant};
 use pomme_protocol::item::ItemCodec;
@@ -16,6 +16,7 @@ use super::{NetworkEvent, item_codec};
 use crate::chat_component::ComponentText;
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+use crate::net::item_codec::Components;
 use crate::position::BlockPos;
 
 /// `ItemEntity.DATA_ITEM`.
@@ -39,7 +40,7 @@ pub(super) fn handle_raw_entity_data(
             for DataValue { index, value } in values {
                 match &value {
                     Value::Item(Some(stack)) if index == ITEM_INDEX => {
-                        if let ItemStack::Present(stack) = item_codec::to_azalea(stack) {
+                        if let ItemStack::Present(stack) = ItemStack::from_wire(stack) {
                             send_item_data(id, &stack, event_tx);
                         }
                     }

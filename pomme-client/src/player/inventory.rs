@@ -1,5 +1,5 @@
 use azalea_inventory::components::EquipmentSlot;
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
 pub const PLAYER_SLOTS: usize = 46;

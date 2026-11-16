@@ -139,7 +139,7 @@ pub struct OpenContainer {
     pub screen: ContainerScreen,
     /// Menu slots in container indices; `inv_slots()` are backed by the
     /// player inventory.
-    pub slots: Vec<azalea_inventory::ItemStack>,
+    pub slots: Vec<pomme_item::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
     /// lit/cook progress or the anvil repair cost. Vanilla data slots are
     /// shorts; the enchanting table uses all 10 (costs, seed, clues) with -1
@@ -236,7 +236,7 @@ pub struct GameState {
     /// container clicks; an open container keeps its own.
     pub inventory_state_id: u32,
     /// Carried (cursor) stack for container screens, driven by the server.
-    pub cursor_item: azalea_inventory::ItemStack,
+    pub cursor_item: pomme_item::ItemStack,
     /// The server-opened container screen (crafting table), if any.
     pub open_container: Option<OpenContainer>,
     /// Which container menu was open last frame (0 = survival inventory), to
@@ -282,7 +282,7 @@ pub struct GameState {
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
     /// `tick_tool_highlight`).
     pub tool_highlight_timer: u32,
-    pub last_tool_highlight: azalea_inventory::ItemStack,
+    pub last_tool_highlight: pomme_item::ItemStack,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub title: crate::ui::title::TitleState,
     pub scoreboard: crate::ui::hud::Scoreboard,
@@ -606,7 +606,7 @@ impl GameState {
             creative_inventory_open: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
             inventory_state_id: 0,
-            cursor_item: azalea_inventory::ItemStack::Empty,
+            cursor_item: pomme_item::ItemStack::Empty,
             open_container: None,
             container_was_open: None,
             inv_drag: None,
@@ -635,7 +635,7 @@ impl GameState {
             server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
-            last_tool_highlight: azalea_inventory::ItemStack::Empty,
+            last_tool_highlight: pomme_item::ItemStack::Empty,
             action_bar: None,
             title: crate::ui::title::TitleState::default(),
             scoreboard: crate::ui::hud::Scoreboard::default(),
@@ -1093,7 +1093,7 @@ impl GameState {
 
     /// The currently open menu's slots: the open container's, else the player
     /// inventory's.
-    pub fn menu_slots(&self) -> &[azalea_inventory::ItemStack] {
+    pub fn menu_slots(&self) -> &[pomme_item::ItemStack] {
         match &self.open_container {
             Some(c) => &c.slots,
             None => self.player.inventory.slots(),
@@ -1103,7 +1103,7 @@ impl GameState {
     /// Set a slot of the currently open menu. Container slots backing the
     /// player inventory mirror into it, so the hotbar and a reopened
     /// inventory stay in sync.
-    pub fn set_menu_slot(&mut self, index: usize, item: azalea_inventory::ItemStack) {
+    pub fn set_menu_slot(&mut self, index: usize, item: pomme_item::ItemStack) {
         match &mut self.open_container {
             Some(c) => {
                 let Some(s) = c.slots.get_mut(index) else {
@@ -1173,7 +1173,7 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
-        self.cursor_item = azalea_inventory::ItemStack::Empty;
+        self.cursor_item = pomme_item::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
         self.bundle_selection = None;
@@ -2394,7 +2394,7 @@ pub(crate) fn set_creative_slot(
     game: &mut GameState,
     connection: &ConnectionHandle,
     slot_num: u16,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
     if !send_creative_slot(game, connection, slot_num, item.clone()) {
         return false;
@@ -2409,7 +2409,7 @@ pub(crate) fn set_creative_slot(
 pub(crate) fn drop_creative_item(
     game: &mut GameState,
     connection: &ConnectionHandle,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
     let sent = send_creative_slot(game, connection, u16::MAX, item);
     if sent {
@@ -2424,14 +2424,14 @@ fn send_creative_slot(
     game: &GameState,
     connection: &ConnectionHandle,
     slot_num: u16,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
     if !crate::player::is_creative(game.player.game_mode) {
         return false;
     }
     connection.packet_tx.send(GamePacket::SetCreativeModeSlot {
         slot: slot_num as i16,
-        stack: crate::net::item_codec::from_azalea(&item),
+        stack: item.to_wire(),
     });
     true
 }
@@ -2445,10 +2445,10 @@ pub(crate) fn send_container_clicks(
     audio: &crate::audio::AudioEngine,
     ops: Vec<azalea_inventory::operations::ClickOperation>,
 ) {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::operations::{
         ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
     };
+    use pomme_item::ItemStack;
 
     use crate::player::menu_click;
 
@@ -2815,7 +2815,7 @@ fn eye_lightmap_brightness(game: &GameState) -> f32 {
 /// check (item components aren't tracked): a carved pumpkin in the head slot.
 fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     match player.inventory.slot(crate::player::inventory::ARMOR_START) {
-        azalea_inventory::ItemStack::Present(d) => {
+        pomme_item::ItemStack::Present(d) => {
             crate::player::inventory::item_resource_name(d.kind) == "carved_pumpkin"
         }
         _ => false,
@@ -2855,7 +2855,7 @@ fn render_death_time(death_time: u32, partial_tick: f32) -> f32 {
 /// selected item's type or hover name changes, clears when the slot empties,
 /// and otherwise counts down.
 fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
-    use azalea_inventory::ItemStack;
+    use pomme_item::ItemStack;
     let selected = game
         .player
         .inventory
@@ -3363,7 +3363,7 @@ pub fn update_game(
     for profile in shown
         .iter()
         .chain([inventory.offhand(), &game.cursor_item])
-        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(pomme_item::ItemStack::as_present)
         .filter_map(crate::ui::common::HeadProfile::of_stack)
     {
         core.request_head(profile);
@@ -4175,7 +4175,7 @@ pub fn update_game(
         });
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
-        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
+        let mut deferred_recipe_cursor = pomme_item::ItemStack::Empty;
         let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
             // shows only the screen's background behind it, and the book
@@ -4443,7 +4443,7 @@ pub fn update_game(
         let is_bundle_slot = |game: &GameState, slot: u16| {
             game.menu_slots()
                 .get(usize::from(slot))
-                .and_then(azalea_inventory::ItemStack::as_present)
+                .and_then(pomme_item::ItemStack::as_present)
                 .is_some_and(crate::ui::bundle::is_bundle)
         };
         // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
@@ -4526,7 +4526,7 @@ pub fn update_game(
             && let Some(stack) = game
                 .menu_slots()
                 .get(usize::from(slot))
-                .and_then(azalea_inventory::ItemStack::as_present)
+                .and_then(pomme_item::ItemStack::as_present)
         {
             let lines = crate::ui::chat::stack_tooltip_lines(
                 stack,
@@ -5663,10 +5663,8 @@ mod dropped_item_tests {
 }
 
 /// A stack's item name and data, for drawing it in a hand; `None` when empty.
-fn held_stack(
-    stack: &azalea_inventory::ItemStack,
-) -> Option<(String, azalea_inventory::ItemStackData)> {
-    let azalea_inventory::ItemStack::Present(data) = stack else {
+fn held_stack(stack: &pomme_item::ItemStack) -> Option<(String, pomme_item::ItemStackData)> {
+    let pomme_item::ItemStack::Present(data) = stack else {
         return None;
     };
     let name = crate::player::inventory::item_resource_name(data.kind);
@@ -5715,7 +5713,7 @@ fn emit_item_copies(
     item_id: u32,
     damage: i32,
     count: i32,
-    item_stack: Option<&azalea_inventory::ItemStackData>,
+    item_stack: Option<&pomme_item::ItemStackData>,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
@@ -5983,7 +5981,7 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
 };
 
 /// An `AbstractSkullBlock` item, which `LivingEntityRenderer` wears as a head.
-fn is_skull(item: &azalea_inventory::ItemStack) -> bool {
+fn is_skull(item: &pomme_item::ItemStack) -> bool {
     item.as_present().is_some_and(|d| {
         matches!(
             crate::player::inventory::item_resource_name(d.kind).as_str(),

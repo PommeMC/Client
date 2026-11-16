@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use azalea_inventory::ItemStack;
+use pomme_item::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{

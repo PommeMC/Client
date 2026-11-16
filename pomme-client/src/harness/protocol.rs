@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use azalea_inventory::ItemStack;
+use pomme_item::ItemStack;
 use serde::{Deserialize, Serialize};
 
 use crate::app::phases::in_game::GameState;

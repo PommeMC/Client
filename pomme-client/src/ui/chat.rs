@@ -19,6 +19,7 @@ use crate::net::commands::{
     CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
     UnattendedCommandCheck, UsageLine,
 };
+use crate::net::item_codec::Components;
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
@@ -2609,7 +2610,7 @@ pub(crate) fn item_tooltip_lines(
 /// A held stack's tooltip, vanilla `ItemStack.getTooltipLines`: what a
 /// container slot and the creative inventory show.
 pub(crate) fn stack_tooltip_lines(
-    data: &azalea_inventory::ItemStackData,
+    data: &pomme_item::ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
     advanced: bool,
 ) -> Vec<TooltipLine> {
@@ -2628,16 +2629,16 @@ pub(crate) fn stack_tooltip_lines(
 // TODO: pomme's item grammar has no JSON output yet, so the rest still goes
 // through azalea's serde shape.
 fn stack_json(
-    data: &azalea_inventory::ItemStackData,
+    data: &pomme_item::ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> serde_json::Value {
-    use azalea_inventory::components::{Enchantments, StoredEnchantments};
+    use azalea_inventory::components::{DataComponentTrait, Enchantments, StoredEnchantments};
     use pomme_registry::DataRegistry;
 
-    let stack = azalea_inventory::ItemStack::Present(data.clone())
-        .with_component::<Enchantments>(None)
-        .with_component::<StoredEnchantments>(None);
-    let mut value = serde_json::to_value(&stack).unwrap_or_default();
+    let mut stack = data.clone();
+    stack.component_patch.remove(Enchantments::KIND);
+    stack.component_patch.remove(StoredEnchantments::KIND);
+    let mut value = crate::net::item_codec::stack_json(&stack).unwrap_or_default();
     let names = |levels: &std::collections::HashMap<pomme_registry::data::Enchantment, i32>| {
         levels
             .iter()

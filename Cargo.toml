@@ -11,6 +11,7 @@ members = [
     "pomme-registry",
     "pomme-registry/azalea-compat",
     "pomme-text",
+    "pomme-item",
     "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",

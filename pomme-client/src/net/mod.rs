@@ -43,9 +43,9 @@ mod wire_corpus;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use glam::DVec3;
+use pomme_item::ItemStack;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
@@ -531,7 +531,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
-        stack: azalea_inventory::ItemStackData,
+        stack: pomme_item::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,

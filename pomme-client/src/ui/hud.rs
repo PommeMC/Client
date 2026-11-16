@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use azalea_inventory::ItemStack;
 use glam::DVec3;
+use pomme_item::ItemStack;
 
 use super::common::{self, FONT_SIZE, TextWidthFn, WHITE, push_item_icon};
 use crate::app::input::{Action, KeyBindings};
