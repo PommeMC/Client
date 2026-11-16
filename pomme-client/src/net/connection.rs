@@ -17,6 +17,7 @@ use super::config_wire::{ConfigFrame, Registries};
 use super::conn::{Conn, MemoryEnd, RawWriter};
 use super::handler::{handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
+use crate::chat_component::ComponentText;
 use crate::ui::server_dialog::DialogRegistry;
 use crate::world::block::BlockStateTable;
 

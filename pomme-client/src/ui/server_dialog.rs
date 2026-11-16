@@ -7,7 +7,8 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 
 use crate::assets::strip_default_namespace;
 use crate::chat_component::{
-    Argument, ClickEvent, Component, DialogHolder, java_float_text, normalize_identifier,
+    Argument, ClickEvent, Component, ComponentText, DialogHolder, java_float_text,
+    normalize_identifier,
 };
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::chat::{push_hit_regions, style_at, wrap_spans};

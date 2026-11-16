@@ -4571,6 +4571,7 @@ dependencies = [
  "pomme-protocol",
  "pomme-registry",
  "pomme-singleplayer",
+ "pomme-text",
  "pyronyx",
  "rand 0.10.3",
  "raw-window-handle",
@@ -4671,6 +4672,15 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "pomme-text"
+version = "0.1.0"
+dependencies = [
+ "pomme-registry",
+ "serde_json",
+ "simdnbt",
 ]
 
 [[package]]

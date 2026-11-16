@@ -1,0 +1,11 @@
+[package]
+name = "pomme-text"
+description = "The game's text components: the model, its NBT and JSON forms, and the traversal that resolves one to styled text."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+pomme-registry = { path = "../pomme-registry" }
+serde_json = { workspace = true }
+simdnbt = "0.10"

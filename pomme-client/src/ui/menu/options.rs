@@ -2,6 +2,7 @@ use super::*;
 use crate::app::core::AppCore;
 use crate::app::input::{InputKey, NOT_BOUND};
 use crate::app::phases::in_game::GameState;
+use crate::chat_component::ComponentText;
 use crate::renderer::Renderer;
 use crate::resources::packs::{Pack, PackCompat};
 use crate::ui::common::BTN_H;

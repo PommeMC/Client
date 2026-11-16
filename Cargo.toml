@@ -10,6 +10,7 @@ members = [
     "pomme-block",
     "pomme-registry",
     "pomme-registry/azalea-compat",
+    "pomme-text",
     "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",

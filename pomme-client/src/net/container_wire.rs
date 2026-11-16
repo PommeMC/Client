@@ -14,6 +14,7 @@ use pomme_registry::builtin::MenuKind;
 use super::NetworkEvent;
 use super::handler::send_ordered;
 use super::translate::native_id;
+use crate::chat_component::ComponentText;
 
 /// Decodes a container packet; `None` for any other packet.
 pub(super) fn handle_raw_container_packet(

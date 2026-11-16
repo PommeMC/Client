@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use winit::keyboard::KeyCode;
 
+use crate::chat_component::ComponentText;
 use crate::position::BlockPos;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::{

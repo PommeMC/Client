@@ -12,6 +12,7 @@ use super::{NetworkEvent, Weather};
 use crate::attribute::{
     AttributeKind, AttributeModifier, AttributeModifierOperation, AttributeSnapshot,
 };
+use crate::chat_component::ComponentText;
 
 /// `ClientboundGameEventPacket.Type` ids the client acts on.
 const START_RAINING: u8 = 1;

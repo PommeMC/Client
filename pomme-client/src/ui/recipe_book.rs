@@ -17,6 +17,7 @@ use super::common::{
 };
 use super::text::strip_formatting;
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+use crate::chat_component::ComponentText;
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,

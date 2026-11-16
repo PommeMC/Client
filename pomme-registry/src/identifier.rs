@@ -49,6 +49,26 @@ impl Identifier {
     pub fn path(&self) -> &str {
         &self.text[self.path_at..]
     }
+
+    /// `Identifier.toShortString`: without the default namespace.
+    pub fn to_short_string(&self) -> String {
+        if self.namespace() == DEFAULT_NAMESPACE {
+            self.path().to_owned()
+        } else {
+            self.text.to_string()
+        }
+    }
+}
+
+/// `Identifier.validNamespaceChar` (`path` false) or `validPathChar` over
+/// `text`; only a path allows `/`.
+pub fn valid_chars(text: &str, path: bool) -> bool {
+    text.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'.' | b'-')
+            || path && byte == b'/'
+    })
 }
 
 impl PartialEq for Identifier {
@@ -110,6 +130,23 @@ mod tests {
     fn the_namespace_defaults_when_left_out_or_empty() {
         assert_eq!(parts("stone"), ("minecraft".into(), "stone".into()));
         assert_eq!(parts(":stone"), ("minecraft".into(), "stone".into()));
+    }
+
+    #[test]
+    fn the_short_string_leaves_out_only_the_default_namespace() {
+        assert_eq!(Identifier::new("stone").to_short_string(), "stone");
+        assert_eq!(
+            Identifier::new("minecraft:stone").to_short_string(),
+            "stone"
+        );
+        assert_eq!(Identifier::new("mod:stone").to_short_string(), "mod:stone");
+    }
+
+    #[test]
+    fn only_a_path_allows_a_slash() {
+        assert!(valid_chars("block/stone_2.x-y", true));
+        assert!(!valid_chars("block/stone", false));
+        assert!(!valid_chars("Stone", true));
     }
 
     #[test]

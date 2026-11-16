@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::common;
 use crate::app::input::KeyBindings;
-use crate::chat_component::{Component, ResolvedStyle};
+use crate::chat_component::{Component, ComponentText, ResolvedStyle};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InlineObject {

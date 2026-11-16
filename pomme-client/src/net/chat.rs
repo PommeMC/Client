@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::NetworkEvent;
 use super::handler::send_ordered;
 use crate::chat_component::{
-    Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
+    Argument, Component, ComponentText, HoverEvent, Style, nbt_to_value, normalize_identifier,
 };
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
