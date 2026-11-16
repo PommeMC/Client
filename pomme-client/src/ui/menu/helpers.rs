@@ -516,8 +516,7 @@ fn wrap_motd_spans(
             }
             current_w += part_w;
             if let Some(last) = current_line.last_mut()
-                && last.color == span.color
-                && last.bold == span.bold
+                && last.same_style(span)
             {
                 last.text.push_str(part);
                 continue;
@@ -1602,6 +1601,20 @@ impl MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motd_text_joins_only_where_its_whole_style_matches() {
+        let plain = TextSpan::new("plain ".into(), [1.0; 4]);
+        let mut italic = plain.with_text("slanted ".into());
+        italic.italic = true;
+        let spans = [
+            italic.clone(),
+            plain.clone(),
+            plain.with_text("more".into()),
+        ];
+        let lines = wrap_motd_spans(&spans, f32::MAX, 8.0, &|text, _| text.len() as f32);
+        assert_eq!(lines, [vec![italic, plain.with_text("plain more".into())]]);
+    }
 
     #[test]
     fn a_text_field_draws_the_edit_box_sprite_for_its_focus() {

@@ -23,6 +23,8 @@ use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase};
 use pomme_registry::Registry;
 use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
+use crate::chat_component::Component;
+
 /// Components azalea can't hold faithfully that pomme doesn't read; they're
 /// dropped rather than misdecoded.
 // TODO: carry these once pomme owns the in-memory item type.
@@ -66,6 +68,16 @@ pub(super) fn item_packet_ids() -> ItemPacketIds {
             update_advancements: id("update_advancements"),
         }
     })
+}
+
+/// A text an azalea component holds as pomme's own component, by way of
+/// the JSON form both read and write. Text that form can't carry comes
+/// through as its plain string.
+pub fn text_component(text: &azalea_chat::FormattedText) -> Component {
+    serde_json::to_value(text)
+        .ok()
+        .and_then(|json| Component::from_value(&json).ok())
+        .unwrap_or_else(|| Component::text(text.to_string()))
 }
 
 /// A decoded stack as azalea's value; an item azalea doesn't know is empty.
@@ -431,6 +443,38 @@ mod tests {
     use azalea_inventory::components::{Damage, Equippable, Trim};
 
     use super::*;
+
+    #[test]
+    fn an_azalea_text_keeps_its_content_style_and_children() {
+        use azalea_chat::FormattedText;
+        use serde::Deserialize;
+
+        use crate::chat_component::Content;
+
+        let styled = FormattedText::deserialize(&serde_json::json!({
+            "text": "Fancy ",
+            "color": "gold",
+            "italic": true,
+            "extra": [{"translate": "item.minecraft.diamond", "bold": true}]
+        }))
+        .unwrap();
+        let component = text_component(&styled);
+        assert_eq!(component.content, Content::Text("Fancy ".into()));
+        assert_eq!(component.style.color, Some(0xffaa00));
+        assert_eq!(component.style.italic, Some(true));
+        let [child] = component.siblings.as_slice() else {
+            panic!("one child, got {:?}", component.siblings);
+        };
+        assert!(
+            matches!(&child.content, Content::Translate { key, .. } if key == "item.minecraft.diamond")
+        );
+        assert_eq!(child.style.bold, Some(true));
+
+        assert_eq!(
+            text_component(&FormattedText::from("plain")).plain_text(),
+            "plain"
+        );
+    }
 
     fn component(name: &str) -> u32 {
         ItemCodec::native()

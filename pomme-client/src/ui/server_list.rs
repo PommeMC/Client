@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::text::{TextSpan, format_text_spans, text_from_json};
+use crate::ui::text::{TextSpan, component_from_json, format_component_spans, legacy_format_spans};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -160,8 +160,7 @@ async fn ping_server(
             .map_err(|e| format!("Pong failed: {e}"))?;
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
-        // Vanilla MOTD base color: 0x808080.
-        let motd = format_text_spans(&text_from_json(&status.description), [0.5, 0.5, 0.5, 1.0]);
+        let motd = motd_spans(&status.description);
         // Vanilla `ServerStatusPinger`: a status without a version is "Old",
         // protocol 0.
         let (version, protocol) = status
@@ -235,9 +234,43 @@ pub fn is_valid_address(address: &str) -> bool {
             .is_some_and(|host| !host.is_empty())
 }
 
+/// Vanilla's MOTD base color, 0x808080.
+const MOTD_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+
+/// A status description as the list draws it. Legacy codes are applied here,
+/// over each component's whole text, so one carries across the lines the
+/// entry later wraps it into (`StringSplitter.splitLines` keeps the style at
+/// a break).
+fn motd_spans(description: &serde_json::Value) -> Vec<TextSpan> {
+    let spans = format_component_spans(&component_from_json(description), MOTD_COLOR);
+    legacy_format_spans(&spans, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_motds_legacy_code_carries_past_its_line_break() {
+        const GREEN: [f32; 4] = [85.0 / 255.0, 1.0, 85.0 / 255.0, 1.0];
+        let spans = motd_spans(&serde_json::json!("\u{a7}aWelcome\nto the server"));
+        let [span] = spans.as_slice() else {
+            panic!("one span, got {spans:?}");
+        };
+        assert_eq!(span.text, "Welcome\nto the server");
+        assert_eq!(span.color, GREEN);
+
+        // Each component's text resets to its own style, as in vanilla.
+        let spans = motd_spans(&serde_json::json!([
+            {"text": "\u{a7}aone "},
+            {"text": "two", "color": "red"},
+            " three"
+        ]));
+        let colors: Vec<_> = spans.iter().map(|s| (s.text.as_str(), s.color)).collect();
+        assert_eq!(colors[0], ("one ", GREEN));
+        assert_eq!(colors[1].0, "two");
+        assert_eq!(colors[2], (" three", MOTD_COLOR));
+    }
 
     /// The launcher writes fields the client doesn't model (category); a
     /// client save must pass them through, not strip them.
