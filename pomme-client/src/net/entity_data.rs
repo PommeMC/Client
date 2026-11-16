@@ -13,6 +13,7 @@ use pomme_registry::builtin::EntityKind;
 use super::handler::{send_ordered, variant_index};
 use super::translate::Translation;
 use super::{NetworkEvent, item_codec};
+use crate::chat_component::ComponentText;
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::position::BlockPos;

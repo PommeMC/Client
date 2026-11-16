@@ -6,7 +6,7 @@ use pomme_registry::builtin::ItemKind;
 use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
-use crate::chat_component::Component;
+use crate::chat_component::{Component, ComponentText};
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};

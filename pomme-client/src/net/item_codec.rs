@@ -443,6 +443,7 @@ mod tests {
     use azalea_inventory::components::{Damage, Equippable, Trim};
 
     use super::*;
+    use crate::chat_component::ComponentText;
 
     #[test]
     fn an_azalea_text_keeps_its_content_style_and_children() {

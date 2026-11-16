@@ -487,6 +487,7 @@ mod tests {
     use pomme_protocol::wire;
 
     use super::*;
+    use crate::chat_component::ComponentText;
 
     /// An inline trim pattern as vanilla encodes it (`CodecOracle`).
     #[test]

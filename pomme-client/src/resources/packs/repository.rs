@@ -384,7 +384,7 @@ mod catalog_tests {
     use std::rc::Rc;
 
     use super::{Pack, PackRepository, RepositorySource};
-    use crate::chat_component::Component;
+    use crate::chat_component::{Component, ComponentText};
     use crate::resources::pack_resources::EmbeddedResourcesSupplier;
     use crate::resources::packs::{
         PackEnablementConfig, PackLocationInfo, PackMetadata, PackPosition,

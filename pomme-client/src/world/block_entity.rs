@@ -414,6 +414,7 @@ mod tests {
     use simdnbt::owned::{NbtList, NbtTag};
 
     use super::*;
+    use crate::chat_component::ComponentText;
 
     #[test]
     fn native_beds_are_modeled_blocks_not_block_entities() {

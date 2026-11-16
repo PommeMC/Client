@@ -24,6 +24,7 @@ use pomme_registry::builtin::SoundEvent;
 use pomme_registry::identifier::Identifier;
 
 use super::RawRead;
+use crate::chat_component::ComponentText;
 
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
     PacketTable::native().id(phase, dir, name).unwrap()

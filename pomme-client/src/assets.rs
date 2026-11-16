@@ -43,17 +43,6 @@ pub(crate) fn strip_default_namespace(value: &str) -> &str {
     value.strip_prefix("minecraft:").unwrap_or(value)
 }
 
-/// `Identifier` namespace (`path` false) or path characters; only the path
-/// allows `/`.
-pub(crate) fn identifier_chars(text: &str, path: bool) -> bool {
-    text.bytes().all(|byte| {
-        byte.is_ascii_lowercase()
-            || byte.is_ascii_digit()
-            || matches!(byte, b'_' | b'.' | b'-')
-            || path && byte == b'/'
-    })
-}
-
 pub fn load_image_bytes(bytes: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()?
