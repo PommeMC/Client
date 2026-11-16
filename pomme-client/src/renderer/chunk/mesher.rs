@@ -465,11 +465,10 @@ fn tint_color(
     pack_tint_shifted(color)
 }
 
-const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
-
 /// Bound on un-drained bulk results: past this, workers block on send (back-
 /// pressure) rather than piling finished meshes — and their pooled buffers —
-/// into an unbounded queue, which would starve the buffer pool.
+/// into an unbounded queue, which would starve the buffer pool. Also the
+/// bound on drained ones still waiting for room in a frame's upload.
 const MAX_PENDING_RESULTS: usize = 256;
 
 pub struct Colormap {
@@ -1192,11 +1191,15 @@ impl MeshDispatcher {
         }
     }
 
-    pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
-        // Edits drain fully and first; bulk chunk loads stay capped per frame.
-        self.priority_rx
-            .try_iter()
-            .chain(self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME))
+    /// Every finished edit, then the finished bulk loads, less the `held`
+    /// earlier ones the caller still has waiting to upload
+    /// ([`MAX_PENDING_RESULTS`]).
+    pub fn drain_results(&self, held: usize) -> impl Iterator<Item = ChunkMeshData> + '_ {
+        self.priority_rx.try_iter().chain(
+            self.result_rx
+                .try_iter()
+                .take(MAX_PENDING_RESULTS.saturating_sub(held)),
+        )
     }
 }
 
