@@ -7,7 +7,7 @@
 use azalea_inventory::components::{BundleContents, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
-    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
+    ClickOperation, PickupAllClick, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
 use pomme_registry::builtin::ItemKind;
@@ -541,7 +541,9 @@ fn apply_op(
             };
             quick_move(kind, menu, s);
         }
-        ClickOperation::PickupAll(_) => pickup_all(kind, menu, cursor),
+        ClickOperation::PickupAll(PickupAllClick { slot, .. }) => {
+            pickup_all(kind, menu, cursor, *slot as usize)
+        }
         ClickOperation::Swap(s) => {
             // Unmappable target (offhand outside the player menu): leave the
             // swap to the server.
@@ -953,8 +955,14 @@ fn move_item_stack_to(
 /// Double-click: gather matching items from every slot but the crafting-result
 /// slot onto the cursor up to a full stack, partial stacks first (vanilla
 /// `PICKUP_ALL` + `canTakeItemForPickAll`).
-fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
+fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack, slot: usize) {
     let ItemStack::Present(carried) = cursor else {
+        return;
+    };
+    if !kind.allow_modification(slot, carried) {
+        return;
+    }
+    let Some(ItemStack::Empty) = menu.slot(slot) else {
         return;
     };
     let max = carried.kind.max_stack_size();
