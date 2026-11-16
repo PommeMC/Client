@@ -6,8 +6,8 @@
 //! (`pomme_item::components`). The rest are the fork's structs: most share
 //! vanilla's layout and decode as they are, the ones whose fork layout
 //! diverges are transcoded first, and a few the fork can't hold are left
-//! unread. Defaults and component hashes still come from the fork too. Each
-//! of those goes as pomme ports it.
+//! unread. Component hashes and the tooltip JSON still come from the fork
+//! too. Each of those goes as pomme ports it.
 
 use std::borrow::Cow;
 use std::io::Cursor;
@@ -15,11 +15,9 @@ use std::sync::OnceLock;
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::{DataComponentTrait, DataComponentUnion};
-use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::{
     DataComponentPatch, ItemStack as ForkStack, ItemStackData as ForkStackData,
 };
-use pomme_item::components::{BundleContents, ChargedProjectiles, Component as PommeComponent};
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::{self, ComponentPatch, ItemCodec, Shape};
@@ -84,39 +82,11 @@ pub fn text_component(text: &azalea_chat::FormattedText) -> Component {
         .unwrap_or_else(|| Component::text(text.to_string()))
 }
 
-/// A component pomme reads itself, with the default the item gives it.
-// TODO: read defaults from the game's own data instead of the fork's tables.
-pub trait ItemDefault: PommeComponent {
-    fn default_for(item: ItemKind) -> Option<Self>;
-}
-
-/// The empty value for an item the fork gives a default `Fork`: every item
-/// with one of these starts with none (`BundleContents.EMPTY`,
-/// `ChargedProjectiles.EMPTY`).
-fn empty_where<Fork: DataComponentTrait, T: Default>(item: ItemKind) -> Option<T> {
-    get_default_component::<Fork>(item).map(|_| T::default())
-}
-
-impl ItemDefault for BundleContents {
-    fn default_for(item: ItemKind) -> Option<Self> {
-        empty_where::<azalea_inventory::components::BundleContents, _>(item)
-    }
-}
-
-impl ItemDefault for ChargedProjectiles {
-    fn default_for(item: ItemKind) -> Option<Self> {
-        empty_where::<azalea_inventory::components::ChargedProjectiles, _>(item)
-    }
-}
-
-/// A stack's components as typed values (`DataComponentHolder.get`): what
-/// its patch sets, else the item's default, and nothing when the patch
-/// removes it.
+/// A stack's components as the inventory fork's values; the ones pomme reads
+/// itself come off the stack directly (`ItemStackData::component`).
 pub trait Components {
-    /// A component pomme reads itself.
-    fn component<T: ItemDefault>(&self) -> Option<T>;
-
-    /// A component as the inventory fork's value.
+    /// `DataComponentHolder.get`: what the patch sets, else the item's
+    /// default, and nothing when the patch removes it.
     fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>>;
 
     /// The stack with the fork value `component` set, or removed for `None`.
@@ -125,23 +95,13 @@ pub trait Components {
 }
 
 impl Components for ItemStackData {
-    fn component<T: ItemDefault>(&self) -> Option<T> {
-        if self.component_patch.removes(T::KIND) {
-            return None;
-        }
-        self.component_patch
-            .read::<T>()
-            .or_else(|| T::default_for(self.kind))
-    }
-
     fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>> {
         if self.component_patch.removes(T::KIND) {
             return None;
         }
-        self.component_patch
-            .get(T::KIND)
-            .and_then(|value| fork_value(T::KIND, value))
-            .or_else(|| get_default_component::<T>(self.kind))
+        // A patched value the fork can't hold leaves the default showing.
+        patched(&self.component_patch)
+            .or_else(|| default_component(self.kind))
             .map(Cow::Owned)
     }
 
@@ -155,10 +115,6 @@ impl Components for ItemStackData {
 }
 
 impl Components for ItemStack {
-    fn component<T: ItemDefault>(&self) -> Option<T> {
-        self.as_present()?.component()
-    }
-
     fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>> {
         self.as_present()?.get_component()
     }
@@ -179,6 +135,11 @@ impl Components for ItemStack {
 fn fork_value<T: AzBuf>(kind: DataComponentKind, value: &[u8]) -> Option<T> {
     let bytes = azalea_component(kind.to_u32(), value)?;
     T::azalea_read(&mut Cursor::new(&bytes[..])).ok()
+}
+
+/// The fork value `item` has for `T` by default.
+pub fn default_component<T: DataComponentTrait + AzBuf>(item: ItemKind) -> Option<T> {
+    fork_value(T::KIND, pomme_item::defaults::get(item, T::KIND)?)
 }
 
 /// The fork value a patch sets `T` to, whatever the item's default.
@@ -508,7 +469,8 @@ fn transcode_trim(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{Damage, Equippable, Trim};
+    use azalea_inventory::components::{Damage, Equippable, MaxDamage, Trim};
+    use pomme_item::components::BundleContents;
 
     use super::*;
     use crate::chat_component::ComponentText;
@@ -578,29 +540,6 @@ mod tests {
     /// One bread x2 as a vanilla `ItemStackTemplate`.
     const BREAD_TEMPLATE: [u8; 5] = [0xD5, 0x07, 0x02, 0x00, 0x00];
 
-    /// [`ItemDefault`] hands out an empty value wherever the fork has a
-    /// default at all.
-    #[test]
-    fn every_default_of_the_stack_holding_components_is_empty() {
-        use azalea_inventory::components as fork;
-
-        for &item in ItemKind::ALL {
-            let bundle = get_default_component::<fork::BundleContents>(item);
-            assert!(bundle.is_none_or(|c| c.items.is_empty()), "{item}");
-            let charged = get_default_component::<fork::ChargedProjectiles>(item);
-            assert!(charged.is_none_or(|c| c.items.is_empty()), "{item}");
-        }
-        let bundle = ItemStack::new(ItemKind::Bundle, 1);
-        assert_eq!(
-            bundle.component::<BundleContents>(),
-            Some(BundleContents::default())
-        );
-        assert_eq!(
-            ItemStack::new(ItemKind::Stone, 1).component::<BundleContents>(),
-            None
-        );
-    }
-
     #[test]
     fn a_removed_component_reads_as_absent_not_as_its_default() {
         let mut bundle = ItemStackData::new(ItemKind::Bundle, 1);
@@ -610,17 +549,9 @@ mod tests {
         assert_eq!(bundle.component::<BundleContents>(), None);
 
         let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        assert!(
-            pickaxe
-                .get_component::<azalea_inventory::components::MaxDamage>()
-                .is_some()
-        );
-        let unbreakable = pickaxe.with_component::<azalea_inventory::components::MaxDamage>(None);
-        assert!(
-            unbreakable
-                .get_component::<azalea_inventory::components::MaxDamage>()
-                .is_none()
-        );
+        assert!(pickaxe.get_component::<MaxDamage>().is_some());
+        let unbreakable = pickaxe.with_component::<MaxDamage>(None);
+        assert!(unbreakable.get_component::<MaxDamage>().is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
-use azalea_inventory::components::{Bees, MaxStackSize, TooltipDisplay};
-use pomme_item::components::BundleContents;
+use azalea_inventory::components::{Bees, TooltipDisplay};
+use pomme_item::components::{BundleContents, MaxStackSize};
 use pomme_item::{ItemStack, ItemStackData};
 
 use crate::net::item_codec::Components;
@@ -104,7 +104,7 @@ pub fn item_weight(data: &ItemStackData) -> Option<Frac> {
     {
         return Some(Frac::ONE);
     }
-    let max_stack_size = data.get_component::<MaxStackSize>().map_or(1, |m| m.count);
+    let max_stack_size = data.component::<MaxStackSize>().map_or(1, |m| m.count);
     (max_stack_size > 0).then(|| Frac::new(1, max_stack_size as i64))
 }
 
@@ -134,7 +134,7 @@ pub fn try_insert(contents: &mut BundleContents, other: &mut ItemStack) -> i32 {
         return 0;
     }
     let stackable = data
-        .get_component::<MaxStackSize>()
+        .component::<MaxStackSize>()
         .is_some_and(|m| m.count > 1);
     let merge = stackable
         .then(|| {
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn stack_specific_max_stack_size_controls_weight() {
         let custom = ItemStack::new(ItemKind::Stone, 1)
-            .with_component(MaxStackSize { count: 4 })
+            .with(&MaxStackSize { count: 4 })
             .as_present()
             .expect("stone stack should be present")
             .clone();

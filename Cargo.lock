@@ -554,6 +554,7 @@ dependencies = [
  "azalea-inventory-macros",
  "azalea-registry",
  "indexmap",
+ "pomme-item",
  "serde",
  "simdnbt",
  "tracing",
@@ -4650,6 +4651,7 @@ version = "0.1.0"
 dependencies = [
  "pomme-protocol",
  "pomme-registry",
+ "serde_json",
 ]
 
 [[package]]

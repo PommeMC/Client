@@ -14,6 +14,7 @@ azalea-core = { version = "0.16.0", default-features = false, features = ["bevy_
 azalea-inventory-macros = { path = "azalea-inventory-macros" }
 azalea-registry = { version = "0.16.0", default-features = false, features = ["serde"] }
 indexmap = "2.14.0"
+pomme-item = { path = "../pomme-item" }
 serde = "1.0.228"
 simdnbt = "0.10.0"
 tracing = "0.1.44"

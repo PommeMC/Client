@@ -7,6 +7,12 @@ wrote, so every component survives the trip back to the wire whether or not
 anything reads it. `components` holds the values pomme reads out of those
 bytes, each ported from the game's codec.
 
-Most component values, each item's defaults and the component hashes still
-come from the `pomme-inventory` fork, through
-`pomme-client/src/net/item_codec.rs`. They move here as they are ported.
+`defaults` holds every item's default components in the same form.
+`src/data/default-components.json` is written by the game itself:
+`tools/codec-oracle/DefaultComponents.java` runs on the reference server jar
+(`just typegen <version>`), builds each item's components the way the game
+does and encodes them with its own codecs.
+
+Most component values and the component hashes still come from the
+`pomme-inventory` fork, through `pomme-client/src/net/item_codec.rs`. They
+move here as they are ported.
