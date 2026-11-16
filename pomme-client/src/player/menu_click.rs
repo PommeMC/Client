@@ -289,8 +289,7 @@ impl ContainerKind<'_> {
             (Self::Crafter { .. }, 0..=8) => !self.crafter_slot_disabled(s),
             (Self::Crafter { .. }, 45) => false,
             (Self::Player, ARMOR_START..ARMOR_END) => {
-                let want = ARMOR_EQUIPMENT[s - ARMOR_START];
-                item.get_component::<Equippable>().map(|c| c.slot) == Some(want)
+                worn_slot(item) == Some(ARMOR_EQUIPMENT[s - ARMOR_START])
             }
             (Self::ShulkerBox, 0..=26) => {
                 crate::player::inventory::can_fit_inside_container_items(item.kind)
@@ -745,6 +744,14 @@ fn safe_insert(
     shrink(carried, take);
 }
 
+/// Vanilla `Player.getEquipmentSlotForItem`: the slot the player wears
+/// `item` in, if it is something they can wear.
+fn worn_slot(item: &ItemStackData) -> Option<EquipmentSlot> {
+    item.get_component::<Equippable>()
+        .filter(|equippable| crate::player::interaction::player_can_equip(equippable))
+        .map(|equippable| equippable.slot)
+}
+
 /// Vanilla `InventoryMenu.quickMoveStack`: the craft result goes to the
 /// inventory from its end, the craft grid and armor to its start, and an
 /// inventory slot to the item's free armor slot or the free offhand, else
@@ -753,12 +760,10 @@ fn player_quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     const INVENTORY: std::ops::Range<usize> = MAIN_START..OFFHAND;
     const HOTBAR_START: usize = 36;
     let free = |menu: &Menu, slot: usize| menu.get(slot).is_some_and(ItemStack::is_empty);
-    // `Player.getEquipmentSlotForItem`: what the item is worn in, if anything.
     let worn_in = menu
         .get(s)
         .and_then(ItemStack::as_present)
-        .and_then(|item| item.get_component::<Equippable>())
-        .map(|equippable| equippable.slot);
+        .and_then(worn_slot);
     let armor = worn_in.and_then(|slot| {
         let at = ARMOR_START + ARMOR_EQUIPMENT.iter().position(|e| *e == slot)?;
         free(menu, at).then_some(at)

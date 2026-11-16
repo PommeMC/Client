@@ -1693,13 +1693,19 @@ fn swappable(stack: &ItemStackData) -> Option<Equippable> {
     stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
+/// Vanilla `Equippable.canBeEquippedBy` for a player.
+// TODO: a tag of allowed entities is taken to include the player.
+pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
+    !matches!(
+        &equippable.allowed_entities,
+        Some(HolderSet::Direct { contents }) if !contents.contains(&EntityKind::Player)
+    )
+}
+
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
 /// `canUseSlot` is always true.
 fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn) -> UseResult {
-    // TODO: a tag of allowed entities is taken to include the player.
-    if let Some(HolderSet::Direct { contents }) = &equippable.allowed_entities
-        && !contents.contains(&EntityKind::Player)
-    {
+    if !player_can_equip(equippable) {
         return UseResult::Pass;
     }
     if worn.locked
