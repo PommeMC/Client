@@ -50,6 +50,23 @@ pub(super) fn randomized_quad_size(random: &mut fastrand::Rng) -> f32 {
     0.1 * (random.f32() * 0.5 + 0.5) * 2.0
 }
 
+/// Quantize RGBA channels only on the camera quad appended by this extraction.
+pub(super) fn extract_quantized_camera_quad(
+    particle: &dyn SingleQuadParticle,
+    previous_roll: f32,
+    world: &LevelContext<'_>,
+    view: &ParticleView<'_>,
+    output: &mut Vec<QuadParticleRenderState>,
+) {
+    let start = output.len();
+    extract_camera_quad(particle, previous_roll, world, view, output);
+    for quad in &mut output[start..] {
+        quad.color = quad
+            .color
+            .map(|channel| (channel * 255.0_f32).floor() / 255.0_f32);
+    }
+}
+
 pub(super) fn extract_camera_quad(
     particle: &dyn SingleQuadParticle,
     previous_roll: f32,

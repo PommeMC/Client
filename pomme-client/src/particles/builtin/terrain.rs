@@ -4,17 +4,13 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::block_particle_option::BlockParticleOption;
-use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, resized_bounds};
+use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size};
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{
-    ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
-    QuadParticleRenderState,
-};
+use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
     SingleQuadParticle, extract_camera_quad, randomized_quad_size,
 };
-use super::super::types::ParticleLimit;
 use crate::position::BlockPos;
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::util::random_source::RandomSource;
@@ -141,30 +137,24 @@ impl Particle for TerrainParticle {
         ParticleRenderType::SingleQuads
     }
 
-    fn get_particle_limit(&self) -> Option<ParticleLimit> {
-        None
-    }
-
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
     }
 
     fn set_size(&mut self, width: f32, height: f32) {
-        if width != self.width || height != self.height {
-            self.width = width;
-            self.height = height;
-            self.bounds = resized_bounds(self.bounds, width, height);
-        }
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
     }
 
     fn scale(&mut self, factor: f32) {
         self.quad_size *= factor;
         self.set_size(0.2 * factor, 0.2 * factor);
-    }
-
-    fn get_light_coords(&self, world: &LevelContext<'_>, _partial_tick: f32) -> ParticleLight {
-        world.get_light_coords(self.position)
     }
 }
 
@@ -186,10 +176,6 @@ impl SingleQuadParticle for TerrainParticle {
             sprite_v(self.vo / 4.0),
             sprite_v((self.vo + 1.0) / 4.0),
         ]
-    }
-
-    fn get_facing(&self) -> ParticleFacing {
-        ParticleFacing::Camera
     }
 
     fn get_quad_size(&self, _partial_tick: f32) -> f32 {

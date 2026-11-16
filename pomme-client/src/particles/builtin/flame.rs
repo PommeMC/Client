@@ -6,19 +6,18 @@ use std::rc::Rc;
 use glam::DVec3;
 
 use super::super::particle::{
-    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::{
-    ParticleFacing, ParticleLayer, ParticleLight, ParticleRenderType, ParticleView,
-    QuadParticleRenderState,
+    ParticleLayer, ParticleLight, ParticleRenderType, ParticleView, QuadParticleRenderState,
 };
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
     SingleQuadParticle, extract_camera_quad, randomized_quad_size,
 };
-use super::super::types::{ParticleLimit, SimpleParticleType};
+use super::super::types::SimpleParticleType;
 use crate::renderer::chunk::atlas::AtlasRegion;
 use crate::util::random_source::RandomSource;
 use crate::world::level::LevelContext;
@@ -104,21 +103,19 @@ impl Particle for FlameParticle {
         ParticleRenderType::SingleQuads
     }
 
-    fn get_particle_limit(&self) -> Option<ParticleLimit> {
-        None
-    }
-
     fn set_pos(&mut self, position: DVec3) {
         self.position = position;
         self.bounds = bounds_at(position, self.width, self.height);
     }
 
     fn set_size(&mut self, width: f32, height: f32) {
-        if width != self.width || height != self.height {
-            self.width = width;
-            self.height = height;
-            self.bounds = resized_bounds(self.bounds, width, height);
-        }
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
     }
 
     fn scale(&mut self, factor: f32) {
@@ -144,19 +141,6 @@ impl SingleQuadParticle for FlameParticle {
         if !self.removed {
             self.sprite = sprites.get(self.age, self.lifetime);
         }
-    }
-
-    fn get_uv(&self) -> [f32; 4] {
-        [
-            self.sprite.u_min,
-            self.sprite.u_max,
-            self.sprite.v_min,
-            self.sprite.v_max,
-        ]
-    }
-
-    fn get_facing(&self) -> ParticleFacing {
-        ParticleFacing::Camera
     }
 
     fn get_quad_size(&self, partial_tick: f32) -> f32 {
