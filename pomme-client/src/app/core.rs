@@ -137,6 +137,14 @@ const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs
 /// next.
 const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
+/// Whether vanilla makes a new `ClientLevel`: `handleLogin` always does,
+/// `handleRespawn` only when the dimension changes. A server need not remove
+/// the old level's entities itself, and a proxy moving the player between
+/// servers doesn't.
+fn starts_new_level(login: bool, old_dimension: &str, dimension: &str) -> bool {
+    login || old_dimension != dimension
+}
+
 /// Whether the rest of the queue may wait for the next frame: only once the
 /// chunk budget is spent and while this frame owes no tick, so every packet
 /// received before a tick is handled before it runs.
@@ -514,6 +522,16 @@ impl GameState {
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
         self.sync_distant_colors();
+    }
+
+    /// Drops every entity, as a level going away takes its own with it.
+    fn clear_entities(&mut self) {
+        self.entity_store = crate::entity::EntityStore::new();
+        self.item_entity_store = crate::entity::ItemEntityStore::new();
+        self.entity_positions.clear();
+        self.entity_kinds.clear();
+        self.vehicle_passengers.clear();
+        self.silent_entities.clear();
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -2265,7 +2283,10 @@ impl AppCore {
                     renderer.clear_chunk_meshes();
                     renderer.reset_distant();
                 }
-                NetworkEvent::DimensionName { name } => {
+                NetworkEvent::DimensionName { name, login } => {
+                    if starts_new_level(login, &game.dimension, &name) {
+                        game.clear_entities();
+                    }
                     game.dimension = name;
                 }
                 NetworkEvent::ChunkLoaded {
@@ -3640,12 +3661,7 @@ impl AppCore {
                     tracing::info!("Server re-entered configuration");
                     game.block_registry.clear_tags();
                     self.audio.stop_all_sounds();
-                    game.entity_store = crate::entity::EntityStore::new();
-                    game.item_entity_store = crate::entity::ItemEntityStore::new();
-                    game.entity_positions.clear();
-                    game.entity_kinds.clear();
-                    game.vehicle_passengers.clear();
-                    game.silent_entities.clear();
+                    game.clear_entities();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
                     // `ServerReconfigScreen` replaces any dialog; the server
@@ -4706,6 +4722,16 @@ mod tests {
         assert!(super::defer_packets(spent, 0.9 * TICK_RATE));
         assert!(!super::defer_packets(spent, TICK_RATE));
         assert!(!super::defer_packets(spent * 10, 3.0 * TICK_RATE));
+    }
+
+    #[test]
+    fn a_login_or_another_dimension_starts_a_new_level() {
+        let (overworld, nether) = ("minecraft:overworld", "minecraft:the_nether");
+        // A proxy moving the player to another server logs them in again.
+        assert!(super::starts_new_level(true, overworld, overworld));
+        assert!(super::starts_new_level(false, overworld, nether));
+        // A respawn after dying keeps the level and what is in it.
+        assert!(!super::starts_new_level(false, overworld, overworld));
     }
 
     #[test]

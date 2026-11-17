@@ -77,7 +77,7 @@ pub(super) fn login_events(
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
-    spawn_events(&login.spawn, registry_holder, event_tx);
+    spawn_events(&login.spawn, true, registry_holder, event_tx);
     send_ordered(
         event_tx,
         NetworkEvent::ServerViewDistance {
@@ -132,7 +132,7 @@ fn handle(
                     keep_attribute_modifiers: data_to_keep & 1 != 0,
                 },
             );
-            spawn_events(&spawn, registry_holder, event_tx);
+            spawn_events(&spawn, false, registry_holder, event_tx);
             // Vanilla recreates the player on respawn; the server re-sends any
             // effects kept across it.
             send_ordered(event_tx, NetworkEvent::ClearMobEffects);
@@ -206,6 +206,7 @@ fn handle(
 /// What login and respawn share: the dimension and the game modes.
 fn spawn_events(
     spawn: &SpawnInfo,
+    login: bool,
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
@@ -226,6 +227,7 @@ fn spawn_events(
         event_tx,
         NetworkEvent::DimensionName {
             name: spawn.dimension.clone(),
+            login,
         },
     );
     send_ordered(
