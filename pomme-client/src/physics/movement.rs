@@ -186,6 +186,12 @@ pub fn tick(
         sin_y_rot,
         cos_y_rot,
     );
+    step_on_block(
+        player,
+        world,
+        tags,
+        input.performing_action(input::Action::Sneak),
+    );
 
     stop_flying_on_ground(player);
 
@@ -196,6 +202,26 @@ pub fn tick(
     player.was_forward_pressed = forward_pressed;
     player.was_shift_pressed = input.performing_action(input::Action::Sneak);
     player.was_jump_pressed = raw_jump_held;
+}
+
+/// `Entity.applyEffectsFromBlocks`' `Block.stepOn`, which only a slime block
+/// uses to move the player: slow or still vertically, and not sneaking, it
+/// drags the horizontal speed down.
+fn step_on_block(
+    player: &mut LocalPlayer,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    stepping_carefully: bool,
+) {
+    if !player.on_ground || stepping_carefully {
+        return;
+    }
+    let abs_y = player.velocity.y.abs();
+    if abs_y < 0.1 && world.block_data(on_pos(player, world, tags, 0.2)).id() == "slime_block" {
+        let scale = 0.4 + abs_y * 0.2;
+        player.velocity.x *= scale;
+        player.velocity.z *= scale;
+    }
 }
 
 fn apply_living_immobility(
@@ -471,10 +497,13 @@ fn tick_land(
 
     let saved_vy = player.velocity.y;
     let block_friction = if on_ground_at_start {
-        world
-            .block_state_table
-            .block_state_data(block_below_affecting_movement(player, world, tags))
-            .movement_friction()
+        modified_friction(
+            world
+                .block_state_table
+                .block_state_data(block_below_affecting_movement(player, world, tags))
+                .movement_friction(),
+            player.attribute(AttributeKind::FrictionModifier) as f32,
+        )
     } else {
         1.0
     };
@@ -514,13 +543,9 @@ fn tick_land(
 
     // TODO: over an unloaded chunk vanilla sets vy to -0.1 instead.
     player.velocity.y -= gravity(player);
-    player.velocity.y *= f64::from(VERTICAL_DRAG);
+    player.velocity.y *= f64::from(air_drag(player, VERTICAL_DRAG));
 
-    let h_friction = if on_ground_at_start {
-        block_friction * HORIZONTAL_DRAG
-    } else {
-        HORIZONTAL_DRAG
-    };
+    let h_friction = block_friction * air_drag(player, HORIZONTAL_DRAG);
     player.velocity.x *= f64::from(h_friction);
     player.velocity.z *= f64::from(h_friction);
 
@@ -732,8 +757,8 @@ pub(crate) fn collided_axes(delta: DVec3, resolved: DVec3) -> [bool; 3] {
 }
 
 /// The rest of vanilla `Entity.move` once the move is applied: ground and
-/// supporting block, fluid contact, fall distance, and stopping on the
-/// collided axes. Returns the move for its movement emission.
+/// supporting block, fluid contact, fall distance, and stopping or bouncing
+/// on the collided axes. Returns the move for its movement emission.
 fn settle_after_move(
     player: &mut LocalPlayer,
     world: CollisionWorld<'_>,
@@ -768,21 +793,79 @@ fn settle_after_move(
         player.fall_distance = 0.0;
     }
 
-    // TODO: slime/bed bounce (`restituteMovementAfterCollisions`).
-    let [x, y, z] = collided;
-    if x {
-        player.velocity.x = 0.0;
-    }
-    if z {
-        player.velocity.z = 0.0;
-    }
-    if y {
-        player.velocity.y = 0.0;
+    if collided.contains(&true) {
+        let effect = world.block_data(effect_pos);
+        let block_bounce = if tags.contains("minecraft:suppresses_bounce", effect.id()) {
+            None
+        } else {
+            Some(f64::from(effect.bounce_restitution()))
+        };
+        restitute_after_collisions(
+            player,
+            collided,
+            resolved,
+            on_ground.then_some(block_bounce),
+            ctx.descending(),
+        );
     }
     movement_sound::Move {
         movement: resolved,
         velocity: *player.velocity,
     }
+}
+
+/// Vanilla `Entity.restituteMovementAfterCollisions`: a collided axis stops,
+/// or bounces back by the player's `bounciness`; a landing also bounces by
+/// the block's, unless it is slower than gravity. `landing` is the landed-on
+/// block's restitution, `None` on one that suppresses bounces; it is absent
+/// when the collision wasn't from above.
+// TODO: before 26.2 a slime block or bed bounced through
+// `updateEntityMovementAfterFallOn`, with no gravity or drag correction.
+fn restitute_after_collisions(
+    player: &mut LocalPlayer,
+    collided: [bool; 3],
+    movement: DVec3,
+    landing: Option<Option<f64>>,
+    suppressing: bool,
+) {
+    let [x, y, z] = collided;
+    let mut restitution = if suppressing {
+        0.0
+    } else {
+        player.attribute(AttributeKind::Bounciness)
+    };
+    let current = *player.velocity;
+    let mut after = current;
+    if x {
+        after.x = -current.x * restitution;
+    }
+    if z {
+        after.z = -current.z * restitution;
+    }
+    if y {
+        let gravity = gravity(player);
+        if let Some(block_bounce) = landing {
+            // 26.3 (777) stopped bouncing a landing at exactly gravity's speed.
+            let too_slow = if crate::version::session_protocol() >= 777 {
+                -current.y <= gravity
+            } else {
+                -current.y < gravity
+            };
+            restitution = match block_bounce {
+                Some(block) if !too_slow && !suppressing => restitution.max(block),
+                _ => 0.0,
+            };
+        }
+        let (gravity_compensation, drag) = if restitution > 0.0 {
+            let portion = movement.y / current.y;
+            let drag = f64::from(air_drag(player, VERTICAL_DRAG));
+            (portion * gravity, 1.0 + portion * (drag - 1.0))
+        } else {
+            (0.0, 1.0)
+        };
+        after.y = (gravity_compensation - current.y) * drag * restitution;
+    }
+    *player.velocity = after;
 }
 
 fn update_sprint_state(
@@ -1005,6 +1088,21 @@ fn can_fall_at_least(
 /// (`LocalPlayer::set_sprinting`).
 fn movement_speed(player: &LocalPlayer) -> f32 {
     player.attribute(AttributeKind::MovementSpeed) as f32
+}
+
+/// `LivingEntity.computeModifiedFriction`: a friction or drag scaled by its
+/// attribute, which leaves it alone at 1.
+fn modified_friction(friction: f32, modifier: f32) -> f32 {
+    (1.0 - (1.0 - friction) * modifier).clamp(0.0, 1.0)
+}
+
+/// `drag` under the player's `air_drag_modifier`; with [`VERTICAL_DRAG`],
+/// `LivingEntity.getAirDrag`.
+fn air_drag(player: &LocalPlayer, drag: f32) -> f32 {
+    modified_friction(
+        drag,
+        player.attribute(AttributeKind::AirDragModifier) as f32,
+    )
 }
 
 /// `LivingEntity.getDefaultGravity`.
@@ -1695,6 +1793,42 @@ mod tests {
         anim: &'a BlockEntityAnimStore,
     ) -> CollisionWorld<'a> {
         CollisionWorld::with_block_entities(chunks, BlockStateTable::native(), anim)
+    }
+
+    #[test]
+    fn a_modifier_of_one_leaves_friction_and_drag_alone() {
+        for friction in [0.6_f32, 0.8, 0.98, 0.989, HORIZONTAL_DRAG, VERTICAL_DRAG] {
+            assert_eq!(
+                modified_friction(friction, 1.0).to_bits(),
+                friction.to_bits()
+            );
+        }
+        assert_eq!(modified_friction(0.6, 0.5), 0.8);
+        assert_eq!(modified_friction(0.6, 0.0), 1.0);
+        assert_eq!(modified_friction(0.6, 2048.0), 0.0);
+    }
+
+    #[test]
+    fn a_landing_bounces_by_the_block_unless_slow_or_sneaking() {
+        let land = |vy: f64, landing, sneaking| {
+            let mut player = LocalPlayer::new();
+            player.velocity = Velocity::new(0.3, vy, 0.0);
+            let moved = dvec3(0.0, vy * 0.4, 0.0);
+            restitute_after_collisions(&mut player, [true, true, false], moved, landing, sneaking);
+            *player.velocity
+        };
+        // Stone: both collided axes stop.
+        assert_eq!(land(-0.5, Some(Some(0.0)), false), DVec3::ZERO);
+        // Slime: back up at the landing speed, with the gravity and drag of
+        // the part of the tick spent falling given back.
+        let bounce = (0.4 * GRAVITY + 0.5) * (1.0 + 0.4 * (f64::from(VERTICAL_DRAG) - 1.0));
+        assert_eq!(land(-0.5, Some(Some(1.0)), false).y, bounce);
+        assert_eq!(land(-0.5, Some(Some(0.75)), false).y, bounce * 0.75);
+        // Slower than gravity, sneaking, on honey, or against a ceiling.
+        assert_eq!(land(-0.07, Some(Some(1.0)), false).y, 0.0);
+        assert_eq!(land(-0.5, Some(Some(1.0)), true).y, 0.0);
+        assert_eq!(land(-0.5, Some(None), false).y, 0.0);
+        assert_eq!(land(0.5, None, false).y, 0.0);
     }
 
     #[test]
