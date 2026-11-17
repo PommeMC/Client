@@ -4210,6 +4210,11 @@ impl AppCore {
             &game.player.effects,
             game.player.eyes_in_water,
             legacy_mining,
+            crate::player::interaction::EntityUse {
+                entities: &game.entity_store,
+                passengers: &game.vehicle_passengers,
+                item_tags: game.recipe_book.item_tags(),
+            },
             &mut effects,
         );
         game.interaction.tick_using_item(

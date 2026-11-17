@@ -1,4 +1,5 @@
 pub mod default_skin;
+pub mod entity_interact;
 pub mod interaction;
 pub mod inventory;
 pub mod item_cooldowns;

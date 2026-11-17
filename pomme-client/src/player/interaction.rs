@@ -27,9 +27,11 @@ use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
+use crate::player::entity_interact::{self, Clicker, Taken, Target};
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::ItemCooldowns;
 use crate::position::BlockPos;
+use crate::recipe::ItemTags;
 use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
@@ -75,6 +77,15 @@ pub struct EntityHitResult {
 pub enum HitResult {
     Block(BlockHitResult),
     Entity(EntityHitResult),
+}
+
+/// What a right click on an entity reads beyond the player's own state.
+#[derive(Clone, Copy)]
+pub struct EntityUse<'a> {
+    pub entities: &'a EntityStore,
+    /// Every vehicle's passengers.
+    pub passengers: &'a HashMap<i32, Vec<i32>>,
+    pub item_tags: &'a ItemTags,
 }
 
 /// Vanilla `InteractionHand.values()`, the order `startUseItem` tries them.
@@ -488,6 +499,7 @@ impl InteractionState {
         mob_effects: &ActiveMobEffects,
         eyes_in_water: bool,
         legacy_mining: LegacyMiningEnchantments,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
@@ -553,6 +565,7 @@ impl InteractionState {
                 food,
                 creative,
                 input.performing_action(input::Action::Sneak),
+                entity_use,
                 effects,
                 &mut dirty_chunks,
             );
@@ -829,6 +842,7 @@ impl InteractionState {
         food: u32,
         creative: bool,
         sneaking: bool,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
@@ -843,12 +857,11 @@ impl InteractionState {
         let suppress_block_use = sneaking && hands.iter().any(|h| h.stack.is_some());
         for (hand, held) in HANDS.into_iter().zip(hands) {
             let result = match self.target {
-                // One interact packet; the server does the rest (trading,
-                // feeding, leads, the villager head-shake).
-                // TODO: succeeding unconditionally is an approximation;
-                // vanilla falls through to `useItem` when the client-side
-                // `interactOn` returns PASS (e.g. eating while the crosshair
-                // rests on a passive mob).
+                // Vanilla `MultiPlayerGameMode.interact`: the packet goes
+                // out whatever the entity answers, and an entity that passes
+                // leaves the click to `useItem` (a shield raised at a zombie).
+                // TODO: the world border and a spectator's pass aren't
+                // checked.
                 Some(HitResult::Entity(hit)) => {
                     sender.send_raw(wire::encode_interact(
                         hit.entity_id,
@@ -856,7 +869,40 @@ impl InteractionState {
                         hit.location - hit.entity_pos,
                         sneaking,
                     ));
-                    UseResult::Success { swing: true }
+                    let golden_dandelion = |h: &HandItem| {
+                        h.stack
+                            .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
+                    };
+                    let taken = entity_use
+                        .entities
+                        .living
+                        .get(&hit.entity_id)
+                        .and_then(|entity| {
+                            entity_interact::interact_on(
+                                Target {
+                                    entity,
+                                    passengers: entity_use
+                                        .passengers
+                                        .get(&hit.entity_id)
+                                        .map_or(0, Vec::len),
+                                },
+                                Clicker {
+                                    held: held.stack,
+                                    hand,
+                                    item_tags: entity_use.item_tags,
+                                    sneaking,
+                                    holding_golden_dandelion: hands.iter().any(golden_dandelion),
+                                    position: player_pos,
+                                    thundering: entity_use.entities.thundering,
+                                },
+                            )
+                        });
+                    match taken {
+                        Some(taken) => UseResult::Success {
+                            swing: taken == Taken::Swing,
+                        },
+                        None => UseResult::Pass,
+                    }
                 }
                 Some(HitResult::Block(hit)) => self.use_item_on(
                     block_registry,
@@ -1693,19 +1739,22 @@ fn swappable(stack: &ItemStackData) -> Option<Equippable> {
     stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
-/// Vanilla `Equippable.canBeEquippedBy` for a player.
+/// Vanilla `Equippable.canBeEquippedBy`.
 // TODO: a tag is read as the game's data pack has it, not as the server
-// synced it, and one the data pack lacks is taken to include the player.
-pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
-    const PLAYER: EntityKind = EntityKind::Player;
+// synced it, and one the data pack lacks is taken to include the entity.
+pub(crate) fn can_be_equipped_by(equippable: &Equippable, kind: EntityKind) -> bool {
     match &equippable.allowed_entities {
         None => true,
-        Some(HolderSet::Direct { contents }) => contents.contains(&PLAYER),
+        Some(HolderSet::Direct { contents }) => contents.contains(&kind),
         Some(HolderSet::Named { key, .. }) => Some(key)
             .filter(|key| key.namespace() == pomme_registry::identifier::DEFAULT_NAMESPACE)
             .and_then(|key| pomme_registry::tags::entities::named(key.path()))
-            .is_none_or(|tag| tag.contains(&PLAYER)),
+            .is_none_or(|tag| tag.contains(&kind)),
     }
+}
+
+pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
+    can_be_equipped_by(equippable, EntityKind::Player)
 }
 
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
@@ -2111,7 +2160,10 @@ pub fn raycast(
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
 /// each entity's bounding box and keeps the nearest hit. A box containing the
-/// ray origin counts as distance zero.
+/// ray origin counts as distance zero. Vanilla keeps the first of two equally
+/// near entities, in the order they entered their section; the lower id
+/// stands in for that, so a mob summoned onto a dying one doesn't win at
+/// random.
 fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
     let mut nearest_dist_sq = f64::MAX;
     let mut nearest = None;
@@ -2127,7 +2179,8 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
             continue;
         };
 
-        if dist_sq < nearest_dist_sq {
+        let earlier = nearest.is_some_and(|hit: EntityHitResult| entity_id < hit.entity_id);
+        if dist_sq < nearest_dist_sq || (dist_sq == nearest_dist_sq && earlier) {
             nearest_dist_sq = dist_sq;
             nearest = Some(EntityHitResult {
                 entity_id,
@@ -2767,6 +2820,26 @@ mod tests {
             };
             assert_eq!(bytes, wire::encode_attack(7));
         }
+    }
+
+    #[test]
+    fn equally_near_entities_resolve_to_the_lower_id() {
+        let mut entities = EntityStore::new();
+        for id in [9, 3, 12, 5] {
+            entities.spawn_living(
+                id,
+                EntityKind::Husk,
+                Position::new(0.0, 0.0, 3.0),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            );
+        }
+        let hit = nearest_entity_hit(
+            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::new(0.0, 1.0, 6.0),
+            &entities,
+        );
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
     }
 
     #[test]
