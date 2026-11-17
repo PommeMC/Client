@@ -4655,13 +4655,12 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     if player.flying {
         modifier *= 1.1;
     }
-    // Vanilla's speedFactor is MOVEMENT_SPEED / walkingSpeed; with Pomme's
-    // client-side speed model that reduces to sprint ? 1.3 : 1.0.
-    // TODO: drive from the MOVEMENT_SPEED attribute so Speed/Slowness potions
-    // and gear modifiers affect FOV too.
+    if player.walk_speed != 0.0 {
+        let speed_factor =
+            player.attribute(AttributeKind::MovementSpeed) as f32 / player.walk_speed;
+        modifier *= (speed_factor + 1.0) / 2.0;
+    }
     // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
-    let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
-    modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)
 }
 
@@ -4718,13 +4717,26 @@ mod tests {
     }
 
     #[test]
-    fn a_login_or_another_dimension_starts_a_new_level() {
-        let (overworld, nether) = ("minecraft:overworld", "minecraft:the_nether");
-        // A proxy moving the player to another server logs them in again.
-        assert!(super::starts_new_level(true, overworld, overworld));
-        assert!(super::starts_new_level(false, overworld, nether));
-        // A respawn after dying keeps the level and what is in it.
-        assert!(!super::starts_new_level(false, overworld, overworld));
+    fn the_fov_follows_the_movement_speed_attribute() {
+        let mut player = LocalPlayer::new();
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        player.set_sprinting(true);
+        assert!((super::compute_fov_modifier(&player, 1.0) - 1.15).abs() < 1.0e-6);
+        // A server that raises the walking speed with the attribute's base
+        // leaves the ratio, and the FOV, where it was.
+        player.set_sprinting(false);
+        player.walk_speed = 0.2;
+        player
+            .attributes
+            .apply_snapshot(&crate::attribute::AttributeSnapshot {
+                attribute: AttributeKind::MovementSpeed,
+                base: f64::from(0.2_f32),
+                modifiers: Vec::new(),
+            });
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        // `walkingSpeed` 0 skips the term rather than dividing by it.
+        player.walk_speed = 0.0;
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
     }
 
     #[test]
@@ -4746,6 +4758,16 @@ mod tests {
         npc.profile_name = Some("Npc".into());
         assert_eq!(npc.scoreboard_name(&TabList::new()), "Npc");
         assert_eq!(npc.scoreboard_name(&listed), "Npc");
+    }
+
+    #[test]
+    fn a_login_or_another_dimension_starts_a_new_level() {
+        let (overworld, nether) = ("minecraft:overworld", "minecraft:the_nether");
+        // A proxy moving the player to another server logs them in again.
+        assert!(super::starts_new_level(true, overworld, overworld));
+        assert!(super::starts_new_level(false, overworld, nether));
+        // A respawn after dying keeps the level and what is in it.
+        assert!(!super::starts_new_level(false, overworld, overworld));
     }
 
     #[test]

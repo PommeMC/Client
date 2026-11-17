@@ -1,0 +1,58 @@
+# The player's movement follows its attributes: at twice the walking speed
+# the same 20 ticks of forward carry it further, and with no jump strength
+# holding jump leaves it on the ground. Without them the server sees a
+# player moving at speeds it never gave it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/attribute @s minecraft:movement_speed base set 0.2"
+
+[[step]]
+chat = "/attribute @s minecraft:jump_strength base set 0"
+
+[[step]]
+chat = "/tp @s 0.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+wait_ticks = 20
+
+[[step]]
+key_down = { action = "key.jump" }
+
+[[step]]
+wait_ticks = 10
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 0.5] } }
+
+[[step]]
+key_up = { action = "key.jump" }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ticks = 20
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+wait_ticks = 40
+
+[[step]]
+screenshot = "stopped"
+
+[[step]]
+expect = { player = { position = [0.5, -60.0, 9.1303] } }
+
+[[step]]
+chat = "/attribute @s minecraft:movement_speed base reset"
+
+[[step]]
+chat = "/attribute @s minecraft:jump_strength base reset"
