@@ -1,0 +1,29 @@
+# A kick shows the disconnected screen titled "Connection Lost", and its
+# "Back to Server List" button opens the server list.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/kick @s Server closed"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+cursor_to_button = "Back to Server List"
+
+[[step]]
+screenshot = "disconnected"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "server_list" }

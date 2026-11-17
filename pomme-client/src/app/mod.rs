@@ -33,6 +33,7 @@ use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
+use crate::ui::menu::Disconnection;
 use crate::user::UserData;
 
 #[derive(Error, Debug)]
@@ -1376,7 +1377,10 @@ impl ApplicationHandler for App {
                                 disconnect(core, gfx, panorama, connection, world, false)
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                core.menu.show_disconnect(reason, &core.input.key_bindings);
+                                core.menu.show_disconnect(
+                                    Disconnection::connect_failed(reason, world.is_some()),
+                                    &core.input.key_bindings,
+                                );
 
                                 leave_world(
                                     core,
@@ -1437,7 +1441,10 @@ impl ApplicationHandler for App {
                                 matches!(result, GameUpdateResult::ExitToTitle),
                             ),
                             GameUpdateResult::Disconnected { reason } => {
-                                core.menu.show_disconnect(reason, &core.input.key_bindings);
+                                core.menu.show_disconnect(
+                                    Disconnection::lost(reason, world.is_some()),
+                                    &core.input.key_bindings,
+                                );
 
                                 leave_world(
                                     core,

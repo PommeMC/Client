@@ -3,7 +3,9 @@ use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::{ConnectArgs, Transport};
 use crate::singleplayer::{self, World};
-use crate::ui::menu::{MenuAction, apply_resource_pack_options, sync_resource_packs};
+use crate::ui::menu::{
+    Disconnection, MenuAction, apply_resource_pack_options, sync_resource_packs,
+};
 
 pub enum MenuUpdateResult {
     None,
@@ -27,7 +29,8 @@ pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
         Ok(opened) => opened,
         Err(reason) => {
             tracing::error!("Failed to open {folder}: {reason}");
-            core.menu.show_disconnect(reason, &core.input.key_bindings);
+            core.menu
+                .show_disconnect(Disconnection::world(reason), &core.input.key_bindings);
             return MenuUpdateResult::None;
         }
     };

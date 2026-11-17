@@ -612,6 +612,81 @@ const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
+/// What vanilla `DisconnectedScreen` is built with: its title, the reason,
+/// and its button's text and target, which don't always agree (a lost
+/// singleplayer connection says "Back to Server List" and opens the title
+/// screen).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disconnection {
+    title: &'static str,
+    reason: String,
+    button: &'static str,
+    back: DisconnectBack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisconnectBack {
+    Title,
+    ServerList,
+    WorldList,
+}
+
+impl DisconnectBack {
+    fn screen(self) -> Screen {
+        match self {
+            Self::Title => Screen::Main,
+            Self::ServerList => Screen::ServerList,
+            Self::WorldList => Screen::WorldList,
+        }
+    }
+}
+
+/// `gui.toMenu`, `DisconnectedScreen`'s default button.
+const TO_SERVER_LIST: &str = "Back to Server List";
+
+impl Disconnection {
+    /// `ConnectScreen` and the login listener: `connect.failed`, back to the
+    /// screen the connection started from.
+    // TODO: a quick play connection's `quickplay.error.title`, back to the
+    // title screen.
+    pub fn connect_failed(reason: String, singleplayer: bool) -> Self {
+        Self::server("Failed to connect to the server", reason, singleplayer)
+    }
+
+    /// `ClientCommonPacketListenerImpl.createDisconnectScreen`:
+    /// `disconnect.lost`, back to the server list when there was a server
+    /// entry, else the title screen.
+    pub fn lost(reason: String, singleplayer: bool) -> Self {
+        Self::server("Connection Lost", reason, singleplayer)
+    }
+
+    fn server(title: &'static str, reason: String, singleplayer: bool) -> Self {
+        Self {
+            title,
+            reason,
+            button: TO_SERVER_LIST,
+            back: if singleplayer {
+                DisconnectBack::Title
+            } else {
+                DisconnectBack::ServerList
+            },
+        }
+    }
+
+    /// A world that couldn't be opened: `QuickPlay.joinSingleplayerWorld`'s
+    /// screen, `gui.toWorld` back to the world list.
+    // TODO: its `quickplay.error.title` only fits a quick play launch; a
+    // world picked from the list has no vanilla screen for this.
+    pub fn world(reason: String) -> Self {
+        Self {
+            title: "Failed to Quick Play",
+            reason,
+            button: "Back to World List",
+            back: DisconnectBack::WorldList,
+        }
+    }
+}
+
 enum Screen {
     Main,
     Account,
@@ -625,7 +700,7 @@ enum Screen {
     DirectConnect,
     AddServer,
     EditServer(usize),
-    Disconnected(String),
+    Disconnected(Disconnection),
     Options,
     OptionsOnline,
     OptionsVideo,
@@ -677,7 +752,7 @@ impl Screen {
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
             Self::EditServer(i) => Self::EditServer(*i),
-            Self::Disconnected(s) => Self::Disconnected(s.clone()),
+            Self::Disconnected(d) => Self::Disconnected(d.clone()),
         }
     }
 }
@@ -1588,8 +1663,8 @@ impl MainMenu {
         self.set_screen(screen, key_bindings);
     }
 
-    pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
-        self.set_screen(Screen::Disconnected(reason), key_bindings);
+    pub fn show_disconnect(&mut self, disconnection: Disconnection, key_bindings: &KeyBindings) {
+        self.set_screen(Screen::Disconnected(disconnection), key_bindings);
     }
 
     /// Resolves a world for launch, since the world list and the saves

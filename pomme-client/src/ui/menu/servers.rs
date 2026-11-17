@@ -1034,9 +1034,6 @@ impl MainMenu {
     /// Vanilla `DisconnectedScreen`: a vertical layout centred on the screen,
     /// holding the title and the reason (wrapped to `width - 50`, centred),
     /// each padded 10, then the back button padded 2.
-    // TODO: vanilla titles it by cause (`connect.failed` "Failed to connect to
-    // the server", `disconnect.lost` "Connection Lost"), and its button is
-    // `gui.toMenu` "Back to Server List", returning to the screen it came from.
     pub(super) fn build_disconnected(
         &mut self,
         screen_w: f32,
@@ -1045,8 +1042,13 @@ impl MainMenu {
         text_width_fn: &dyn Fn(&str, f32) -> f32,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let reason = match &self.screen {
-            Screen::Disconnected(r) => r.clone(),
+        let Disconnection {
+            title,
+            reason,
+            button,
+            back,
+        } = match &self.screen {
+            Screen::Disconnected(disconnection) => disconnection.clone(),
             _ => return empty_result(),
         };
 
@@ -1079,7 +1081,7 @@ impl MainMenu {
             })
         };
         let title_y = top + text_pad;
-        text("Disconnected".into(), title_y);
+        text(title.into(), title_y);
         let reason_y = title_y + line_h + 2.0 * text_pad;
         for (i, line) in lines.into_iter().enumerate() {
             text(line, reason_y + i as f32 * line_h);
@@ -1099,10 +1101,10 @@ impl MainMenu {
             btn_w,
             btn_h,
             gs,
-            "Back to Menu",
+            button,
             true,
         ) {
-            self.set_screen(Screen::Main, key_bindings);
+            self.set_screen(back.screen(), key_bindings);
         }
         self.finish_focus(&ctx);
 
@@ -1180,13 +1182,76 @@ mod tests {
     }
 
     #[test]
+    fn the_disconnected_button_returns_where_its_cause_says() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-disconnect-back-test", &mut key_bindings);
+        let width = |text: &str, scale: f32| text.chars().count() as f32 * scale * 2.0;
+        let cases = [
+            (
+                Disconnection::lost("Server closed".into(), false),
+                "Connection Lost",
+                TO_SERVER_LIST,
+                DisconnectBack::ServerList,
+            ),
+            (
+                Disconnection::lost("Server closed".into(), true),
+                "Connection Lost",
+                TO_SERVER_LIST,
+                DisconnectBack::Title,
+            ),
+            (
+                Disconnection::connect_failed("Connection refused".into(), false),
+                "Failed to connect to the server",
+                TO_SERVER_LIST,
+                DisconnectBack::ServerList,
+            ),
+            (
+                Disconnection::world("No such world".into()),
+                "Failed to Quick Play",
+                "Back to World List",
+                DisconnectBack::WorldList,
+            ),
+        ];
+        for (disconnection, title, button, back) in cases {
+            menu.show_disconnect(disconnection, &key_bindings);
+            let texts = |menu: &mut MainMenu, key_bindings: &mut KeyBindings, input: &MenuInput| {
+                menu.build(1280.0, 720.0, input, key_bindings, width)
+                    .elements
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        MenuElement::Text { text, x, y, .. } => Some((text, x, y)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let shown = texts(&mut menu, &mut key_bindings, &MenuInput::default());
+            assert!(shown.iter().any(|(text, ..)| text == title), "{title}");
+            let (_, x, y) = shown
+                .iter()
+                .find(|(text, ..)| text == button)
+                .unwrap_or_else(|| panic!("no {button} button"));
+            let click = MenuInput {
+                cursor: (*x, *y),
+                clicked: true,
+                ..MenuInput::default()
+            };
+            texts(&mut menu, &mut key_bindings, &click);
+            assert_eq!(
+                std::mem::discriminant(&menu.screen),
+                std::mem::discriminant(&back.screen()),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
     fn a_long_disconnect_reason_wraps_inside_the_screen() {
         const W: f32 = 1280.0;
         let mut key_bindings = KeyBindings::default();
         let mut menu = test_menu("pomme-disconnect-wrap-test", &mut key_bindings);
         let reason =
             "Connection failed: server requires authentication but no access token was available";
-        menu.show_disconnect(reason.into(), &key_bindings);
+        menu.show_disconnect(Disconnection::lost(reason.into(), false), &key_bindings);
         let width = |text: &str, scale: f32| text.chars().count() as f32 * scale * 2.0;
         let result = menu.build(W, 720.0, &MenuInput::default(), &mut key_bindings, width);
         let gs = menu.gui_scale(W, 720.0);
@@ -1195,7 +1260,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 MenuElement::Text { text, .. }
-                    if text != "Disconnected" && text != "Back to Menu" =>
+                    if text != "Connection Lost" && text != TO_SERVER_LIST =>
                 {
                     Some(text.as_str())
                 }
