@@ -3152,12 +3152,11 @@ impl AppCore {
                             uuid,
                         );
                         if entity_type == pomme_registry::builtin::EntityKind::Player {
-                            let textures = game
-                                .tab_list
-                                .players
-                                .get(&uuid)
-                                .and_then(|p| p.textures.clone());
-                            self.queue_player_skin(uuid, textures);
+                            let info = game.tab_list.players.get(&uuid);
+                            if let Some(entity) = game.entity_store.living.get_mut(&id) {
+                                entity.profile_name = info.map(|p| p.name.clone());
+                            }
+                            self.queue_player_skin(uuid, info.and_then(|p| p.textures.clone()));
                         }
                     }
                     if entity_type == pomme_registry::builtin::EntityKind::Item {
@@ -3893,19 +3892,13 @@ impl AppCore {
             if Some(id) == vehicle {
                 return false;
             }
-            let pusher_name = match entity.player_uuid {
-                Some(uuid) => match tab_list.players.get(&uuid) {
-                    // `Player.tick` sets `noPhysics` for spectators, so
-                    // `Entity.push` returns before any impulse.
-                    Some(info) if crate::player::is_spectator(info.game_mode) => return false,
-                    Some(info) => info.name.clone(),
-                    // TODO: keep the spawn-time profile name; a player
-                    // dropped from the tab list falls back to no team.
-                    None => return true,
-                },
-                None => entity.uuid.to_string(),
-            };
-            scoreboard.pushable_by(&pusher_name, local_name)
+            // `Player.tick` sets `noPhysics` for spectators, so `Entity.push`
+            // returns before any impulse.
+            let spectator = entity
+                .player_uuid
+                .and_then(|uuid| tab_list.players.get(&uuid))
+                .is_some_and(|info| crate::player::is_spectator(info.game_mode));
+            !spectator && scoreboard.pushable_by(&entity.scoreboard_name(tab_list), local_name)
         };
         // Vanilla `Level.isThundering`.
         game.entity_store.thundering =
@@ -4732,6 +4725,27 @@ mod tests {
         assert!(super::starts_new_level(false, overworld, nether));
         // A respawn after dying keeps the level and what is in it.
         assert!(!super::starts_new_level(false, overworld, overworld));
+    }
+
+    #[test]
+    fn a_player_goes_by_the_name_it_spawned_with() {
+        use pomme_registry::builtin::EntityKind;
+
+        let uuid = uuid::Uuid::from_u128(7);
+        let mut npc = crate::entity::LivingEntity::new(
+            EntityKind::Player,
+            Default::default(),
+            Default::default(),
+            uuid,
+        );
+        // Without one it reads the tab list, and its UUID outside it.
+        let listed = tab_list_with(uuid, "Listed", None);
+        assert_eq!(npc.scoreboard_name(&listed), "Listed");
+        assert_eq!(npc.scoreboard_name(&TabList::new()), uuid.to_string());
+        // The name outlives the entry, and a rename in the list.
+        npc.profile_name = Some("Npc".into());
+        assert_eq!(npc.scoreboard_name(&TabList::new()), "Npc");
+        assert_eq!(npc.scoreboard_name(&listed), "Npc");
     }
 
     #[test]
