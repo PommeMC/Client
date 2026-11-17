@@ -240,8 +240,7 @@ const DYE_TEXT_COLORS: [u32; 16] = [
 
 const BLACK_DYE: usize = 15;
 
-/// Sign `WoodType` names, in the order the block-entity pipeline's
-/// `SIGN_TEXTURES` lists them.
+/// Sign `WoodType` names.
 pub(crate) const SIGN_WOOD_NAMES: [&str; 12] = [
     "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
     "bamboo", "crimson", "warped",
