@@ -4089,7 +4089,10 @@ impl AppCore {
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
-        let neutral = InputState::released();
+        // A screen takes the keys, not the hotbar selection: a neutral input
+        // on slot 0 would tell the server the held item changed.
+        let mut neutral = InputState::released();
+        neutral.set_selected_slot(self.input.selected_slot());
         let input = if input_live { &self.input } else { &neutral };
 
         // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
