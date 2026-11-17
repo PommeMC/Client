@@ -3252,7 +3252,11 @@ pub fn update_game(
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
-    core.input.menu_capture = game.paused || game.gui_open() || game.death_screen_open;
+    let screen_open = game.paused || game.gui_open() || game.death_screen_open;
+    if screen_open && !core.input.menu_capture {
+        core.input.screen_opened();
+    }
+    core.input.menu_capture = screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
@@ -4668,7 +4672,11 @@ pub fn update_game(
         if changed {
             game.apply_sign_edit();
         }
-        if done || !game.sign_edit_valid() {
+        let invalid = !game.sign_edit_valid();
+        if invalid && !done {
+            tracing::info!("Closing the sign editor: its sign is gone or out of reach");
+        }
+        if done || invalid {
             game.close_sign_editor(&connection.packet_tx);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -5409,6 +5417,7 @@ pub fn update_game(
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
     {
+        tracing::info!("Closed menu {prev}");
         connection
             .packet_tx
             .send(GamePacket::ContainerClose { container_id: prev });

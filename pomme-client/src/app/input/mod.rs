@@ -717,6 +717,18 @@ impl InputState {
         self.spectator_slot_presses.clear();
     }
 
+    /// Vanilla `Gui.setScreen`'s `KeyMapping.releaseAll`: a press made
+    /// before a screen opened was for the world and never reaches the
+    /// screen. The game ticks consume presses, so one made since the last
+    /// tick is still pending when a packet opens a screen. A mouse button
+    /// held through the screen stays released after it, as `setAll` only
+    /// puts the keyboard's keys back down.
+    pub fn screen_opened(&mut self) {
+        self.release_mouse_buttons();
+        self.clear_click_counts();
+        self.clear_just_pressed_actions();
+    }
+
     /// Digit presses queued for the spectator menu since the last tick.
     pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.spectator_slot_presses)
@@ -851,10 +863,14 @@ impl InputState {
         for &code in &keys {
             self.on_key(code, ElementState::Released, false);
         }
+        self.release_mouse_buttons();
+        keys
+    }
+
+    fn release_mouse_buttons(&mut self) {
         for button in std::mem::take(&mut self.mouse_buttons_down) {
             self.on_mouse_button(button, ElementState::Released);
         }
-        keys
     }
 
     /// No screen or text field is taking the input.
@@ -1474,6 +1490,22 @@ mod key_code_tests {
 #[cfg(test)]
 mod binding_lookup_tests {
     use super::*;
+
+    #[test]
+    fn a_screen_that_opens_gets_no_earlier_click() {
+        let mut input = InputState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        assert!(input.right_just_pressed());
+        input.screen_opened();
+        assert!(!input.right_just_pressed());
+        assert!(!input.consume_click(Action::Use));
+        // Let go until it is pressed again, however long it stays down.
+        assert!(!input.right_held());
+        assert!(!input.performing_action(Action::Use));
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        assert!(input.performing_action(Action::Use));
+    }
 
     #[test]
     fn configured_close_routes_captured_keys_like_escape() {

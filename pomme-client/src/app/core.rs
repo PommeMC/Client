@@ -1607,6 +1607,9 @@ impl AppCore {
     /// `Gui.setScreen` with a new screen: whatever is up goes, running its
     /// `removed()`, so an options screen saves and chat keeps its draft.
     fn replace_screen(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+        // Also when one menu replaces another, which `update_game` doesn't
+        // see as a screen opening.
+        self.input.screen_opened();
         game.close_sign_editor(&connection.packet_tx);
         game.paused = false;
         self.menu
@@ -2608,6 +2611,7 @@ impl AppCore {
                         MenuKind::Crafter3x3 => Some(ContainerScreen::Crafter),
                         _ => None,
                     };
+                    tracing::info!("The server opened menu {container_id}");
                     if let Some(screen) = screen {
                         if game.inventory_open || game.recipe_book_ui.captures_typing() {
                             game.recipe_book_ui
@@ -2674,6 +2678,7 @@ impl AppCore {
                 NetworkEvent::ContainerClosed => {
                     // Vanilla closes whatever menu is open regardless of the
                     // packet's container id, and with it any screen.
+                    tracing::info!("The server closed the open menu");
                     game.close_sign_editor(&connection.packet_tx);
                     game.close_menu();
                     // The server initiated the close; don't echo one back.
