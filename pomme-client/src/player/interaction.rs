@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use azalea_block::BlockState;
 use azalea_buf::AzBuf;
 use azalea_inventory::components::{
-    BlocksAttacks, Consumable, DataComponentTrait, Equippable, Food, ItemUseAnimation,
-    KineticWeapon, MinimumAttackCharge, UseEffects,
+    BlocksAttacks, Consumable, DataComponentTrait, EquipmentSlot, Equippable, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseEffects,
 };
 use glam::{DVec3, Vec3};
 use pomme_item::ItemStackData;
@@ -2174,6 +2174,12 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
             let entity_pos: DVec3 = entity.position.into();
             let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
             let (location, dist_sq) = if aabb.contains(from) {
+                // `SulfurCube.canBePickedFromInside`: not around its block.
+                let swallowed = entity.entity_type == EntityKind::SulfurCube
+                    && entity.equipment(EquipmentSlot::Body).is_some();
+                if swallowed {
+                    return None;
+                }
                 (from, 0.0)
             } else {
                 let clip = aabb.clip(from, to)?;
@@ -2850,9 +2856,20 @@ mod tests {
         assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
 
         // From inside their boxes the last one wins.
-        let inside = DVec3::new(0.0, 1.0, 3.0);
-        let hit = nearest_entity_hit(inside, inside + DVec3::Z, &entities);
-        assert_eq!(hit.map(|hit| hit.entity_id), Some(12));
+        let inside = DVec3::new(0.0, 0.2, 3.0);
+        let pick = |entities: &EntityStore| {
+            nearest_entity_hit(inside, inside + DVec3::Z, entities).map(|hit| hit.entity_id)
+        };
+        assert_eq!(pick(&entities), Some(12));
+
+        // A sulfur cube holding a block can't be picked from inside it.
+        entities.living.get_mut(&12).unwrap().entity_type = EntityKind::SulfurCube;
+        assert_eq!(pick(&entities), Some(12));
+        entities.living.get_mut(&12).unwrap().equipment.insert(
+            EquipmentSlot::Body,
+            pomme_item::ItemStack::Present(ItemStackData::new(ItemKind::Tnt, 1)),
+        );
+        assert_eq!(pick(&entities), Some(9));
     }
 
     #[test]
