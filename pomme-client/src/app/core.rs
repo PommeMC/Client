@@ -1607,6 +1607,9 @@ impl AppCore {
     /// `Gui.setScreen` with a new screen: whatever is up goes, running its
     /// `removed()`, so an options screen saves and chat keeps its draft.
     fn replace_screen(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+        // Also when one menu replaces another, which `update_game` doesn't
+        // see as a screen opening.
+        self.input.screen_opened();
         game.close_sign_editor(&connection.packet_tx);
         game.paused = false;
         self.menu
