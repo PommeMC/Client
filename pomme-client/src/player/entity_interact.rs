@@ -10,7 +10,9 @@
 // - a pet's owner: every tame animal is the player's;
 // - `AgeableMob.ageLockParticleTimer`, the 40 ticks a baby refuses a second
 //   golden dandelion;
-// - `prevent_armor_change` on a mob's equipment, which stops shears.
+// - `prevent_armor_change` on a mob's equipment, which stops shears;
+// - a pig's saddle before 1.21.5, which was a synced flag and isn't read, so a
+//   saddled pig there passes an empty hand.
 
 use azalea_inventory::components::{CustomName, Damage, Dye, EquipmentSlot, Equippable};
 use glam::DVec3;
@@ -535,35 +537,42 @@ mod tests {
         entity
     }
 
-    /// The main hand's click on `entity` holding `item`, not sneaking.
+    /// The main hand's click on `entity` holding `item`, not sneaking, on a
+    /// server that synced no tags.
     fn click(entity: &LivingEntity, item: Option<ItemKind>) -> Option<Taken> {
-        click_with(entity, item, |_| {})
+        click_as(entity, item, &ItemTags::default(), false)
     }
 
-    fn click_with(
+    fn click_as(
         entity: &LivingEntity,
         item: Option<ItemKind>,
-        adjust: impl FnOnce(&mut Clicker),
+        item_tags: &ItemTags,
+        sneaking: bool,
     ) -> Option<Taken> {
         let held = item.map(|item| ItemStackData::new(item, 1));
-        let item_tags = ItemTags::default();
-        let mut clicker = Clicker {
-            held: held.as_ref(),
-            hand: InteractionHand::MainHand,
-            item_tags: &item_tags,
-            sneaking: false,
-            holding_golden_dandelion: false,
-            position: DVec3::ZERO,
-            thundering: false,
-        };
-        adjust(&mut clicker);
         interact_on(
             Target {
                 entity,
                 passengers: 0,
             },
-            clicker,
+            Clicker {
+                held: held.as_ref(),
+                hand: InteractionHand::MainHand,
+                item_tags,
+                sneaking,
+                holding_golden_dandelion: false,
+                position: DVec3::ZERO,
+                thundering: false,
+            },
         )
+    }
+
+    #[test]
+    fn a_tag_the_server_synced_replaces_the_built_in_one() {
+        let pig = entity(E::Pig);
+        let synced = ItemTags::from_entries([("minecraft:pig_food".into(), vec![I::Bread as u32])]);
+        assert_eq!(click_as(&pig, Some(I::Bread), &synced, false), QUIET);
+        assert_eq!(click_as(&pig, Some(I::Carrot), &synced, false), None);
     }
 
     #[test]
@@ -676,12 +685,12 @@ mod tests {
 
     #[test]
     fn a_boat_is_boarded_unless_sneaking() {
+        let sneak = |boat| click_as(boat, None, &ItemTags::default(), true);
         let boat = entity(E::OakBoat);
         assert_eq!(click(&boat, None), SWING);
-        assert_eq!(click_with(&boat, None, |c| c.sneaking = true), None);
+        assert_eq!(sneak(&boat), None);
         assert_eq!(click(&boat, Some(I::Lead)), QUIET);
-        let chest = entity(E::OakChestBoat);
-        assert_eq!(click_with(&chest, None, |c| c.sneaking = true), SWING);
+        assert_eq!(sneak(&entity(E::OakChestBoat)), SWING);
     }
 
     #[test]

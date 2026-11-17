@@ -2160,33 +2160,41 @@ pub fn raycast(
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
 /// each entity's bounding box and keeps the nearest hit. A box containing the
-/// ray origin counts as distance zero. Vanilla keeps the first of two equally
-/// near entities, in the order they entered their section; the lower id
-/// stands in for that, so a mob summoned onto a dying one doesn't win at
-/// random.
+/// ray origin counts as distance zero, and the last such box wins; a box hit
+/// after one of those replaces it, as vanilla's loop does. Vanilla walks the
+/// entities in the order they entered their section; ascending id stands in
+/// for that, so equally near entities don't resolve at random.
+// TODO: vanilla skips the player's own vehicle unless the ray starts inside
+// a box.
 fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
-    let mut nearest_dist_sq = f64::MAX;
-    let mut nearest = None;
-    for (&entity_id, entity) in &entities.living {
-        let dims = living_entity_dimensions(entity);
-        let aabb = dims.make_bounding_box(entity.position.into());
-
-        let (location, dist_sq) = if aabb.contains(from) {
-            (from, 0.0)
-        } else if let Some(clip) = aabb.clip(from, to) {
-            (clip, clip.distance_squared(from))
-        } else {
-            continue;
-        };
-
-        let earlier = nearest.is_some_and(|hit: EntityHitResult| entity_id < hit.entity_id);
-        if dist_sq < nearest_dist_sq || (dist_sq == nearest_dist_sq && earlier) {
-            nearest_dist_sq = dist_sq;
-            nearest = Some(EntityHitResult {
+    let mut touched: Vec<_> = entities
+        .living
+        .iter()
+        .filter_map(|(&entity_id, entity)| {
+            let entity_pos: DVec3 = entity.position.into();
+            let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
+            let (location, dist_sq) = if aabb.contains(from) {
+                (from, 0.0)
+            } else {
+                let clip = aabb.clip(from, to)?;
+                (clip, clip.distance_squared(from))
+            };
+            let hit = EntityHitResult {
                 entity_id,
                 location,
-                entity_pos: entity.position.into(),
-            });
+                entity_pos,
+            };
+            Some((hit, dist_sq))
+        })
+        .collect();
+    touched.sort_unstable_by_key(|(hit, _)| hit.entity_id);
+
+    let mut nearest_dist_sq = f64::MAX;
+    let mut nearest = None;
+    for (hit, dist_sq) in touched {
+        if dist_sq == 0.0 || dist_sq < nearest_dist_sq || nearest_dist_sq == 0.0 {
+            nearest_dist_sq = dist_sq;
+            nearest = Some(hit);
         }
     }
     nearest
@@ -2840,6 +2848,11 @@ mod tests {
             &entities,
         );
         assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
+
+        // From inside their boxes the last one wins.
+        let inside = DVec3::new(0.0, 1.0, 3.0);
+        let hit = nearest_entity_hit(inside, inside + DVec3::Z, &entities);
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(12));
     }
 
     #[test]
