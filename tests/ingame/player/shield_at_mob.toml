@@ -1,0 +1,93 @@
+# A right click on a mob that doesn't react to it goes on to the held item,
+# so a shield comes up while the crosshair rests on a husk. A villager takes
+# the click, and the shield stays down.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+chat = "/tp @s 60.5 -60 60.5 0 0"
+
+[[step]]
+expect = { player = { position = [60.5, -60.0, 60.5] } }
+
+[[step]]
+chat = "/summon minecraft:husk 60.5 -60 62.5 {NoAI:1b,Silent:1b,Tags:[\"shield_at_mob\"]}"
+
+[[step]]
+expect = { entity = "husk" }
+
+[[step]]
+look_at = [60.5, -59.0, 62.5]
+
+# The hand settles after the turn.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+screenshot = "raised_at_husk"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+chat = "/kill @e[tag=shield_at_mob]"
+
+# Past the husk's death animation, which the crosshair would still hit.
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/summon minecraft:villager 60.5 -60 62.5 {NoAI:1b,Silent:1b,Tags:[\"shield_at_mob\"]}"
+
+[[step]]
+expect = { entity = "villager" }
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { player = { using_item = false } }
+timeout_ms = 0
+
+[[step]]
+screenshot = "lowered_at_villager"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+chat = "/kill @e[tag=shield_at_mob]"
+
+[[step]]
+chat = "/kill @e[type=item,distance=..10]"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/gamemode creative"

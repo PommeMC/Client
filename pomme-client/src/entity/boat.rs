@@ -92,6 +92,11 @@ impl BoatSim {
         self.bubble_angle_o + (self.bubble_angle - self.bubble_angle_o) * partial_tick
     }
 
+    /// Vanilla `AbstractBoat.interact`'s `outOfControlTicks < 60`: boardable.
+    pub fn in_control(&self) -> bool {
+        self.out_of_control_ticks < 60.0
+    }
+
     /// Vanilla `isUnderWater`.
     pub fn is_under_water(&self) -> bool {
         matches!(
