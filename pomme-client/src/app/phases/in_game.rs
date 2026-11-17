@@ -5140,6 +5140,10 @@ pub fn update_game(
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
                 }
+                let has_block_model = game.block_registry.render_view().has_block_model(state);
+                if !crate::world::block_entity::drawn_by_pipeline(be.kind, has_block_model) {
+                    return None;
+                }
                 let props = block_state_data.properties();
                 let variant = block_entity::variant_for_block(be.kind, id, props);
                 let yaw = block_entity::yaw_for_block(be.kind, props);
@@ -5177,6 +5181,8 @@ pub fn update_game(
                         variant,
                         lid_open,
                         light,
+                        placement: crate::world::block_entity::SignBlock::of(id, props)
+                            .map(|sign| (sign.model_index(), sign.body_transformation())),
                     },
                 ))
             })

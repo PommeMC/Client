@@ -464,6 +464,12 @@ impl<'a> BlockRenderView<'a> {
             .get(self.block_state_table.block_state_data(state).id)
     }
 
+    /// Whether the state's assets give it geometry to mesh.
+    pub(crate) fn has_block_model(self, state: BlockState) -> bool {
+        self.get_baked_model(state, None).is_some()
+            || self.get_multipart_quads(state, None).is_some()
+    }
+
     /// The state's variant model as vanilla `ModelBlockRenderer` picks it for
     /// the block at `pos`, or the first of a weighted list without one.
     pub(crate) fn get_baked_model(

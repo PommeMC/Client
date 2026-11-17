@@ -2098,6 +2098,14 @@ fn emit_block_model(
             by,
             bz,
         );
+    } else if snapshot
+        .block_state_table
+        .block_state_data(state)
+        .id()
+        .ends_with("_sign")
+    {
+        // A sign with no block model (assets from before 26.2) is the
+        // block-entity pipeline's to draw.
     } else if let Some(textures) = registry.get_textures(state) {
         emit_cube_faces(
             sink, model_pos, state, textures, snapshot, uv_map, bx, by, bz,

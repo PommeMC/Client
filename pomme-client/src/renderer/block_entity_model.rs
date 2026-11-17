@@ -38,6 +38,111 @@ pub fn bake_shulker_box_model() -> BakedEntityModel {
     bake_model(vec![lid, base], 64, 64)
 }
 
+/// A model in the literal space vanilla's `ModelPart`s are written in: one
+/// part per cube, at its `PartPose` offset and Y rotation. The caller's
+/// matrix is the renderer's own, flips included.
+fn bake_literal(
+    parts: &[(&str, Vec3, f32, ModelCube)],
+    tex: (u32, u32),
+    faces: u8,
+) -> BakedEntityModel {
+    let mut vertices = Vec::new();
+    let mut part_ranges = Vec::new();
+    let mut baked = Vec::new();
+    for (name, offset, y_rot, cube) in parts {
+        let start = vertices.len() as u32;
+        generate_cube_vertices(cube, tex.0, tex.1, faces, false, &mut vertices);
+        part_ranges.push((start, vertices.len() as u32 - start));
+        baked.push(EntityPart {
+            name: (*name).into(),
+            offset: *offset,
+            default_rotation: Vec3::new(0.0, *y_rot, 0.0),
+            cubes: Vec::new(),
+            parent: None,
+        });
+    }
+    BakedEntityModel::new(baked, vertices, part_ranges).with_convention(ModelConvention::BlockYUp)
+}
+
+fn cube(origin: [f32; 3], size: [f32; 3], tex_offset: (i32, i32)) -> ModelCube {
+    ModelCube {
+        origin: origin.into(),
+        size: size.into(),
+        tex_offset,
+        deformation: 0.0,
+        mirror: false,
+    }
+}
+
+/// The 64x32 `entity/signs` textures.
+const SIGN_TEXTURE: (u32, u32) = (64, 32);
+
+/// `StandingSignRenderer.createSignLayer` as it was before 26.2, standing
+/// then wall: the board, and a standing sign's stick.
+pub fn bake_sign_models() -> Vec<BakedEntityModel> {
+    let board = (
+        "sign",
+        Vec3::ZERO,
+        0.0,
+        cube([-12.0, -14.0, -1.0], [24.0, 12.0, 2.0], (0, 0)),
+    );
+    let stick = (
+        "stick",
+        Vec3::ZERO,
+        0.0,
+        cube([-1.0, -2.0, -1.0], [2.0, 14.0, 2.0], (0, 14)),
+    );
+    vec![
+        bake_literal(&[board, stick], SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&[board], SIGN_TEXTURE, FACE_ALL),
+    ]
+}
+
+/// `HangingSignRenderer.createHangingSignLayer` as it was before 26.2:
+/// ceiling, ceiling middle, then wall.
+pub fn bake_hanging_sign_models() -> Vec<BakedEntityModel> {
+    use std::f32::consts::FRAC_PI_4;
+
+    let board = (
+        "board",
+        Vec3::ZERO,
+        0.0,
+        cube([-7.0, 0.0, -1.0], [14.0, 10.0, 2.0], (0, 12)),
+    );
+    let plank = (
+        "plank",
+        Vec3::ZERO,
+        0.0,
+        cube([-8.0, -6.0, -2.0], [16.0, 2.0, 4.0], (0, 0)),
+    );
+    let chain = |name, x: f32, y_rot: f32, u| {
+        (
+            name,
+            Vec3::new(x, -6.0, 0.0),
+            y_rot,
+            cube([-1.5, 0.0, 0.0], [3.0, 6.0, 0.0], (u, 6)),
+        )
+    };
+    let chains = [
+        chain("chainL1", -5.0, -FRAC_PI_4, 0),
+        chain("chainL2", -5.0, FRAC_PI_4, 6),
+        chain("chainR1", 5.0, -FRAC_PI_4, 0),
+        chain("chainR2", 5.0, FRAC_PI_4, 6),
+    ];
+    let v_chains = (
+        "vChains",
+        Vec3::ZERO,
+        0.0,
+        cube([-6.0, -6.0, 0.0], [12.0, 6.0, 0.0], (14, 6)),
+    );
+    let with_chains = |first: &[_]| [first, &chains[..]].concat();
+    vec![
+        bake_literal(&with_chains(&[board]), SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&[board, v_chains], SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&with_chains(&[board, plank]), SIGN_TEXTURE, FACE_ALL),
+    ]
+}
+
 /// One chest layer as parts [bottom, lid, lock], matching vanilla `ChestModel`
 /// (single/double-left/double-right differ only in body/lock x extents and the
 /// culled seam face). Texture 64x64; lid and lock pivot at offset (0, 9, 1).
@@ -51,53 +156,31 @@ fn bake_chest_layer(
     lock_w: f32,
     faces: u8,
 ) -> BakedEntityModel {
-    let cubes = [
-        (
-            "bottom",
-            Vec3::ZERO,
-            Vec3::new(body_x0, 0.0, 1.0),
-            Vec3::new(body_w, 10.0, 14.0),
-            (0, 19),
-        ),
-        (
-            "lid",
-            Vec3::new(0.0, 9.0, 1.0),
-            Vec3::new(body_x0, 0.0, 0.0),
-            Vec3::new(body_w, 5.0, 14.0),
-            (0, 0),
-        ),
-        (
-            "lock",
-            Vec3::new(0.0, 9.0, 1.0),
-            Vec3::new(lock_x0, -2.0, 14.0),
-            Vec3::new(lock_w, 4.0, 1.0),
-            (0, 0),
-        ),
-    ];
-
-    let mut vertices = Vec::new();
-    let mut part_ranges = Vec::new();
-    let mut parts = Vec::new();
-    for (name, offset, origin, size, tex_offset) in cubes {
-        let start = vertices.len() as u32;
-        let cube = ModelCube {
-            origin,
-            size,
-            tex_offset,
-            deformation: 0.0,
-            mirror: false,
-        };
-        generate_cube_vertices(&cube, 64, 64, faces, false, &mut vertices);
-        part_ranges.push((start, vertices.len() as u32 - start));
-        parts.push(EntityPart {
-            name: name.into(),
-            offset,
-            default_rotation: Vec3::ZERO,
-            cubes: Vec::new(),
-            parent: None,
-        });
-    }
-    BakedEntityModel::new(parts, vertices, part_ranges).with_convention(ModelConvention::BlockYUp)
+    let pivot = Vec3::new(0.0, 9.0, 1.0);
+    bake_literal(
+        &[
+            (
+                "bottom",
+                Vec3::ZERO,
+                0.0,
+                cube([body_x0, 0.0, 1.0], [body_w, 10.0, 14.0], (0, 19)),
+            ),
+            (
+                "lid",
+                pivot,
+                0.0,
+                cube([body_x0, 0.0, 0.0], [body_w, 5.0, 14.0], (0, 0)),
+            ),
+            (
+                "lock",
+                pivot,
+                0.0,
+                cube([lock_x0, -2.0, 14.0], [lock_w, 4.0, 1.0], (0, 0)),
+            ),
+        ],
+        (64, 64),
+        faces,
+    )
 }
 
 /// Chest models in variant order [single, double-left, double-right], from
