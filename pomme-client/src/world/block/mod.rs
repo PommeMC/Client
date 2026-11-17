@@ -428,15 +428,6 @@ impl BlockStateData {
         }
     }
 
-    /// Vanilla `Block.getBounceRestitution`.
-    pub(crate) fn bounce_restitution(&self) -> f32 {
-        match self.id() {
-            "slime_block" => 1.0,
-            id if id.ends_with("_bed") => 0.75,
-            _ => 0.0,
-        }
-    }
-
     pub(crate) fn movement_speed_factor(&self) -> f32 {
         match self.id() {
             "soul_sand" | "honey_block" => 0.4,

@@ -794,19 +794,16 @@ fn settle_after_move(
     }
 
     if collided.contains(&true) {
-        let effect = world.block_data(effect_pos);
-        let block_bounce = if tags.contains("minecraft:suppresses_bounce", effect.id()) {
-            None
-        } else {
-            Some(f64::from(effect.bounce_restitution()))
+        let landing =
+            on_ground.then(|| block_bounce(world.block_data(effect_pos), tags).map(f64::from));
+        let bouncer = Bouncer {
+            bounciness: player.attribute(AttributeKind::Bounciness),
+            gravity: gravity(player),
+            air_drag: f64::from(air_drag(player, VERTICAL_DRAG)),
+            suppressing: ctx.descending(),
         };
-        restitute_after_collisions(
-            player,
-            collided,
-            resolved,
-            on_ground.then_some(block_bounce),
-            ctx.descending(),
-        );
+        *player.velocity =
+            restitute_after_collisions(*player.velocity, collided, resolved, landing, bouncer);
     }
     movement_sound::Move {
         movement: resolved,
@@ -814,27 +811,44 @@ fn settle_after_move(
     }
 }
 
-/// Vanilla `Entity.restituteMovementAfterCollisions`: a collided axis stops,
-/// or bounces back by the player's `bounciness`; a landing also bounces by
-/// the block's, unless it is slower than gravity. `landing` is the landed-on
-/// block's restitution, `None` on one that suppresses bounces; it is absent
+/// What `Entity.restituteMovementAfterCollisions` reads of the entity.
+#[derive(Clone, Copy)]
+pub(crate) struct Bouncer {
+    /// `getEntityBounciness`.
+    pub bounciness: f64,
+    /// `getEffectiveGravity`.
+    pub gravity: f64,
+    /// `getAirDrag`.
+    pub air_drag: f64,
+    /// `isSuppressingBounce`: sneaking.
+    pub suppressing: bool,
+}
+
+/// `block`'s `getBounceRestitution`, `None` when it suppresses bounces.
+pub(crate) fn block_bounce(block: &BlockStateData, tags: &BlockTags) -> Option<f32> {
+    (!tags.contains("minecraft:suppresses_bounce", block.id()))
+        .then(|| block.movement_bounce_restitution())
+}
+
+/// Vanilla `Entity.restituteMovementAfterCollisions`, returning the new
+/// velocity: a collided axis stops, or bounces back by the entity's
+/// bounciness; a landing also bounces by the block's, unless it is slower
+/// than gravity. `landing` is [`block_bounce`] of the block landed on, absent
 /// when the collision wasn't from above.
 // TODO: before 26.2 a slime block or bed bounced through
 // `updateEntityMovementAfterFallOn`, with no gravity or drag correction.
-fn restitute_after_collisions(
-    player: &mut LocalPlayer,
-    collided: [bool; 3],
+pub(crate) fn restitute_after_collisions(
+    current: DVec3,
+    [x, y, z]: [bool; 3],
     movement: DVec3,
     landing: Option<Option<f64>>,
-    suppressing: bool,
-) {
-    let [x, y, z] = collided;
-    let mut restitution = if suppressing {
+    bouncer: Bouncer,
+) -> DVec3 {
+    let mut restitution = if bouncer.suppressing {
         0.0
     } else {
-        player.attribute(AttributeKind::Bounciness)
+        bouncer.bounciness
     };
-    let current = *player.velocity;
     let mut after = current;
     if x {
         after.x = -current.x * restitution;
@@ -843,29 +857,30 @@ fn restitute_after_collisions(
         after.z = -current.z * restitution;
     }
     if y {
-        let gravity = gravity(player);
         if let Some(block_bounce) = landing {
             // 26.3 (777) stopped bouncing a landing at exactly gravity's speed.
             let too_slow = if crate::version::session_protocol() >= 777 {
-                -current.y <= gravity
+                -current.y <= bouncer.gravity
             } else {
-                -current.y < gravity
+                -current.y < bouncer.gravity
             };
             restitution = match block_bounce {
-                Some(block) if !too_slow && !suppressing => restitution.max(block),
+                Some(block) if !too_slow && !bouncer.suppressing => restitution.max(block),
                 _ => 0.0,
             };
         }
         let (gravity_compensation, drag) = if restitution > 0.0 {
             let portion = movement.y / current.y;
-            let drag = f64::from(air_drag(player, VERTICAL_DRAG));
-            (portion * gravity, 1.0 + portion * (drag - 1.0))
+            (
+                portion * bouncer.gravity,
+                1.0 + portion * (bouncer.air_drag - 1.0),
+            )
         } else {
             (0.0, 1.0)
         };
         after.y = (gravity_compensation - current.y) * drag * restitution;
     }
-    *player.velocity = after;
+    after
 }
 
 fn update_sprint_state(
@@ -1810,12 +1825,21 @@ mod tests {
 
     #[test]
     fn a_landing_bounces_by_the_block_unless_slow_or_sneaking() {
-        let land = |vy: f64, landing, sneaking| {
-            let mut player = LocalPlayer::new();
-            player.velocity = Velocity::new(0.3, vy, 0.0);
+        let land = |vy: f64, landing, suppressing| {
+            let bouncer = Bouncer {
+                bounciness: 0.0,
+                gravity: GRAVITY,
+                air_drag: f64::from(VERTICAL_DRAG),
+                suppressing,
+            };
             let moved = dvec3(0.0, vy * 0.4, 0.0);
-            restitute_after_collisions(&mut player, [true, true, false], moved, landing, sneaking);
-            *player.velocity
+            restitute_after_collisions(
+                dvec3(0.3, vy, 0.0),
+                [true, true, false],
+                moved,
+                landing,
+                bouncer,
+            )
         };
         // Stone: both collided axes stop.
         assert_eq!(land(-0.5, Some(Some(0.0)), false), DVec3::ZERO);
