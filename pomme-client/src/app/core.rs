@@ -3129,6 +3129,52 @@ impl AppCore {
                         Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
+                NetworkEvent::InitializeBorder {
+                    center_x,
+                    center_z,
+                    old_size,
+                    new_size,
+                    lerp_time_ms,
+                    max_size,
+                    warning_blocks,
+                    warning_time,
+                } => {
+                    game.world_border.apply_initialize(
+                        center_x,
+                        center_z,
+                        old_size,
+                        new_size,
+                        lerp_time_ms,
+                        max_size,
+                        warning_blocks,
+                        warning_time,
+                        std::time::Instant::now(),
+                    );
+                }
+                NetworkEvent::SetBorderCenter { center_x, center_z } => {
+                    game.world_border.apply_center(center_x, center_z);
+                }
+                NetworkEvent::SetBorderLerpSize {
+                    old_size,
+                    new_size,
+                    lerp_time_ms,
+                } => {
+                    game.world_border.apply_lerp_size(
+                        old_size,
+                        new_size,
+                        lerp_time_ms,
+                        std::time::Instant::now(),
+                    );
+                }
+                NetworkEvent::SetBorderSize { size } => {
+                    game.world_border.apply_size(size);
+                }
+                NetworkEvent::SetBorderWarningDelay { warning_delay } => {
+                    game.world_border.apply_warning_delay(warning_delay);
+                }
+                NetworkEvent::SetBorderWarningDistance { warning_blocks } => {
+                    game.world_border.apply_warning_distance(warning_blocks);
+                }
                 NetworkEvent::EntitySpawned {
                     id,
                     uuid,

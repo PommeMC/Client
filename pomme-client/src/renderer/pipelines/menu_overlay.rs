@@ -870,15 +870,25 @@ impl MenuGeometry {
                         *tint,
                     );
                 }
-                MenuElement::Vignette { w, h, brightness } => {
-                    // Clamp mirrors vanilla Hud.extractVignette.
+                MenuElement::Vignette {
+                    w,
+                    h,
+                    brightness,
+                    warning,
+                } => {
                     let b = brightness.clamp(0.0, 1.0);
+                    let w_val = warning.clamp(0.0, 1.0);
+                    let color = if w_val > 0.0 {
+                        [b, b * (1.0 - w_val), b * (1.0 - w_val), 1.0]
+                    } else {
+                        [b, b, b, 1.0]
+                    };
                     push_fullscreen_quad(
                         &mut vertices,
                         *w,
                         *h,
                         self.overlay_vignette_uv,
-                        [b, b, b, 1.0],
+                        color,
                         8.0,
                     );
                 }
@@ -2346,6 +2356,7 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         brightness: f32,
+        warning: f32,
     },
     /// Full-screen pumpkin-blur camera overlay.
     PumpkinOverlay {

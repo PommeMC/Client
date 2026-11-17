@@ -313,6 +313,7 @@ pub struct GameState {
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
+    pub world_border: crate::world::border::WorldBorder,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
@@ -652,6 +653,7 @@ impl GameState {
             rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
+            world_border: crate::world::border::WorldBorder::default(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
@@ -2710,7 +2712,9 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    // TODO: also skip blocks outside the world border once it's tracked.
+    if !game.world_border.is_block_inside(pos, std::time::Instant::now()) {
+        return None;
+    }
     if block_state_data.is_air() {
         return None;
     }
@@ -3479,6 +3483,9 @@ pub fn update_game(
             .player
             .prev_portal_effect_intensity
             .lerp(game.player.portal_effect_intensity, partial_tick);
+        let warning_factor = game
+            .world_border
+            .warning_factor(*game.player.position, std::time::Instant::now());
         hud::build_camera_overlays(
             &mut elements,
             sw,
@@ -3486,6 +3493,7 @@ pub fn update_game(
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
+            warning_factor,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
@@ -5391,6 +5399,11 @@ pub fn update_game(
         &nameplate_renders,
         &sign_renders,
         &weather_columns,
+        Some(&game.world_border),
+        (
+            game.chunk_store.min_y(),
+            game.chunk_store.min_y() + game.chunk_store.height() as i32,
+        ),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {
