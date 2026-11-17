@@ -717,6 +717,15 @@ impl InputState {
         self.spectator_slot_presses.clear();
     }
 
+    /// Vanilla `Gui.setScreen`'s `KeyMapping.releaseAll`: a press made
+    /// before a screen opened was for the world and never reaches the
+    /// screen. The game ticks consume presses, so one made since the last
+    /// tick is still pending when a packet opens a screen.
+    pub fn screen_opened(&mut self) {
+        self.clear_click_counts();
+        self.clear_just_pressed_actions();
+    }
+
     /// Digit presses queued for the spectator menu since the last tick.
     pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.spectator_slot_presses)
@@ -1474,6 +1483,18 @@ mod key_code_tests {
 #[cfg(test)]
 mod binding_lookup_tests {
     use super::*;
+
+    #[test]
+    fn a_screen_that_opens_gets_no_earlier_click() {
+        let mut input = InputState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        assert!(input.right_just_pressed());
+        input.screen_opened();
+        assert!(!input.right_just_pressed());
+        assert!(!input.consume_click(Action::Use));
+        // Still down, so a release ends it as usual.
+        assert!(input.right_held());
+    }
 
     #[test]
     fn configured_close_routes_captured_keys_like_escape() {
