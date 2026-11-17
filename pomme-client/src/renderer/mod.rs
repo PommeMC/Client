@@ -227,7 +227,6 @@ enum RenderMode<'a> {
         signs: &'a [SignRenderInfo],
         weather: &'a [WeatherColumn],
         world_border: Option<&'a crate::world::border::WorldBorder>,
-        world_height: (i32, i32),
         cloud_mode: CloudMode,
         render_distance: u32,
         /// How far distant terrain draws, in chunks; 0 for none.
@@ -1741,7 +1740,6 @@ impl Renderer {
         signs: &[SignRenderInfo],
         weather: &[WeatherColumn],
         world_border: Option<&crate::world::border::WorldBorder>,
-        world_height: (i32, i32),
         cloud_mode: CloudMode,
         render_distance: u32,
         distant_terrain: u32,
@@ -1791,7 +1789,6 @@ impl Renderer {
                 signs,
                 weather,
                 world_border,
-                world_height,
                 cloud_mode,
                 render_distance,
                 distant_terrain,
@@ -2584,7 +2581,6 @@ impl Renderer {
                 signs: _,
                 weather,
                 world_border,
-                world_height,
                 cloud_mode,
                 render_distance,
                 distant_terrain,
@@ -2783,8 +2779,6 @@ impl Renderer {
                             &self.camera,
                             border,
                             *render_distance as f32 * 16.0,
-                            world_height.0,
-                            world_height.1,
                         );
                     }
 

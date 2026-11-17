@@ -3142,14 +3142,16 @@ impl AppCore {
                     warning_time,
                 } => {
                     game.world_border.apply_initialize(
-                        center_x,
-                        center_z,
-                        old_size,
-                        new_size,
-                        lerp_time_ms,
-                        max_size,
-                        warning_blocks,
-                        warning_time,
+                        crate::world::border::WorldBorderInit {
+                            center_x,
+                            center_z,
+                            old_size,
+                            new_size,
+                            lerp_time_ms,
+                            max_size,
+                            warning_blocks,
+                            warning_time,
+                        },
                         std::time::Instant::now(),
                     );
                 }

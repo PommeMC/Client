@@ -19,6 +19,18 @@ pub enum BorderStatus {
     Growing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldBorderInit {
+    pub center_x: f64,
+    pub center_z: f64,
+    pub old_size: f64,
+    pub new_size: f64,
+    pub lerp_time_ms: u64,
+    pub max_size: u32,
+    pub warning_blocks: u32,
+    pub warning_time: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WorldBorder {
     pub center: DVec2,
@@ -219,30 +231,19 @@ impl WorldBorder {
         ratio.clamp(0.0, 1.0) as f32
     }
 
-    pub fn apply_initialize(
-        &mut self,
-        center_x: f64,
-        center_z: f64,
-        old_size: f64,
-        new_size: f64,
-        lerp_time_ms: u64,
-        max_size: u32,
-        warning_blocks: u32,
-        warning_time: u32,
-        now: Instant,
-    ) {
-        self.center = DVec2::new(center_x, center_z);
-        self.old_size = old_size;
-        self.new_size = new_size;
+    pub fn apply_initialize(&mut self, init: WorldBorderInit, now: Instant) {
+        self.center = DVec2::new(init.center_x, init.center_z);
+        self.old_size = init.old_size;
+        self.new_size = init.new_size;
         self.lerp_start = now;
-        self.lerp_duration = Duration::from_millis(lerp_time_ms);
-        self.max_size = if max_size == 0 {
+        self.lerp_duration = Duration::from_millis(init.lerp_time_ms);
+        self.max_size = if init.max_size == 0 {
             DEFAULT_MAX_SIZE
         } else {
-            max_size as f64
+            init.max_size as f64
         };
-        self.warning_blocks = warning_blocks as f64;
-        self.warning_time_secs = warning_time;
+        self.warning_blocks = init.warning_blocks as f64;
+        self.warning_time_secs = init.warning_time;
     }
 
     pub fn apply_center(&mut self, center_x: f64, center_z: f64) {
@@ -296,7 +297,19 @@ mod tests {
     fn small_border_bounds_and_inside() {
         let mut border = WorldBorder::new();
         let now = Instant::now();
-        border.apply_initialize(10.0, 20.0, 100.0, 100.0, 0, 29999984, 5, 15, now);
+        border.apply_initialize(
+            WorldBorderInit {
+                center_x: 10.0,
+                center_z: 20.0,
+                old_size: 100.0,
+                new_size: 100.0,
+                lerp_time_ms: 0,
+                max_size: 29999984,
+                warning_blocks: 5,
+                warning_time: 15,
+            },
+            now,
+        );
         assert_eq!(border.min_x(now), -40.0);
         assert_eq!(border.max_x(now), 60.0);
         assert_eq!(border.min_z(now), -30.0);
@@ -329,7 +342,19 @@ mod tests {
     fn warning_factor_near_border() {
         let mut border = WorldBorder::new();
         let now = Instant::now();
-        border.apply_initialize(0.0, 0.0, 20.0, 20.0, 0, 29999984, 5, 15, now);
+        border.apply_initialize(
+            WorldBorderInit {
+                center_x: 0.0,
+                center_z: 0.0,
+                old_size: 20.0,
+                new_size: 20.0,
+                lerp_time_ms: 0,
+                max_size: 29999984,
+                warning_blocks: 5,
+                warning_time: 15,
+            },
+            now,
+        );
         assert_eq!(border.warning_factor(DVec3::new(0.0, 64.0, 0.0), now), 0.0);
         assert_eq!(border.warning_factor(DVec3::new(5.0, 64.0, 0.0), now), 0.0);
         assert!((border.warning_factor(DVec3::new(7.5, 64.0, 0.0), now) - 0.5).abs() < 1e-4);
@@ -347,7 +372,19 @@ mod tests {
 
         let mut border = WorldBorder::new();
         let now = Instant::now();
-        border.apply_initialize(0.0, 0.0, 20.0, 20.0, 0, 29999984, 5, 15, now);
+        border.apply_initialize(
+            WorldBorderInit {
+                center_x: 0.0,
+                center_z: 0.0,
+                old_size: 20.0,
+                new_size: 20.0,
+                lerp_time_ms: 0,
+                max_size: 29999984,
+                warning_blocks: 5,
+                warning_time: 15,
+            },
+            now,
+        );
 
         let player_aabb = Aabb::new(dvec3(9.4, 64.0, -0.3), dvec3(10.0, 65.8, 0.3));
         let boxes = border.collision_boxes(&player_aabb, now).unwrap();
@@ -382,7 +419,19 @@ mod tests {
     fn border_collision_none_when_far_or_outside() {
         let mut border = WorldBorder::new();
         let now = Instant::now();
-        border.apply_initialize(0.0, 0.0, 20.0, 20.0, 0, 29999984, 5, 15, now);
+        border.apply_initialize(
+            WorldBorderInit {
+                center_x: 0.0,
+                center_z: 0.0,
+                old_size: 20.0,
+                new_size: 20.0,
+                lerp_time_ms: 0,
+                max_size: 29999984,
+                warning_blocks: 5,
+                warning_time: 15,
+            },
+            now,
+        );
 
         let far_aabb = Aabb::new(dvec3(-0.3, 64.0, -0.3), dvec3(0.3, 65.8, 0.3));
         assert!(border.collision_boxes(&far_aabb, now).is_none());

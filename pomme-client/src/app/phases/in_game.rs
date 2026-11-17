@@ -5428,10 +5428,6 @@ pub fn update_game(
         &sign_renders,
         &weather_columns,
         Some(&game.world_border),
-        (
-            game.chunk_store.min_y(),
-            game.chunk_store.min_y() + game.chunk_store.height() as i32,
-        ),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {

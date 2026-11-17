@@ -118,8 +118,6 @@ impl WorldBorderPipeline {
         camera: &Camera,
         border: &WorldBorder,
         render_distance_blocks: f32,
-        _min_y: i32,
-        _max_y: i32,
     ) {
         let now = Instant::now();
         let time_secs = now.duration_since(self.start_time).as_secs_f32();
@@ -178,14 +176,13 @@ impl WorldBorderPipeline {
             push_wall_quad(
                 &mut verts,
                 anchor,
-                DVec3::new(min_x, y_bot, z_start),
-                DVec3::new(min_x, y_bot, z_end),
-                DVec3::new(min_x, y_top, z_end),
-                DVec3::new(min_x, y_top, z_start),
-                u0_z,
-                u1_z,
-                v_bot,
-                v_top,
+                [
+                    DVec3::new(min_x, y_bot, z_start),
+                    DVec3::new(min_x, y_bot, z_end),
+                    DVec3::new(min_x, y_top, z_end),
+                    DVec3::new(min_x, y_top, z_start),
+                ],
+                [u0_z, u1_z, v_bot, v_top],
                 color,
             );
         }
@@ -194,14 +191,13 @@ impl WorldBorderPipeline {
             push_wall_quad(
                 &mut verts,
                 anchor,
-                DVec3::new(max_x, y_bot, z_end),
-                DVec3::new(max_x, y_bot, z_start),
-                DVec3::new(max_x, y_top, z_start),
-                DVec3::new(max_x, y_top, z_end),
-                u0_z,
-                u1_z,
-                v_bot,
-                v_top,
+                [
+                    DVec3::new(max_x, y_bot, z_end),
+                    DVec3::new(max_x, y_bot, z_start),
+                    DVec3::new(max_x, y_top, z_start),
+                    DVec3::new(max_x, y_top, z_end),
+                ],
+                [u0_z, u1_z, v_bot, v_top],
                 color,
             );
         }
@@ -210,14 +206,13 @@ impl WorldBorderPipeline {
             push_wall_quad(
                 &mut verts,
                 anchor,
-                DVec3::new(x_end, y_bot, min_z),
-                DVec3::new(x_start, y_bot, min_z),
-                DVec3::new(x_start, y_top, min_z),
-                DVec3::new(x_end, y_top, min_z),
-                u0_x,
-                u1_x,
-                v_bot,
-                v_top,
+                [
+                    DVec3::new(x_end, y_bot, min_z),
+                    DVec3::new(x_start, y_bot, min_z),
+                    DVec3::new(x_start, y_top, min_z),
+                    DVec3::new(x_end, y_top, min_z),
+                ],
+                [u0_x, u1_x, v_bot, v_top],
                 color,
             );
         }
@@ -226,14 +221,13 @@ impl WorldBorderPipeline {
             push_wall_quad(
                 &mut verts,
                 anchor,
-                DVec3::new(x_start, y_bot, max_z),
-                DVec3::new(x_end, y_bot, max_z),
-                DVec3::new(x_end, y_top, max_z),
-                DVec3::new(x_start, y_top, max_z),
-                u0_x,
-                u1_x,
-                v_bot,
-                v_top,
+                [
+                    DVec3::new(x_start, y_bot, max_z),
+                    DVec3::new(x_end, y_bot, max_z),
+                    DVec3::new(x_end, y_top, max_z),
+                    DVec3::new(x_start, y_top, max_z),
+                ],
+                [u0_x, u1_x, v_bot, v_top],
                 color,
             );
         }
@@ -256,50 +250,44 @@ impl WorldBorderPipeline {
 fn push_wall_quad(
     verts: &mut Vec<WorldBorderVertex>,
     anchor: DVec3,
-    p0: DVec3,
-    p1: DVec3,
-    p2: DVec3,
-    p3: DVec3,
-    u0: f32,
-    u1: f32,
-    v_bot: f32,
-    v_top: f32,
+    corners: [DVec3; 4],
+    uv: [f32; 4],
     color: [f32; 4],
 ) {
-    let v0_pos = (p0 - anchor).as_vec3().to_array();
-    let v1_pos = (p1 - anchor).as_vec3().to_array();
-    let v2_pos = (p2 - anchor).as_vec3().to_array();
-    let v3_pos = (p3 - anchor).as_vec3().to_array();
+    let v0_pos = (corners[0] - anchor).as_vec3().to_array();
+    let v1_pos = (corners[1] - anchor).as_vec3().to_array();
+    let v2_pos = (corners[2] - anchor).as_vec3().to_array();
+    let v3_pos = (corners[3] - anchor).as_vec3().to_array();
 
     verts.push(WorldBorderVertex {
         position: v0_pos,
-        uv: [u0, v_bot],
+        uv: [uv[0], uv[2]],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v1_pos,
-        uv: [u1, v_bot],
+        uv: [uv[1], uv[2]],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v2_pos,
-        uv: [u1, v_top],
+        uv: [uv[1], uv[3]],
         color,
     });
 
     verts.push(WorldBorderVertex {
         position: v0_pos,
-        uv: [u0, v_bot],
+        uv: [uv[0], uv[2]],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v2_pos,
-        uv: [u1, v_top],
+        uv: [uv[1], uv[3]],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v3_pos,
-        uv: [u0, v_top],
+        uv: [uv[0], uv[3]],
         color,
     });
 }
