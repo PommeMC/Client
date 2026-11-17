@@ -8,7 +8,7 @@ pub mod tab_list;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
-use crate::attribute::AttributeMap;
+use crate::attribute::{AttributeKind, AttributeMap};
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
@@ -367,6 +367,28 @@ impl DropThrottle {
 }
 
 impl LocalPlayer {
+    /// Vanilla `LivingEntity.setSprinting`: the flag, and the sprint speed
+    /// modifier taken off and put back on with it. A server's attribute
+    /// update replaces the modifiers, so the two can disagree until the next
+    /// call, as in vanilla.
+    pub fn set_sprinting(&mut self, sprinting: bool) {
+        // `SPEED_MODIFIER_SPRINTING`: 0.3f, widened into the attribute's double.
+        const AMOUNT: f64 = 0.3_f32 as f64;
+        self.sprinting = sprinting;
+        self.attributes.set_modifier(
+            AttributeKind::MovementSpeed,
+            "minecraft:sprinting",
+            sprinting.then_some(AMOUNT),
+        );
+    }
+
+    /// An attribute's value; the player's supplier has every one read here.
+    pub fn attribute(&self, attribute: AttributeKind) -> f64 {
+        self.attributes
+            .value(attribute)
+            .expect("the player's supplier has the attribute")
+    }
+
     pub fn new() -> Self {
         Self {
             position: Position::default(),

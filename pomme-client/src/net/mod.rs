@@ -436,6 +436,8 @@ pub enum NetworkEvent {
     },
     DimensionName {
         name: String,
+        /// From a login rather than a respawn.
+        login: bool,
     },
     PlayerAbilitiesChanged {
         flying: bool,

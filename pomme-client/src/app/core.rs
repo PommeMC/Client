@@ -137,6 +137,14 @@ const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs
 /// next.
 const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
+/// Whether vanilla makes a new `ClientLevel`: `handleLogin` always does,
+/// `handleRespawn` only when the dimension changes. A server need not remove
+/// the old level's entities itself, and a proxy moving the player between
+/// servers doesn't.
+fn starts_new_level(login: bool, old_dimension: &str, dimension: &str) -> bool {
+    login || old_dimension != dimension
+}
+
 /// Whether the rest of the queue may wait for the next frame: only once the
 /// chunk budget is spent and while this frame owes no tick, so every packet
 /// received before a tick is handled before it runs.
@@ -514,6 +522,16 @@ impl GameState {
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
         self.sync_distant_colors();
+    }
+
+    /// Drops every entity, as a level going away takes its own with it.
+    fn clear_entities(&mut self) {
+        self.entity_store = crate::entity::EntityStore::new();
+        self.item_entity_store = crate::entity::ItemEntityStore::new();
+        self.entity_positions.clear();
+        self.entity_kinds.clear();
+        self.vehicle_passengers.clear();
+        self.silent_entities.clear();
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -2265,7 +2283,10 @@ impl AppCore {
                     renderer.clear_chunk_meshes();
                     renderer.reset_distant();
                 }
-                NetworkEvent::DimensionName { name } => {
+                NetworkEvent::DimensionName { name, login } => {
+                    if starts_new_level(login, &game.dimension, &name) {
+                        game.clear_entities();
+                    }
                     game.dimension = name;
                 }
                 NetworkEvent::ChunkLoaded {
@@ -3131,12 +3152,11 @@ impl AppCore {
                             uuid,
                         );
                         if entity_type == pomme_registry::builtin::EntityKind::Player {
-                            let textures = game
-                                .tab_list
-                                .players
-                                .get(&uuid)
-                                .and_then(|p| p.textures.clone());
-                            self.queue_player_skin(uuid, textures);
+                            let info = game.tab_list.players.get(&uuid);
+                            if let Some(entity) = game.entity_store.living.get_mut(&id) {
+                                entity.profile_name = info.map(|p| p.name.clone());
+                            }
+                            self.queue_player_skin(uuid, info.and_then(|p| p.textures.clone()));
                         }
                     }
                     if entity_type == pomme_registry::builtin::EntityKind::Item {
@@ -3640,12 +3660,7 @@ impl AppCore {
                     tracing::info!("Server re-entered configuration");
                     game.block_registry.clear_tags();
                     self.audio.stop_all_sounds();
-                    game.entity_store = crate::entity::EntityStore::new();
-                    game.item_entity_store = crate::entity::ItemEntityStore::new();
-                    game.entity_positions.clear();
-                    game.entity_kinds.clear();
-                    game.vehicle_passengers.clear();
-                    game.silent_entities.clear();
+                    game.clear_entities();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
                     // `ServerReconfigScreen` replaces any dialog; the server
@@ -3877,19 +3892,13 @@ impl AppCore {
             if Some(id) == vehicle {
                 return false;
             }
-            let pusher_name = match entity.player_uuid {
-                Some(uuid) => match tab_list.players.get(&uuid) {
-                    // `Player.tick` sets `noPhysics` for spectators, so
-                    // `Entity.push` returns before any impulse.
-                    Some(info) if crate::player::is_spectator(info.game_mode) => return false,
-                    Some(info) => info.name.clone(),
-                    // TODO: keep the spawn-time profile name; a player
-                    // dropped from the tab list falls back to no team.
-                    None => return true,
-                },
-                None => entity.uuid.to_string(),
-            };
-            scoreboard.pushable_by(&pusher_name, local_name)
+            // `Player.tick` sets `noPhysics` for spectators, so `Entity.push`
+            // returns before any impulse.
+            let spectator = entity
+                .player_uuid
+                .and_then(|uuid| tab_list.players.get(&uuid))
+                .is_some_and(|info| crate::player::is_spectator(info.game_mode));
+            !spectator && scoreboard.pushable_by(&entity.scoreboard_name(tab_list), local_name)
         };
         // Vanilla `Level.isThundering`.
         game.entity_store.thundering =
@@ -4646,13 +4655,12 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     if player.flying {
         modifier *= 1.1;
     }
-    // Vanilla's speedFactor is MOVEMENT_SPEED / walkingSpeed; with Pomme's
-    // client-side speed model that reduces to sprint ? 1.3 : 1.0.
-    // TODO: drive from the MOVEMENT_SPEED attribute so Speed/Slowness potions
-    // and gear modifiers affect FOV too.
+    if player.walk_speed != 0.0 {
+        let speed_factor =
+            player.attribute(AttributeKind::MovementSpeed) as f32 / player.walk_speed;
+        modifier *= (speed_factor + 1.0) / 2.0;
+    }
     // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
-    let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
-    modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)
 }
 
@@ -4706,6 +4714,60 @@ mod tests {
         assert!(super::defer_packets(spent, 0.9 * TICK_RATE));
         assert!(!super::defer_packets(spent, TICK_RATE));
         assert!(!super::defer_packets(spent * 10, 3.0 * TICK_RATE));
+    }
+
+    #[test]
+    fn the_fov_follows_the_movement_speed_attribute() {
+        let mut player = LocalPlayer::new();
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        player.set_sprinting(true);
+        assert!((super::compute_fov_modifier(&player, 1.0) - 1.15).abs() < 1.0e-6);
+        // A server that raises the walking speed with the attribute's base
+        // leaves the ratio, and the FOV, where it was.
+        player.set_sprinting(false);
+        player.walk_speed = 0.2;
+        player
+            .attributes
+            .apply_snapshot(&crate::attribute::AttributeSnapshot {
+                attribute: AttributeKind::MovementSpeed,
+                base: f64::from(0.2_f32),
+                modifiers: Vec::new(),
+            });
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        // `walkingSpeed` 0 skips the term rather than dividing by it.
+        player.walk_speed = 0.0;
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+    }
+
+    #[test]
+    fn a_player_goes_by_the_name_it_spawned_with() {
+        use pomme_registry::builtin::EntityKind;
+
+        let uuid = uuid::Uuid::from_u128(7);
+        let mut npc = crate::entity::LivingEntity::new(
+            EntityKind::Player,
+            Default::default(),
+            Default::default(),
+            uuid,
+        );
+        // Without one it reads the tab list, and its UUID outside it.
+        let listed = tab_list_with(uuid, "Listed", None);
+        assert_eq!(npc.scoreboard_name(&listed), "Listed");
+        assert_eq!(npc.scoreboard_name(&TabList::new()), uuid.to_string());
+        // The name outlives the entry, and a rename in the list.
+        npc.profile_name = Some("Npc".into());
+        assert_eq!(npc.scoreboard_name(&TabList::new()), "Npc");
+        assert_eq!(npc.scoreboard_name(&listed), "Npc");
+    }
+
+    #[test]
+    fn a_login_or_another_dimension_starts_a_new_level() {
+        let (overworld, nether) = ("minecraft:overworld", "minecraft:the_nether");
+        // A proxy moving the player to another server logs them in again.
+        assert!(super::starts_new_level(true, overworld, overworld));
+        assert!(super::starts_new_level(false, overworld, nether));
+        // A respawn after dying keeps the level and what is in it.
+        assert!(!super::starts_new_level(false, overworld, overworld));
     }
 
     #[test]

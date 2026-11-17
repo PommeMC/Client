@@ -733,6 +733,10 @@ pub struct LivingEntity {
     pub uuid: uuid::Uuid,
     /// `uuid` for a remote player, the key into the tab list and skin cache.
     pub player_uuid: Option<uuid::Uuid>,
+    /// A remote player's name from the tab list as it spawned (vanilla
+    /// `RemotePlayer`'s `GameProfile`), which outlives its tab list entry: a
+    /// server's NPCs leave the list right after they spawn.
+    pub profile_name: Option<String>,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub prev_walk_anim_speed: f32,
@@ -988,6 +992,17 @@ fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVe
 }
 
 impl LivingEntity {
+    /// Vanilla `getScoreboardName`: the name a player spawned with, anyone
+    /// else's UUID string.
+    // TODO: vanilla doesn't spawn a player the tab list lacks; here one goes
+    // by the list's name once it has one.
+    pub fn scoreboard_name(&self, tab_list: &crate::player::tab_list::TabList) -> String {
+        match &self.profile_name {
+            Some(name) => name.clone(),
+            None => glowing::scoreboard_name(tab_list, self.uuid, self.player_uuid),
+        }
+    }
+
     /// Vanilla `LivingEntity.recreateFromPacket`: the head and body both
     /// start at the packet's head yaw, which `look_dir` carries.
     pub fn new(
@@ -1014,6 +1029,7 @@ impl LivingEntity {
             entity_type,
             uuid,
             player_uuid: (entity_type == EntityKind::Player).then_some(uuid),
+            profile_name: None,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,

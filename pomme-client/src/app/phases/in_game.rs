@@ -4803,7 +4803,7 @@ pub fn update_game(
                 let is_sleeping = e.sleeping_pos.is_some();
                 let (radius, strength) = crate::entity::shadow::of_living(e);
 
-                let name = || scoreboard_name(&game.tab_list, e.uuid, e.player_uuid);
+                let name = || e.scoreboard_name(&game.tab_list);
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
                     outline_color: outline(
@@ -5228,7 +5228,7 @@ pub fn update_game(
             if entity.player_uuid == Some(core.user.uuid) {
                 continue;
             }
-            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            let name = entity.scoreboard_name(&game.tab_list);
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {

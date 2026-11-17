@@ -2676,14 +2676,22 @@ fn translate_update_attributes_766() {
     wire::write_varint(&mut old, 1); // one attribute
     wire::write_varint(&mut old, 16); // generic.max_health (766 space)
     old.extend_from_slice(&20.0f64.to_be_bytes()); // base
-    wire::write_varint(&mut old, 1); // one modifier
+    wire::write_varint(&mut old, 2); // two modifiers
     old.extend_from_slice(&[0xAB; 16]); // uuid
     old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
     wire::write_varint(&mut old, 0); // operation
+    // `SPEED_MODIFIER_SPRINTING_UUID`, which 1.21 names.
+    old.extend_from_slice(&0x662A6B8D_DA3E_4C1C_8813_96EA6097278D_u128.to_be_bytes());
+    old.extend_from_slice(&0.3f64.to_be_bytes());
+    wire::write_varint(&mut old, 2);
 
     let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(766, old) else {
         panic!("wrong packet");
     };
+    assert_eq!(
+        p.values[0].modifiers[1].id.to_string(),
+        "minecraft:sprinting"
+    );
     assert_eq!(p.values.len(), 1);
     assert_eq!(
         p.values[0].attribute,
