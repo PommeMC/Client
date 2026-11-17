@@ -5288,9 +5288,10 @@ fn translate_entity_data_777() {
 }
 
 /// Outbound on 26.3: `swing` becomes the payload-less, main-hand-only
-/// `punch`; `player_action` actions after the first shift up by one; and
-/// `accept_teleportation` takes the pose of the `move_player_pos_rot`
-/// following it, which 26.3 no longer sends.
+/// `punch`; `player_action` actions after the first shift up by one;
+/// `sign_update` carries its text side last; and `accept_teleportation`
+/// takes the pose of the `move_player_pos_rot` following it, which 26.3 no
+/// longer sends.
 #[test]
 fn translate_outbound_777() {
     let t = translation_for(777);
@@ -5322,6 +5323,17 @@ fn translate_outbound_777() {
         assert_eq!(
             t.translate_outbound_game_frame(frame(sb("player_action"), &payload)),
             vec![frame(old_sb("player_action"), &expected)]
+        );
+    }
+
+    // The text side moves from before the four lines to after them.
+    let (sign_pos, lines) = ([0, 0, 0, 0, 0, 0, 0, 9], [2, b'h', b'i', 0, 0, 0]);
+    for front in [0, 1] {
+        let native = [&sign_pos[..], &[front], &lines].concat();
+        let wire = [&sign_pos[..], &lines, &[front]].concat();
+        assert_eq!(
+            t.translate_outbound_game_frame(frame(sb("sign_update"), &native)),
+            vec![frame(old_sb("sign_update"), &wire)]
         );
     }
 

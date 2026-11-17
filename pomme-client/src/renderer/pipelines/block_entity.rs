@@ -64,22 +64,6 @@ struct KindDef {
     tex_size: u32,
 }
 
-/// In `SIGN_WOOD_NAMES` order.
-const SIGN_TEXTURES: &[&[ResourceId]] = &[
-    &[resource_id!("minecraft:textures/block/oak_sign.png")],
-    &[resource_id!("minecraft:textures/block/spruce_sign.png")],
-    &[resource_id!("minecraft:textures/block/birch_sign.png")],
-    &[resource_id!("minecraft:textures/block/jungle_sign.png")],
-    &[resource_id!("minecraft:textures/block/acacia_sign.png")],
-    &[resource_id!("minecraft:textures/block/dark_oak_sign.png")],
-    &[resource_id!("minecraft:textures/block/mangrove_sign.png")],
-    &[resource_id!("minecraft:textures/block/cherry_sign.png")],
-    &[resource_id!("minecraft:textures/block/pale_oak_sign.png")],
-    &[resource_id!("minecraft:textures/block/bamboo_sign.png")],
-    &[resource_id!("minecraft:textures/block/crimson_sign.png")],
-    &[resource_id!("minecraft:textures/block/warped_sign.png")],
-];
-
 /// Chest textures mirroring vanilla `Sheets.chooseSprite`: material-major with
 /// [single, double-left, double-right] per material, so
 /// `variant = material * 3 + type` and `variant % 3` is the model index.
@@ -221,8 +205,6 @@ pub fn variant_for_block(
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
-        BlockEntityKind::Sign => crate::world::block_entity::SignBlock::of(name, props)
-            .map_or(0, |sign| sign.wood as u32),
         _ => 0,
     }
 }
@@ -259,14 +241,6 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
             Some("east") => 270.0,
             _ => 0.0,
         },
-        // TODO: wall signs have no `rotation` (they use `facing`) and vanilla
-        // renders them with a postless model offset against the wall; they
-        // currently fall back to the standing model facing south.
-        BlockEntityKind::Sign => props
-            .get("rotation")
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|r| r * 22.5)
-            .unwrap_or(0.0),
         _ => 0.0,
     }
 }
@@ -317,12 +291,6 @@ fn kind_definitions() -> Vec<KindDef> {
             models: vec![block_entity_model::bake_shulker_box_model()],
             tex_variants: SHULKER_TEXTURES,
             tex_size: 64,
-        },
-        KindDef {
-            kind: BlockEntityKind::Sign,
-            models: vec![block_entity_model::bake_sign_model()],
-            tex_variants: SIGN_TEXTURES,
-            tex_size: 32,
         },
     ]
 }

@@ -6539,33 +6539,6 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-/// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
-/// order -Z, +Z, minY, maxY, -X, +X) instead of the entity box-unwrap, for
-/// block models whose texture layout isn't a box-unwrap (e.g. signs). Rects
-/// apply in plain corner order on every slot — unlike the box unwrap, slot 3
-/// (maxY) gets no V reversal, so an asymmetric down face needs a
-/// pre-reversed rect.
-pub(crate) fn generate_cube_vertices_faces(
-    cube: &ModelCube,
-    face_uvs: &[[f32; 4]; 6],
-    tex_w: u32,
-    tex_h: u32,
-    vertices: &mut Vec<EntityVertex>,
-) {
-    let tw = tex_w as f32;
-    let th = tex_h as f32;
-    let positions = cube_face_positions(cube, true);
-    for (slot, (pos, uv)) in positions.iter().zip(face_uvs).enumerate() {
-        push_face(
-            pos,
-            [uv[0] / tw, uv[1] / th, uv[2] / tw, uv[3] / th],
-            false,
-            cube_face_normal(slot, true, cube.mirror),
-            vertices,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
