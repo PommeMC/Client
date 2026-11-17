@@ -871,7 +871,10 @@ impl GameState {
         let mut boxes = self.collidable_entity_boxes();
         if !crate::player::is_spectator(self.player.game_mode) {
             let now = std::time::Instant::now();
-            if let Some(border_boxes) = self.world_border.collision_boxes(&self.player.bounding_box(), now) {
+            if let Some(border_boxes) = self
+                .world_border
+                .collision_boxes(&self.player.bounding_box(), now)
+            {
                 boxes.extend_from_slice(&border_boxes);
             }
         }
@@ -883,7 +886,8 @@ impl GameState {
     /// not its own passengers.
     pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
         let passengers = self.vehicle_passengers.get(&boat_id);
-        let mut boxes: Vec<crate::physics::aabb::Aabb> = self.entity_store
+        let mut boxes: Vec<crate::physics::aabb::Aabb> = self
+            .entity_store
             .living
             .iter()
             .filter(|&(&id, e)| {
@@ -901,7 +905,10 @@ impl GameState {
             .collect();
         if let Some(boat) = self.entity_store.living.get(&boat_id) {
             let now = std::time::Instant::now();
-            if let Some(border_boxes) = self.world_border.collision_boxes(&crate::entity::boat::boat_aabb(boat), now) {
+            if let Some(border_boxes) = self
+                .world_border
+                .collision_boxes(&crate::entity::boat::boat_aabb(boat), now)
+            {
                 boxes.extend_from_slice(&border_boxes);
             }
         }
@@ -2730,7 +2737,10 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    if !game.world_border.is_block_inside(pos, std::time::Instant::now()) {
+    if !game
+        .world_border
+        .is_block_inside(pos, std::time::Instant::now())
+    {
         return None;
     }
     if block_state_data.is_air() {

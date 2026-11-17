@@ -519,8 +519,11 @@ impl Renderer {
 
         let weather_pipeline =
             WeatherPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
-        let world_border_pipeline =
-            pipelines::world_border::WorldBorderPipeline::new(&ctx.device, swapchain_state.targets(), resources);
+        let world_border_pipeline = pipelines::world_border::WorldBorderPipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            resources,
+        );
 
         let particle_pipeline =
             ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
@@ -1920,7 +1923,8 @@ impl Renderer {
         self.weather_pipeline.destroy(device);
         self.weather_pipeline = WeatherPipeline::new(device, targets, resources, &self.lightmap);
         self.world_border_pipeline.destroy(device);
-        self.world_border_pipeline = pipelines::world_border::WorldBorderPipeline::new(device, targets, resources);
+        self.world_border_pipeline =
+            pipelines::world_border::WorldBorderPipeline::new(device, targets, resources);
         self.cloud_pipeline.destroy(device);
         self.cloud_pipeline = CloudPipeline::new(device, targets, resources);
         self.block_overlay_pipeline.destroy(device);
