@@ -27,7 +27,7 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{
     HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
 };
-use crate::player::menu_click::ContainerKind;
+use crate::player::menu_click::{BundleClick, ContainerKind};
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
@@ -1164,6 +1164,14 @@ impl GameState {
     pub fn close_creative_inventory(&mut self) {
         self.creative_inventory_open = false;
         self.creative_state.reset_interaction();
+        self.reset_bundle_hover();
+    }
+
+    /// Forgets the hovered bundle and its selection, as a closing screen does.
+    fn reset_bundle_hover(&mut self) {
+        self.bundle_selection = None;
+        self.bundle_hovered = None;
+        self.bundle_scroll = (0.0, 0.0);
     }
 
     /// Close whichever container menu is open. Clears the carried stack
@@ -1176,9 +1184,7 @@ impl GameState {
         self.cursor_item = pomme_item::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
-        self.bundle_selection = None;
-        self.bundle_hovered = None;
-        self.bundle_scroll = (0.0, 0.0);
+        self.reset_bundle_hover();
         self.recipe_book_ui
             .reset_for_closed_screen(&mut self.recipe_book);
     }
@@ -1193,6 +1199,40 @@ impl GameState {
                         ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
                     )
             )
+    }
+
+    /// The entry selected in the bundle at `slot` of `menu`.
+    fn selected_bundle_item(&self, menu: i32, slot: u16) -> i32 {
+        self.bundle_selection
+            .filter(|(m, s, _)| *m == menu && *s == slot)
+            .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i)
+    }
+
+    /// What a click in `menu` reads of the hovered bundle's selection.
+    fn bundle_click(&self, menu: i32) -> BundleClick {
+        BundleClick {
+            selection: self
+                .bundle_selection
+                .filter(|(m, _, _)| *m == menu)
+                .map(|(_, slot, selected)| (slot, selected)),
+            sound: None,
+        }
+    }
+
+    /// A click's side of [`Self::bundle_click`]: the selection it reset and
+    /// the sound it made.
+    fn finish_bundle_click(
+        &mut self,
+        menu: i32,
+        bundle: BundleClick,
+        audio: &crate::audio::AudioEngine,
+    ) {
+        if bundle.selection.is_none() && self.bundle_selection.is_some_and(|(m, _, _)| m == menu) {
+            self.bundle_selection = None;
+        }
+        if let Some(sound) = bundle.sound {
+            sound.play(audio, self.player.position);
+        }
     }
 
     /// A server update replaced the stack in `slot` of `menu` (every slot when
@@ -2363,21 +2403,90 @@ fn scroll_wheel(accumulated: &mut (f32, f32), (x, y): (f32, f32)) -> i32 {
 }
 
 /// Vanilla `BundleMouseActions.toggleSelectedBundleItem`: the stack's
-/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes.
+/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes,
+/// naming the slot `packet_offset` on from `slot` (see [`bundle_slot_hover`]).
 fn toggle_bundle_selection(
     game: &mut GameState,
     sender: &crate::net::sender::PacketSender,
     menu: i32,
     slot: u16,
+    packet_offset: u16,
     selected: i32,
 ) {
-    let current = game
-        .bundle_selection
-        .filter(|(m, s, _)| *m == menu && *s == slot)
-        .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+    let current = game.selected_bundle_item(menu, slot);
     game.bundle_selection =
         (selected >= 0 && selected != current).then_some((menu, slot, selected));
-    send_bundle_selection(sender, slot, selected);
+    send_bundle_selection(sender, slot + packet_offset, selected);
+}
+
+fn is_bundle_slot(game: &GameState, slot: u16) -> bool {
+    game.menu_slots()
+        .get(usize::from(slot))
+        .and_then(pomme_item::ItemStack::as_present)
+        .is_some_and(crate::ui::bundle::is_bundle)
+}
+
+/// Vanilla `BundleItem.getNumberOfItemsToShow` for the stack in `slot`.
+fn shown_bundle_items(game: &GameState, slot: u16) -> usize {
+    game.menu_slots()
+        .get(usize::from(slot))
+        .and_then(pomme_item::ItemStack::as_present)
+        .and_then(crate::ui::bundle::contents)
+        .map_or(0, |contents| {
+            crate::ui::bundle::shown_count(contents.items.len())
+        })
+}
+
+/// Vanilla `BundleMouseActions` for the slot under the cursor, after the
+/// frame's clicks: leaving a bundle unselects it (`onStopHovering`), the wheel
+/// steps through its contents, and its tooltip stands in for the plain one.
+/// Returns whether it drew that tooltip. `packet_offset` is what the open
+/// screen's own slot numbering adds to `hovered` in the selection packet;
+/// the last argument is the cursor, the screen size and the GUI scale.
+#[allow(clippy::too_many_arguments)]
+fn bundle_slot_hover(
+    elements: &mut Vec<MenuElement>,
+    game: &mut GameState,
+    sender: &crate::net::sender::PacketSender,
+    menu_id: i32,
+    hovered: Option<u16>,
+    packet_offset: u16,
+    scroll: (f32, f32),
+    (cursor, sw, sh, gs): ((f32, f32), f32, f32, f32),
+) -> bool {
+    use crate::ui::bundle::{self, NO_SELECTION};
+    if let Some((menu, slot, _)) = game.bundle_hovered
+        && menu == menu_id
+        && Some(slot) != hovered
+        && is_bundle_slot(game, slot)
+    {
+        toggle_bundle_selection(game, sender, menu_id, slot, packet_offset, NO_SELECTION);
+    }
+    game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
+
+    let Some((_, slot, true)) = game.bundle_hovered else {
+        return false;
+    };
+    let data = game.menu_slots()[usize::from(slot)]
+        .as_present()
+        .cloned()
+        .expect("a bundle slot holds a stack");
+    let shown = shown_bundle_items(game, slot);
+    // `BundleMouseActions.onMouseScrolled`.
+    // TODO: vanilla steps once per wheel event, scaled by
+    // `mouseWheelSensitivity`; the input layer sums a frame's events.
+    if shown > 0 && scroll != (0.0, 0.0) {
+        let current = game.selected_bundle_item(menu_id, slot);
+        let wheel = scroll_wheel(&mut game.bundle_scroll, scroll);
+        let next = bundle::next_selection(wheel, current, shown);
+        if wheel != 0 && next != current {
+            toggle_bundle_selection(game, sender, menu_id, slot, packet_offset, next);
+        }
+    }
+    let selected = game.selected_bundle_item(menu_id, slot);
+    bundle::push_selected_icon(elements, &data, selected);
+    bundle::push_tooltip(elements, &data, selected, cursor, sw, sh, gs);
+    true
 }
 
 fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
@@ -2498,14 +2607,7 @@ pub(crate) fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
-                let mut bundle = menu_click::BundleClick {
-                    selection: game
-                        .bundle_selection
-                        .filter(|(menu, _, _)| *menu == container_id)
-                        .map(|(_, slot, selected)| (slot, selected)),
-                    sound: None,
-                };
-                let had_selection = bundle.selection.is_some();
+                let mut bundle = game.bundle_click(container_id);
                 let changed = menu_click::apply_click(
                     kind,
                     game.menu_slots(),
@@ -2514,12 +2616,7 @@ pub(crate) fn send_container_clicks(
                     crate::player::is_creative(game.player.game_mode),
                     &mut bundle,
                 );
-                if had_selection && bundle.selection.is_none() {
-                    game.bundle_selection = None;
-                }
-                if let Some(sound) = bundle.sound {
-                    sound.play(audio, game.player.position);
-                }
+                game.finish_bundle_click(container_id, bundle, audio);
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
                     game.set_menu_slot(*s as usize, item.clone());
@@ -4444,12 +4541,6 @@ pub fn update_game(
         screen_pointer = pointer;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
-        let is_bundle_slot = |game: &GameState, slot: u16| {
-            game.menu_slots()
-                .get(usize::from(slot))
-                .and_then(pomme_item::ItemStack::as_present)
-                .is_some_and(crate::ui::bundle::is_bundle)
-        };
         // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
         // bundle unselects it before the click goes out.
         for op in &ops {
@@ -4467,65 +4558,25 @@ pub fn update_game(
                     &connection.packet_tx,
                     menu_id,
                     slot,
+                    0,
                     crate::ui::bundle::NO_SELECTION,
                 );
             }
         }
         send_container_clicks(game, connection, &core.audio, ops);
 
-        // Vanilla `extractContents`: after the clicks, leaving a slot that
-        // holds a bundle unselects it (`onStopHovering`).
-        if let Some((menu, slot, _)) = game.bundle_hovered
-            && menu == menu_id
-            && Some(slot) != hovered
-            && is_bundle_slot(game, slot)
-        {
-            toggle_bundle_selection(
-                game,
-                &connection.packet_tx,
-                menu_id,
-                slot,
-                crate::ui::bundle::NO_SELECTION,
-            );
-        }
-        game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
-
-        if let Some((_, slot, true)) = game.bundle_hovered {
-            let data = game.menu_slots()[usize::from(slot)]
-                .as_present()
-                .cloned()
-                .expect("a bundle slot holds a stack");
-            let shown = crate::ui::bundle::contents(&data)
-                .map_or(0, |c| crate::ui::bundle::shown_count(c.items.len()));
-            let current = game
-                .bundle_selection
-                .filter(|(m, s, _)| *m == menu_id && *s == slot)
-                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
-            // `BundleMouseActions.onMouseScrolled`.
-            // TODO: vanilla steps once per wheel event, scaled by
-            // `mouseWheelSensitivity`; the input layer sums a frame's events.
-            if shown > 0 && menu_scroll != (0.0, 0.0) {
-                let wheel = scroll_wheel(&mut game.bundle_scroll, menu_scroll);
-                let next = crate::ui::bundle::next_selection(wheel, current, shown);
-                if wheel != 0 && next != current {
-                    toggle_bundle_selection(game, &connection.packet_tx, menu_id, slot, next);
-                }
-            }
-            let selected = game
-                .bundle_selection
-                .filter(|(m, s, _)| *m == menu_id && *s == slot)
-                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
-            crate::ui::bundle::push_selected_icon(&mut elements, &data, selected);
-            crate::ui::bundle::push_tooltip(
-                &mut elements,
-                &data,
-                selected,
-                core.input.cursor_pos(),
-                sw,
-                sh,
-                gs,
-            );
-        } else if let Some(slot) = hovered
+        let bundle_tooltip = bundle_slot_hover(
+            &mut elements,
+            game,
+            &connection.packet_tx,
+            menu_id,
+            hovered,
+            0,
+            menu_scroll,
+            (core.input.cursor_pos(), sw, sh, gs),
+        );
+        if !bundle_tooltip
+            && let Some(slot) = hovered
             && game.cursor_item.is_empty()
             && let Some(stack) = game
                 .menu_slots()
@@ -4554,8 +4605,6 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    // TODO: vanilla's creative screen inherits `BundleMouseActions` (scroll
-    // selection, the bundle tooltip); only survival containers have them here.
     if game.creative_inventory_open && !dialog_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
@@ -4568,7 +4617,18 @@ pub fn update_game(
                     && core.input.input_just_pressed(key)
             });
         let right_clicked = core.input.right_just_pressed();
-        let scroll_delta = core.input.consume_menu_scroll();
+        let scroll = core.input.consume_menu_scroll_xy();
+        // `AbstractContainerScreen.mouseScrolled`: a hovered bundle with
+        // items to show takes the wheel before the item list does.
+        let bundle_scrolls = game
+            .bundle_hovered
+            .is_some_and(|(_, slot, _)| shown_bundle_items(game, slot) > 0);
+        let (scroll_delta, bundle_scroll) = if bundle_scrolls {
+            (0.0, scroll)
+        } else {
+            (scroll.1, (0.0, 0.0))
+        };
+        let mut bundle = game.bundle_click(0);
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
         // Vanilla's focused search box takes every key, the drop key included.
@@ -4602,7 +4662,9 @@ pub fn update_game(
             core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
             effects,
+            &mut bundle,
         );
+        game.finish_bundle_click(0, bundle, &core.audio);
         if let Some(lines) = effect_tooltip {
             crate::ui::common::push_tooltip_lines(&mut elements, cursor, sw, sh, gs, lines);
         }
@@ -4640,6 +4702,16 @@ pub fn update_game(
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
+        bundle_slot_hover(
+            &mut elements,
+            game,
+            &connection.packet_tx,
+            0,
+            game.creative_state.hovered_slot,
+            game.creative_state.bundle_packet_offset(),
+            bundle_scroll,
+            (cursor, sw, sh, gs),
+        );
         core.input.clear_just_pressed_actions();
     }
 
