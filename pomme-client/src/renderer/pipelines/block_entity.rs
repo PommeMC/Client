@@ -27,6 +27,10 @@ pub struct BlockEntityRenderInfo {
     pub lid_open: f32,
     /// Vanilla `BlockEntityRenderState.lightCoords`.
     pub light: LightLevels,
+    /// A sign's model and block-local matrix (`SignBlock::model_index`,
+    /// `body_transformation`), in place of the variant's model turned by
+    /// `yaw`.
+    pub placement: Option<(u32, glam::Mat4)>,
 }
 
 /// The block entities to draw, the first `camera_len` of them the ones the
@@ -56,6 +60,42 @@ struct KindEntry {
     vertex_buffer: rhi::backend::Buffer,
     textures: Vec<TextureSlot>,
 }
+
+/// The 64x32 textures in `folder` of `textures/entity/signs/`, in
+/// `SIGN_WOOD_NAMES` order.
+macro_rules! sign_textures {
+    (@one $folder:literal, $wood:literal) => {
+        &[resource_id!(concat!(
+            "minecraft:textures/entity/signs/",
+            $folder,
+            $wood,
+            ".png"
+        ))]
+    };
+    ($folder:literal) => {
+        &[
+            sign_textures!(@one $folder, "oak"),
+            sign_textures!(@one $folder, "spruce"),
+            sign_textures!(@one $folder, "birch"),
+            sign_textures!(@one $folder, "jungle"),
+            sign_textures!(@one $folder, "acacia"),
+            sign_textures!(@one $folder, "dark_oak"),
+            sign_textures!(@one $folder, "mangrove"),
+            sign_textures!(@one $folder, "cherry"),
+            sign_textures!(@one $folder, "pale_oak"),
+            sign_textures!(@one $folder, "bamboo"),
+            sign_textures!(@one $folder, "crimson"),
+            sign_textures!(@one $folder, "warped"),
+        ]
+    };
+}
+
+const SIGN_TEXTURES: &[&[ResourceId]] = sign_textures!("");
+const HANGING_SIGN_TEXTURES: &[&[ResourceId]] = sign_textures!("hanging/");
+
+/// A texture only the assets from before 26.2 have. From 26.2 a sign is a
+/// block model, which the mesher draws.
+const LEGACY_SIGN_TEXTURE: ResourceId = resource_id!("minecraft:textures/entity/signs/oak.png");
 
 struct KindDef {
     kind: BlockEntityKind,
@@ -205,6 +245,10 @@ pub fn variant_for_block(
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
+        BlockEntityKind::Sign | BlockEntityKind::HangingSign => {
+            crate::world::block_entity::SignBlock::of(name, props)
+                .map_or(0, |sign| sign.wood as u32)
+        }
         _ => 0,
     }
 }
@@ -254,7 +298,27 @@ fn is_christmas() -> bool {
     now.month() == time::Month::December && (24..=26).contains(&now.day())
 }
 
-fn kind_definitions() -> Vec<KindDef> {
+fn kind_definitions(resources: &dyn ResourceManager) -> Vec<KindDef> {
+    let legacy_signs = matches!(resources.get_resource(&LEGACY_SIGN_TEXTURE), Ok(Some(_)));
+    let mut defs = base_kind_definitions();
+    if legacy_signs {
+        defs.push(KindDef {
+            kind: BlockEntityKind::Sign,
+            models: block_entity_model::bake_sign_models(),
+            tex_variants: SIGN_TEXTURES,
+            tex_size: 64,
+        });
+        defs.push(KindDef {
+            kind: BlockEntityKind::HangingSign,
+            models: block_entity_model::bake_hanging_sign_models(),
+            tex_variants: HANGING_SIGN_TEXTURES,
+            tex_size: 64,
+        });
+    }
+    defs
+}
+
+fn base_kind_definitions() -> Vec<KindDef> {
     let xmas = is_christmas();
     let chest_models = block_entity_model::bake_chest_models();
     // Ender chests have no double form; only the single model applies.
@@ -337,7 +401,7 @@ impl BlockEntityPipeline {
             ModelInput::PushConstant,
         );
 
-        let defs = kind_definitions();
+        let defs = kind_definitions(resources);
 
         let (camera_sets, camera_buffers) = util::create_uniform_sets(
             device,
@@ -435,7 +499,8 @@ impl BlockEntityPipeline {
                 bound_set = slot.set;
             }
 
-            let model = &entry.models[info.variant as usize % entry.models.len()];
+            let model_index = info.placement.map_or(info.variant, |(model, _)| model);
+            let model = &entry.models[model_index as usize % entry.models.len()];
 
             let block_center = (glam::DVec3::new(
                 info.pos.x as f64 + 0.5,
@@ -443,16 +508,22 @@ impl BlockEntityPipeline {
                 info.pos.z as f64 + 0.5,
             ) - anchor)
                 .as_vec3();
-            let model_mat = match model.convention {
+            let model_mat = match (info.placement, model.convention) {
+                (Some((_, placement)), _) => {
+                    let block_min =
+                        glam::DVec3::new(info.pos.x as f64, info.pos.y as f64, info.pos.z as f64)
+                            - anchor;
+                    glam::Mat4::from_translation(block_min.as_vec3()) * placement
+                }
                 // With the 180 yaw offset and the convention's baked-in flip
                 // this reproduces vanilla's block-entity `scale(1,-1,-1)`.
-                ModelConvention::EntityYDown => {
+                (None, ModelConvention::EntityYDown) => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
                 }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.
-                ModelConvention::BlockYUp => {
+                (None, ModelConvention::BlockYUp) => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
                         * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))

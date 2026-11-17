@@ -5169,6 +5169,8 @@ pub fn update_game(
                         variant,
                         lid_open,
                         light,
+                        placement: crate::world::block_entity::SignBlock::of(id, props)
+                            .map(|sign| (sign.model_index(), sign.body_transformation())),
                     },
                 ))
             })
