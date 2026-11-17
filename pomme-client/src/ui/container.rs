@@ -587,8 +587,8 @@ pub fn resolve_gesture(
 
     // Timing-based like vanilla; the server only gathers if it has a cursor item
     // (avoids depending on the round-trip-lagged local carried state).
-    let double = input.left_pressed
-        && matches!(last_click, Some((s, t)) if *s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS);
+    let double =
+        input.left_pressed && double_click(last_click, slot) && kind.can_take_for_pick_all(slot);
 
     if input.shift {
         ops.push(ClickOperation::QuickMove(match click_kind {
@@ -606,26 +606,29 @@ pub fn resolve_gesture(
             slot,
             reversed: false,
         }));
-        *last_click = None;
-    } else {
-        if carrying {
-            // Start a drag; only an eligible slot joins the covered set (vanilla
-            // gates every quick-craft slot on mayPlace). A single-slot or empty
-            // set resolves to a normal click on release.
-            let covered = if menu_click::drag_slot_eligible(kind, slots, cursor_item, slot) {
-                vec![slot]
-            } else {
-                Vec::new()
-            };
-            *drag = Some((click_kind, covered));
+    } else if carrying {
+        // Start a drag; only an eligible slot joins the covered set (vanilla
+        // gates every quick-craft slot on mayPlace). A single-slot or empty
+        // set resolves to a normal click on release.
+        let covered = if menu_click::drag_slot_eligible(kind, slots, cursor_item, slot) {
+            vec![slot]
         } else {
-            ops.push(pickup(&click_kind, Some(slot)));
-        }
-        if input.left_pressed {
-            *last_click = Some((slot, Instant::now()));
-        }
+            Vec::new()
+        };
+        *drag = Some((click_kind, covered));
+    } else {
+        ops.push(pickup(&click_kind, Some(slot)));
     }
     (ops, false)
+}
+
+/// Whether a left click on `slot` follows one on it within the double-click
+/// time. Vanilla `MouseHandler` times every click from the one before, so
+/// this click is kept for the next and a third fast click is a double too.
+pub fn double_click(last_click: &mut Option<(u16, Instant)>, slot: u16) -> bool {
+    let double = matches!(last_click, Some((s, t)) if *s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS);
+    *last_click = Some((slot, Instant::now()));
+    double
 }
 
 fn pickup(kind: &QuickCraftKind, slot: Option<u16>) -> ClickOperation {
@@ -644,11 +647,21 @@ fn quick_craft(kind: &QuickCraftKind, status: QuickCraftStatus) -> ClickOperatio
 
 #[cfg(test)]
 mod tests {
+    use pomme_registry::builtin::ItemKind;
+
     use super::*;
 
-    #[test]
-    fn an_empty_handed_double_click_still_sends_the_press_pickup() {
-        let kind = ContainerKind::Crafter { disabled: 0 };
+    /// The clicks sent for a press on `slot` straight after one, and for its
+    /// release, and the time kept for the next click.
+    fn double_click_ops(
+        kind: ContainerKind,
+        slot: u16,
+        cursor_item: &ItemStack,
+    ) -> (
+        Vec<ClickOperation>,
+        Vec<ClickOperation>,
+        Option<(u16, Instant)>,
+    ) {
         let slots = vec![ItemStack::Empty; kind.slot_count()];
         let panel = Panel {
             scale: 1.0,
@@ -657,13 +670,11 @@ mod tests {
             w: 176.0,
             h: 166.0,
         };
-        let mut drag = None;
-        let mut last_click = Some((4, Instant::now()));
-        let press = ContainerInput {
-            left_pressed: true,
+        let input = |down| ContainerInput {
+            left_pressed: down,
             right_pressed: false,
             middle_pressed: false,
-            left_held: true,
+            left_held: down,
             right_held: false,
             shift: false,
             hotbar_swap: None,
@@ -671,23 +682,66 @@ mod tests {
             throw: false,
             throw_all: false,
         };
-        let (ops, _) = resolve_gesture(
-            &press,
-            Some(4),
-            &panel,
-            (10.0, 10.0),
-            kind,
-            &slots,
-            &ItemStack::Empty,
-            &mut drag,
-            &mut last_click,
-        );
+        let mut drag = None;
+        let mut last_click = Some((slot, Instant::now()));
+        let [press, release] = [true, false].map(|down| {
+            resolve_gesture(
+                &input(down),
+                Some(slot),
+                &panel,
+                (10.0, 10.0),
+                kind,
+                &slots,
+                cursor_item,
+                &mut drag,
+                &mut last_click,
+            )
+            .0
+        });
+        (press, release, last_click)
+    }
+
+    #[test]
+    fn an_empty_handed_double_click_still_sends_the_press_pickup() {
+        let (press, release, _) =
+            double_click_ops(ContainerKind::Crafter { disabled: 0 }, 4, &ItemStack::Empty);
         assert!(matches!(
-            ops.as_slice(),
+            press.as_slice(),
             [
                 ClickOperation::Pickup(PickupClick::Left { slot: Some(4) }),
                 ClickOperation::PickupAll(PickupAllClick { slot: 4, .. }),
             ]
         ));
+        assert!(release.is_empty());
+    }
+
+    #[test]
+    fn a_double_click_on_a_crafting_result_is_a_plain_click() {
+        let planks = ItemStack::new(ItemKind::OakPlanks, 4);
+        for kind in [ContainerKind::Player, ContainerKind::CraftingTable] {
+            let (press, release, _) = double_click_ops(kind, 0, &ItemStack::Empty);
+            assert!(matches!(
+                press.as_slice(),
+                [ClickOperation::Pickup(PickupClick::Left { slot: Some(0) })]
+            ));
+            assert!(release.is_empty());
+
+            // Carrying the last craft, the click goes out on the release.
+            let (press, release, _) = double_click_ops(kind, 0, &planks);
+            assert!(press.is_empty());
+            assert!(matches!(
+                release.as_slice(),
+                [ClickOperation::Pickup(PickupClick::Left { slot: Some(0) })]
+            ));
+
+            let (press, _, _) = double_click_ops(kind, 1, &planks);
+            assert!(matches!(press.as_slice(), [ClickOperation::PickupAll(_)]));
+        }
+    }
+
+    #[test]
+    fn a_double_click_times_the_click_after_it() {
+        let (_, _, last_click) = double_click_ops(ContainerKind::Furnace, 4, &ItemStack::Empty);
+        assert!(matches!(last_click, Some((4, _))));
     }
 }

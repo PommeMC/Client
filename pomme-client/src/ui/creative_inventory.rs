@@ -707,7 +707,8 @@ pub fn build_creative_inventory(
     } else if let Some(hit) = &real_hit
         && let Some(kind) = hit.click
     {
-        let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
+        let double = matches!(kind, ClickKind::Left)
+            && super::container::double_click(&mut state.last_left_click, hit.slot);
         if hit.slot == SLOT_TRASH && shift {
             // Vanilla `slotClicked`: a quick-move on the destroy slot empties
             // every `inventoryMenu` slot and keeps the carried stack.
@@ -723,25 +724,19 @@ pub fn build_creative_inventory(
             if !items.is_empty() {
                 action = CreativeAction::SetSlots(items);
             }
-            state.last_left_click = None;
-        } else {
-            if matches!(kind, ClickKind::Left) {
-                state.last_left_click = Some((hit.slot, Instant::now()));
-            }
-            if let ItemStack::Present(carried) = &state.cursor_item {
-                // Carrying: start a drag on an eligible slot, else swap immediately.
-                if drag_slot_eligible(carried, inventory, hit.slot) {
-                    state.drag = Some(DragState {
-                        button: kind,
-                        slots: vec![hit.slot],
-                    });
-                } else {
-                    action = apply_slot_action(state, inventory, hit.slot, kind);
-                }
+        } else if let ItemStack::Present(carried) = &state.cursor_item {
+            // Carrying: start a drag on an eligible slot, else swap immediately.
+            if drag_slot_eligible(carried, inventory, hit.slot) {
+                state.drag = Some(DragState {
+                    button: kind,
+                    slots: vec![hit.slot],
+                });
             } else {
-                // Empty cursor: pick up / take half immediately.
                 action = apply_slot_action(state, inventory, hit.slot, kind);
             }
+        } else {
+            // Empty cursor: pick up / take half immediately.
+            action = apply_slot_action(state, inventory, hit.slot, kind);
         }
     }
 
@@ -1221,12 +1216,6 @@ fn stack_with_count(item: &ItemStackData, count: i32) -> ItemStack {
     } else {
         ItemStack::Empty
     }
-}
-
-const DOUBLE_CLICK_MS: u128 = 250;
-
-fn is_double_click(state: &CreativeState, slot: u16) -> bool {
-    matches!(state.last_left_click, Some((s, t)) if s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS)
 }
 
 /// Double-click gather: fill the carried stack to its max by pulling matching
