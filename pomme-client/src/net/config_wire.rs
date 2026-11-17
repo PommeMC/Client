@@ -119,17 +119,11 @@ impl Registries {
                 Some((Identifier::new(&entry.id), data))
             })
             .collect();
-        // TODO: vanilla takes any tag as an element (26.3's
-        // `block_transformer` entries are lists); azalea's holder only
-        // compounds, so such a registry is left out whole.
         let Some(entries) = entries else {
-            return Err(RegistryError::Unsupported(format!(
-                "an element of {registry} isn't a compound"
-            )));
+            return Err(RegistryError::not_a_compound(&registry));
         };
         let entries = if self.selected_known_packs {
-            super::known_packs::fill_known_entries(protocol, &registry, entries)
-                .map_err(RegistryError::MissingElement)?
+            super::known_packs::fill_known_entries(protocol, &registry, entries)?
         } else {
             entries
         };
@@ -149,6 +143,15 @@ pub(super) enum RegistryError {
     /// disconnects.
     #[error("{0}")]
     MissingElement(String),
+}
+
+impl RegistryError {
+    // TODO: vanilla takes any tag as an element (26.3's `block_transformer`
+    // entries are lists); azalea's holder only compounds, so such a registry
+    // is left out whole.
+    pub fn not_a_compound(registry: &Identifier) -> Self {
+        Self::Unsupported(format!("an element of {registry} isn't a compound"))
+    }
 }
 
 /// A registry element's network NBT, when it is a compound.
@@ -245,6 +248,36 @@ mod tests {
         let biomes = crate::net::connection::biome_registry(&registries.holder).unwrap();
         let ids: Vec<String> = biomes.map.keys().map(ToString::to_string).collect();
         assert_eq!(ids, ["minecraft:plains", "minecraft:desert"]);
+    }
+
+    /// 26.3 has its own core pack, and its `block_transformer` elements are
+    /// lists, which the holder can't take from the pack either.
+    #[test]
+    fn a_translated_version_claims_and_fills_from_its_own_pack() {
+        let core = KnownPack {
+            namespace: "minecraft".into(),
+            id: "core".into(),
+            version: "26.3".into(),
+        };
+        let mut registries = Registries::default();
+        assert!(registries.select_packs(777, &[]).is_empty());
+        assert_eq!(
+            registries.select_packs(777, std::slice::from_ref(&core)),
+            [core]
+        );
+        registries.append(777, biomes()).unwrap();
+        assert!(crate::net::connection::biome_registry(&registries.holder).is_some());
+
+        let mut transformers = biomes();
+        transformers.registry = "minecraft:block_transformer".into();
+        transformers.entries.truncate(1);
+        transformers.entries[0].id = "minecraft:axe".into();
+        transformers.entries[0].data = None;
+        assert!(matches!(
+            registries.append(777, transformers.clone()),
+            Err(RegistryError::Unsupported(_))
+        ));
+        assert_eq!(registries.append_or_skip(777, transformers), Ok(()));
     }
 
     #[test]
