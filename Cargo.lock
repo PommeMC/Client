@@ -554,6 +554,7 @@ dependencies = [
  "azalea-inventory-macros",
  "azalea-registry",
  "indexmap",
+ "pomme-item",
  "serde",
  "simdnbt",
  "tracing",
@@ -4568,9 +4569,11 @@ dependencies = [
  "pomme-dirs",
  "pomme-gpu-allocator",
  "pomme-install",
+ "pomme-item",
  "pomme-protocol",
  "pomme-registry",
  "pomme-singleplayer",
+ "pomme-text",
  "pyronyx",
  "rand 0.10.3",
  "raw-window-handle",
@@ -4643,6 +4646,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pomme-item"
+version = "0.1.0"
+dependencies = [
+ "pomme-protocol",
+ "pomme-registry",
+ "serde_json",
+]
+
+[[package]]
 name = "pomme-protocol"
 version = "0.1.0"
 dependencies = [
@@ -4671,6 +4683,15 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "pomme-text"
+version = "0.1.0"
+dependencies = [
+ "pomme-registry",
+ "serde_json",
+ "simdnbt",
 ]
 
 [[package]]

@@ -3,11 +3,10 @@ use std::time::{Duration, Instant};
 
 use azalea_inventory::components::{
     self, CustomName, Damage, DataComponentTrait, Dye, DyeColor, DyedColor, Enchantments,
-    EncodableDataComponent, PotionContents, ProvidesTrimMaterial, Trim,
+    PotionContents, ProvidesTrimMaterial, Trim,
 };
-use azalea_inventory::default_components::get_default_component;
-use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::defaults::ItemKindExt;
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::{DataComponentKind, ItemKind, Potion};
 use pomme_registry::{DataRegistry, DataRegistryKey, Holder, Registry};
 
@@ -17,6 +16,8 @@ use super::common::{
 };
 use super::text::strip_formatting;
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+use crate::chat_component::ComponentText;
+use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,
@@ -1292,7 +1293,7 @@ fn direct_trim_material_name(
 }
 
 fn stack_tooltip_lines(stack: &ResolvedSlotStack) -> Vec<TooltipLine> {
-    let mut lines = match serde_json::to_value(&stack.stack) {
+    let mut lines = match crate::net::item_codec::stack_json(&stack.stack) {
         Ok(value) => crate::ui::chat::item_tooltip_lines(&value, None, false),
         Err(_) => vec![TooltipLine::new(
             super::common::item_display_name(&stack.stack),
@@ -1460,359 +1461,9 @@ fn display_result_stacks(
     slot_stacks(result, book)
 }
 
-fn with_component<T>(stack: ItemStackData, component: T) -> ItemStackData
-where
-    T: DataComponentTrait + EncodableDataComponent,
-{
-    match ItemStack::Present(stack).with_component(component) {
-        ItemStack::Present(stack) => stack,
-        ItemStack::Empty => unreachable!("a positive recipe-display stack cannot become empty"),
-    }
-}
-
 fn without_component<T: DataComponentTrait>(mut stack: ItemStackData) -> ItemStackData {
-    // SAFETY: `None` represents an explicit removal, so there is no union value
-    // whose runtime type needs to match the component kind.
-    unsafe {
-        stack
-            .component_patch
-            .unchecked_insert_component(T::KIND, None)
-    };
+    stack.component_patch.remove(T::KIND);
     stack
-}
-
-fn stack_has_component_kind(stack: &ItemStackData, kind: DataComponentKind) -> bool {
-    if let Some((_, value)) = stack
-        .component_patch
-        .iter()
-        .find(|(patched_kind, _)| *patched_kind == kind)
-    {
-        // An explicit removal overrides an item default, while an explicit
-        // value always satisfies OnlyWithComponent.
-        return value.is_some();
-    }
-
-    match kind {
-        DataComponentKind::CustomData => {
-            get_default_component::<components::CustomData>(stack.kind).is_some()
-        }
-        DataComponentKind::MaxStackSize => {
-            get_default_component::<components::MaxStackSize>(stack.kind).is_some()
-        }
-        DataComponentKind::MaxDamage => {
-            get_default_component::<components::MaxDamage>(stack.kind).is_some()
-        }
-        DataComponentKind::Damage => {
-            get_default_component::<components::Damage>(stack.kind).is_some()
-        }
-        DataComponentKind::Unbreakable => {
-            get_default_component::<components::Unbreakable>(stack.kind).is_some()
-        }
-        DataComponentKind::CustomName => {
-            get_default_component::<components::CustomName>(stack.kind).is_some()
-        }
-        DataComponentKind::ItemName => {
-            get_default_component::<components::ItemName>(stack.kind).is_some()
-        }
-        DataComponentKind::ItemModel => {
-            get_default_component::<components::ItemModel>(stack.kind).is_some()
-        }
-        DataComponentKind::Lore => get_default_component::<components::Lore>(stack.kind).is_some(),
-        DataComponentKind::Rarity => {
-            get_default_component::<components::Rarity>(stack.kind).is_some()
-        }
-        DataComponentKind::Enchantments => {
-            get_default_component::<components::Enchantments>(stack.kind).is_some()
-        }
-        DataComponentKind::CanPlaceOn => {
-            get_default_component::<components::CanPlaceOn>(stack.kind).is_some()
-        }
-        DataComponentKind::CanBreak => {
-            get_default_component::<components::CanBreak>(stack.kind).is_some()
-        }
-        DataComponentKind::AttributeModifiers => {
-            get_default_component::<components::AttributeModifiers>(stack.kind).is_some()
-        }
-        DataComponentKind::CustomModelData => {
-            get_default_component::<components::CustomModelData>(stack.kind).is_some()
-        }
-        DataComponentKind::TooltipDisplay => {
-            get_default_component::<components::TooltipDisplay>(stack.kind).is_some()
-        }
-        DataComponentKind::RepairCost => {
-            get_default_component::<components::RepairCost>(stack.kind).is_some()
-        }
-        DataComponentKind::CreativeSlotLock => {
-            get_default_component::<components::CreativeSlotLock>(stack.kind).is_some()
-        }
-        DataComponentKind::EnchantmentGlintOverride => {
-            get_default_component::<components::EnchantmentGlintOverride>(stack.kind).is_some()
-        }
-        DataComponentKind::IntangibleProjectile => {
-            get_default_component::<components::IntangibleProjectile>(stack.kind).is_some()
-        }
-        DataComponentKind::Food => get_default_component::<components::Food>(stack.kind).is_some(),
-        DataComponentKind::Consumable => {
-            get_default_component::<components::Consumable>(stack.kind).is_some()
-        }
-        DataComponentKind::UseRemainder => {
-            get_default_component::<components::UseRemainder>(stack.kind).is_some()
-        }
-        DataComponentKind::UseCooldown => {
-            get_default_component::<components::UseCooldown>(stack.kind).is_some()
-        }
-        DataComponentKind::DamageResistant => {
-            get_default_component::<components::DamageResistant>(stack.kind).is_some()
-        }
-        DataComponentKind::Tool => get_default_component::<components::Tool>(stack.kind).is_some(),
-        DataComponentKind::Weapon => {
-            get_default_component::<components::Weapon>(stack.kind).is_some()
-        }
-        DataComponentKind::Enchantable => {
-            get_default_component::<components::Enchantable>(stack.kind).is_some()
-        }
-        DataComponentKind::Equippable => {
-            get_default_component::<components::Equippable>(stack.kind).is_some()
-        }
-        DataComponentKind::Repairable => {
-            get_default_component::<components::Repairable>(stack.kind).is_some()
-        }
-        DataComponentKind::Glider => {
-            get_default_component::<components::Glider>(stack.kind).is_some()
-        }
-        DataComponentKind::TooltipStyle => {
-            get_default_component::<components::TooltipStyle>(stack.kind).is_some()
-        }
-        DataComponentKind::DeathProtection => {
-            get_default_component::<components::DeathProtection>(stack.kind).is_some()
-        }
-        DataComponentKind::BlocksAttacks => {
-            get_default_component::<components::BlocksAttacks>(stack.kind).is_some()
-        }
-        DataComponentKind::StoredEnchantments => {
-            get_default_component::<components::StoredEnchantments>(stack.kind).is_some()
-        }
-        DataComponentKind::DyedColor => {
-            get_default_component::<components::DyedColor>(stack.kind).is_some()
-        }
-        DataComponentKind::MapColor => {
-            get_default_component::<components::MapColor>(stack.kind).is_some()
-        }
-        DataComponentKind::MapId => {
-            get_default_component::<components::MapId>(stack.kind).is_some()
-        }
-        DataComponentKind::MapDecorations => {
-            get_default_component::<components::MapDecorations>(stack.kind).is_some()
-        }
-        DataComponentKind::MapPostProcessing => {
-            get_default_component::<components::MapPostProcessing>(stack.kind).is_some()
-        }
-        DataComponentKind::ChargedProjectiles => {
-            get_default_component::<components::ChargedProjectiles>(stack.kind).is_some()
-        }
-        DataComponentKind::BundleContents => {
-            get_default_component::<components::BundleContents>(stack.kind).is_some()
-        }
-        DataComponentKind::PotionContents => {
-            get_default_component::<components::PotionContents>(stack.kind).is_some()
-        }
-        DataComponentKind::PotionDurationScale => {
-            get_default_component::<components::PotionDurationScale>(stack.kind).is_some()
-        }
-        DataComponentKind::SuspiciousStewEffects => {
-            get_default_component::<components::SuspiciousStewEffects>(stack.kind).is_some()
-        }
-        DataComponentKind::WritableBookContent => {
-            get_default_component::<components::WritableBookContent>(stack.kind).is_some()
-        }
-        DataComponentKind::WrittenBookContent => {
-            get_default_component::<components::WrittenBookContent>(stack.kind).is_some()
-        }
-        DataComponentKind::Trim => get_default_component::<components::Trim>(stack.kind).is_some(),
-        DataComponentKind::DebugStickState => {
-            get_default_component::<components::DebugStickState>(stack.kind).is_some()
-        }
-        DataComponentKind::EntityData => {
-            get_default_component::<components::EntityData>(stack.kind).is_some()
-        }
-        DataComponentKind::BucketEntityData => {
-            get_default_component::<components::BucketEntityData>(stack.kind).is_some()
-        }
-        DataComponentKind::BlockEntityData => {
-            get_default_component::<components::BlockEntityData>(stack.kind).is_some()
-        }
-        DataComponentKind::Instrument => {
-            get_default_component::<components::Instrument>(stack.kind).is_some()
-        }
-        DataComponentKind::ProvidesTrimMaterial => {
-            get_default_component::<components::ProvidesTrimMaterial>(stack.kind).is_some()
-        }
-        DataComponentKind::OminousBottleAmplifier => {
-            get_default_component::<components::OminousBottleAmplifier>(stack.kind).is_some()
-        }
-        DataComponentKind::JukeboxPlayable => {
-            get_default_component::<components::JukeboxPlayable>(stack.kind).is_some()
-        }
-        DataComponentKind::ProvidesBannerPatterns => {
-            get_default_component::<components::ProvidesBannerPatterns>(stack.kind).is_some()
-        }
-        DataComponentKind::Recipes => {
-            get_default_component::<components::Recipes>(stack.kind).is_some()
-        }
-        DataComponentKind::LodestoneTracker => {
-            get_default_component::<components::LodestoneTracker>(stack.kind).is_some()
-        }
-        DataComponentKind::FireworkExplosion => {
-            get_default_component::<components::FireworkExplosion>(stack.kind).is_some()
-        }
-        DataComponentKind::Fireworks => {
-            get_default_component::<components::Fireworks>(stack.kind).is_some()
-        }
-        DataComponentKind::Profile => {
-            get_default_component::<components::Profile>(stack.kind).is_some()
-        }
-        DataComponentKind::NoteBlockSound => {
-            get_default_component::<components::NoteBlockSound>(stack.kind).is_some()
-        }
-        DataComponentKind::BannerPatterns => {
-            get_default_component::<components::BannerPatterns>(stack.kind).is_some()
-        }
-        DataComponentKind::BaseColor => {
-            get_default_component::<components::BaseColor>(stack.kind).is_some()
-        }
-        DataComponentKind::PotDecorations => {
-            get_default_component::<components::PotDecorations>(stack.kind).is_some()
-        }
-        DataComponentKind::Container => {
-            get_default_component::<components::Container>(stack.kind).is_some()
-        }
-        DataComponentKind::BlockState => {
-            get_default_component::<components::BlockState>(stack.kind).is_some()
-        }
-        DataComponentKind::Bees => get_default_component::<components::Bees>(stack.kind).is_some(),
-        DataComponentKind::Lock => get_default_component::<components::Lock>(stack.kind).is_some(),
-        DataComponentKind::ContainerLoot => {
-            get_default_component::<components::ContainerLoot>(stack.kind).is_some()
-        }
-        DataComponentKind::BreakSound => {
-            get_default_component::<components::BreakSound>(stack.kind).is_some()
-        }
-        DataComponentKind::VillagerVariant => {
-            get_default_component::<components::VillagerVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::WolfVariant => {
-            get_default_component::<components::WolfVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::WolfSoundVariant => {
-            get_default_component::<components::WolfSoundVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::WolfCollar => {
-            get_default_component::<components::WolfCollar>(stack.kind).is_some()
-        }
-        DataComponentKind::FoxVariant => {
-            get_default_component::<components::FoxVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::SalmonSize => {
-            get_default_component::<components::SalmonSize>(stack.kind).is_some()
-        }
-        DataComponentKind::ParrotVariant => {
-            get_default_component::<components::ParrotVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::TropicalFishPattern => {
-            get_default_component::<components::TropicalFishPattern>(stack.kind).is_some()
-        }
-        DataComponentKind::TropicalFishBaseColor => {
-            get_default_component::<components::TropicalFishBaseColor>(stack.kind).is_some()
-        }
-        DataComponentKind::TropicalFishPatternColor => {
-            get_default_component::<components::TropicalFishPatternColor>(stack.kind).is_some()
-        }
-        DataComponentKind::MooshroomVariant => {
-            get_default_component::<components::MooshroomVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::RabbitVariant => {
-            get_default_component::<components::RabbitVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::PigVariant => {
-            get_default_component::<components::PigVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::CowVariant => {
-            get_default_component::<components::CowVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::ChickenVariant => {
-            get_default_component::<components::ChickenVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::FrogVariant => {
-            get_default_component::<components::FrogVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::HorseVariant => {
-            get_default_component::<components::HorseVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::PaintingVariant => {
-            get_default_component::<components::PaintingVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::LlamaVariant => {
-            get_default_component::<components::LlamaVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::AxolotlVariant => {
-            get_default_component::<components::AxolotlVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::CatVariant => {
-            get_default_component::<components::CatVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::CatCollar => {
-            get_default_component::<components::CatCollar>(stack.kind).is_some()
-        }
-        DataComponentKind::SheepColor => {
-            get_default_component::<components::SheepColor>(stack.kind).is_some()
-        }
-        DataComponentKind::ShulkerColor => {
-            get_default_component::<components::ShulkerColor>(stack.kind).is_some()
-        }
-        DataComponentKind::UseEffects => {
-            get_default_component::<components::UseEffects>(stack.kind).is_some()
-        }
-        DataComponentKind::MinimumAttackCharge => {
-            get_default_component::<components::MinimumAttackCharge>(stack.kind).is_some()
-        }
-        DataComponentKind::DamageType => {
-            get_default_component::<components::DamageType>(stack.kind).is_some()
-        }
-        DataComponentKind::PiercingWeapon => {
-            get_default_component::<components::PiercingWeapon>(stack.kind).is_some()
-        }
-        DataComponentKind::KineticWeapon => {
-            get_default_component::<components::KineticWeapon>(stack.kind).is_some()
-        }
-        DataComponentKind::SwingAnimation => {
-            get_default_component::<components::SwingAnimation>(stack.kind).is_some()
-        }
-        DataComponentKind::ZombieNautilusVariant => {
-            get_default_component::<components::ZombieNautilusVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::AttackRange => {
-            get_default_component::<components::AttackRange>(stack.kind).is_some()
-        }
-        DataComponentKind::AdditionalTradeCost => {
-            get_default_component::<components::AdditionalTradeCost>(stack.kind).is_some()
-        }
-        DataComponentKind::Dye => get_default_component::<components::Dye>(stack.kind).is_some(),
-        DataComponentKind::PigSoundVariant => {
-            get_default_component::<components::PigSoundVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::CowSoundVariant => {
-            get_default_component::<components::CowSoundVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::ChickenSoundVariant => {
-            get_default_component::<components::ChickenSoundVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::CatSoundVariant => {
-            get_default_component::<components::CatSoundVariant>(stack.kind).is_some()
-        }
-        DataComponentKind::SulfurCubeContent => {
-            get_default_component::<components::SulfurCubeContent>(stack.kind).is_some()
-        }
-    }
 }
 
 fn dye_texture_rgb(color: DyeColor) -> i32 {
@@ -1875,12 +1526,9 @@ fn apply_dye(mut target: ResolvedSlotStack, dye: DyeColor) -> ResolvedSlotStack 
     }
 
     target.stack.count = 1;
-    target.stack = with_component(
-        target.stack,
-        DyedColor {
-            rgb: (red << 16) | (green << 8) | blue,
-        },
-    );
+    target.stack = target.stack.with_component(DyedColor {
+        rgb: (red << 16) | (green << 8) | blue,
+    });
     target
 }
 
@@ -1908,7 +1556,7 @@ fn apply_trim(
             return None;
         }
         base.stack.count = 1;
-        base.stack = with_component(base.stack, trim);
+        base.stack = base.stack.with_component(trim);
         base.direct_trim = None;
         return Some(base);
     }
@@ -2009,13 +1657,10 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
                         break 'potions;
                     }
                     let mut stack = stack.clone();
-                    stack.stack = with_component(
-                        stack.stack,
-                        PotionContents {
-                            potion: Some(potion),
-                            ..PotionContents::default()
-                        },
-                    );
+                    stack.stack = stack.stack.with_component(PotionContents {
+                        potion: Some(potion),
+                        ..PotionContents::default()
+                    });
                     out.push(stack);
                 }
             }
@@ -2030,7 +1675,7 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
             };
             slot_stacks(contents, book)
                 .into_iter()
-                .filter(|stack| stack_has_component_kind(&stack.stack, kind))
+                .filter(|stack| stack.stack.has_component(kind))
                 .collect()
         }
         SlotDisplay::Dyed { dye, target } => {
@@ -2998,9 +2643,10 @@ mod tests {
 
     #[test]
     fn player_craftability_excludes_armor_offhand_and_damaged_stacks() {
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{Damage, DataComponentUnion};
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::Damage;
+        use pomme_registry::builtin::ItemKind;
+
+        use crate::net::item_codec::set_fork_component;
 
         let diamond = ItemKind::Diamond.to_u32();
         let mut slots = vec![ItemStack::Empty; 46];
@@ -3008,13 +2654,8 @@ mod tests {
         slots[45] = ItemStack::Present(ItemStackData::new(ItemKind::Diamond, 3));
         assert!(!available_items(&slots, RecipeBookScreenSpec::player(0)).contains_key(&diamond));
 
-        let mut patch = DataComponentPatch::default();
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::Damage,
-                Some(DataComponentUnion::from(Damage { amount: 1 })),
-            );
-        }
+        let mut patch = pomme_item::ComponentPatch::default();
+        set_fork_component(&mut patch, Damage { amount: 1 });
         slots[9] = ItemStack::Present(ItemStackData {
             kind: ItemKind::Diamond,
             count: 4,
@@ -3307,25 +2948,24 @@ mod tests {
     #[test]
     fn search_matches_vanilla_plain_and_identifier_modes_with_components() {
         use azalea_chat::FormattedText;
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{CustomName, DataComponentUnion, Lore};
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::{CustomName, Lore};
+        use pomme_registry::builtin::ItemKind;
 
-        let mut patch = DataComponentPatch::default();
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::CustomName,
-                Some(DataComponentUnion::from(CustomName {
-                    name: FormattedText::from("Fancy Gem"),
-                })),
-            );
-            patch.unchecked_insert_component(
-                DataComponentKind::Lore,
-                Some(DataComponentUnion::from(Lore {
-                    lines: vec![FormattedText::from("Secret Recipe")],
-                })),
-            );
-        }
+        use crate::net::item_codec::set_fork_component;
+
+        let mut patch = pomme_item::ComponentPatch::default();
+        set_fork_component(
+            &mut patch,
+            CustomName {
+                name: FormattedText::from("Fancy Gem"),
+            },
+        );
+        set_fork_component(
+            &mut patch,
+            Lore {
+                lines: vec![FormattedText::from("Secret Recipe")],
+            },
+        );
         let entry = RecipeBookEntry {
             id: 9,
             display: RecipeDisplay::Shapeless {
@@ -3683,13 +3323,12 @@ mod tests {
     #[test]
     fn direct_trim_material_is_preserved_in_resolved_stack_and_tooltip() {
         use azalea_chat::FormattedText;
-        use azalea_inventory::DataComponentPatch;
-        use azalea_inventory::components::{
-            AssetInfo, DataComponentUnion, DirectTrimMaterial, MaterialAssetGroup,
-        };
-        use pomme_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_inventory::components::{AssetInfo, DirectTrimMaterial, MaterialAssetGroup};
+        use pomme_registry::builtin::ItemKind;
 
-        let mut patch = DataComponentPatch::default();
+        use crate::net::item_codec::set_fork_component;
+
+        let mut patch = pomme_item::ComponentPatch::default();
         let direct_material = DirectTrimMaterial {
             assets: MaterialAssetGroup {
                 assert_name: AssetInfo {
@@ -3699,14 +3338,12 @@ mod tests {
             },
             description: FormattedText::from("Test Material"),
         };
-        unsafe {
-            patch.unchecked_insert_component(
-                DataComponentKind::ProvidesTrimMaterial,
-                Some(DataComponentUnion::from(ProvidesTrimMaterial {
-                    value: Holder::Direct(direct_material),
-                })),
-            );
-        }
+        set_fork_component(
+            &mut patch,
+            ProvidesTrimMaterial {
+                value: Holder::Direct(direct_material),
+            },
+        );
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::SmithingTrim {

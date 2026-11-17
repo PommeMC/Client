@@ -1,4 +1,5 @@
-# Shift-clicking a chestplate from the hotbar equips it (menu slot 6).
+# Shift-clicking a chestplate from the hotbar equips it (menu slot 6), and a
+# shield goes to the offhand (menu slot 45).
 
 [[step]]
 wait_ms = 2000
@@ -31,3 +32,15 @@ wait_ms = 300
 
 [[step]]
 screenshot = "tooltip"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+click = { slot = 36, op = "quick_move" }
+
+[[step]]
+expect = { slot = 45, item = "shield" }

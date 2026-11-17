@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::{AttributeModifiers, MaxDamage, Rarity};
-use azalea_inventory::default_components::get_default_component;
 use pomme_registry::builtin::ItemKind;
 use simdnbt::owned::{NbtCompound, NbtTag};
 
@@ -19,6 +18,7 @@ use crate::net::commands::{
     CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
     UnattendedCommandCheck, UsageLine,
 };
+use crate::net::item_codec::{Components, default_component};
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
@@ -2609,14 +2609,14 @@ pub(crate) fn item_tooltip_lines(
 /// A held stack's tooltip, vanilla `ItemStack.getTooltipLines`: what a
 /// container slot and the creative inventory show.
 pub(crate) fn stack_tooltip_lines(
-    data: &azalea_inventory::ItemStackData,
+    data: &pomme_item::ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
     advanced: bool,
 ) -> Vec<TooltipLine> {
     item_tooltip_lines_with_bindings(
         &stack_json(data, registries),
         None,
-        Some(super::creative_inventory::total_component_count(data)),
+        Some(data.component_kinds().len()),
         advanced,
         &KeyBindings::default(),
     )
@@ -2628,16 +2628,16 @@ pub(crate) fn stack_tooltip_lines(
 // TODO: pomme's item grammar has no JSON output yet, so the rest still goes
 // through azalea's serde shape.
 fn stack_json(
-    data: &azalea_inventory::ItemStackData,
+    data: &pomme_item::ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> serde_json::Value {
-    use azalea_inventory::components::{Enchantments, StoredEnchantments};
+    use azalea_inventory::components::{DataComponentTrait, Enchantments, StoredEnchantments};
     use pomme_registry::DataRegistry;
 
-    let stack = azalea_inventory::ItemStack::Present(data.clone())
-        .with_component::<Enchantments>(None)
-        .with_component::<StoredEnchantments>(None);
-    let mut value = serde_json::to_value(&stack).unwrap_or_default();
+    let mut stack = data.clone();
+    stack.component_patch.remove(Enchantments::KIND);
+    stack.component_patch.remove(StoredEnchantments::KIND);
+    let mut value = crate::net::item_codec::stack_json(&stack).unwrap_or_default();
     let names = |levels: &std::collections::HashMap<pomme_registry::data::Enchantment, i32>| {
         levels
             .iter()
@@ -2711,7 +2711,7 @@ fn item_tooltip_lines_with_bindings(
     let rarity = component_value(components, "rarity")
         .and_then(serde_json::Value::as_str)
         .and_then(item_rarity_from_name)
-        .or_else(|| kind.and_then(get_default_component::<Rarity>))
+        .or_else(|| kind.and_then(default_component::<Rarity>))
         .unwrap_or(Rarity::Common);
     let rarity = if enchanted {
         match rarity {
@@ -2836,7 +2836,7 @@ fn item_tooltip_lines_with_bindings(
             Some(modifiers) => modifiers,
             None => {
                 defaults = kind
-                    .and_then(get_default_component::<AttributeModifiers>)
+                    .and_then(default_component::<AttributeModifiers>)
                     .and_then(|modifiers| serde_json::to_value(modifiers).ok())
                     .unwrap_or_default();
                 &defaults
@@ -2866,7 +2866,7 @@ fn item_tooltip_lines_with_bindings(
             .and_then(serde_json::Value::as_i64)
             .map(|value| value as i32)
             .or_else(|| {
-                kind.and_then(get_default_component::<MaxDamage>)
+                kind.and_then(default_component::<MaxDamage>)
                     .map(|value| value.amount)
             })
             .unwrap_or(0);

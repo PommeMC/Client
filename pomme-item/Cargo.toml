@@ -1,0 +1,11 @@
+[package]
+name = "pomme-item"
+description = "Item stacks as the client holds them: an item, a count and its component patch."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+pomme-protocol = { path = "../pomme-protocol" }
+pomme-registry = { path = "../pomme-registry" }
+serde_json = { workspace = true }

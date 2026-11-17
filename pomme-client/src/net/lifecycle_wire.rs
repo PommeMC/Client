@@ -16,6 +16,7 @@ use super::chat_security::ProfileKeyServices;
 use super::handler::send_ordered;
 use super::sender::PacketSender;
 use super::{DimensionInfo, NetworkEvent};
+use crate::chat_component::ComponentText;
 use crate::world::block::model::CardinalLightType;
 
 /// Decodes a lifecycle packet other than `login`, which the game loop reads

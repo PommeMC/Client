@@ -1,11 +1,13 @@
 use azalea_inventory::components::{
     CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
 };
-use azalea_inventory::{ItemStack, ItemStackData};
+use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
+use crate::chat_component::{Component, ComponentText};
+use crate::net::item_codec::Components;
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -32,12 +34,12 @@ const BTN_BORDER: f32 = 3.0;
 pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32;
 
 /// The hover-name component: custom name, else item-name component.
-fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedText> {
-    if let Some(name) = data.get_component::<CustomName>() {
-        return Some(name.name.clone());
-    }
-    data.get_component::<ItemName>()
-        .map(|name| name.name.clone())
+fn item_hover_component(data: &ItemStackData) -> Option<Component> {
+    let name = match data.get_component::<CustomName>() {
+        Some(custom) => custom.name.clone(),
+        None => data.get_component::<ItemName>()?.name.clone(),
+    };
+    Some(crate::net::item_codec::text_component(&name))
 }
 
 /// Vanilla `Window.getGuiScaledWidth` and `getGuiScaledHeight`: `px` in GUI
@@ -89,7 +91,7 @@ pub fn gui_from_bottom(screen_h: f32, n: f32, gs: f32) -> f32 {
 
 pub fn item_display_name(data: &ItemStackData) -> String {
     item_hover_component(data)
-        .map(|name| name.to_string())
+        .map(|name| name.plain_text())
         .unwrap_or_else(|| crate::lang::item_display_name(data.kind))
 }
 
@@ -119,7 +121,7 @@ pub fn item_display_spans(
     base_color: [f32; 4],
 ) -> Vec<crate::ui::text::TextSpan> {
     item_hover_component(data)
-        .map(|name| crate::ui::text::format_text_spans(&name, base_color))
+        .map(|name| crate::ui::text::format_component_spans(&name, base_color))
         .unwrap_or_else(|| {
             vec![crate::ui::text::TextSpan::new(
                 crate::lang::item_display_name(data.kind),
@@ -1250,14 +1252,16 @@ pub struct SliderResult {
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
-    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_inventory::components::{Damage, MaxDamage, Unbreakable};
+    use pomme_item::components::BundleContents;
+    use pomme_item::{ItemStack, ItemStackData};
     use pomme_registry::builtin::ItemKind;
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
+    use crate::net::item_codec::Components;
     use crate::player::item_cooldowns::ItemCooldowns;
 
     #[test]
@@ -1469,7 +1473,7 @@ mod tests {
     }
 
     fn bundle(items: Vec<ItemStack>) -> ItemStackData {
-        present(ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items }))
+        present(ItemStack::new(ItemKind::Bundle, 1).with(&BundleContents { items }))
     }
 
     #[test]

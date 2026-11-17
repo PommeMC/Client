@@ -119,6 +119,7 @@ pub fn run(args: LaunchArgs, platform: Platform) {
 
     update::clean_up();
     let check_for_update = update::enabled(&args);
+    std::thread::spawn(pomme_item::defaults::prewarm);
 
     // Bare launches take the newest joinable version, skipping any staged one.
     let default_version = VERSIONS

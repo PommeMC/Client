@@ -1,13 +1,9 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::sync::Arc;
-
-use azalea_chat::FormattedText;
-use azalea_chat::style::Style;
 
 use super::common;
 use crate::app::input::KeyBindings;
-use crate::chat_component::{Component, ResolvedStyle};
+use crate::chat_component::{Component, ComponentText, ResolvedStyle};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InlineObject {
@@ -133,8 +129,8 @@ pub struct TextSpan {
     pub font: Option<String>,
     /// Object glyph drawn for this span's U+FFFC.
     pub inline_object: Option<InlineObject>,
-    /// Resolved component style (click, hover, insertion) of native chat
-    /// text; `None` for azalea-decoded text.
+    /// Resolved component style (click, hover, insertion) of a component's
+    /// text; `None` for a plain string's.
     pub component_style: Option<Arc<ResolvedStyle>>,
 }
 
@@ -162,6 +158,33 @@ impl TextSpan {
             text,
             ..self.clone()
         }
+    }
+
+    /// Whether `other` is formatted as this span is, whatever their text.
+    pub fn same_style(&self, other: &Self) -> bool {
+        let Self {
+            text: _,
+            color,
+            bold,
+            italic,
+            strikethrough,
+            underline,
+            obfuscated,
+            shadow_color,
+            font,
+            inline_object,
+            component_style,
+        } = self;
+        *color == other.color
+            && *bold == other.bold
+            && *italic == other.italic
+            && *strikethrough == other.strikethrough
+            && *underline == other.underline
+            && *obfuscated == other.obfuscated
+            && *shadow_color == other.shadow_color
+            && *font == other.font
+            && *inline_object == other.inline_object
+            && *component_style == other.component_style
     }
 }
 
@@ -248,65 +271,8 @@ pub fn format_component_spans_with_parent_and_bindings(
 
 /// A text component sent as JSON (a server's MOTD, a login kick); empty when
 /// it isn't one.
-pub fn text_from_json(json: &serde_json::Value) -> FormattedText {
-    serde::Deserialize::deserialize(json).unwrap_or_default()
-}
-
-/// Flatten an azalea `FormattedText` component into styled spans for rendering.
-///
-/// `base_color` applies wherever the component carries no explicit color,
-/// mirroring vanilla `drawString`'s color argument.
-pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<TextSpan> {
-    let spans: RefCell<Vec<TextSpan>> = RefCell::new(Vec::new());
-    let current_style: RefCell<Option<Style>> = RefCell::new(None);
-
-    text.to_custom_format(
-        |_running, new| {
-            *current_style.borrow_mut() = Some(new.clone());
-            (String::new(), String::new())
-        },
-        |t| {
-            if !t.is_empty() {
-                let style = current_style.borrow();
-                let s = style.as_ref();
-                let color = s
-                    .map(|s| style_to_rgba(s, base_color))
-                    .unwrap_or(base_color);
-                let bold = s.and_then(|s| s.bold).unwrap_or(false);
-                let italic = s.and_then(|s| s.italic).unwrap_or(false);
-                let strikethrough = s.and_then(|s| s.strikethrough).unwrap_or(false);
-                let underline = s.and_then(|s| s.underlined).unwrap_or(false);
-                let obfuscated = s.and_then(|s| s.obfuscated).unwrap_or(false);
-
-                spans.borrow_mut().push(TextSpan {
-                    text: t.to_string(),
-                    color,
-                    bold,
-                    italic,
-                    strikethrough,
-                    underline,
-                    obfuscated,
-                    shadow_color: s.and_then(|s| s.shadow_color).map(argb32),
-                    font: s.and_then(|s| s.font.as_deref()).map(font_id),
-                    inline_object: None,
-                    component_style: None,
-                });
-            }
-            String::new()
-        },
-        |_| String::new(),
-        &Style::default(),
-    );
-
-    let result = spans.into_inner();
-    if result.is_empty() {
-        let plain = format!("{text}");
-        if !plain.is_empty() {
-            return vec![TextSpan::new(plain, base_color)];
-        }
-    }
-
-    result
+pub fn component_from_json(json: &serde_json::Value) -> Component {
+    Component::from_value(json).unwrap_or_else(|_| Component::text(""))
 }
 
 fn parse_inline_object(value: &serde_json::Value) -> Option<InlineObject> {
@@ -420,15 +386,6 @@ pub(crate) fn argb32(value: u32) -> [f32; 4] {
     ]
 }
 
-fn style_to_rgba(style: &Style, base_color: [f32; 4]) -> [f32; 4] {
-    if let Some(color) = &style.color {
-        let v = color.value;
-        rgb24(v)
-    } else {
-        base_color
-    }
-}
-
 /// Vanilla `ChatFormatting.PREFIX_CODE`, the section sign that starts a
 /// legacy formatting code.
 pub(crate) const PREFIX_CODE: char = '\u{00a7}';
@@ -460,8 +417,6 @@ pub(crate) fn legacy_rgb(code: char) -> Option<u32> {
     })
 }
 
-/// The spans as vanilla's `Font` draws them: legacy codes are decomposed in
-/// every string it renders, not only chat. Borrows when there are none.
 /// Vanilla `ChatFormatting.stripFormatting`: drops `§` codes.
 pub(crate) fn strip_formatting(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -480,6 +435,8 @@ pub(crate) fn strip_formatting(text: &str) -> String {
     out
 }
 
+/// The spans as vanilla's `Font` draws them: legacy codes are decomposed in
+/// every string it renders, not only chat. Borrows when there are none.
 pub(crate) fn font_spans(spans: &[TextSpan]) -> Cow<'_, [TextSpan]> {
     if spans.iter().any(|span| span.text.contains(PREFIX_CODE)) {
         Cow::Owned(legacy_format_spans(spans, true))
@@ -550,7 +507,6 @@ pub(crate) fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> V
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
@@ -660,18 +616,27 @@ two"
     }
 
     #[test]
-    fn azalea_spans_keep_obfuscated_shadow_and_font() {
-        let text = FormattedText::deserialize(&serde_json::json!({
+    fn json_spans_keep_obfuscated_shadow_and_font() {
+        let component = component_from_json(&serde_json::json!({
             "text": "abc",
             "obfuscated": true,
             "shadow_color": 0x80ff_0000_u32,
             "font": "alt"
-        }))
-        .unwrap();
-        let span = &format_text_spans(&text, [1.0; 4])[0];
+        }));
+        let span = &format_component_spans(&component, [1.0; 4])[0];
         assert!(span.obfuscated);
         assert_eq!(span.shadow_color, Some([1.0, 0.0, 0.0, 128.0 / 255.0]));
         assert_eq!(span.font.as_deref(), Some("minecraft:alt"));
+    }
+
+    #[test]
+    fn json_that_isnt_a_component_is_empty() {
+        let component = component_from_json(&serde_json::json!({"no": "content"}));
+        assert!(format_component_spans(&component, [1.0; 4]).is_empty());
+        assert_eq!(
+            component_from_json(&serde_json::json!("hi")).plain_text(),
+            "hi"
+        );
     }
 
     #[test]

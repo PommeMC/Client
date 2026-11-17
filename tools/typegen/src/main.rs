@@ -11,7 +11,7 @@
 //! - `data/generated.rs`: the keys of the registries a server sends, from the
 //!   folders of `extracted/data/minecraft` (and `worldgen/biome`)
 //! - `tags/{blocks,items,fluids,entities}.rs`: the data pack's tags, each
-//!   flattened and in protocol-id order
+//!   flattened and in protocol-id order, and a lookup of them by path
 //!
 //! Run `cargo fmt -p pomme-registry` afterwards (`just typegen` does). It
 //! hard-fails on anything it can't resolve rather than emit wrong data.
@@ -94,7 +94,7 @@ fn generate(reference: &Path, version: &str, out: &Path) -> Result<(), Error> {
         let kind = enum_name(registry);
         let mut code =
             format!("{header}\nuse crate::builtin::{kind};\nuse crate::tags::RegistryTag;\n");
-        for (name, ids) in tags {
+        for (name, ids) in &tags {
             let listed: Vec<String> = ids
                 .iter()
                 .map(|&id| format!("{kind}::{}", variant(&entries[id])))
@@ -102,10 +102,19 @@ fn generate(reference: &Path, version: &str, out: &Path) -> Result<(), Error> {
             writeln!(
                 code,
                 "\npub static {}: RegistryTag<{kind}> = RegistryTag::new(&[{}]);",
-                static_name(&name),
+                static_name(name),
                 listed.join(", ")
             )?;
         }
+        writeln!(
+            code,
+            "\n/// The tag at this path under the `minecraft` namespace, like `mineable/axe`.\n\
+             pub fn named(path: &str) -> Option<RegistryTag<{kind}>> {{\n    Some(match path {{"
+        )?;
+        for name in tags.keys() {
+            writeln!(code, "        \"{name}\" => {},", static_name(name))?;
+        }
+        code.push_str("        _ => return None,\n    })\n}\n");
         write(&out.join("tags").join(format!("{module}.rs")), &code)?;
     }
     Ok(())

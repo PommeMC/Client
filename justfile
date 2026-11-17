@@ -152,11 +152,11 @@ ci-fmt:
 ci-lint:
     @cargo clippy -p pomme-client --release --all-targets --no-default-features --features {{ lint_features }} -- -D warnings
     @cargo clippy -p pomme-protocol -p pomme-auth --release --all-targets --all-features -- -D warnings
-    @cargo clippy -p pomme-dirs -p pomme-install -p azalea-block -p pomme-registry -p azalea-registry -p azalea-inventory -p ingame-test -p protogen -p blockgen -p typegen --release --all-targets -- -D warnings
+    @cargo clippy -p pomme-dirs -p pomme-install -p azalea-block -p pomme-registry -p azalea-registry -p pomme-text -p pomme-item -p azalea-inventory -p ingame-test -p protogen -p blockgen -p typegen --release --all-targets -- -D warnings
 
 # Tests, in the dev profile (dependencies are optimised there).
 ci-test:
-    @cargo nextest run -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p pomme-registry -p azalea-inventory -p ingame-test -p typegen
+    @cargo nextest run -p pomme-protocol -p pomme-dirs -p pomme-auth -p pomme-install -p pomme-registry -p pomme-text -p pomme-item -p azalea-inventory -p ingame-test -p typegen
     @cargo nextest run -p pomme-client --no-default-features
 
 # SteelMC's crate, the client with it, and the test that boots a real world.
@@ -185,15 +185,17 @@ serializergen version="26.2":
     python=$(command -v python3 || command -v python)
     PATH="{{ jdk }}:$PATH" "$python" tools/protogen/entity_serializers.py reference {{ version }} pomme-protocol/src/data/entity-serializers-{{ version }}.json
 
-# Regenerate pomme-registry's entries and tags (tools/typegen) and
-# pomme-inventory's default item components from a version's reference dir.
+# Regenerate pomme-registry's entries and tags (tools/typegen) and pomme-item's
+# default item components (tools/codec-oracle/DefaultComponents.java, run on
+# the reference server jar) from a version's reference dir. Needs Java 25 on
+# PATH or JAVA_HOME.
 typegen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo run -p typegen -- reference/{{ version }} {{ version }} pomme-registry/src
-    python=$(command -v python3 || command -v python)
-    "$python" tools/typegen/default_components.py reference/{{ version }}
-    cargo fmt -p pomme-registry -p azalea-inventory
+    ref="reference/{{ version }}"
+    cargo run -p typegen -- "$ref" {{ version }} pomme-registry/src
+    cargo fmt -p pomme-registry
+    "{{ just_executable() }}" _oracle "$ref/server.jar" DefaultComponents pomme-item/src/data/default-components.json
 
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
@@ -206,16 +208,23 @@ codec-fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
     jar=$(cargo run -q -p ingame-test -- --fetch-server)
-    out=target/codec-oracle
+    "{{ just_executable() }}" _oracle "$jar" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
+
+# Compiles `tools/codec-oracle/<tool>.java` against the game classes and
+# libraries in a server bundler jar and runs it with `args`.
+_oracle jar tool +args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="target/codec-oracle/{{ tool }}"
     sep=":"; if [ "${OS:-}" = "Windows_NT" ]; then sep=";"; fi
     bin=""; if [ -n "${JAVA_HOME:-}" ]; then bin="$JAVA_HOME/bin/"; fi
     rm -rf "$out" && mkdir -p "$out/lib"
     # This unzip build doesn't glob archive members; list them explicitly.
-    unzip -Z1 "$jar" | grep -E '^META-INF/(versions|libraries)/.*\.jar$' \
-        | xargs unzip -qn "$jar" -d "$out/lib"
+    unzip -Z1 "{{ jar }}" | grep -E '^META-INF/(versions|libraries)/.*\.jar$' \
+        | xargs unzip -qn "{{ jar }}" -d "$out/lib"
     cp=$(find "$out/lib" -name '*.jar' | tr '\n' "$sep")
-    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" tools/codec-oracle/CodecOracle.java
-    "${bin}java" -cp "$cp$out/classes" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
+    "${bin}javac" --release 25 -nowarn -cp "$cp" -d "$out/classes" "tools/codec-oracle/{{ tool }}.java"
+    "${bin}java" -cp "$cp$out/classes" {{ tool }} {{ args }}
 
 # JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"

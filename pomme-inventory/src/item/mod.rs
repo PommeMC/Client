@@ -1,8 +1,5 @@
 use azalea_registry::builtin::ItemKind;
 
-use crate::components::MaxStackSize;
-use crate::default_components::get_default_component;
-
 pub mod consume_effect;
 
 pub trait MaxStackSizeExt {
@@ -24,6 +21,6 @@ pub trait MaxStackSizeExt {
 
 impl MaxStackSizeExt for ItemKind {
     fn max_stack_size(&self) -> i32 {
-        get_default_component::<MaxStackSize>(*self).map_or(64, |s| s.count)
+        pomme_item::defaults::ItemKindExt::max_stack_size(self)
     }
 }

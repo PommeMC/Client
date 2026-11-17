@@ -12,7 +12,6 @@ use serde::Serialize;
 use serde::ser::SerializeMap;
 
 use crate::components::{self, DataComponentUnion};
-use crate::default_components::get_default_component;
 
 /// Either an item in an inventory or nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -211,11 +210,7 @@ impl ItemStackData {
     /// This is used for things like getting the damage of an item, or seeing
     /// how much food it replenishes.
     pub fn get_component<'a, T: components::DataComponentTrait>(&'a self) -> Option<Cow<'a, T>> {
-        if let Some(c) = self.component_patch.get::<T>() {
-            Some(Cow::Borrowed(c))
-        } else {
-            get_default_component::<T>(self.kind).map(|c| Cow::Owned(c))
-        }
+        self.component_patch.get::<T>().map(Cow::Borrowed)
     }
 }
 

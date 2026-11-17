@@ -1,13 +1,15 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStackData;
+use azalea_buf::AzBuf;
 use azalea_inventory::components::{
-    BlocksAttacks, ChargedProjectiles, Consumable, Equippable, Food, ItemUseAnimation,
+    BlocksAttacks, Consumable, DataComponentTrait, Equippable, Food, ItemUseAnimation,
     KineticWeapon, MinimumAttackCharge, UseEffects,
 };
-use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use glam::{DVec3, Vec3};
+use pomme_item::ItemStackData;
+use pomme_item::components::ChargedProjectiles;
 pub use pomme_protocol::serverbound::InteractionHand;
 use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
@@ -20,6 +22,7 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
+use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
@@ -1690,13 +1693,25 @@ fn swappable(stack: &ItemStackData) -> Option<Equippable> {
     stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
+/// Vanilla `Equippable.canBeEquippedBy` for a player.
+// TODO: a tag is read as the game's data pack has it, not as the server
+// synced it, and one the data pack lacks is taken to include the player.
+pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
+    const PLAYER: EntityKind = EntityKind::Player;
+    match &equippable.allowed_entities {
+        None => true,
+        Some(HolderSet::Direct { contents }) => contents.contains(&PLAYER),
+        Some(HolderSet::Named { key, .. }) => Some(key)
+            .filter(|key| key.namespace() == pomme_registry::identifier::DEFAULT_NAMESPACE)
+            .and_then(|key| pomme_registry::tags::entities::named(key.path()))
+            .is_none_or(|tag| tag.contains(&PLAYER)),
+    }
+}
+
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
 /// `canUseSlot` is always true.
 fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn) -> UseResult {
-    // TODO: a tag of allowed entities is taken to include the player.
-    if let Some(HolderSet::Direct { contents }) = &equippable.allowed_entities
-        && !contents.contains(&EntityKind::Player)
-    {
+    if !player_can_equip(equippable) {
         return UseResult::Pass;
     }
     if worn.locked
@@ -1930,17 +1945,15 @@ fn hand_render_selection(
 /// Vanilla `ItemInHandRenderer.isChargedCrossbow` / `CrossbowItem.isCharged`.
 pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
     stack.kind == ItemKind::Crossbow
-        && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
+        && stack
+            .component::<ChargedProjectiles>()
+            .is_some_and(|c| !c.items.is_empty())
 }
 
 /// The stack's component override if the server set one, else the item's
 /// default.
-pub(crate) fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
-    stack
-        .component_patch
-        .get::<T>()
-        .cloned()
-        .or_else(|| get_default_component::<T>(stack.kind))
+pub(crate) fn stack_component<T: DataComponentTrait + AzBuf>(stack: &ItemStackData) -> Option<T> {
+    stack.get_component::<T>().map(Cow::into_owned)
 }
 
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
@@ -2358,11 +2371,11 @@ mod tests {
 
     #[test]
     fn hand_render_selection_matches_vanilla() {
-        use azalea_inventory::ItemStack;
+        use pomme_item::ItemStack;
 
         let stack = |kind| ItemStackData::new(kind, 1);
         let charged = ItemStack::new(ItemKind::Crossbow, 1)
-            .with_component(ChargedProjectiles {
+            .with(&ChargedProjectiles {
                 items: vec![ItemStack::new(ItemKind::Arrow, 1)],
             })
             .as_present()

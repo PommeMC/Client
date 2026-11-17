@@ -17,6 +17,7 @@ use super::config_wire::{ConfigFrame, Registries};
 use super::conn::{Conn, MemoryEnd, RawWriter};
 use super::handler::{handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
+use crate::chat_component::ComponentText;
 use crate::ui::server_dialog::DialogRegistry;
 use crate::world::block::BlockStateTable;
 
@@ -415,8 +416,10 @@ async fn login_sequence(
                 return Ok(id);
             }
             LoginPacket::Disconnect(reason) => {
-                let reason = crate::ui::text::text_from_json(&reason);
-                return Err(ConnectionError::Disconnected(reason.to_string()));
+                let reason = crate::ui::text::component_from_json(&reason).plain_text();
+                return Err(ConnectionError::Disconnected(
+                    crate::ui::text::strip_formatting(&reason),
+                ));
             }
             // TODO: vanilla answers from the cookies an earlier transfer stored.
             LoginPacket::CookieRequest(key) => {

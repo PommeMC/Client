@@ -1710,7 +1710,7 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: [f32; 2],
         use_anim: [Option<UseAnim>; 2],
-        held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
+        held_items: [Option<(String, pomme_item::ItemStackData)>; 2],
         main_hand_right: bool,
         hand_light: LightLevels,
         shown_hands: HandRenderSelection,
@@ -2101,7 +2101,7 @@ impl Renderer {
     fn held_item(
         &mut self,
         name: String,
-        stack: &azalea_inventory::ItemStackData,
+        stack: &pomme_item::ItemStackData,
         team_color: Option<u32>,
     ) -> pipelines::held_item::HeldItemInfo {
         let model = self.render_assets.stack_model_key(&name, stack);
@@ -2376,7 +2376,7 @@ impl Renderer {
                     *item_tints = items
                         .iter()
                         .map(|item| {
-                            let azalea_inventory::ItemStack::Present(data) = item else {
+                            let pomme_item::ItemStack::Present(data) = item else {
                                 return Vec::new();
                             };
                             let name = crate::player::inventory::item_resource_name(data.kind);

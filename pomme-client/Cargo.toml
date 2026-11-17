@@ -81,7 +81,9 @@ azalea-chat = "0.16"
 # azalea-core uses bevy_ecs without gating it on its feature; azalea-world
 # used to turn both of these on.
 azalea-core = { version = "0.16", features = ["bevy_ecs", "serde"] }
+pomme-item = { path = "../pomme-item" }
 pomme-registry = { path = "../pomme-registry" }
+pomme-text = { path = "../pomme-text" }
 azalea-inventory = "0.16"
 uuid = { version = "1", features = ["v4"] }
 md-5 = "0.11"

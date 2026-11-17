@@ -117,7 +117,7 @@ mod tests {
     use simdnbt::owned::NbtCompound;
 
     use super::*;
-    use crate::chat_component::Content;
+    use crate::chat_component::{ComponentText, Content};
 
     /// A frame holding just packet `name`'s id.
     fn frame(phase: Phase, name: &str) -> Vec<u8> {

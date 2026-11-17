@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use azalea_inventory::ItemStack;
 use azalea_inventory::operations::{
     ClickOperation, CloneClick, PickupAllClick, PickupClick, QuickCraftClick, QuickCraftKind,
     QuickCraftStatus, QuickMoveClick, SwapClick, ThrowClick,
 };
+use pomme_item::ItemStack;
 
 use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, gui_centered, hit_test,

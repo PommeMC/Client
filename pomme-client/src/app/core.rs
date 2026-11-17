@@ -18,10 +18,12 @@ use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::attribute::{AttributeInstance, AttributeKind, AttributeMap};
+use crate::chat_component::ComponentText;
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
+use crate::net::item_codec::Components;
 use crate::net::{DimensionInfo, NetworkEvent};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
@@ -310,7 +312,7 @@ fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i
 
 /// The texture of what `e` holds in its main hand, for its eating crumbs.
 fn mouth_item_texture(e: &crate::entity::LivingEntity) -> Option<String> {
-    let azalea_inventory::ItemStack::Present(held) =
+    let pomme_item::ItemStack::Present(held) =
         e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)?
     else {
         return None;
@@ -2556,7 +2558,7 @@ impl AppCore {
                     menu_type,
                     title,
                 } => {
-                    use azalea_inventory::ItemStack;
+                    use pomme_item::ItemStack;
                     use pomme_registry::builtin::MenuKind;
 
                     use crate::app::phases::in_game::ContainerScreen;
@@ -4602,7 +4604,7 @@ pub(crate) fn chunk_lod(
 /// The [`Worn`](crate::player::interaction::Worn) for `stack`, if it's a
 /// swappable equippable.
 fn worn_for<'a>(
-    stack: Option<&azalea_inventory::ItemStackData>,
+    stack: Option<&pomme_item::ItemStackData>,
     inventory: &'a crate::player::inventory::Inventory,
     selected: u8,
     creative: bool,

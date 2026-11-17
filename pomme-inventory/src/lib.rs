@@ -1,10 +1,8 @@
 #![doc = include_str!("../README.md")]
-#![feature(min_specialization)]
 // The `AzBuf` derive writes `field: field` for every field it reads.
 #![allow(clippy::redundant_field_names)]
 
 pub mod components;
-pub mod default_components;
 pub mod item;
 pub mod operations;
 mod slot;

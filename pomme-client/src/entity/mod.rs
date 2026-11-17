@@ -9,10 +9,10 @@ pub mod villager;
 
 use std::collections::HashMap;
 
-use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
 use dimensions::EntityDimensions;
 use glam::DVec3;
+use pomme_item::ItemStack;
 use pomme_registry::builtin::EntityKind;
 
 use crate::attribute::AttributeMap;
@@ -1729,7 +1729,7 @@ pub struct ItemEntity {
     /// Vanilla `ItemStack.getDamageValue()` — the other seed component.
     pub damage: i32,
     pub count: i32,
-    pub stack: Option<azalea_inventory::ItemStackData>,
+    pub stack: Option<pomme_item::ItemStackData>,
     pub age: u32,
     pub bob_offset: f32,
     pub is_glowing: bool,
@@ -1744,7 +1744,7 @@ struct PickupAnimation {
     item_id: u32,
     damage: i32,
     count: i32,
-    stack: Option<azalea_inventory::ItemStackData>,
+    stack: Option<pomme_item::ItemStackData>,
     start_pos: Position,
     target_pos: Position,
     bob_offset: f32,
@@ -1757,7 +1757,7 @@ pub struct PickupRenderInfo {
     pub item_id: u32,
     pub damage: i32,
     pub count: i32,
-    pub stack: Option<azalea_inventory::ItemStackData>,
+    pub stack: Option<pomme_item::ItemStackData>,
     pub position: Position,
     pub bob_offset: f32,
     pub age: u32,
@@ -1814,7 +1814,7 @@ impl ItemEntityStore {
         item_id: u32,
         damage: i32,
         count: i32,
-        stack: azalea_inventory::ItemStackData,
+        stack: pomme_item::ItemStackData,
     ) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
