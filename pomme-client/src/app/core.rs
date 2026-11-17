@@ -2261,7 +2261,7 @@ impl AppCore {
                 NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
                 NetworkEvent::LoggedIn => {
                     if let Some(state) = connect_phase.as_deref_mut() {
-                        *state = ConnectionPhase::Configuring;
+                        state.login_finished();
                     }
                 }
                 NetworkEvent::Connected => {

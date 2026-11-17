@@ -144,6 +144,14 @@ pub enum ConnectionPhase {
 }
 
 impl ConnectionPhase {
+    /// A server connection starts configuring. A world being started keeps
+    /// its phase, and with it one status until the terrain appears.
+    pub fn login_finished(&mut self) {
+        if *self == Self::Connecting {
+            *self = Self::Configuring;
+        }
+    }
+
     /// Login is done: vanilla's login listener titles a disconnect
     /// `connect.failed`, its common listener `disconnect.lost`.
     pub fn logged_in(&self) -> bool {
@@ -301,6 +309,13 @@ mod tests {
         ] {
             assert_eq!(phase.logged_in(), logged_in);
         }
+
+        let after_login = |mut phase: ConnectionPhase| {
+            phase.login_finished();
+            phase
+        };
+        assert!(after_login(Connecting) == Configuring);
+        assert!(after_login(StartingWorld) == StartingWorld);
     }
 
     #[test]
