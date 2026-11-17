@@ -199,6 +199,13 @@ impl ContainerKind<'_> {
         self.inv_start() + 36
     }
 
+    /// Vanilla `canTakeItemForPickAll` (`InventoryMenu`, `CraftingMenu`): a
+    /// crafting result is never gathered, so a double click on it is two
+    /// plain clicks.
+    pub fn can_take_for_pick_all(self, slot: u16) -> bool {
+        !(matches!(self, Self::Player | Self::CraftingTable) && slot == 0)
+    }
+
     /// The result slot whose clicks we can't predict, if this menu has one:
     /// crafting results need recipe logic, the anvil result costs XP and
     /// materials. Vanilla excludes the crafting result from double-click

@@ -1,0 +1,80 @@
+# Fast clicks on the inventory's crafting result each craft once: a double
+# click there gathers nothing, so no click is swallowed.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear"
+
+[[step]]
+chat = "/give @s minecraft:oak_log 3"
+
+[[step]]
+expect = { slot = 36, item = "oak_log", count = 3 }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+click = { slot = 36, op = "pickup_left" }
+
+[[step]]
+click = { slot = 1, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 0, item = "oak_planks", count = 4 }
+
+# The result slot's centre at the harness's 427x240 GUI.
+# Each click waits for the last one's planks to reach the cursor, still inside
+# the double-click time.
+[[step]]
+cursor = [287, 73]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { slot = 1, item = "air" }
+
+[[step]]
+click = { slot = 9, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 9, item = "oak_planks", count = 12 }
+
+[[step]]
+screenshot = "crafted"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear"
+
+[[step]]
+chat = "/gamemode creative"

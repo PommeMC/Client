@@ -588,6 +588,7 @@ pub fn resolve_gesture(
     // Timing-based like vanilla; the server only gathers if it has a cursor item
     // (avoids depending on the round-trip-lagged local carried state).
     let double = input.left_pressed
+        && kind.can_take_for_pick_all(slot)
         && matches!(last_click, Some((s, t)) if *s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS);
 
     if input.shift {
@@ -646,9 +647,8 @@ fn quick_craft(kind: &QuickCraftKind, status: QuickCraftStatus) -> ClickOperatio
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_empty_handed_double_click_still_sends_the_press_pickup() {
-        let kind = ContainerKind::Crafter { disabled: 0 };
+    /// The clicks sent for an empty-handed press on `slot`, straight after one.
+    fn double_click(kind: ContainerKind, slot: u16) -> Vec<ClickOperation> {
         let slots = vec![ItemStack::Empty; kind.slot_count()];
         let panel = Panel {
             scale: 1.0,
@@ -657,8 +657,6 @@ mod tests {
             w: 176.0,
             h: 166.0,
         };
-        let mut drag = None;
-        let mut last_click = Some((4, Instant::now()));
         let press = ContainerInput {
             left_pressed: true,
             right_pressed: false,
@@ -671,23 +669,42 @@ mod tests {
             throw: false,
             throw_all: false,
         };
-        let (ops, _) = resolve_gesture(
+        resolve_gesture(
             &press,
-            Some(4),
+            Some(slot),
             &panel,
             (10.0, 10.0),
             kind,
             &slots,
             &ItemStack::Empty,
-            &mut drag,
-            &mut last_click,
-        );
+            &mut None,
+            &mut Some((slot, Instant::now())),
+        )
+        .0
+    }
+
+    #[test]
+    fn an_empty_handed_double_click_still_sends_the_press_pickup() {
         assert!(matches!(
-            ops.as_slice(),
+            double_click(ContainerKind::Crafter { disabled: 0 }, 4).as_slice(),
             [
                 ClickOperation::Pickup(PickupClick::Left { slot: Some(4) }),
                 ClickOperation::PickupAll(PickupAllClick { slot: 4, .. }),
             ]
         ));
+    }
+
+    #[test]
+    fn a_double_click_on_a_crafting_result_is_a_plain_click() {
+        for kind in [ContainerKind::Player, ContainerKind::CraftingTable] {
+            assert!(matches!(
+                double_click(kind, 0).as_slice(),
+                [ClickOperation::Pickup(PickupClick::Left { slot: Some(0) })]
+            ));
+            assert!(matches!(
+                double_click(kind, 1).as_slice(),
+                [_, ClickOperation::PickupAll(_)]
+            ));
+        }
     }
 }
