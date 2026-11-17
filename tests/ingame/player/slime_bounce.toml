@@ -1,0 +1,49 @@
+# Landing on a slime block bounces the player back up: dropped ten blocks
+# onto one, the player is in the air again a second after touching down,
+# where a landing on stone leaves it on the ground.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 80.5 -60 76.5 0 0"
+
+[[step]]
+expect = { player = { position = [80.5, -60.0, 76.5] } }
+
+[[step]]
+chat = "/setblock 80 -61 80 minecraft:slime_block"
+
+[[step]]
+expect = { block = "slime_block", at = [80, -61, 80] }
+
+[[step]]
+chat = "/tp @s 80.5 -50 80.5 0 0"
+
+# The fall takes about 1.5 s and the bounce another 2.
+[[step]]
+wait_ms = 2500
+
+[[step]]
+chat = "/execute as @s at @s if entity @s[y=-57,dy=20] run say in the air"
+
+[[step]]
+expect = { chat = "in the air" }
+
+[[step]]
+chat = "/setblock 80 -61 80 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 80.5 -50 80.5 0 0"
+
+[[step]]
+wait_ms = 2500
+
+[[step]]
+expect = { player = { position = [80.5, -60.0, 80.5] } }
+
+[[step]]
+chat = "/setblock 80 -61 80 minecraft:grass_block"
