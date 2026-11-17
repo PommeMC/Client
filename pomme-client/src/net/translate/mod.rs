@@ -60,8 +60,9 @@
 //!   leave the ingredient lists they appear in
 //! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
 //!   which pomme never sends (it only steers the server's new destroy-progress
-//!   level events, 2019/2020, which drop client-side); `sign_update` reordered
-//!   its slot field (pomme never sends it)
+//!   level events, 2019/2020, which drop client-side)
+//! - `sign_update` moved the text side from before the four lines to after
+//!   them, as a `SignTextSlot` (0 back, 1 front) where it was a boolean
 //! - `accept_teleportation` appends the accepted pose, and 26.3's
 //!   `handleMovePlayer` no longer follows it with a `move_player_pos_rot` (a
 //!   second position packet in one tick disconnects): the accept is held and
@@ -716,6 +717,8 @@ struct Ids777 {
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
     move_player_pos_rot_id: u32,
+    sign_update_id: u32,
+    sign_update_old_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus

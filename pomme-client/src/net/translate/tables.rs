@@ -257,6 +257,8 @@ impl GameIds {
                     "accept_teleportation",
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
+                sign_update_id: id(Serverbound, "sign_update"),
+                sign_update_old_id: required_id(table, Phase::Game, Serverbound, "sign_update"),
             }),
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
                 codec,

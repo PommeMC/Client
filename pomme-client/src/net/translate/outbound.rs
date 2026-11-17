@@ -105,6 +105,9 @@ impl Translation {
             if id == v777.accept_teleportation_id {
                 return translate_accept_teleportation_777(state, &frame[pos..]);
             }
+            if id == v777.sign_update_id {
+                return translate_sign_update_777(v777.sign_update_old_id, &frame[pos..]);
+            }
             if id == v777.move_player_pos_rot_id
                 && let Some(frames) = translate_move_player_pos_rot_777(v777, &frame[pos..], state)
             {
