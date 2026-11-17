@@ -118,8 +118,8 @@ impl WorldBorderPipeline {
         camera: &Camera,
         border: &WorldBorder,
         render_distance_blocks: f32,
-        min_y: i32,
-        max_y: i32,
+        _min_y: i32,
+        _max_y: i32,
     ) {
         let now = Instant::now();
         let time_secs = now.duration_since(self.start_time).as_secs_f32();
@@ -127,107 +127,115 @@ impl WorldBorderPipeline {
         let max_x = border.max_x(now);
         let min_z = border.min_z(now);
         let max_z = border.max_z(now);
-        let color = border.color(now);
 
         let cam = *camera.position;
-        let anchor = camera.anchor();
         let radius = render_distance_blocks.max(32.0) as f64;
 
-        let anim = time_secs * 0.25;
-        let uv_scale = 0.5f32;
-        let y_bot = min_y as f64;
-        let y_top = max_y as f64;
-        let v0 = (y_bot as f32 - anim) * uv_scale;
-        let v1 = (y_top as f32 - anim) * uv_scale;
+        let dist_to_border = (cam.x - min_x)
+            .min(max_x - cam.x)
+            .min(cam.z - min_z)
+            .min(max_z - cam.z);
+
+        if cam.x < min_x - radius
+            || cam.x > max_x + radius
+            || cam.z < min_z - radius
+            || cam.z > max_z + radius
+            || dist_to_border >= radius
+        {
+            return;
+        }
+
+        let alpha = ((1.0 - (dist_to_border / radius).max(0.0)).powi(4).min(1.0) as f32)
+            * border.color(now)[3];
+        if alpha <= 0.0 {
+            return;
+        }
+
+        let mut color = border.color(now);
+        color[3] = alpha;
+
+        let anchor = camera.anchor();
+        let anim = time_secs.rem_euclid(3.0) / 3.0;
+
+        let y_bot = (cam.y - radius).floor();
+        let y_top = (cam.y + radius).ceil();
+        let v_top = -(y_top as f32) * 0.5 + anim;
+        let v_bot = -(y_bot as f32) * 0.5 + anim;
+
+        let z_start = (cam.z - radius).floor().clamp(min_z, max_z);
+        let z_end = (cam.z + radius).ceil().clamp(min_z, max_z);
+        let u0_z = (z_start.floor() as i64 & 1) as f32 * 0.5 + anim;
+        let u1_z = u0_z + (z_end - z_start) as f32 * 0.5;
+
+        let x_start = (cam.x - radius).floor().clamp(min_x, max_x);
+        let x_end = (cam.x + radius).ceil().clamp(min_x, max_x);
+        let u0_x = (x_start.floor() as i64 & 1) as f32 * 0.5 + anim;
+        let u1_x = u0_x + (x_end - x_start) as f32 * 0.5;
 
         let mut verts: Vec<WorldBorderVertex> = Vec::with_capacity(32);
 
-        if (cam.x - min_x).abs() <= radius {
-            let z_start = (cam.z - radius).clamp(min_z, max_z);
-            let z_end = (cam.z + radius).clamp(min_z, max_z);
-            if z_start < z_end {
-                let u0 = (z_start as f32 + anim) * uv_scale;
-                let u1 = (z_end as f32 + anim) * uv_scale;
-                push_wall_quad(
-                    &mut verts,
-                    anchor,
-                    DVec3::new(min_x, y_bot, z_start),
-                    DVec3::new(min_x, y_bot, z_end),
-                    DVec3::new(min_x, y_top, z_end),
-                    DVec3::new(min_x, y_top, z_start),
-                    u0,
-                    u1,
-                    v0,
-                    v1,
-                    color,
-                );
-            }
+        if (cam.x - min_x).abs() <= radius && z_start < z_end {
+            push_wall_quad(
+                &mut verts,
+                anchor,
+                DVec3::new(min_x, y_bot, z_start),
+                DVec3::new(min_x, y_bot, z_end),
+                DVec3::new(min_x, y_top, z_end),
+                DVec3::new(min_x, y_top, z_start),
+                u0_z,
+                u1_z,
+                v_bot,
+                v_top,
+                color,
+            );
         }
 
-        if (cam.x - max_x).abs() <= radius {
-            let z_start = (cam.z - radius).clamp(min_z, max_z);
-            let z_end = (cam.z + radius).clamp(min_z, max_z);
-            if z_start < z_end {
-                let u0 = (z_start as f32 - anim) * uv_scale;
-                let u1 = (z_end as f32 - anim) * uv_scale;
-                push_wall_quad(
-                    &mut verts,
-                    anchor,
-                    DVec3::new(max_x, y_bot, z_end),
-                    DVec3::new(max_x, y_bot, z_start),
-                    DVec3::new(max_x, y_top, z_start),
-                    DVec3::new(max_x, y_bot, z_end),
-                    u0,
-                    u1,
-                    v0,
-                    v1,
-                    color,
-                );
-            }
+        if (cam.x - max_x).abs() <= radius && z_start < z_end {
+            push_wall_quad(
+                &mut verts,
+                anchor,
+                DVec3::new(max_x, y_bot, z_end),
+                DVec3::new(max_x, y_bot, z_start),
+                DVec3::new(max_x, y_top, z_start),
+                DVec3::new(max_x, y_top, z_end),
+                u0_z,
+                u1_z,
+                v_bot,
+                v_top,
+                color,
+            );
         }
 
-        if (cam.z - min_z).abs() <= radius {
-            let x_start = (cam.x - radius).clamp(min_x, max_x);
-            let x_end = (cam.x + radius).clamp(min_x, max_x);
-            if x_start < x_end {
-                let u0 = (x_start as f32 - anim) * uv_scale;
-                let u1 = (x_end as f32 - anim) * uv_scale;
-                push_wall_quad(
-                    &mut verts,
-                    anchor,
-                    DVec3::new(x_end, y_bot, min_z),
-                    DVec3::new(x_start, y_bot, min_z),
-                    DVec3::new(x_start, y_top, min_z),
-                    DVec3::new(x_end, y_top, min_z),
-                    u0,
-                    u1,
-                    v0,
-                    v1,
-                    color,
-                );
-            }
+        if (cam.z - min_z).abs() <= radius && x_start < x_end {
+            push_wall_quad(
+                &mut verts,
+                anchor,
+                DVec3::new(x_end, y_bot, min_z),
+                DVec3::new(x_start, y_bot, min_z),
+                DVec3::new(x_start, y_top, min_z),
+                DVec3::new(x_end, y_top, min_z),
+                u0_x,
+                u1_x,
+                v_bot,
+                v_top,
+                color,
+            );
         }
 
-        if (cam.z - max_z).abs() <= radius {
-            let x_start = (cam.x - radius).clamp(min_x, max_x);
-            let x_end = (cam.x + radius).clamp(min_x, max_x);
-            if x_start < x_end {
-                let u0 = (x_start as f32 + anim) * uv_scale;
-                let u1 = (x_end as f32 + anim) * uv_scale;
-                push_wall_quad(
-                    &mut verts,
-                    anchor,
-                    DVec3::new(x_start, y_bot, max_z),
-                    DVec3::new(x_end, y_bot, max_z),
-                    DVec3::new(x_end, y_top, max_z),
-                    DVec3::new(x_start, y_top, max_z),
-                    u0,
-                    u1,
-                    v0,
-                    v1,
-                    color,
-                );
-            }
+        if (cam.z - max_z).abs() <= radius && x_start < x_end {
+            push_wall_quad(
+                &mut verts,
+                anchor,
+                DVec3::new(x_start, y_bot, max_z),
+                DVec3::new(x_end, y_bot, max_z),
+                DVec3::new(x_end, y_top, max_z),
+                DVec3::new(x_start, y_top, max_z),
+                u0_x,
+                u1_x,
+                v_bot,
+                v_top,
+                color,
+            );
         }
 
         if verts.is_empty() {
@@ -254,8 +262,8 @@ fn push_wall_quad(
     p3: DVec3,
     u0: f32,
     u1: f32,
-    v0: f32,
-    v1: f32,
+    v_bot: f32,
+    v_top: f32,
     color: [f32; 4],
 ) {
     let v0_pos = (p0 - anchor).as_vec3().to_array();
@@ -265,33 +273,33 @@ fn push_wall_quad(
 
     verts.push(WorldBorderVertex {
         position: v0_pos,
-        uv: [u0, v0],
+        uv: [u0, v_bot],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v1_pos,
-        uv: [u1, v0],
+        uv: [u1, v_bot],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v2_pos,
-        uv: [u1, v1],
+        uv: [u1, v_top],
         color,
     });
 
     verts.push(WorldBorderVertex {
         position: v0_pos,
-        uv: [u0, v0],
+        uv: [u0, v_bot],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v2_pos,
-        uv: [u1, v1],
+        uv: [u1, v_top],
         color,
     });
     verts.push(WorldBorderVertex {
         position: v3_pos,
-        uv: [u0, v1],
+        uv: [u0, v_top],
         color,
     });
 }
@@ -307,10 +315,14 @@ fn create_pipeline(
         layout,
         &rhi::RenderPipelineDesc {
             depth: Some(rhi::DepthState {
-                compare: rhi::CompareFunction::Less,
-                ..rhi::DepthState::READ_ONLY
+                write: false,
+                compare: rhi::CompareFunction::LessEqual,
+                bias: Some(rhi::DepthBias {
+                    constant: -3,
+                    slope: -3.0,
+                }),
             }),
-            blend: Some(rhi::BlendState::TRANSLUCENT),
+            blend: Some(rhi::BlendState::OVERLAY),
             cull_mode: rhi::CullMode::None,
             ..rhi::RenderPipelineDesc::new(
                 "world_border",

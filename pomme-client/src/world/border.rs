@@ -1,13 +1,15 @@
 use std::time::{Duration, Instant};
 
-use glam::{DVec2, DVec3};
+use glam::{DVec2, DVec3, dvec3};
 
+use crate::physics::aabb::Aabb;
 use crate::position::BlockPos;
 
 pub const DEFAULT_BORDER_SIZE: f64 = 29999984.0;
 pub const DEFAULT_MAX_SIZE: f64 = 29999984.0;
 pub const DEFAULT_WARNING_BLOCKS: f64 = 5.0;
 pub const DEFAULT_WARNING_TIME_SECS: u32 = 15;
+pub const BORDER_BOX_EXTENT: f64 = 30000000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -86,9 +88,9 @@ impl WorldBorder {
 
     pub fn color(&self, now: Instant) -> [f32; 4] {
         match self.status(now) {
-            BorderStatus::Stationary => [0.13, 0.55, 0.95, 0.60],
-            BorderStatus::Shrinking => [0.95, 0.18, 0.18, 0.65],
-            BorderStatus::Growing => [0.18, 0.92, 0.28, 0.60],
+            BorderStatus::Stationary => [0.1255, 0.6275, 1.0, 1.0],
+            BorderStatus::Shrinking => [1.0, 0.1882, 0.1882, 1.0],
+            BorderStatus::Growing => [0.251, 1.0, 0.502, 1.0],
         }
     }
 
@@ -132,6 +134,18 @@ impl WorldBorder {
         bx >= min_x && (bx + 1.0) <= max_x && bz >= min_z && (bz + 1.0) <= max_z
     }
 
+    pub fn is_inside_bounds(&self, aabb: &Aabb, now: Instant, margin: f64) -> bool {
+        let min_x = self.min_x(now);
+        let max_x = self.max_x(now);
+        let min_z = self.min_z(now);
+        let max_z = self.max_z(now);
+
+        aabb.max.x > min_x - margin
+            && aabb.min.x < max_x + margin
+            && aabb.max.z > min_z - margin
+            && aabb.min.z < max_z + margin
+    }
+
     pub fn distance_to_border(&self, pos: DVec3, now: Instant) -> f64 {
         let min_x = self.min_x(now);
         let max_x = self.max_x(now);
@@ -144,6 +158,52 @@ impl WorldBorder {
         let dist_max_z = max_z - pos.z;
 
         dist_min_x.min(dist_max_x).min(dist_min_z).min(dist_max_z)
+    }
+
+    pub fn should_collide(&self, aabb: &Aabb, now: Instant) -> bool {
+        let size_x = (aabb.max.x - aabb.min.x).abs();
+        let size_z = (aabb.max.z - aabb.min.z).abs();
+        let max_extent = size_x.max(size_z).max(1.0);
+
+        let center = dvec3(
+            (aabb.min.x + aabb.max.x) * 0.5,
+            (aabb.min.y + aabb.max.y) * 0.5,
+            (aabb.min.z + aabb.max.z) * 0.5,
+        );
+        let dist = self.distance_to_border(center, now);
+        dist < max_extent * 2.0 && self.is_inside_bounds(aabb, now, 0.0)
+    }
+
+    pub fn collision_boxes(&self, aabb: &Aabb, now: Instant) -> Option<[Aabb; 4]> {
+        if !self.should_collide(aabb, now) {
+            return None;
+        }
+
+        let min_x = self.min_x(now);
+        let max_x = self.max_x(now);
+        let min_z = self.min_z(now);
+        let max_z = self.max_z(now);
+
+        let far = BORDER_BOX_EXTENT;
+
+        Some([
+            Aabb::new(
+                dvec3(min_x - far, -far, min_z - far),
+                dvec3(min_x, far, max_z + far),
+            ),
+            Aabb::new(
+                dvec3(max_x, -far, min_z - far),
+                dvec3(max_x + far, far, max_z + far),
+            ),
+            Aabb::new(
+                dvec3(min_x - far, -far, min_z - far),
+                dvec3(max_x + far, far, min_z),
+            ),
+            Aabb::new(
+                dvec3(min_x - far, -far, max_z),
+                dvec3(max_x + far, far, max_z + far),
+            ),
+        ])
     }
 
     pub fn warning_factor(&self, pos: DVec3, now: Instant) -> f32 {
@@ -275,5 +335,59 @@ mod tests {
         assert!((border.warning_factor(DVec3::new(7.5, 64.0, 0.0), now) - 0.5).abs() < 1e-4);
         assert_eq!(border.warning_factor(DVec3::new(10.0, 64.0, 0.0), now), 1.0);
         assert_eq!(border.warning_factor(DVec3::new(11.0, 64.0, 0.0), now), 1.0);
+    }
+
+    #[test]
+    fn border_collision_blocks_outgoing_movement() {
+        use crate::entity::components::Velocity;
+        use crate::physics::block_shape::CollisionContext;
+        use crate::physics::collision::{CollisionWorld, resolve_collision};
+        use crate::world::block::BlockStateTable;
+        use crate::world::chunk::ChunkStore;
+
+        let mut border = WorldBorder::new();
+        let now = Instant::now();
+        border.apply_initialize(0.0, 0.0, 20.0, 20.0, 0, 29999984, 5, 15, now);
+
+        let player_aabb = Aabb::new(dvec3(9.4, 64.0, -0.3), dvec3(10.0, 65.8, 0.3));
+        let boxes = border.collision_boxes(&player_aabb, now).unwrap();
+
+        let chunks = ChunkStore::new(2);
+        let table = BlockStateTable::native();
+        let world = CollisionWorld::new(&chunks, table).with_extra_boxes(&boxes);
+        let ctx = CollisionContext::EMPTY;
+
+        let (resolved, _) = resolve_collision(
+            world,
+            player_aabb,
+            Velocity::new(0.5, 0.0, 0.0),
+            0.6,
+            true,
+            &ctx,
+        );
+        assert_eq!(resolved.x, 0.0);
+
+        let (resolved_inward, _) = resolve_collision(
+            world,
+            player_aabb,
+            Velocity::new(-0.5, 0.0, 0.0),
+            0.6,
+            true,
+            &ctx,
+        );
+        assert!((resolved_inward.x - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn border_collision_none_when_far_or_outside() {
+        let mut border = WorldBorder::new();
+        let now = Instant::now();
+        border.apply_initialize(0.0, 0.0, 20.0, 20.0, 0, 29999984, 5, 15, now);
+
+        let far_aabb = Aabb::new(dvec3(-0.3, 64.0, -0.3), dvec3(0.3, 65.8, 0.3));
+        assert!(border.collision_boxes(&far_aabb, now).is_none());
+
+        let outside_aabb = Aabb::new(dvec3(15.0, 64.0, -0.3), dvec3(15.6, 65.8, 0.3));
+        assert!(border.collision_boxes(&outside_aabb, now).is_none());
     }
 }

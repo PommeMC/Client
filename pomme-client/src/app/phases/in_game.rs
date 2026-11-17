@@ -867,12 +867,23 @@ impl GameState {
             .collect()
     }
 
+    pub fn collidable_player_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        let mut boxes = self.collidable_entity_boxes();
+        if !crate::player::is_spectator(self.player.game_mode) {
+            let now = std::time::Instant::now();
+            if let Some(border_boxes) = self.world_border.collision_boxes(&self.player.bounding_box(), now) {
+                boxes.extend_from_slice(&border_boxes);
+            }
+        }
+        boxes
+    }
+
     /// What the boat the player steers collides with
     /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
     /// not its own passengers.
     pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
         let passengers = self.vehicle_passengers.get(&boat_id);
-        self.entity_store
+        let mut boxes: Vec<crate::physics::aabb::Aabb> = self.entity_store
             .living
             .iter()
             .filter(|&(&id, e)| {
@@ -887,7 +898,14 @@ impl GameState {
                     EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
                 }
             })
-            .collect()
+            .collect();
+        if let Some(boat) = self.entity_store.living.get(&boat_id) {
+            let now = std::time::Instant::now();
+            if let Some(border_boxes) = self.world_border.collision_boxes(&crate::entity::boat::boat_aabb(boat), now) {
+                boxes.extend_from_slice(&border_boxes);
+            }
+        }
+        boxes
     }
 
     /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor

@@ -10,9 +10,8 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 tex = texture(sampler2D(border_tex, border_tex_sampler), v_uv);
-    vec4 color = tex * v_color;
-    if (color.a < 0.02) {
+    if (tex.a == 0.0) {
         discard;
     }
-    out_color = color;
+    out_color = tex * v_color;
 }
