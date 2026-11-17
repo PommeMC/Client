@@ -199,6 +199,7 @@ pub async fn connect_to_server(
         .is_some_and(|t| t.no_config_phase());
     if !no_config {
         send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
+        send_ordered(&event_tx, NetworkEvent::LoggedIn);
     }
 
     let joined = if no_config {
@@ -1421,16 +1422,18 @@ mod tests {
             ServerboundConfigPacket::FinishConfiguration(_)
         ));
 
-        // Protocol selection precedes configuration; the remaining events
-        // arrive as soon as configuration ends, before any game packet.
+        // Protocol selection and the end of login precede configuration; the
+        // remaining events arrive as soon as configuration ends, before any
+        // game packet.
         let events: Vec<_> = std::iter::from_fn(|| event_rx.recv().ok())
-            .take(3)
+            .take(4)
             .collect();
         assert!(
             matches!(events[0], NetworkEvent::ProtocolSelected { protocol } if protocol == NATIVE.protocol)
         );
-        assert!(matches!(events[1], NetworkEvent::BiomeColors { .. }));
-        assert!(matches!(events[2], NetworkEvent::Connected));
+        assert!(matches!(events[1], NetworkEvent::LoggedIn));
+        assert!(matches!(events[2], NetworkEvent::BiomeColors { .. }));
+        assert!(matches!(events[3], NetworkEvent::Connected));
 
         client.abort();
     }

@@ -616,6 +616,8 @@ const DOUBLE_CLICK_MS: u128 = 400;
 /// and its button's text and target, which don't always agree (a lost
 /// singleplayer connection says "Back to Server List" and opens the title
 /// screen).
+// TODO: with multiplayer disabled (`allowsMultiplayer`) the button is
+// `gui.toTitle` and opens the title screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disconnection {
     title: &'static str,

@@ -1377,10 +1377,14 @@ impl ApplicationHandler for App {
                                 disconnect(core, gfx, panorama, connection, world, false)
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                core.menu.show_disconnect(
-                                    Disconnection::connect_failed(reason, world.is_some()),
-                                    &core.input.key_bindings,
-                                );
+                                let singleplayer = world.is_some();
+                                let disconnection = if connect_phase.logged_in() {
+                                    Disconnection::lost(reason, singleplayer)
+                                } else {
+                                    Disconnection::connect_failed(reason, singleplayer)
+                                };
+                                core.menu
+                                    .show_disconnect(disconnection, &core.input.key_bindings);
 
                                 leave_world(
                                     core,

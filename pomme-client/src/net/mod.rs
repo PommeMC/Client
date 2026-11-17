@@ -138,6 +138,8 @@ pub enum NetworkEvent {
     ProtocolSelected {
         protocol: i32,
     },
+    /// Login is done and configuration starts.
+    LoggedIn,
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`

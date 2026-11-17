@@ -138,7 +138,17 @@ pub enum ConnectionPhase {
     /// Waiting on the integrated server. Singleplayer only.
     StartingWorld,
     Connecting,
+    /// Logged in, in the configuration phase.
+    Configuring,
     Loading,
+}
+
+impl ConnectionPhase {
+    /// Login is done: vanilla's login listener titles a disconnect
+    /// `connect.failed`, its common listener `disconnect.lost`.
+    pub fn logged_in(&self) -> bool {
+        matches!(self, Self::Configuring | Self::Loading)
+    }
 }
 
 pub enum AppPhase {
@@ -279,6 +289,19 @@ pub fn draw_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_is_logged_in_from_configuration_on() {
+        use ConnectionPhase::*;
+        for (phase, logged_in) in [
+            (StartingWorld, false),
+            (Connecting, false),
+            (Configuring, true),
+            (Loading, true),
+        ] {
+            assert_eq!(phase.logged_in(), logged_in);
+        }
+    }
 
     #[test]
     fn one_slow_frame_sets_both_lows() {
