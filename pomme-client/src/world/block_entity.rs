@@ -43,6 +43,14 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
     }
 }
 
+/// Whether the block-entity pipeline draws a block of `kind`. A sign is its
+/// to draw only without a block model (assets from before 26.2): the old
+/// sign textures alone don't say so, as a resource pack can carry them onto
+/// newer assets.
+pub fn drawn_by_pipeline(kind: BlockEntityKind, has_block_model: bool) -> bool {
+    !(has_block_model && matches!(kind, BlockEntityKind::Sign | BlockEntityKind::HangingSign))
+}
+
 /// The block entity a block gets the moment it's placed, before (or without)
 /// any data from the server: [`rendered_kind`]'s, and signs, whose editor
 /// opens on the empty sign the placement made.
@@ -570,6 +578,15 @@ mod tests {
         assert_eq!(hanging.max_text_line_width(), 60.0);
         assert_eq!(hanging.text_line_height(), 9.0);
         assert!(SignBlock::of("oak_planks", &props(Vec::new())).is_none());
+    }
+
+    #[test]
+    fn a_sign_with_a_block_model_is_left_to_the_mesher() {
+        for kind in [BlockEntityKind::Sign, BlockEntityKind::HangingSign] {
+            assert!(drawn_by_pipeline(kind, false));
+            assert!(!drawn_by_pipeline(kind, true));
+        }
+        assert!(drawn_by_pipeline(BlockEntityKind::Chest, true));
     }
 
     #[test]
