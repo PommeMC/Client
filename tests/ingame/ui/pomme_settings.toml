@@ -1,6 +1,6 @@
 # Pomme's own settings (Pomme-only): a button under the Options grid opens
 # them, one screen per category. Performance holds Chunk Detail and Distant
-# Terrain, Shaders holds Shader Pack.
+# Terrain, Shaders holds Shader Pack, Updates holds Nightly Builds.
 
 pomme_only = true
 
@@ -106,6 +106,67 @@ wait_ms = 300
 
 [[step]]
 screenshot = "shaders"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Updates..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Nightly Builds: OFF"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "updates"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor = [213, 200]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "nightly_on"
+
+# Back off, since the options save.
+[[step]]
+cursor_to_button = "Nightly Builds: ON"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
 
 [[step]]
 cursor_to_button = "Done"
