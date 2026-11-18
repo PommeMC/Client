@@ -99,8 +99,8 @@ jobs:
           fi
 
           # Merges are gated on CI, but master can still go red when two PRs pass
-          # separately and then conflict, and this release is announced to
-          # Discord. A run still in progress reports null and also skips.
+          # separately and then conflict, and clients update to this build on
+          # their own. A run still in progress reports null and also skips.
           ci=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=1" \
             --jq '.workflow_runs[0].conclusion // "none"')
@@ -309,7 +309,9 @@ jobs:
         with:
           tag_name: ${{ needs.check.outputs.release_tag }}
           name: ${{ needs.check.outputs.tag }}
-          target_commitish: ${{ github.sha }}
+          # A nightly's tag goes on the commit that was built, which the next
+          # night compares master with; a release's stays on master's tip.
+          target_commitish: ${{ needs.check.outputs.channel == 'nightly' && github.sha || '' }}
           prerelease: ${{ needs.check.outputs.channel == 'nightly' }}
           make_latest: ${{ needs.check.outputs.channel != 'nightly' }}
           previous_tag: ${{ needs.check.outputs.prev }}
