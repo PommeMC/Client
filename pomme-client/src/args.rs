@@ -30,6 +30,11 @@ pub struct LaunchArgs {
     #[arg(long)]
     pub launch_token: Option<String>,
 
+    /// Starts this build as it is, without updating it first: the way to the
+    /// Nightly Builds option when the newest build won't start.
+    #[arg(long)]
+    pub no_update: bool,
+
     #[arg(long)]
     pub assets_dir: Option<String>,
 

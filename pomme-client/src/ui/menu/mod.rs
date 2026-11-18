@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use pomme_install::client::Channel;
 use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
@@ -85,6 +86,8 @@ struct Settings {
     vignette: bool,
     #[serde(default = "default_true")]
     entity_shadows: bool,
+    #[serde(default)]
+    nightly_builds: bool,
     #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
@@ -336,6 +339,7 @@ impl Default for Settings {
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
+            nightly_builds: false,
             vsync: true,
             max_framerate: 120,
             inactivity_fps_limit: InactivityFpsLimit::default(),
@@ -633,6 +637,7 @@ enum Screen {
     OptionsPomme,
     OptionsPommePerformance,
     OptionsPommeShaders,
+    OptionsPommeUpdates,
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
@@ -661,6 +666,7 @@ impl Screen {
             Self::OptionsPomme => Self::OptionsPomme,
             Self::OptionsPommePerformance => Self::OptionsPommePerformance,
             Self::OptionsPommeShaders => Self::OptionsPommeShaders,
+            Self::OptionsPommeUpdates => Self::OptionsPommeUpdates,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
@@ -857,6 +863,8 @@ pub struct MainMenu {
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
+    /// Whether updates follow master's nightly builds (Pomme-only).
+    nightly_builds: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub inactivity_fps_limit: InactivityFpsLimit,
@@ -1033,6 +1041,7 @@ impl MainMenu {
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
+            nightly_builds: settings.nightly_builds,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             inactivity_fps_limit: settings.inactivity_fps_limit,
@@ -1295,6 +1304,7 @@ impl MainMenu {
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
+                nightly_builds: self.nightly_builds,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 inactivity_fps_limit: self.inactivity_fps_limit,
@@ -1406,6 +1416,15 @@ impl MainMenu {
         self.save_settings(key_bindings);
     }
 
+    /// The builds this client updates to at its next start.
+    pub fn update_channel(&self) -> Channel {
+        if self.nightly_builds {
+            Channel::Nightly
+        } else {
+            Channel::Stable
+        }
+    }
+
     pub fn open_options(&mut self, key_bindings: &KeyBindings) {
         // Stale after a disconnect; the in-game path re-sets it every frame.
         self.server_render_distance = 0;
@@ -1432,6 +1451,7 @@ impl MainMenu {
                 | Screen::OptionsPomme
                 | Screen::OptionsPommePerformance
                 | Screen::OptionsPommeShaders
+                | Screen::OptionsPommeUpdates
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
@@ -1732,6 +1752,13 @@ impl MainMenu {
                 key_bindings,
             ),
             Screen::OptionsPommeShaders => self.build_options_pomme_shaders(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeUpdates => self.build_options_pomme_updates(
                 screen_w,
                 screen_h,
                 input,
