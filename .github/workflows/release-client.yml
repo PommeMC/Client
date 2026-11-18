@@ -94,7 +94,6 @@ jobs:
           if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..HEAD")" ]; then
             skip "No new commits on master since ${last_tag}."
           fi
-          # A nightly of the commit the last one was built from changes nothing.
           if [ "$CHANNEL" = "nightly" ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}')" = "$GITHUB_SHA" ]; then
             skip "No new commits on master since the last nightly."
           fi
@@ -120,43 +119,43 @@ jobs:
         run: |
           git fetch --tags --force
           tags=$(git tag --list 'client-v*')
+          latest=$(echo "$tags" \
+            | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+            | sort -V | tail -n1)
           if [ "$CHANNEL" = "nightly" ]; then
             # The run number only goes up, so each nightly is newer than the
-            # one before, and both sit between this release and the next.
-            prev=$(echo "$tags" | sort -V | tail -n1)
-            core=$(echo "$prev" | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')
-            core=${core:-0.0.0}
-            {
-              echo "tag=nightly-${core}.${GITHUB_RUN_NUMBER}+${MC_VERSION}"
-              echo "release_tag=nightly"
-              echo "version=$core"
-              echo "prev=$prev"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${{ github.ref_name }}"
+            # one before, and both sit between this release and the next. It
+            # starts over if this file is renamed or recreated, which strands
+            # nightly clients until the next release.
+            version=${latest:-0.0.0}
+            tag="nightly-${version}.${GITHUB_RUN_NUMBER}+${MC_VERSION}"
+            release_tag=nightly
           else
-            core="${{ inputs.version }}"
-            if [ -z "$core" ]; then
-              latest=$(echo "$tags" \
-                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
-                | sort -V | tail -n1)
-              if [ -z "$latest" ]; then
-                core="0.1.0"
-              else
-                IFS=. read -r ma mi pa <<< "$latest"
-                core="$ma.$mi.$((pa + 1))"
+            if [ "${{ github.event_name }}" = "push" ]; then
+              tag="${{ github.ref_name }}"
+            else
+              core="${{ inputs.version }}"
+              if [ -z "$core" ]; then
+                if [ -z "$latest" ]; then
+                  core="0.1.0"
+                else
+                  IFS=. read -r ma mi pa <<< "$latest"
+                  core="$ma.$mi.$((pa + 1))"
+                fi
               fi
+              tag="client-v${core}+${MC_VERSION}"
             fi
-            tag="client-v${core}+${MC_VERSION}"
+            release_tag=$tag
+            version=${tag#client-v}
+            version=${version%%+*}
           fi
           prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
-          version=${tag#client-v}
-          echo "version=${version%%+*}" >> "$GITHUB_OUTPUT"
-          echo "prev=$prev" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "release_tag=$release_tag"
+            echo "version=$version"
+            echo "prev=$prev"
+          } >> "$GITHUB_OUTPUT"
 
   build-client:
     needs: check
@@ -293,13 +292,18 @@ jobs:
           cd dist
           sha256sum * > sha256sums.txt
 
-      # The nightly tag moves to this commit, so the last nightly goes first.
-      # Clients that look in between find no nightly and stay as they are.
+      # The nightly tag moves to this commit, so the last nightly goes first;
+      # clients that look in between find no nightly and stay as they are.
+      # Only a missing one is skipped: a delete that fails would leave the tag
+      # on the old commit under the new files.
       - name: Remove the last nightly
         if: needs.check.outputs.channel == 'nightly'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete nightly --cleanup-tag --yes || true
+        run: |
+          if gh release view nightly > /dev/null 2>&1; then
+            gh release delete nightly --cleanup-tag --yes
+          fi
 
       - uses: softprops/action-gh-release@v3
         with:
