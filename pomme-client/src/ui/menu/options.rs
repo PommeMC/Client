@@ -12,9 +12,7 @@ use crate::ui::text::TextSpan;
 const COLLISION_STRIPE: [f32; 4] = common::rgb(0xffff00);
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
-/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget). On
-/// the Options screen itself the first row is its header's and the rest are
-/// its grid's (see [`RootLayout`]).
+/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
 pub(super) enum OptRow<'a> {
     Header(&'a str),
     Big(&'a str),
@@ -1452,6 +1450,10 @@ impl MainMenu {
         )
     }
 
+    /// An options screen: `rows` under its title and over Done. With
+    /// `options_list` they scroll as an `OptionsList` between the shared
+    /// header and footer; without, they take the Options screen's own layout
+    /// ([`RootLayout`]), the first in its header and the rest in its grid.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_options_grid(
         &mut self,
@@ -1464,7 +1466,7 @@ impl MainMenu {
         nav: &[(&str, Screen)],
         sliders: &[(&'static str, f32)],
         disabled: &[&str],
-        header_footer: bool,
+        options_list: bool,
         tooltips: &[(&str, &str)],
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
@@ -1483,7 +1485,7 @@ impl MainMenu {
         let lh = 9.0 * gs;
         let btn_dy = (row_h - btn_h) / 2.0;
         let cx = sw / 2.0;
-        let root = (!header_footer)
+        let root = (!options_list)
             .then(|| RootLayout::new(common::gui_size(sh, gs), rows.len().saturating_sub(1)));
         let done_w = 200.0 * gs;
         let (left_x, right_x, center_x, done_x) = if root.is_some() {
@@ -1535,7 +1537,7 @@ impl MainMenu {
             done_y = chrome.done_y;
         }
 
-        let content_pad = if header_footer { 4.0 * gs } else { 0.0 };
+        let content_pad = if options_list { 4.0 * gs } else { 0.0 };
         // Vertical advance per row (vanilla OptionsList: 25px pitch; headers pad
         // above).
         let header_pad_top = |i: usize| if i == 0 { 0.0 } else { 2.0 * lh };
@@ -1552,7 +1554,7 @@ impl MainMenu {
             .sum();
         let content_h = content_bottom - content_top;
         let list_h = grid_h + content_pad;
-        let scrollable = header_footer && list_h > content_h;
+        let scrollable = options_list && list_h > content_h;
         // `AbstractSelectionList.scrollBarX`: 8 right of the 310-wide rows.
         let scrollbar_x = cx + 163.0 * gs;
         if scrollable {
@@ -1581,7 +1583,7 @@ impl MainMenu {
             time_secs: self.created.elapsed().as_secs_f64(),
         };
 
-        if header_footer {
+        if options_list {
             elements.push(MenuElement::ScissorPush {
                 x: 0.0,
                 y: content_top,
@@ -1912,7 +1914,7 @@ impl MainMenu {
             self.settings_dirty = true;
         }
 
-        if header_footer {
+        if options_list {
             elements.push(MenuElement::ScissorPop);
         }
 
