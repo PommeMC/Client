@@ -5,8 +5,14 @@ on:
     tags: ["client-v*"]
   schedule:
     - cron: "7 18 * * 0" # Sundays 18:07 UTC (weekly pre-alpha snapshot of master)
+    - cron: "7 3 * * *" # 03:07 UTC (nightly build of master, for clients that opt in)
   workflow_dispatch:
     inputs:
+      channel:
+        description: "release: a client-v* release. nightly: replaces the rolling nightly pre-release"
+        type: choice
+        options: [release, nightly]
+        default: release
       version:
         description: "Version core, e.g. 0.2.0 (blank = bump patch from latest)"
         required: false
@@ -23,6 +29,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MC_VERSION: "26.2"
+  # The nightly schedule above, which tells its runs from the weekly one's.
+  NIGHTLY_CRON: "7 3 * * *"
 
 permissions:
   contents: write
@@ -40,23 +48,42 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      channel: ${{ steps.channel.outputs.channel }}
+      # The build's id, which the client is built with: the release's tag, or
+      # for a nightly `nightly-<last release>.<run>+<minecraft>`.
       tag: ${{ steps.rel.outputs.tag }}
+      # The git tag it is published under: `nightly` for every nightly.
+      release_tag: ${{ steps.rel.outputs.release_tag }}
       prev: ${{ steps.rel.outputs.prev }}
       version: ${{ steps.rel.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Check for new commits since last release
+      - name: Pick the channel
+        id: channel
+        shell: bash
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          REQUESTED: ${{ inputs.channel }}
+        run: |
+          if [ "$SCHEDULE" = "$NIGHTLY_CRON" ] || [ "$REQUESTED" = "nightly" ]; then
+            echo "channel=nightly" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for new commits since the last build
         id: check
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           release() { echo "should_release=true" >> "$GITHUB_OUTPUT"; exit 0; }
           skip() { echo "should_release=false" >> "$GITHUB_OUTPUT"; echo "$1"; exit 0; }
 
-          # Only the weekly cron is gated; a tag push or manual dispatch is a
+          # Only the crons are gated; a tag push or manual dispatch is a
           # deliberate act and always releases, and a pull request only builds.
           if [ "${{ github.event_name }}" != "schedule" ]; then
             release
@@ -66,6 +93,10 @@ jobs:
           last_tag=$(git tag --list 'client-v*' --sort=-v:refname | head -n1)
           if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..HEAD")" ]; then
             skip "No new commits on master since ${last_tag}."
+          fi
+          # A nightly of the commit the last one was built from changes nothing.
+          if [ "$CHANNEL" = "nightly" ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}')" = "$GITHUB_SHA" ]; then
+            skip "No new commits on master since the last nightly."
           fi
 
           # Merges are gated on CI, but master can still go red when two PRs pass
@@ -84,9 +115,25 @@ jobs:
       - name: Resolve release tag
         id: rel
         shell: bash
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           git fetch --tags --force
           tags=$(git tag --list 'client-v*')
+          if [ "$CHANNEL" = "nightly" ]; then
+            # The run number only goes up, so each nightly is newer than the
+            # one before, and both sit between this release and the next.
+            prev=$(echo "$tags" | sort -V | tail -n1)
+            core=$(echo "$prev" | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')
+            core=${core:-0.0.0}
+            {
+              echo "tag=nightly-${core}.${GITHUB_RUN_NUMBER}+${MC_VERSION}"
+              echo "release_tag=nightly"
+              echo "version=$core"
+              echo "prev=$prev"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ github.event_name }}" = "push" ]; then
             tag="${{ github.ref_name }}"
           else
@@ -106,6 +153,7 @@ jobs:
           fi
           prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
           version=${tag#client-v}
           echo "version=${version%%+*}" >> "$GITHUB_OUTPUT"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
@@ -245,15 +293,27 @@ jobs:
           cd dist
           sha256sum * > sha256sums.txt
 
+      # The nightly tag moves to this commit, so the last nightly goes first.
+      # Clients that look in between find no nightly and stay as they are.
+      - name: Remove the last nightly
+        if: needs.check.outputs.channel == 'nightly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete nightly --cleanup-tag --yes || true
+
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.check.outputs.tag }}
-          prerelease: false
-          make_latest: true
+          tag_name: ${{ needs.check.outputs.release_tag }}
+          name: ${{ needs.check.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.check.outputs.channel == 'nightly' }}
+          make_latest: ${{ needs.check.outputs.channel != 'nightly' }}
           previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ needs.check.outputs.prev != '' }}
           body: |
+            ${{ needs.check.outputs.channel == 'nightly' && 'A nightly build of master, less tested than a release. A client follows these with Options, Pomme Settings, Updates, Nightly Builds.' || '' }}
+
             These builds aren't signed yet, so the first launch needs one extra step:
             - **macOS:** open `Pomme.app` with right-click → Open, or allow it under System Settings → Privacy & Security.
             - **Windows:** on the SmartScreen prompt, choose More info → Run anyway.
