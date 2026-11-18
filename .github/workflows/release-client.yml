@@ -318,7 +318,7 @@ jobs:
           files: dist/*
           generate_release_notes: ${{ needs.check.outputs.prev != '' }}
           body: |
-            ${{ needs.check.outputs.channel == 'nightly' && 'A nightly build of master, less tested than a release. A client follows these with Options, Pomme Settings, Updates, Nightly Builds.' || '' }}
+            ${{ needs.check.outputs.channel == 'nightly' && 'A nightly build of master, less tested than a release. A client follows these with Options, Pomme Settings, Updates, Nightly Builds. If one will not start, reinstall the latest release, start it once with --no-update and turn Nightly Builds off.' || '' }}
 
             These builds aren't signed yet, so the first launch needs one extra step:
             - **macOS:** open `Pomme.app` with right-click → Open, or allow it under System Settings → Privacy & Security.
