@@ -1,5 +1,6 @@
-# The Chunk Detail slider defaults to Off at its right end and steps down to
-# 8 chunks at its left. Ends back on Off, since the options save.
+# Chunk Detail, in Pomme Settings' Performance category (Pomme-only): the
+# slider defaults to Off at its right end and steps down to 8 chunks at its
+# left. Ends back on Off, since the options save.
 
 [[step]]
 press = { action = "key.menu" }
@@ -17,9 +18,9 @@ mouse_down = "left"
 [[step]]
 mouse_up = "left"
 
-# Video Settings...
+# Pomme Settings, then its Performance category.
 [[step]]
-cursor = [133, 110]
+cursor_to_button = "Pomme Settings..."
 
 [[step]]
 mouse_down = "left"
@@ -28,10 +29,13 @@ mouse_down = "left"
 mouse_up = "left"
 
 [[step]]
-cursor = [213, 120]
+cursor_to_button = "Performance..."
 
 [[step]]
-scroll = -10.0
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
 
 [[step]]
 wait_ms = 300
@@ -40,7 +44,7 @@ wait_ms = 300
 screenshot = "off"
 
 [[step]]
-cursor = [60, 118]
+cursor = [60, 50]
 
 [[step]]
 mouse_down = "left"
@@ -55,7 +59,7 @@ wait_ms = 300
 screenshot = "eight"
 
 [[step]]
-cursor = [207, 118]
+cursor = [207, 50]
 
 [[step]]
 mouse_down = "left"
@@ -63,7 +67,19 @@ mouse_down = "left"
 [[step]]
 mouse_up = "left"
 
-# Done, then Done again on Options.
+# Done on Performance, on Pomme Settings, then on Options.
+[[step]]
+cursor = [213, 223]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
 [[step]]
 cursor = [213, 223]
 

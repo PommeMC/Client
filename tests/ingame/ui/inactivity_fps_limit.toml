@@ -26,7 +26,7 @@ mouse_up = "left"
 
 # Video Settings...
 [[step]]
-cursor = [133, 115]
+cursor_to_button = "Video Settings..."
 
 [[step]]
 mouse_down = "left"

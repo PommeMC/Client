@@ -18,6 +18,10 @@ pub(super) enum OptRow<'a> {
     Big(&'a str),
     Pair(&'a str, &'a str),
     PairLeft(&'a str),
+    /// One 150px widget centred on the screen. As the last row of a screen
+    /// without a header it hangs below the centred grid, which moves up only
+    /// when the row wouldn't clear Done.
+    Center(&'a str),
 }
 
 fn option_enabled(label: &str, disabled: &[&str]) -> bool {
@@ -30,7 +34,7 @@ fn option_enabled(label: &str, disabled: &[&str]) -> bool {
 fn row_labels<'a>(row: &OptRow<'a>) -> Vec<&'a str> {
     match row {
         OptRow::Header(_) => Vec::new(),
-        OptRow::Big(a) | OptRow::PairLeft(a) => vec![*a],
+        OptRow::Big(a) | OptRow::PairLeft(a) | OptRow::Center(a) => vec![*a],
         OptRow::Pair(a, b) => vec![*a, *b],
     }
 }
@@ -140,7 +144,9 @@ const CHAT_SCALE: &str = "Chat Text Size:";
 const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
+const CHUNK_DETAIL: &str = "Chunk Detail:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
+const SHADER_PACK: &str = "Shader Pack:";
 const CHUNK_FADE: &str = "Chunk Fade:";
 const INACTIVITY_FPS_LIMIT: &str = "Reduce fps when:";
 
@@ -258,6 +264,9 @@ impl MainMenu {
             OptRow::Pair("Language...", "Chat Settings..."),
             OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
             OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
+            // The one way into Pomme's own settings (Pomme-only), under the
+            // grid so its rows keep their order.
+            OptRow::Center("Pomme Settings..."),
         ];
 
         let nav: &[(&str, Screen)] = &[
@@ -272,6 +281,7 @@ impl MainMenu {
             ("Accessibility Settings...", Screen::OptionsAccessibility),
             ("Telemetry Data...", Screen::OptionsTelemetry),
             ("Credits & Attribution...", Screen::OptionsCredits),
+            ("Pomme Settings...", Screen::OptionsPomme),
         ];
 
         let fov_frac = (self.fov as f32 - 30.0) / 80.0;
@@ -343,7 +353,7 @@ impl MainMenu {
     fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
-            "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
+            CHUNK_DETAIL => super::CHUNK_DETAIL_SPAN,
             DISTANT_TERRAIN => super::DISTANT_TERRAIN_STEPS as f32,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
@@ -381,16 +391,6 @@ impl MainMenu {
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
         let rd = format!("Render Distance: {} chunks", self.render_distance);
-        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
-            "Chunk Detail: Off".to_string()
-        } else {
-            format!("Chunk Detail: {} chunks", self.chunk_detail)
-        };
-        let dt = if self.distant_terrain == 0 {
-            format!("{DISTANT_TERRAIN} OFF")
-        } else {
-            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
-        };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -411,10 +411,6 @@ impl MainMenu {
         let inactivity_label = format!(
             "{INACTIVITY_FPS_LIMIT} {}",
             self.inactivity_fps_limit.label()
-        );
-        let shader_label = format!(
-            "Shader Pack: {}",
-            self.shader_pack.as_deref().unwrap_or("OFF")
         );
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
         let vignette_label = if self.vignette {
@@ -448,13 +444,12 @@ impl MainMenu {
             // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
-            OptRow::Pair(&cd, &dt),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
             OptRow::Pair(&blur_label, "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::Pair("Weather Radius: 10", &shader_label),
+            OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
             OptRow::Pair(autosave_label, vignette_label),
             OptRow::Pair(&attack_label, &fade_label),
@@ -462,17 +457,10 @@ impl MainMenu {
         let rd_frac = ((self.render_distance as f32 - 2.0)
             / (self.render_distance_max() as f32 - 2.0))
             .clamp(0.0, 1.0);
-        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
-            / super::CHUNK_DETAIL_SPAN)
-            .clamp(0.0, 1.0);
-        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
-            / super::DISTANT_TERRAIN_STEPS as f32;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
-            ("Chunk Detail:", cd_frac),
-            (DISTANT_TERRAIN, dt_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
             (BRIGHTNESS, self.brightness),
@@ -517,6 +505,113 @@ impl MainMenu {
             disabled,
             true,
             tooltips,
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme's own settings (Pomme-only): everything the options screens
+    /// have no place for, one sub-screen per category as Options has one per
+    /// area.
+    pub(super) fn build_options_pomme(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let rows = [OptRow::Pair("Performance...", "Shaders...")];
+        let nav: &[(&str, Screen)] = &[
+            ("Performance...", Screen::OptionsPommePerformance),
+            ("Shaders...", Screen::OptionsPommeShaders),
+        ];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Pomme Settings",
+            Screen::Options,
+            &rows,
+            nav,
+            &[],
+            &[],
+            false,
+            &[],
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme Settings' Performance category (Pomme-only).
+    pub(super) fn build_options_pomme_performance(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
+            format!("{CHUNK_DETAIL} Off")
+        } else {
+            format!("{CHUNK_DETAIL} {} chunks", self.chunk_detail)
+        };
+        let dt = if self.distant_terrain == 0 {
+            format!("{DISTANT_TERRAIN} OFF")
+        } else {
+            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
+        };
+        let rows = [OptRow::Pair(&cd, &dt)];
+        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
+            / super::CHUNK_DETAIL_SPAN)
+            .clamp(0.0, 1.0);
+        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
+            / super::DISTANT_TERRAIN_STEPS as f32;
+        let sliders: &[(&str, f32)] = &[(CHUNK_DETAIL, cd_frac), (DISTANT_TERRAIN, dt_frac)];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Performance",
+            Screen::OptionsPomme,
+            &rows,
+            &[],
+            sliders,
+            &[],
+            true,
+            &[],
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme Settings' Shaders category (Pomme-only).
+    pub(super) fn build_options_pomme_shaders(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let shader_label = format!(
+            "{SHADER_PACK} {}",
+            self.shader_pack.as_deref().unwrap_or("OFF")
+        );
+        let rows = [OptRow::PairLeft(&shader_label)];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Shaders",
+            Screen::OptionsPomme,
+            &rows,
+            &[],
+            &[],
+            &[],
+            true,
+            &[],
             text_width_fn,
             key_bindings,
         )
@@ -1391,6 +1486,10 @@ impl MainMenu {
             .enumerate()
             .map(|(i, row)| row_advance(i, row))
             .sum();
+        let hanging_h = match rows.last() {
+            Some(OptRow::Center(_)) if !header_footer => row_h,
+            _ => 0.0,
+        };
         let content_h = content_bottom - content_top;
         let list_h = grid_h + content_pad;
         let scrollable = header_footer && list_h > content_h;
@@ -1418,7 +1517,13 @@ impl MainMenu {
         let top_y = if header_footer {
             content_top + content_pad - scroll
         } else {
-            content_top + (content_h - grid_h) / 2.0
+            let centred = content_top + (content_h - (grid_h - hanging_h)) / 2.0;
+            if hanging_h > 0.0 {
+                // Done keeps the gap the rows have between them.
+                centred.min(content_bottom - grid_h - btn_dy)
+            } else {
+                centred
+            }
         };
         let mut slider_results: Vec<(&str, f32)> = Vec::new();
         let label_scroll = common::LabelScroll {
@@ -1472,6 +1577,7 @@ impl MainMenu {
                     widgets.push((*b, right_x, small_w));
                 }
                 OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
+                OptRow::Center(a) => widgets.push((*a, cx - small_w / 2.0, small_w)),
             }
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
@@ -1578,7 +1684,7 @@ impl MainMenu {
                         self.cloud_mode = self.cloud_mode.cycle();
                         self.save_settings(key_bindings);
                     }
-                    if label.starts_with("Shader Pack:") {
+                    if label.starts_with(SHADER_PACK) {
                         self.shader_pack =
                             next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
                         self.save_settings(key_bindings);
@@ -1710,7 +1816,7 @@ impl MainMenu {
             let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
-                "Chunk Detail:" => {
+                CHUNK_DETAIL => {
                     self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
                 }
                 DISTANT_TERRAIN => {
@@ -2569,7 +2675,8 @@ mod tests {
     struct Grid {
         menu: MainMenu,
         key_bindings: KeyBindings,
-        rows: [OptRow<'static>; 1],
+        rows: Vec<OptRow<'static>>,
+        height: f32,
         nav: Vec<(&'static str, Screen)>,
         sliders: Vec<(&'static str, f32)>,
         disabled: Vec<&'static str>,
@@ -2581,7 +2688,8 @@ mod tests {
             Self {
                 menu: test_menu("pomme-options-focus-test", &mut key_bindings),
                 key_bindings,
-                rows: [OptRow::Pair(left, right)],
+                rows: vec![OptRow::Pair(left, right)],
+                height: 600.0,
                 nav: Vec::new(),
                 sliders: Vec::new(),
                 disabled: Vec::new(),
@@ -2598,7 +2706,7 @@ mod tests {
             let text_width = |_: &str, _: f32| 0.0;
             self.menu.build_options_grid(
                 800.0,
-                600.0,
+                self.height,
                 input,
                 "Test",
                 Screen::Main,
@@ -2619,8 +2727,12 @@ mod tests {
     }
 
     fn click(x: f32) -> MenuInput {
+        click_at(x, 300.0)
+    }
+
+    fn click_at(x: f32, y: f32) -> MenuInput {
         MenuInput {
-            cursor: (x, 300.0),
+            cursor: (x, y),
             clicked: true,
             mouse_held: true,
             ..Default::default()
@@ -2842,11 +2954,68 @@ mod tests {
         menu.build_options_mouse(sw, sh, &input, tw, &key_bindings);
         menu.build_options(sw, sh, &input, tw, &key_bindings);
         menu.build_options_video(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme_performance(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme_shaders(sw, sh, &input, tw, &key_bindings);
         menu.build_options_controls(sw, sh, &input, tw, &key_bindings);
         menu.build_options_chat(sw, sh, &input, tw, &key_bindings);
         menu.build_options_accessibility(sw, sh, &input, tw, &key_bindings);
         menu.build_options_music(sw, sh, &input, tw, &key_bindings);
         menu.build_options_skin(sw, sh, &input, tw, &key_bindings);
         menu.build_options_online(sw, sh, &input, tw, &key_bindings);
+    }
+
+    /// Every button frame `w` wide, as `(x, y)`, in build order.
+    fn frames(result: &MainMenuResult, w: f32) -> Vec<(f32, f32)> {
+        result
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::NineSlice { x, y, w: fw, .. } if *fw == w => Some((*x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_trailing_centre_row_lifts_the_grid_only_when_it_would_not_clear_done() {
+        let idle = MenuInput::default();
+        let mut plain = Grid::new("First", "Second");
+        let mut hanging = Grid::new("First", "Second");
+        hanging.rows.push(OptRow::Center("Third"));
+
+        // Room to spare: the grid stays put and the row sits one pitch below.
+        let before = frames(&plain.frame(&idle), 150.0);
+        let after = frames(&hanging.frame(&idle), 150.0);
+        assert_eq!(after[..2], before[..]);
+        assert_eq!(after[2], (325.0, before[0].1 + 25.0));
+
+        // Too short: the grid moves up until the row clears Done by the gap
+        // rows keep between them.
+        plain.height = 120.0;
+        hanging.height = 120.0;
+        let short = hanging.frame(&idle);
+        let done_y = frames(&short, 200.0)[0].1;
+        let rows = frames(&short, 150.0);
+        assert_eq!(rows[2].1 + BTN_H + 5.0, done_y);
+        assert_eq!(rows[0].1 + 25.0, rows[2].1);
+        assert!(rows[0].1 < frames(&plain.frame(&idle), 150.0)[0].1);
+    }
+
+    #[test]
+    fn the_pomme_settings_button_opens_its_categories() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-settings-entry-test", &mut key_bindings);
+        let text_width = |_: &str, _: f32| 0.0;
+        let tw: common::TextWidthFn = &text_width;
+        let idle = menu.build_options(800.0, 600.0, &MenuInput::default(), tw, &key_bindings);
+        // The only small widget centred on the screen.
+        let (x, y) = *frames(&idle, 150.0)
+            .iter()
+            .find(|(x, _)| *x == 325.0)
+            .expect("the centred row");
+        let click = click_at(x + 75.0, y + BTN_H / 2.0);
+        menu.build_options(800.0, 600.0, &click, tw, &key_bindings);
+        assert!(matches!(menu.screen, Screen::OptionsPomme));
     }
 }
