@@ -1,7 +1,8 @@
 # Pomme's own settings (Pomme-only): a button under the Options grid opens
 # them, one screen per category. Performance holds Chunk Detail and Distant
-# Terrain, Shaders holds Shader Pack. The other client has no such button, so
-# the script fails there by design.
+# Terrain, Shaders holds Shader Pack.
+
+pomme_only = true
 
 [[step]]
 press = { action = "key.menu" }

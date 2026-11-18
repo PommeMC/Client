@@ -68,6 +68,10 @@ min_version = "1.20.5"
 that version. Gate only for what the server can't do; a script failing because
 of a client bug stays a failure.
 
+A script about a Pomme extension, which vanilla has no screen or option for,
+sets `pomme_only = true` the same way. The vanilla harness prints `SKIP` for
+it instead of failing.
+
 ## Wire fixtures
 
 `just wire-fixtures <version>...` runs `world/join` on each version with

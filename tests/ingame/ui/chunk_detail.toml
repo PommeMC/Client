@@ -2,6 +2,8 @@
 # slider defaults to Off at its right end and steps down to 8 chunks at its
 # left. Ends back on Off, since the options save.
 
+pomme_only = true
+
 [[step]]
 press = { action = "key.menu" }
 
