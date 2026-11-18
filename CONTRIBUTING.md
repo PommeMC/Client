@@ -115,13 +115,17 @@ Client releases are built by `.github/workflows/release-client.yml`:
   since the last one or when that commit's CI is not green.
 - The week's release in two steps: on Thursday the last nightly's commit is
   built as a candidate, a draft release no client sees, and on Sunday the draft
-  is published, after daily clients have run that code for a few days. To hold
-  a candidate back, delete its draft and its tag before Sunday; do the same
-  before cutting a release by hand while one waits.
+  is published, after daily clients have run that code for a few days.
 - A manual dispatch: `release` cuts and publishes at once, optionally with a
   version core (blank bumps the patch), and `nightly`, `candidate` and
   `publish` run those steps by hand. Tick `dry_run` to build and package
   without releasing: the files stay on the run.
+
+To hold a candidate back, delete its draft before Sunday. Do the same before
+cutting a release by hand while one waits, and for a draft a missed publish
+left behind. Leave the tag: the nightlies since are numbered from it, and
+without it the next ones would look older to the clients that took them. The
+version it named is skipped.
 
 Each release has, per OS, a zip (the files the updater swaps in, also usable
 as a portable install) and an installer built from it by `packaging/`: a dmg
