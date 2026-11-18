@@ -1,6 +1,7 @@
-//! The Pomme client's own builds, published as `client-v*` GitHub releases:
-//! finding the newest, and downloading this platform's zip checked against the
-//! release's `sha256sums.txt`.
+//! The Pomme client's own builds, published as GitHub releases: a `client-v*`
+//! one per release and a rolling `nightly` one for master's latest build.
+//! Finding the newest on a channel, and downloading this platform's zip
+//! checked against the release's `sha256sums.txt`.
 
 use std::path::Path;
 
@@ -12,13 +13,81 @@ use crate::{Progress, get};
 /// Newest first; listed rather than `/releases/latest`, which held the
 /// launcher's releases before the client's.
 const RELEASES_URL: &str = "https://api.github.com/repos/PommeMC/Client/releases?per_page=30";
-const TAG_PREFIX: &str = "client-v";
+const RELEASE_PREFIX: &str = "client-v";
+const NIGHTLY_PREFIX: &str = "nightly-";
+/// The tag of the one release each nightly build replaces.
+const NIGHTLY_TAG: &str = "nightly";
 const CHECKSUMS_ASSET: &str = "sha256sums.txt";
+
+/// Which builds a client updates to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// Releases only.
+    Stable,
+    /// Master's latest build too, whichever is newer.
+    Nightly,
+}
+
+/// A published build, ordered oldest first: release `x.y.z` from
+/// `client-vx.y.z+<minecraft>`, or the `n`th build of master after it from
+/// `nightly-x.y.z.n+<minecraft>`. A nightly is newer than the release it
+/// follows and older than the next one, which is cut from a later master.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Build {
+    version: (u32, u32, u32),
+    /// 0 for a release.
+    nightly: u32,
+}
+
+impl Build {
+    pub fn parse(id: &str) -> Option<Self> {
+        let (core, is_nightly) = match id.strip_prefix(RELEASE_PREFIX) {
+            Some(core) => (core, false),
+            None => (id.strip_prefix(NIGHTLY_PREFIX)?, true),
+        };
+        let core = core.split_once('+').map_or(core, |(core, _)| core);
+        let mut parts = core.split('.').map(str::parse);
+        let version = (
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        );
+        let nightly = if is_nightly {
+            parts.next()?.ok().filter(|n| *n > 0)?
+        } else {
+            0
+        };
+        parts.next().is_none().then_some(Self { version, nightly })
+    }
+}
+
+impl std::fmt::Display for Build {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (major, minor, patch) = self.version;
+        write!(f, "{major}.{minor}.{patch}")?;
+        if self.nightly > 0 {
+            write!(f, "-nightly.{}", self.nightly)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Deserialize)]
 pub struct Release {
-    pub tag_name: String,
+    tag_name: String,
+    name: Option<String>,
     assets: Vec<Asset>,
+}
+
+impl Release {
+    /// What names the build: the tag, or under the rolling nightly tag the
+    /// release's name.
+    pub fn id(&self) -> &str {
+        match (self.tag_name.as_str(), &self.name) {
+            (NIGHTLY_TAG, Some(name)) => name,
+            (tag, _) => tag,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -41,41 +110,32 @@ pub fn platform_zip() -> Result<&'static str, String> {
     }
 }
 
-/// Whether release `theirs` is a later build than `ours`, by the `x.y.z` of
-/// `client-vx.y.z+<minecraft>`; never for a tag that doesn't parse.
+/// Whether `theirs` is a later build than `ours`; never for an id that
+/// doesn't parse.
 pub fn is_newer(ours: &str, theirs: &str) -> bool {
-    match (release_core(ours), release_core(theirs)) {
+    match (Build::parse(ours), Build::parse(theirs)) {
         (Some(ours), Some(theirs)) => theirs > ours,
         _ => false,
     }
 }
 
-/// The `x.y.z` of a `client-vx.y.z+<minecraft>` tag.
-pub fn release_version(tag: &str) -> Option<&str> {
-    let core = tag.strip_prefix(TAG_PREFIX)?;
-    Some(core.split_once('+').map_or(core, |(core, _)| core))
-}
-
-fn release_core(tag: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = release_version(tag)?.split('.').map(str::parse);
-    let version = (
-        parts.next()?.ok()?,
-        parts.next()?.ok()?,
-        parts.next()?.ok()?,
-    );
-    parts.next().is_none().then_some(version)
-}
-
-pub async fn latest_release(http: &reqwest::Client) -> Result<Release, String> {
+pub async fn latest_release(http: &reqwest::Client, channel: Channel) -> Result<Release, String> {
     let releases: Vec<Release> = get(http, RELEASES_URL)
         .await?
         .json()
         .await
         .map_err(|e| e.to_string())?;
+    newest(releases, channel).ok_or_else(|| "No client release found".to_owned())
+}
+
+/// The newest build among `releases` that `channel` takes.
+fn newest(releases: Vec<Release>, channel: Channel) -> Option<Release> {
     releases
         .into_iter()
-        .find(|r| r.tag_name.starts_with(TAG_PREFIX))
-        .ok_or_else(|| "No client release found".to_owned())
+        .filter_map(|release| Some((Build::parse(release.id())?, release)))
+        .filter(|(build, _)| channel == Channel::Nightly || build.nightly == 0)
+        .max_by_key(|(build, _)| *build)
+        .map(|(_, release)| release)
 }
 
 /// File `name` of `release`, refused unless it matches the release's
@@ -91,7 +151,7 @@ pub async fn download(
             .assets
             .iter()
             .find(|a| a.name == name)
-            .ok_or_else(|| format!("Release {} has no {name}", release.tag_name))
+            .ok_or_else(|| format!("Release {} has no {name}", release.id()))
     };
     let sums = get(http, &asset(CHECKSUMS_ASSET)?.browser_download_url)
         .await?
@@ -179,10 +239,67 @@ mod tests {
     }
 
     #[test]
-    fn the_version_drops_the_minecraft_part() {
-        assert_eq!(release_version("client-v0.2.8+26.2"), Some("0.2.8"));
-        assert_eq!(release_version("client-v0.2.8"), Some("0.2.8"));
-        assert_eq!(release_version("launcher-v0.1.2"), None);
+    fn a_nightly_sits_between_the_release_it_follows_and_the_next() {
+        let (release, nightly) = ("client-v0.2.12+26.2", "nightly-0.2.12.345+26.2");
+        assert!(is_newer(release, nightly));
+        assert!(is_newer(nightly, "nightly-0.2.12.346+26.2"));
+        assert!(is_newer(nightly, "client-v0.2.13+26.2"));
+        assert!(!is_newer(nightly, release));
+        assert!(!is_newer(nightly, nightly));
+        // A nightly names the run that built it.
+        assert!(!is_newer(release, "nightly-0.2.12+26.2"));
+        assert!(!is_newer(release, "nightly-0.2.12.0+26.2"));
+        assert!(!is_newer(release, "nightly"));
+    }
+
+    #[test]
+    fn a_build_shows_as_its_version() {
+        let shown = |id| Build::parse(id).map(|build| build.to_string());
+        assert_eq!(shown("client-v0.2.8+26.2").as_deref(), Some("0.2.8"));
+        assert_eq!(shown("client-v0.2.8").as_deref(), Some("0.2.8"));
+        assert_eq!(
+            shown("nightly-0.2.8.345+26.2").as_deref(),
+            Some("0.2.8-nightly.345")
+        );
+        assert_eq!(shown("launcher-v0.1.2"), None);
+    }
+
+    fn releases(json: &str) -> Vec<Release> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_channel_takes_its_newest_build() {
+        // As GitHub lists them: the rolling nightly, recreated each night,
+        // then the releases newest first.
+        let listed = r#"[
+            {"tag_name": "nightly", "name": "nightly-0.2.12.345+26.2", "assets": []},
+            {"tag_name": "client-v0.2.12+26.2", "name": "client-v0.2.12+26.2", "assets": []},
+            {"tag_name": "client-v0.2.11+26.2", "name": null, "assets": []},
+            {"tag_name": "launcher-v0.1.2", "name": null, "assets": []}
+        ]"#;
+        let id = |channel| newest(releases(listed), channel).map(|r| r.id().to_owned());
+        assert_eq!(id(Channel::Stable).as_deref(), Some("client-v0.2.12+26.2"));
+        assert_eq!(
+            id(Channel::Nightly).as_deref(),
+            Some("nightly-0.2.12.345+26.2")
+        );
+    }
+
+    #[test]
+    fn the_nightly_channel_takes_a_release_newer_than_the_nightly() {
+        let listed = r#"[
+            {"tag_name": "client-v0.2.13+26.2", "name": null, "assets": []},
+            {"tag_name": "nightly", "name": "nightly-0.2.12.345+26.2", "assets": []}
+        ]"#;
+        let newest = newest(releases(listed), Channel::Nightly).unwrap();
+        assert_eq!(newest.id(), "client-v0.2.13+26.2");
+    }
+
+    #[test]
+    fn no_release_is_no_build() {
+        let listed = r#"[{"tag_name": "launcher-v0.1.2", "name": null, "assets": []}]"#;
+        assert!(newest(releases(listed), Channel::Nightly).is_none());
     }
 
     #[test]

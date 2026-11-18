@@ -70,16 +70,19 @@ impl Install {
         let state = Arc::clone(&self.state);
         let report = move |progress| *state.lock().unwrap() = State::Running(progress);
         let job: Pin<Box<dyn Future<Output = State> + Send>> = match self.job {
-            Job::Update => Box::pin(async move {
-                match crate::update::run(&report).await {
-                    Ok(Some(exe)) => State::Updated(exe),
-                    Ok(None) => State::Done,
-                    Err(reason) => {
-                        tracing::warn!("Skipping the update: {reason}");
-                        State::Done
+            Job::Update => {
+                let channel = core.menu.update_channel();
+                Box::pin(async move {
+                    match crate::update::run(channel, &report).await {
+                        Ok(Some(exe)) => State::Updated(exe),
+                        Ok(None) => State::Done,
+                        Err(reason) => {
+                            tracing::warn!("Skipping the update: {reason}");
+                            State::Done
+                        }
                     }
-                }
-            }),
+                })
+            }
             Job::Assets => {
                 let dirs = core.data_dirs.clone();
                 let version = core.version.clone();

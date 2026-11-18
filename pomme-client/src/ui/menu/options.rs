@@ -193,6 +193,7 @@ const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
 const CHUNK_DETAIL: &str = "Chunk Detail:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
 const SHADER_PACK: &str = "Shader Pack:";
+const NIGHTLY_BUILDS: &str = "Nightly Builds:";
 const CHUNK_FADE: &str = "Chunk Fade:";
 const INACTIVITY_FPS_LIMIT: &str = "Reduce fps when:";
 
@@ -566,10 +567,15 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let rows = [OptRow::Pair("Performance...", "Shaders...")];
+        let mut rows = vec![OptRow::Pair("Performance...", "Shaders...")];
+        // Phones and tablets don't update themselves (`update::enabled`).
+        if cfg!(not(mobile)) {
+            rows.push(OptRow::PairLeft("Updates..."));
+        }
         let nav: &[(&str, Screen)] = &[
             ("Performance...", Screen::OptionsPommePerformance),
             ("Shaders...", Screen::OptionsPommeShaders),
+            ("Updates...", Screen::OptionsPommeUpdates),
         ];
         self.build_options_grid(
             sw,
@@ -657,6 +663,39 @@ impl MainMenu {
             &[],
             true,
             &[],
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme Settings' Updates category (Pomme-only).
+    pub(super) fn build_options_pomme_updates(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let nightly_label = format!("{NIGHTLY_BUILDS} {}", on_off(self.nightly_builds));
+        let rows = [OptRow::PairLeft(&nightly_label)];
+        let tooltips: &[(&str, &str)] = &[(
+            NIGHTLY_BUILDS,
+            "Updates to each night's build when the game starts, not only to releases. Nightly \
+             builds are less tested.",
+        )];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Updates",
+            Screen::OptionsPomme,
+            &rows,
+            &[],
+            &[],
+            &[],
+            true,
+            tooltips,
             text_width_fn,
             key_bindings,
         )
@@ -1739,6 +1778,10 @@ impl MainMenu {
                         self.cloud_mode = self.cloud_mode.cycle();
                         self.save_settings(key_bindings);
                     }
+                    if label.starts_with(NIGHTLY_BUILDS) {
+                        self.nightly_builds = !self.nightly_builds;
+                        self.save_settings(key_bindings);
+                    }
                     if label.starts_with(SHADER_PACK) {
                         self.shader_pack =
                             next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
@@ -2808,16 +2851,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn entity_shadows_toggle_preserves_saved_key_bindings() {
-        let dir =
-            std::env::temp_dir().join(format!("pomme-entity-shadows-{}", uuid::Uuid::new_v4()));
+    /// A grid whose options save to a folder of its own, gone with the guard.
+    fn saving_grid(left: &'static str) -> (Grid, impl Drop) {
+        let dir = std::env::temp_dir().join(format!("pomme-options-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let _cleanup = scopeguard::guard((), |_| {
+        let mut grid = Grid::new(left, "Other");
+        grid.menu.settings_dir = dir.clone();
+        let cleanup = scopeguard::guard((), move |_| {
             let _ = std::fs::remove_dir_all(&dir);
         });
-        let mut grid = Grid::new("Entity Shadows: ON", "Other");
-        grid.menu.settings_dir = dir.clone();
+        (grid, cleanup)
+    }
+
+    fn saved_settings(grid: &Grid) -> Settings {
+        let saved = std::fs::read_to_string(grid.menu.settings_dir.join("options.json")).unwrap();
+        serde_json::from_str(&saved).unwrap()
+    }
+
+    #[test]
+    fn entity_shadows_toggle_preserves_saved_key_bindings() {
+        let (mut grid, _cleanup) = saving_grid("Entity Shadows: ON");
         grid.menu.entity_shadows = true;
         grid.key_bindings
             .set(Action::Jump, vec![InputKey::Keyboard(KeyCode::KeyJ)]);
@@ -2826,15 +2879,23 @@ mod tests {
         for enabled in [false, true] {
             assert!(grid.frame(&click(300.0)).clicked_button);
             assert_eq!(grid.menu.entity_shadows, enabled);
-            let saved: Settings =
-                serde_json::from_str(&std::fs::read_to_string(dir.join("options.json")).unwrap())
-                    .unwrap();
+            let saved = saved_settings(&grid);
             assert_eq!(saved.entity_shadows, enabled);
             assert_eq!(
                 serde_json::to_value(&saved.key_bindings).unwrap(),
                 serde_json::to_value(&grid.key_bindings).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn the_nightly_builds_toggle_moves_the_update_channel_and_is_saved() {
+        let (mut grid, _cleanup) = saving_grid("Nightly Builds: OFF");
+        assert_eq!(grid.menu.update_channel(), Channel::Stable);
+
+        assert!(grid.frame(&click(300.0)).clicked_button);
+        assert_eq!(grid.menu.update_channel(), Channel::Nightly);
+        assert!(saved_settings(&grid).nightly_builds);
     }
 
     #[test]
@@ -3004,6 +3065,7 @@ mod tests {
         menu.build_options_pomme(sw, sh, &input, tw, &key_bindings);
         menu.build_options_pomme_performance(sw, sh, &input, tw, &key_bindings);
         menu.build_options_pomme_shaders(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme_updates(sw, sh, &input, tw, &key_bindings);
         menu.build_options_controls(sw, sh, &input, tw, &key_bindings);
         menu.build_options_chat(sw, sh, &input, tw, &key_bindings);
         menu.build_options_accessibility(sw, sh, &input, tw, &key_bindings);
