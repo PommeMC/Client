@@ -142,11 +142,11 @@ jobs:
         id: rel
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           git fetch --tags --force
-          tags=$(git tag --list 'client-v*')
-          latest=$(echo "$tags" \
+          latest=$(git tag --list 'client-v*' \
             | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
             | sort -V | tail -n1)
           if [ "$CHANNEL" = "nightly" ]; then
@@ -176,7 +176,11 @@ jobs:
             version=${tag#client-v}
             version=${version%%+*}
           fi
-          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          # The notes run from the last release that went out, not a tag left
+          # by a candidate that was held back.
+          prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName' \
+            | grep '^client-v' | grep -vFx "$tag" | sort -V | tail -n1 || true)
           {
             echo "tag=$tag"
             echo "release_tag=$release_tag"
