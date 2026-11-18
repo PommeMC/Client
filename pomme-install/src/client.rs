@@ -264,8 +264,10 @@ mod tests {
         assert_eq!(shown("launcher-v0.1.2"), None);
     }
 
-    fn releases(json: &str) -> Vec<Release> {
-        serde_json::from_str(json).unwrap()
+    /// The id of the newest build `channel` takes from GitHub's `listed`.
+    fn newest_id(listed: &str, channel: Channel) -> Option<String> {
+        let releases: Vec<Release> = serde_json::from_str(listed).unwrap();
+        newest(releases, channel).map(|release| release.id().to_owned())
     }
 
     #[test]
@@ -278,11 +280,25 @@ mod tests {
             {"tag_name": "client-v0.2.11+26.2", "name": null, "assets": []},
             {"tag_name": "launcher-v0.1.2", "name": null, "assets": []}
         ]"#;
-        let id = |channel| newest(releases(listed), channel).map(|r| r.id().to_owned());
-        assert_eq!(id(Channel::Stable).as_deref(), Some("client-v0.2.12+26.2"));
         assert_eq!(
-            id(Channel::Nightly).as_deref(),
+            newest_id(listed, Channel::Stable).as_deref(),
+            Some("client-v0.2.12+26.2")
+        );
+        assert_eq!(
+            newest_id(listed, Channel::Nightly).as_deref(),
             Some("nightly-0.2.12.345+26.2")
+        );
+    }
+
+    #[test]
+    fn the_newest_build_is_the_highest_however_they_are_listed() {
+        let listed = r#"[
+            {"tag_name": "client-v0.2.11+26.2", "name": null, "assets": []},
+            {"tag_name": "client-v0.2.12+26.2", "name": null, "assets": []}
+        ]"#;
+        assert_eq!(
+            newest_id(listed, Channel::Stable).as_deref(),
+            Some("client-v0.2.12+26.2")
         );
     }
 
@@ -292,14 +308,16 @@ mod tests {
             {"tag_name": "client-v0.2.13+26.2", "name": null, "assets": []},
             {"tag_name": "nightly", "name": "nightly-0.2.12.345+26.2", "assets": []}
         ]"#;
-        let newest = newest(releases(listed), Channel::Nightly).unwrap();
-        assert_eq!(newest.id(), "client-v0.2.13+26.2");
+        assert_eq!(
+            newest_id(listed, Channel::Nightly).as_deref(),
+            Some("client-v0.2.13+26.2")
+        );
     }
 
     #[test]
     fn no_release_is_no_build() {
         let listed = r#"[{"tag_name": "launcher-v0.1.2", "name": null, "assets": []}]"#;
-        assert!(newest(releases(listed), Channel::Nightly).is_none());
+        assert_eq!(newest_id(listed, Channel::Nightly), None);
     }
 
     #[test]

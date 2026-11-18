@@ -30,18 +30,20 @@ pub fn version() -> &'static str {
     })
 }
 
-/// Whether this launch checks for a newer release. Not when the old launcher
-/// started it: that keeps its own copies under `launcher/clients`.
+/// Whether this launch checks for a newer build: only a published one's.
 pub fn enabled(args: &crate::LaunchArgs) -> bool {
+    RELEASE.is_some() && cfg!(not(mobile)) && wanted(args)
+}
+
+/// Whether `args` leave the update on. Not when the old launcher started the
+/// client: that keeps its own copies under `launcher/clients`.
+fn wanted(args: &crate::LaunchArgs) -> bool {
     #[cfg(feature = "test-harness")]
     if args.harness_script.is_some() {
         return false;
     }
     // A `--chunk-bench` run measures the binary it was started with.
-    RELEASE.is_some()
-        && cfg!(not(mobile))
-        && args.launch_token.is_none()
-        && args.chunk_bench.is_none()
+    !args.no_update && args.launch_token.is_none() && args.chunk_bench.is_none()
 }
 
 /// Installs `channel`'s newest build over this one if it is newer, returning
@@ -173,6 +175,15 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn a_launch_can_turn_the_update_off() {
+        let wanted = |words| wanted(&crate::LaunchArgs::from_words(words).unwrap());
+        assert!(wanted(""));
+        assert!(!wanted("--no-update"));
+        assert!(!wanted("--launch-token abc"));
+        assert!(!wanted("--chunk-bench 16"));
+    }
 
     fn release_zip(files: &[(&str, &str)]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
