@@ -34,6 +34,10 @@ struct ScriptFile {
     _min_version: Option<String>,
     #[serde(default, rename = "max_version")]
     _max_version: Option<String>,
+    /// Marks a script about a Pomme extension, which the vanilla harness
+    /// skips.
+    #[serde(default, rename = "pomme_only")]
+    _pomme_only: bool,
 }
 
 /// One `[[step]]` table: exactly one action, plus an optional timeout.

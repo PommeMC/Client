@@ -629,6 +629,10 @@ enum Screen {
     Options,
     OptionsOnline,
     OptionsVideo,
+    /// Pomme's own settings and their category screens (Pomme-only).
+    OptionsPomme,
+    OptionsPommePerformance,
+    OptionsPommeShaders,
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
@@ -654,6 +658,9 @@ impl Screen {
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
+            Self::OptionsPomme => Self::OptionsPomme,
+            Self::OptionsPommePerformance => Self::OptionsPommePerformance,
+            Self::OptionsPommeShaders => Self::OptionsPommeShaders,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
@@ -1422,6 +1429,9 @@ impl MainMenu {
             Screen::Options
                 | Screen::OptionsOnline
                 | Screen::OptionsVideo
+                | Screen::OptionsPomme
+                | Screen::OptionsPommePerformance
+                | Screen::OptionsPommeShaders
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
@@ -1711,6 +1721,23 @@ impl MainMenu {
             Screen::OptionsVideo => {
                 self.build_options_video(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::OptionsPomme => {
+                self.build_options_pomme(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::OptionsPommePerformance => self.build_options_pomme_performance(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeShaders => self.build_options_pomme_shaders(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
             Screen::OptionsSkinCustomization => {
                 self.build_options_skin(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }

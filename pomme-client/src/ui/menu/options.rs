@@ -18,6 +18,56 @@ pub(super) enum OptRow<'a> {
     Big(&'a str),
     Pair(&'a str, &'a str),
     PairLeft(&'a str),
+    /// One 150px widget centred on the screen.
+    Center(&'a str),
+}
+
+/// `OptionsScreen`'s `HeaderAndFooterLayout(61, 33)`, in GUI units: the title
+/// and the first row stacked 8 apart and centred in the header, the other
+/// rows a two-column grid of 150-wide cells padded 4 each side and below,
+/// and Done centred in the footer. Vertical centring rounds half up, as
+/// `AbstractChildWrapper.setY` does.
+struct RootLayout {
+    title_y: f32,
+    header_row_y: f32,
+    grid_y: f32,
+    done_y: f32,
+}
+
+impl RootLayout {
+    const HEADER_H: f32 = 61.0;
+    const HEADER_SPACING: f32 = 8.0;
+    /// A grid cell: the 150-wide button and its padding.
+    const CELL_W: f32 = 158.0;
+    /// Two buttons 8 apart, which the header row and the grid inside its
+    /// padding both are.
+    const ROW_W: f32 = 308.0;
+    const ROW_PITCH: f32 = 24.0;
+
+    /// For a screen `height` GUI units tall with `grid_rows` rows under the
+    /// header's.
+    fn new(height: f32, grid_rows: usize) -> Self {
+        let line_h = common::LINE_HEIGHT as f32;
+        let stacked = line_h + Self::HEADER_SPACING + BTN_H;
+        let title_y = ((Self::HEADER_H - stacked) / 2.0).round();
+        let footer_y = height - HEADER_FOOTER_H;
+        // `HeaderAndFooterLayout.arrangeElements`: 30 under the header, or
+        // higher where the grid wouldn't clear the footer.
+        let grid_h = Self::ROW_PITCH * grid_rows as f32;
+        Self {
+            title_y,
+            header_row_y: title_y + line_h + Self::HEADER_SPACING,
+            grid_y: (Self::HEADER_H + 30.0).min(footer_y - grid_h),
+            done_y: footer_y + ((HEADER_FOOTER_H - BTN_H) / 2.0).round(),
+        }
+    }
+
+    fn row_y(&self, row: usize) -> f32 {
+        match row.checked_sub(1) {
+            None => self.header_row_y,
+            Some(grid_row) => self.grid_y + Self::ROW_PITCH * grid_row as f32,
+        }
+    }
 }
 
 fn option_enabled(label: &str, disabled: &[&str]) -> bool {
@@ -30,7 +80,7 @@ fn option_enabled(label: &str, disabled: &[&str]) -> bool {
 fn row_labels<'a>(row: &OptRow<'a>) -> Vec<&'a str> {
     match row {
         OptRow::Header(_) => Vec::new(),
-        OptRow::Big(a) | OptRow::PairLeft(a) => vec![*a],
+        OptRow::Big(a) | OptRow::PairLeft(a) | OptRow::Center(a) => vec![*a],
         OptRow::Pair(a, b) => vec![*a, *b],
     }
 }
@@ -140,7 +190,9 @@ const CHAT_SCALE: &str = "Chat Text Size:";
 const CHAT_LINE_SPACING: &str = "Line Spacing:";
 const CHAT_DELAY: &str = "Chat Delay:";
 const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
+const CHUNK_DETAIL: &str = "Chunk Detail:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
+const SHADER_PACK: &str = "Shader Pack:";
 const CHUNK_FADE: &str = "Chunk Fade:";
 const INACTIVITY_FPS_LIMIT: &str = "Reduce fps when:";
 
@@ -249,8 +301,7 @@ impl MainMenu {
         } else {
             format!("FOV: {}", self.fov)
         };
-        // FOV slider + Online lead the grid, above the categories (vanilla header
-        // sub-row).
+        // The first row is the header's (`RootLayout`).
         let rows: Vec<OptRow> = vec![
             OptRow::Pair(&fov_label, "Online..."),
             OptRow::Pair("Skin Customization...", "Music & Sounds..."),
@@ -258,6 +309,9 @@ impl MainMenu {
             OptRow::Pair("Language...", "Chat Settings..."),
             OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
             OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
+            // The one way into Pomme's own settings (Pomme-only), as a last
+            // grid row so the others keep their order.
+            OptRow::Center("Pomme Settings..."),
         ];
 
         let nav: &[(&str, Screen)] = &[
@@ -272,6 +326,7 @@ impl MainMenu {
             ("Accessibility Settings...", Screen::OptionsAccessibility),
             ("Telemetry Data...", Screen::OptionsTelemetry),
             ("Credits & Attribution...", Screen::OptionsCredits),
+            ("Pomme Settings...", Screen::OptionsPomme),
         ];
 
         let fov_frac = (self.fov as f32 - 30.0) / 80.0;
@@ -343,7 +398,7 @@ impl MainMenu {
     fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
-            "Chunk Detail:" => super::CHUNK_DETAIL_SPAN,
+            CHUNK_DETAIL => super::CHUNK_DETAIL_SPAN,
             DISTANT_TERRAIN => super::DISTANT_TERRAIN_STEPS as f32,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
@@ -381,16 +436,6 @@ impl MainMenu {
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
         let rd = format!("Render Distance: {} chunks", self.render_distance);
-        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
-            "Chunk Detail: Off".to_string()
-        } else {
-            format!("Chunk Detail: {} chunks", self.chunk_detail)
-        };
-        let dt = if self.distant_terrain == 0 {
-            format!("{DISTANT_TERRAIN} OFF")
-        } else {
-            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
-        };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -411,10 +456,6 @@ impl MainMenu {
         let inactivity_label = format!(
             "{INACTIVITY_FPS_LIMIT} {}",
             self.inactivity_fps_limit.label()
-        );
-        let shader_label = format!(
-            "Shader Pack: {}",
-            self.shader_pack.as_deref().unwrap_or("OFF")
         );
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
         let vignette_label = if self.vignette {
@@ -448,13 +489,12 @@ impl MainMenu {
             // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
-            OptRow::Pair(&cd, &dt),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair(entity_shadows_label, "Entity Distance: 100%"),
             OptRow::Pair(&blur_label, "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::Pair("Weather Radius: 10", &shader_label),
+            OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
             OptRow::Pair(autosave_label, vignette_label),
             OptRow::Pair(&attack_label, &fade_label),
@@ -462,17 +502,10 @@ impl MainMenu {
         let rd_frac = ((self.render_distance as f32 - 2.0)
             / (self.render_distance_max() as f32 - 2.0))
             .clamp(0.0, 1.0);
-        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
-            / super::CHUNK_DETAIL_SPAN)
-            .clamp(0.0, 1.0);
-        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
-            / super::DISTANT_TERRAIN_STEPS as f32;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
-            ("Chunk Detail:", cd_frac),
-            (DISTANT_TERRAIN, dt_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
             (BRIGHTNESS, self.brightness),
@@ -517,6 +550,113 @@ impl MainMenu {
             disabled,
             true,
             tooltips,
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme's own settings (Pomme-only): everything the options screens
+    /// have no place for, one sub-screen per category, laid out as Controls
+    /// lays out its own.
+    pub(super) fn build_options_pomme(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let rows = [OptRow::Pair("Performance...", "Shaders...")];
+        let nav: &[(&str, Screen)] = &[
+            ("Performance...", Screen::OptionsPommePerformance),
+            ("Shaders...", Screen::OptionsPommeShaders),
+        ];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Pomme Settings",
+            Screen::Options,
+            &rows,
+            nav,
+            &[],
+            &[],
+            true,
+            &[],
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme Settings' Performance category (Pomme-only).
+    pub(super) fn build_options_pomme_performance(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
+            format!("{CHUNK_DETAIL} Off")
+        } else {
+            format!("{CHUNK_DETAIL} {} chunks", self.chunk_detail)
+        };
+        let dt = if self.distant_terrain == 0 {
+            format!("{DISTANT_TERRAIN} OFF")
+        } else {
+            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
+        };
+        let rows = [OptRow::Pair(&cd, &dt)];
+        let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
+            / super::CHUNK_DETAIL_SPAN)
+            .clamp(0.0, 1.0);
+        let dt_frac = super::distant_terrain_step(self.distant_terrain) as f32
+            / super::DISTANT_TERRAIN_STEPS as f32;
+        let sliders: &[(&str, f32)] = &[(CHUNK_DETAIL, cd_frac), (DISTANT_TERRAIN, dt_frac)];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Performance",
+            Screen::OptionsPomme,
+            &rows,
+            &[],
+            sliders,
+            &[],
+            true,
+            &[],
+            text_width_fn,
+            key_bindings,
+        )
+    }
+
+    /// Pomme Settings' Shaders category (Pomme-only).
+    pub(super) fn build_options_pomme_shaders(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+        key_bindings: &KeyBindings,
+    ) -> MainMenuResult {
+        let shader_label = format!(
+            "{SHADER_PACK} {}",
+            self.shader_pack.as_deref().unwrap_or("OFF")
+        );
+        let rows = [OptRow::PairLeft(&shader_label)];
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            "Shaders",
+            Screen::OptionsPomme,
+            &rows,
+            &[],
+            &[],
+            &[],
+            true,
+            &[],
             text_width_fn,
             key_bindings,
         )
@@ -1310,6 +1450,10 @@ impl MainMenu {
         )
     }
 
+    /// An options screen: `rows` under its title and over Done. With
+    /// `options_list` they scroll as an `OptionsList` between the shared
+    /// header and footer; without, they take the Options screen's own layout
+    /// ([`RootLayout`]), the first in its header and the rest in its grid.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_options_grid(
         &mut self,
@@ -1322,7 +1466,7 @@ impl MainMenu {
         nav: &[(&str, Screen)],
         sliders: &[(&'static str, f32)],
         disabled: &[&str],
-        header_footer: bool,
+        options_list: bool,
         tooltips: &[(&str, &str)],
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
@@ -1341,8 +1485,27 @@ impl MainMenu {
         let lh = 9.0 * gs;
         let btn_dy = (row_h - btn_h) / 2.0;
         let cx = sw / 2.0;
-        let left_x = cx - 155.0 * gs;
-        let right_x = left_x + 160.0 * gs;
+        let root = (!options_list)
+            .then(|| RootLayout::new(common::gui_size(sh, gs), rows.len().saturating_sub(1)));
+        let done_w = 200.0 * gs;
+        let (left_x, right_x, center_x, done_x) = if root.is_some() {
+            let left_x = common::gui_aligned(sw, RootLayout::ROW_W, gs, 0.5);
+            let cell_w = RootLayout::CELL_W * gs;
+            (
+                left_x,
+                left_x + cell_w,
+                left_x + cell_w / 2.0,
+                common::gui_aligned(sw, 200.0, gs, 0.5),
+            )
+        } else {
+            let left_x = cx - 155.0 * gs;
+            (
+                left_x,
+                left_x + 160.0 * gs,
+                cx - small_w / 2.0,
+                cx - done_w / 2.0,
+            )
+        };
         let cursor = input.cursor;
         let clicked = input.clicked;
 
@@ -1352,31 +1515,29 @@ impl MainMenu {
 
         let (content_top, content_bottom, done_y);
 
-        if header_footer {
-            let chrome = push_screen_chrome(&mut elements, sw, sh, gs, title);
-            content_top = chrome.content_top;
-            content_bottom = chrome.content_bottom;
-            done_y = chrome.done_y;
-        } else {
-            let title_y = 15.0 * gs;
-            let done_pad = 8.0 * gs;
-            content_top = title_y + fs + 10.0 * gs;
-            done_y = sh - btn_h - done_pad;
-            content_bottom = done_y;
+        if let Some(root) = &root {
+            content_top = RootLayout::HEADER_H * gs;
+            content_bottom = sh - HEADER_FOOTER_H * gs;
+            done_y = root.done_y * gs;
 
             common::push_menu_background(&mut elements, sw, sh);
 
             elements.push(MenuElement::Text {
-                x: cx,
-                y: title_y,
+                x: common::gui_half_width(sw, gs),
+                y: root.title_y * gs,
                 text: title.into(),
                 scale: fs,
                 color: WHITE,
                 centered: true,
             });
+        } else {
+            let chrome = push_screen_chrome(&mut elements, sw, sh, gs, title);
+            content_top = chrome.content_top;
+            content_bottom = chrome.content_bottom;
+            done_y = chrome.done_y;
         }
 
-        let content_pad = if header_footer { 4.0 * gs } else { 0.0 };
+        let content_pad = if options_list { 4.0 * gs } else { 0.0 };
         // Vertical advance per row (vanilla OptionsList: 25px pitch; headers pad
         // above).
         let header_pad_top = |i: usize| if i == 0 { 0.0 } else { 2.0 * lh };
@@ -1393,7 +1554,7 @@ impl MainMenu {
             .sum();
         let content_h = content_bottom - content_top;
         let list_h = grid_h + content_pad;
-        let scrollable = header_footer && list_h > content_h;
+        let scrollable = options_list && list_h > content_h;
         // `AbstractSelectionList.scrollBarX`: 8 right of the 310-wide rows.
         let scrollbar_x = cx + 163.0 * gs;
         if scrollable {
@@ -1415,18 +1576,14 @@ impl MainMenu {
             self.scroll_offset = 0.0;
         }
         let scroll = if scrollable { self.scroll_offset } else { 0.0 };
-        let top_y = if header_footer {
-            content_top + content_pad - scroll
-        } else {
-            content_top + (content_h - grid_h) / 2.0
-        };
+        let top_y = content_top + content_pad - scroll;
         let mut slider_results: Vec<(&str, f32)> = Vec::new();
         let label_scroll = common::LabelScroll {
             text_width_fn,
             time_secs: self.created.elapsed().as_secs_f64(),
         };
 
-        if header_footer {
+        if options_list {
             elements.push(MenuElement::ScissorPush {
                 x: 0.0,
                 y: content_top,
@@ -1452,7 +1609,10 @@ impl MainMenu {
 
         let mut y_cursor = top_y;
         for (i, row) in rows.iter().enumerate() {
-            let by = y_cursor + btn_dy;
+            let by = match &root {
+                Some(root) => root.row_y(i) * gs,
+                None => y_cursor + btn_dy,
+            };
             let mut widgets: Vec<(&str, f32, f32)> = Vec::new();
             match row {
                 OptRow::Header(title) => {
@@ -1472,6 +1632,7 @@ impl MainMenu {
                     widgets.push((*b, right_x, small_w));
                 }
                 OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
+                OptRow::Center(a) => widgets.push((*a, center_x, small_w)),
             }
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
@@ -1578,7 +1739,7 @@ impl MainMenu {
                         self.cloud_mode = self.cloud_mode.cycle();
                         self.save_settings(key_bindings);
                     }
-                    if label.starts_with("Shader Pack:") {
+                    if label.starts_with(SHADER_PACK) {
                         self.shader_pack =
                             next_shader_pack(&self.shader_packs_dir, self.shader_pack.as_deref());
                         self.save_settings(key_bindings);
@@ -1710,7 +1871,7 @@ impl MainMenu {
             let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
-                "Chunk Detail:" => {
+                CHUNK_DETAIL => {
                     self.chunk_detail = super::CHUNK_DETAIL_MIN + (v * span).round() as u32
                 }
                 DISTANT_TERRAIN => {
@@ -1753,7 +1914,7 @@ impl MainMenu {
             self.settings_dirty = true;
         }
 
-        if header_footer {
+        if options_list {
             elements.push(MenuElement::ScissorPop);
         }
 
@@ -1770,22 +1931,14 @@ impl MainMenu {
             );
         }
 
-        let done_w = 200.0 * gs;
-        let done_h = common::hit_test(cursor, [cx - done_w / 2.0, done_y, done_w, btn_h]);
+        let done_h = common::hit_test(cursor, [done_x, done_y, done_w, btn_h]);
         let done_focused = ctx.focused(true, done_h);
-        let done_cursor = helpers::focus_cursor(
-            done_focused,
-            done_h,
-            cx - done_w / 2.0,
-            done_y,
-            done_w,
-            btn_h,
-            cursor,
-        );
+        let done_cursor =
+            helpers::focus_cursor(done_focused, done_h, done_x, done_y, done_w, btn_h, cursor);
         common::push_button_scrolling(
             &mut elements,
             done_cursor,
-            cx - done_w / 2.0,
+            done_x,
             done_y,
             done_w,
             btn_h,
@@ -2564,12 +2717,14 @@ mod tests {
         assert!(key_bindings.is_default(Action::Jump));
     }
 
-    /// A grid of one `Pair` row at 800x600: the left widget spans x 245..395
-    /// and the right one 405..555, both at y 300.
+    /// An options list of one `Pair` row at 800x600: the left widget spans x
+    /// 245..395 and the right one 405..555, both across [`ROW_Y`].
+    const ROW_Y: f32 = 50.0;
+
     struct Grid {
         menu: MainMenu,
         key_bindings: KeyBindings,
-        rows: [OptRow<'static>; 1],
+        rows: Vec<OptRow<'static>>,
         nav: Vec<(&'static str, Screen)>,
         sliders: Vec<(&'static str, f32)>,
         disabled: Vec<&'static str>,
@@ -2581,7 +2736,7 @@ mod tests {
             Self {
                 menu: test_menu("pomme-options-focus-test", &mut key_bindings),
                 key_bindings,
-                rows: [OptRow::Pair(left, right)],
+                rows: vec![OptRow::Pair(left, right)],
                 nav: Vec::new(),
                 sliders: Vec::new(),
                 disabled: Vec::new(),
@@ -2606,7 +2761,7 @@ mod tests {
                 &self.nav,
                 &self.sliders,
                 &self.disabled,
-                false,
+                true,
                 &[],
                 &text_width,
                 &self.key_bindings,
@@ -2619,8 +2774,12 @@ mod tests {
     }
 
     fn click(x: f32) -> MenuInput {
+        click_at(x, ROW_Y)
+    }
+
+    fn click_at(x: f32, y: f32) -> MenuInput {
         MenuInput {
-            cursor: (x, 300.0),
+            cursor: (x, y),
             clicked: true,
             mouse_held: true,
             ..Default::default()
@@ -2686,7 +2845,7 @@ mod tests {
         assert_eq!(grid.menu.focus, Some(0));
 
         let hover_second = MenuInput {
-            cursor: (450.0, 300.0),
+            cursor: (450.0, ROW_Y),
             ..Default::default()
         };
         let result = grid.frame(&hover_second);
@@ -2842,11 +3001,71 @@ mod tests {
         menu.build_options_mouse(sw, sh, &input, tw, &key_bindings);
         menu.build_options(sw, sh, &input, tw, &key_bindings);
         menu.build_options_video(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme_performance(sw, sh, &input, tw, &key_bindings);
+        menu.build_options_pomme_shaders(sw, sh, &input, tw, &key_bindings);
         menu.build_options_controls(sw, sh, &input, tw, &key_bindings);
         menu.build_options_chat(sw, sh, &input, tw, &key_bindings);
         menu.build_options_accessibility(sw, sh, &input, tw, &key_bindings);
         menu.build_options_music(sw, sh, &input, tw, &key_bindings);
         menu.build_options_skin(sw, sh, &input, tw, &key_bindings);
         menu.build_options_online(sw, sh, &input, tw, &key_bindings);
+    }
+
+    /// Every button frame `w` wide, as `(x, y)`, in build order.
+    fn frames(result: &MainMenuResult, w: f32) -> Vec<(f32, f32)> {
+        result
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::NineSlice { x, y, w: fw, .. } if *fw == w => Some((*x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The Options screen's button frames `w` wide at 800 by `sh`.
+    fn options_frames(menu: &mut MainMenu, sh: f32, w: f32) -> Vec<(f32, f32)> {
+        let text_width = |_: &str, _: f32| 0.0;
+        let key_bindings = KeyBindings::default();
+        let idle = MenuInput::default();
+        frames(
+            &menu.build_options(800.0, sh, &idle, &text_width, &key_bindings),
+            w,
+        )
+    }
+
+    #[test]
+    fn options_lays_out_as_its_header_and_footer_layout_does() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-options-layout-test", &mut key_bindings);
+
+        let rows = options_frames(&mut menu, 600.0, 150.0);
+        // FOV and Online in the header, then the grid 30 under it.
+        assert_eq!(rows[..2], [(246.0, 29.0), (404.0, 29.0)]);
+        assert_eq!(rows[2..4], [(246.0, 91.0), (404.0, 91.0)]);
+        assert_eq!(rows[4].1, 115.0);
+        // Pomme's row, centred under the five of the grid.
+        assert_eq!(rows[12], (325.0, 211.0));
+        assert_eq!(options_frames(&mut menu, 600.0, 200.0), [(300.0, 574.0)]);
+
+        // Too short for that: the grid moves up until it clears the footer.
+        let rows = options_frames(&mut menu, 240.0, 150.0);
+        assert_eq!(rows[1].1, 29.0);
+        assert_eq!(rows[2].1, 63.0);
+        assert_eq!(rows[12].1, 183.0);
+        assert_eq!(options_frames(&mut menu, 240.0, 200.0), [(300.0, 214.0)]);
+    }
+
+    #[test]
+    fn the_pomme_settings_button_opens_its_categories() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-settings-entry-test", &mut key_bindings);
+        let (x, y) = *options_frames(&mut menu, 600.0, 150.0)
+            .last()
+            .expect("the centred row");
+        let click = click_at(x + 75.0, y + BTN_H / 2.0);
+        menu.build_options(800.0, 600.0, &click, &|_, _| 0.0, &key_bindings);
+        assert!(matches!(menu.screen, Screen::OptionsPomme));
     }
 }

@@ -1,0 +1,151 @@
+# Pomme's own settings (Pomme-only): a button under the Options grid opens
+# them, one screen per category. Performance holds Chunk Detail and Distant
+# Terrain, Shaders holds Shader Pack.
+
+pomme_only = true
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor = [213, 60]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "options"
+
+[[step]]
+cursor_to_button = "Pomme Settings..."
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "entry_hovered"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor = [213, 200]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "categories"
+
+[[step]]
+cursor_to_button = "Performance..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 200]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "performance"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Shaders..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 200]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "shaders"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+# Back out of Pomme Settings, then Options.
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
