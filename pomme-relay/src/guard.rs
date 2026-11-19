@@ -29,15 +29,18 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
     response
 }
 
-/// Whether `host`, a `Host` header, names this relay: localhost, or the
-/// public hostname it was given.
+/// Whether `host`, a `Host` header, names this relay: the public hostname it
+/// was given, or localhost when it has none. A public relay doesn't answer to
+/// localhost, which anything but a browser can claim to be asking for.
 fn serves(config: &Config, host: &str) -> bool {
     let name = host
         .rsplit_once(':')
         .filter(|(_, port)| port.parse::<u16>().is_ok())
         .map_or(host, |(name, _)| name);
-    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
-        || config.public_host.as_deref() == Some(name)
+    match &config.public_host {
+        Some(public) => name.eq_ignore_ascii_case(public),
+        None => matches!(name, "localhost" | "127.0.0.1" | "[::1]"),
+    }
 }
 
 /// Whether a request came from a page of this relay's own origin, going by
@@ -87,30 +90,40 @@ static SECURITY_HEADERS: LazyLock<Vec<(header::HeaderName, HeaderValue)>> = Lazy
 });
 
 /// The client a request came from: the peer, or behind a trusted reverse
-/// proxy the address it appended to `X-Forwarded-For`. An IPv6 client is its
-/// /64, the smallest block one subscriber is given, so it can't take a fresh
-/// address for every request.
+/// proxy the last address in `X-Forwarded-For`, the one the proxy added
+/// (earlier ones, and earlier header lines, are the client's own claim). An
+/// IPv6 client is its /56, the block a provider gives one subscriber, so it
+/// can't take a fresh address for every request.
 pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMap) -> IpAddr {
     let forwarded = || {
-        text(headers, "x-forwarded-for")?
+        let lines = headers.get_all("x-forwarded-for");
+        let address = lines
+            .iter()
+            .next_back()?
+            .to_str()
+            .ok()?
             .rsplit(',')
-            .next()?
-            .trim()
-            .parse()
-            .ok()
+            .next()?;
+        address.trim().parse().ok()
     };
-    network(
-        config
-            .trust_proxy
-            .then(forwarded)
-            .flatten()
-            .unwrap_or(peer.0.ip()),
-    )
+    let address = if config.trust_proxy {
+        forwarded().unwrap_or_else(|| {
+            tracing::warn!("The proxy sent no client address; its own stands in");
+            peer.0.ip()
+        })
+    } else {
+        peer.0.ip()
+    };
+    network(address)
 }
 
 fn network(ip: IpAddr) -> IpAddr {
+    const SUBSCRIBER_BITS: u32 = 56;
     match ip.to_canonical() {
-        IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from(u128::from(ip) & !u128::from(u64::MAX))),
+        IpAddr::V6(ip) => {
+            let mask = u128::MAX << (u128::BITS - SUBSCRIBER_BITS);
+            IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask))
+        }
         ip => ip,
     }
 }
@@ -131,11 +144,11 @@ impl Connections {
     pub fn open(self: &Arc<Self>, config: &Config, client: IpAddr) -> Option<Slot> {
         let mut counts = self.counts();
         let (by_client, total) = &mut *counts;
-        let open = by_client.entry(client).or_default();
-        if *open >= config.connections_per_client || *total >= config.max_connections {
+        let open = by_client.get(&client).copied().unwrap_or(0);
+        if open >= config.connections_per_client || *total >= config.max_connections {
             return None;
         }
-        *open += 1;
+        by_client.insert(client, open + 1);
         *total += 1;
         Some(Slot {
             connections: Arc::clone(self),
@@ -181,23 +194,49 @@ mod tests {
     }
 
     #[test]
-    fn serves_localhost_and_its_public_host_only() {
-        let config = config(Some("play.pomme.rs"));
-        for host in [
-            "localhost:8090",
-            "127.0.0.1:8090",
-            "[::1]:8090",
-            "play.pomme.rs",
-        ] {
-            assert!(serves(&config, host), "{host}");
-        }
-        for host in [
+    fn serves_its_public_host_or_else_localhost() {
+        let local = ["localhost:8090", "127.0.0.1:8090", "[::1]:8090"];
+        let public = ["play.pomme.rs", "Play.Pomme.rs:443"];
+        let other = [
             "evil.example",
             "evil.example:8090",
             "play.pomme.rs.evil.example",
-        ] {
-            assert!(!serves(&config, host), "{host}");
+        ];
+        let serves = |public_host, host| serves(&config(public_host), host);
+        for host in local {
+            assert!(serves(None, host), "{host}");
+            assert!(!serves(Some("play.pomme.rs"), host), "{host}");
         }
+        for host in public {
+            assert!(serves(Some("play.pomme.rs"), host), "{host}");
+            assert!(!serves(None, host), "{host}");
+        }
+        for host in other {
+            assert!(!serves(None, host), "{host}");
+            assert!(!serves(Some("play.pomme.rs"), host), "{host}");
+        }
+    }
+
+    #[test]
+    fn a_trusted_proxys_own_entry_names_the_client() {
+        let peer = || ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 9)));
+        let client = |trust_proxy, lines: &[&'static str]| {
+            let mut headers = HeaderMap::new();
+            for line in lines {
+                headers.append("x-forwarded-for", HeaderValue::from_static(line));
+            }
+            let config = Config {
+                trust_proxy,
+                ..Config::default()
+            };
+            client(&config, peer(), &headers).to_string()
+        };
+        assert_eq!(client(true, &["203.0.113.7"]), "203.0.113.7");
+        assert_eq!(client(true, &["1.2.3.4, 203.0.113.7"]), "203.0.113.7");
+        assert_eq!(client(true, &["1.2.3.4", "203.0.113.7"]), "203.0.113.7");
+        assert_eq!(client(true, &["nonsense"]), "10.0.0.1");
+        assert_eq!(client(true, &[]), "10.0.0.1");
+        assert_eq!(client(false, &["203.0.113.7"]), "10.0.0.1");
     }
 
     #[test]
@@ -218,9 +257,9 @@ mod tests {
     #[test]
     fn an_ipv6_client_is_its_whole_block() {
         let network = |ip: &str| network(ip.parse().unwrap()).to_string();
-        assert_eq!(network("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
-        assert_eq!(network("2001:db8:1:2::9"), "2001:db8:1:2::");
-        assert_eq!(network("2001:db8:1:3::9"), "2001:db8:1:3::");
+        assert_eq!(network("2001:db8:1:1234:5:6:7:8"), "2001:db8:1:1200::");
+        assert_eq!(network("2001:db8:1:12ff::9"), "2001:db8:1:1200::");
+        assert_eq!(network("2001:db8:1:1300::9"), "2001:db8:1:1300::");
         assert_eq!(network("::ffff:203.0.113.7"), "203.0.113.7");
         assert_eq!(network("203.0.113.7"), "203.0.113.7");
     }
@@ -235,6 +274,12 @@ mod tests {
         assert!(connections.open(&config, a).is_none(), "per client");
         let _b1 = connections.open(&config, b).unwrap();
         assert!(connections.open(&config, b).is_none(), "in all");
+        let c = "3.3.3.3".parse().unwrap();
+        assert!(connections.open(&config, c).is_none(), "in all");
+        assert!(
+            !connections.counts().0.contains_key(&c),
+            "refused, so untracked"
+        );
         drop(a1);
         assert!(connections.open(&config, b).is_some());
     }

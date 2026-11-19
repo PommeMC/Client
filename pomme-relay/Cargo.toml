@@ -10,7 +10,8 @@ publish = false
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
-hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
+pomme-protocol = { path = "../pomme-protocol" }
+hickory-resolver ={ version = "0.26", features = ["tokio", "system-config"] }
 reqwest = { workspace = true, features = ["stream"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tower-http = { version = "0.6", features = ["fs"] }
@@ -19,4 +20,5 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }

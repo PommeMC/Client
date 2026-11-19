@@ -18,7 +18,7 @@ pub enum Spend {
     Connect,
 }
 
-/// A bucket's size, and how many it refills a second.
+/// A bucket's size, and how much it refills a second.
 type Rate = (f64, f64);
 
 impl Spend {
@@ -36,9 +36,25 @@ impl Spend {
 /// Every client's API calls together, which Mojang counts against the relay.
 const API_TOTAL: Rate = (600.0, 10.0);
 
-/// Past this many tracked clients, idle ones are forgotten.
-const MAX_TRACKED: usize = 10_000;
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// The bytes one client may download: a few first installs at once, then a
+/// megabyte a second.
+const DOWNLOAD_BYTES: Rate = (2048.0 * MIB, MIB);
+
+/// What a client's bucket counts.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Meter {
+    Requests(Spend),
+    DownloadBytes,
+}
+
+/// At this many buckets, idle ones are forgotten, and while it stays full a
+/// client with none is refused.
+const MAX_TRACKED: usize = 100_000;
 const IDLE: Duration = Duration::from_secs(600);
+/// How often a full table is searched for idle buckets.
+const PRUNE_EVERY: Duration = Duration::from_secs(10);
 
 struct Bucket {
     tokens: f64,
@@ -53,10 +69,14 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, (size, refill): Rate, now: Instant) -> bool {
+    fn refill(&mut self, (size, refill): Rate, now: Instant) {
         let refilled = now.duration_since(self.at).as_secs_f64() * refill;
         self.tokens = (self.tokens + refilled).min(size);
         self.at = now;
+    }
+
+    fn take(&mut self, rate: Rate, now: Instant) -> bool {
+        self.refill(rate, now);
         let allowed = self.tokens >= 1.0;
         if allowed {
             self.tokens -= 1.0;
@@ -68,16 +88,55 @@ impl Bucket {
 pub struct Limits(Mutex<Buckets>);
 
 struct Buckets {
-    clients: HashMap<(Spend, IpAddr), Bucket>,
+    clients: HashMap<(Meter, IpAddr), Bucket>,
     api_total: Bucket,
+    pruned: Instant,
 }
 
 impl Default for Limits {
     fn default() -> Self {
+        let now = Instant::now();
         Self(Mutex::new(Buckets {
             clients: HashMap::new(),
-            api_total: Bucket::full(API_TOTAL, Instant::now()),
+            api_total: Bucket::full(API_TOTAL, now),
+            pruned: now,
         }))
+    }
+}
+
+impl Buckets {
+    /// `client`'s bucket for `meter`, or `None` when the table is full of
+    /// other clients.
+    fn bucket(
+        &mut self,
+        meter: Meter,
+        client: IpAddr,
+        rate: Rate,
+        now: Instant,
+    ) -> Option<&mut Bucket> {
+        let key = (meter, client);
+        if self.clients.len() >= MAX_TRACKED && !self.clients.contains_key(&key) {
+            if now.duration_since(self.pruned) >= PRUNE_EVERY {
+                self.clients
+                    .retain(|_, bucket| now.duration_since(bucket.at) < IDLE);
+                self.pruned = now;
+            }
+            if self.clients.len() >= MAX_TRACKED {
+                return None;
+            }
+        }
+        Some(
+            self.clients
+                .entry(key)
+                .or_insert_with(|| Bucket::full(rate, now)),
+        )
+    }
+
+    /// The bytes `client` may still download, refilled up to `now`.
+    fn download_bytes(&mut self, client: IpAddr, now: Instant) -> Option<&mut Bucket> {
+        let bucket = self.bucket(Meter::DownloadBytes, client, DOWNLOAD_BYTES, now)?;
+        bucket.refill(DOWNLOAD_BYTES, now);
+        Some(bucket)
     }
 }
 
@@ -87,18 +146,38 @@ impl Limits {
         self.allow_at(spend, client, Instant::now())
     }
 
+    /// Counts `bytes` relayed to `client` against what it may download. They
+    /// were already sent, so the bucket can go below empty, and stays shut
+    /// until that is paid back.
+    pub fn downloaded(&self, client: IpAddr, bytes: usize) {
+        self.downloaded_at(client, bytes, Instant::now());
+    }
+
     fn allow_at(&self, spend: Spend, client: IpAddr, now: Instant) -> bool {
-        let mut buckets = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let Buckets { clients, api_total } = &mut *buckets;
-        if clients.len() > MAX_TRACKED {
-            clients.retain(|_, bucket| now.duration_since(bucket.at) < IDLE);
+        let mut buckets = self.buckets();
+        if spend == Spend::Download
+            && !buckets
+                .download_bytes(client, now)
+                .is_some_and(|bytes| bytes.tokens > 0.0)
+        {
+            return false;
         }
         let rate = spend.per_client();
-        clients
-            .entry((spend, client))
-            .or_insert_with(|| Bucket::full(rate, now))
-            .take(rate, now)
-            && (spend != Spend::Api || api_total.take(API_TOTAL, now))
+        buckets
+            .bucket(Meter::Requests(spend), client, rate, now)
+            .is_some_and(|bucket| bucket.take(rate, now))
+            && (spend != Spend::Api || buckets.api_total.take(API_TOTAL, now))
+    }
+
+    fn downloaded_at(&self, client: IpAddr, bytes: usize, now: Instant) {
+        let mut buckets = self.buckets();
+        if let Some(bucket) = buckets.download_bytes(client, now) {
+            bucket.tokens -= bytes as f64;
+        }
+    }
+
+    fn buckets(&self) -> std::sync::MutexGuard<'_, Buckets> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -108,18 +187,21 @@ mod tests {
 
     use super::*;
 
+    fn client(n: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(n))
+    }
+
     #[test]
     fn a_client_runs_out_then_refills() {
         let limits = Limits::default();
-        let client: IpAddr = "1.1.1.1".parse().unwrap();
         let start = Instant::now();
         let (size, refill) = Spend::Connect.per_client();
         for _ in 0..size as usize {
-            assert!(limits.allow_at(Spend::Connect, client, start));
+            assert!(limits.allow_at(Spend::Connect, client(1), start));
         }
-        assert!(!limits.allow_at(Spend::Connect, client, start));
+        assert!(!limits.allow_at(Spend::Connect, client(1), start));
         let later = start + Duration::from_secs_f64(1.0 / refill);
-        assert!(limits.allow_at(Spend::Connect, client, later));
+        assert!(limits.allow_at(Spend::Connect, client(1), later));
     }
 
     #[test]
@@ -128,13 +210,40 @@ mod tests {
         let start = Instant::now();
         let per_client = Spend::Api.per_client().0 as usize;
         let clients = API_TOTAL.0 as usize / per_client;
-        for client in 0..clients as u32 {
-            let client = IpAddr::V4(Ipv4Addr::from(client + 1));
+        for n in 0..clients as u32 {
             for _ in 0..per_client {
-                assert!(limits.allow_at(Spend::Api, client, start));
+                assert!(limits.allow_at(Spend::Api, client(n + 1), start));
             }
         }
-        let fresh = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
-        assert!(!limits.allow_at(Spend::Api, fresh, start));
+        assert!(!limits.allow_at(Spend::Api, client(u32::MAX), start));
+    }
+
+    #[test]
+    fn downloads_stop_until_their_bytes_are_paid_back() {
+        let limits = Limits::default();
+        let start = Instant::now();
+        let (size, refill) = DOWNLOAD_BYTES;
+        let over = 10.0 * refill;
+        limits.downloaded_at(client(1), (size + over) as usize, start);
+        assert!(!limits.allow_at(Spend::Download, client(1), start));
+        assert!(limits.allow_at(Spend::Download, client(2), start));
+        let nearly = start + Duration::from_secs(9);
+        assert!(!limits.allow_at(Spend::Download, client(1), nearly));
+        let paid = start + Duration::from_secs(11);
+        assert!(limits.allow_at(Spend::Download, client(1), paid));
+    }
+
+    #[test]
+    fn a_full_table_refuses_new_clients_until_idle_ones_go() {
+        let limits = Limits::default();
+        let start = Instant::now();
+        for n in 0..MAX_TRACKED as u32 {
+            assert!(limits.allow_at(Spend::Connect, client(n), start));
+        }
+        let newcomer = client(u32::MAX);
+        let soon = start + PRUNE_EVERY;
+        assert!(!limits.allow_at(Spend::Connect, newcomer, soon));
+        assert!(limits.allow_at(Spend::Connect, client(0), soon));
+        assert!(limits.allow_at(Spend::Connect, newcomer, start + IDLE));
     }
 }

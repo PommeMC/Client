@@ -8,6 +8,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use futures_util::TryStreamExt as _;
 
 use crate::limits::Spend;
 use crate::{AppState, guard};
@@ -49,9 +50,15 @@ const DROPPED_REQUEST_HEADERS: &[&str] = &[
     "via",
     "x-forwarded-for",
     "x-forwarded-host",
+    "x-forwarded-port",
     "x-forwarded-proto",
+    "x-forwarded-server",
+    "x-original-forwarded-for",
     "x-real-ip",
+    "x-client-ip",
+    "x-request-id",
     "true-client-ip",
+    "fly-client-ip",
     "cdn-loop",
     "cf-connecting-ip",
     "cf-ipcountry",
@@ -65,6 +72,8 @@ const KEPT_RESPONSE_HEADERS: &[header::HeaderName] = &[
     header::CACHE_CONTROL,
     header::ETAG,
     header::LAST_MODIFIED,
+    header::ACCEPT_RANGES,
+    header::CONTENT_RANGE,
 ];
 
 /// The content types the client reads. Anything else is relayed as bytes, so
@@ -77,8 +86,8 @@ const DATA_TYPES: &[&str] = &[
 ];
 
 /// Gives up on a host that won't answer, or a download that stalls, rather
-/// than holding the relay's connections open. A redirect is passed back, not
-/// followed: its target was never checked against [`ALLOWED_HOSTS`].
+/// than holding the relay's connections open. A redirect isn't followed: its
+/// target was never checked against [`ALLOWED_HOSTS`].
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -131,6 +140,11 @@ pub async fn relay(
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
+    // The page couldn't follow one either: its target isn't under `/relay`.
+    if upstream.status().is_redirection() && upstream.headers().contains_key(header::LOCATION) {
+        tracing::warn!("{url} redirects, which the relay doesn't follow");
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
     let mut response = Response::builder()
         .status(upstream.status())
         .header(header::CONTENT_SECURITY_POLICY, "sandbox");
@@ -144,8 +158,14 @@ pub async fn relay(
             response = response.header(name, value);
         }
     }
+    let limits = state.limits;
+    let relayed = upstream.bytes_stream().inspect_ok(move |chunk| {
+        if spend == Spend::Download {
+            limits.downloaded(client, chunk.len());
+        }
+    });
     response
-        .body(Body::from_stream(upstream.bytes_stream()))
+        .body(Body::from_stream(relayed))
         .expect("the relayed response builds")
 }
 

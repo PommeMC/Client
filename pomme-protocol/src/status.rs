@@ -6,8 +6,11 @@
 use serde::Deserialize;
 
 use crate::codec::{DecodeResult, Reader};
-use crate::packets::{PacketTable, Phase};
+use crate::packets::{Direction, PacketTable, Phase};
 use crate::wire::{write_utf, write_varint};
+
+/// `ClientIntentionPacket.MAX_HOST_LENGTH`.
+const MAX_HOST_LENGTH: usize = 255;
 
 /// `ClientboundStatusResponsePacket`'s `lenientJson(Short.MAX_VALUE)`.
 const MAX_STATUS_LENGTH: usize = i16::MAX as usize;
@@ -38,6 +41,31 @@ impl Intention {
         buf.extend(self.port.to_be_bytes());
         write_varint(&mut buf, self.intent as u32);
         buf
+    }
+
+    /// Decodes the frame [`Self::encode`] writes.
+    pub fn decode(frame: &[u8]) -> DecodeResult<Self> {
+        let mut r = Reader::new(frame);
+        let id = PacketTable::native().id(Phase::Handshake, Direction::Serverbound, "intention");
+        if Some(r.varint()?) != id {
+            return Err(r.error("not the intention packet"));
+        }
+        let protocol_version = r.var_i32()?;
+        let host = r.utf(MAX_HOST_LENGTH)?.to_owned();
+        let port = r.u16()?;
+        let intent = match r.varint()? {
+            1 => ClientIntent::Status,
+            2 => ClientIntent::Login,
+            3 => ClientIntent::Transfer,
+            _ => return Err(r.error("unknown intent")),
+        };
+        r.ensure_eof()?;
+        Ok(Self {
+            protocol_version,
+            host,
+            port,
+            intent,
+        })
     }
 }
 
@@ -171,19 +199,42 @@ mod tests {
         &frame[1..]
     }
 
-    #[test]
-    fn serverbound_packets_encode_as_vanilla_does() {
-        let intention = Intention {
+    /// The `handshake/intention` fixture's packet.
+    fn intention() -> Intention {
+        Intention {
             protocol_version: 776,
             host: "play.example.org".into(),
             port: 25565,
             intent: ClientIntent::Login,
-        };
-        assert_eq!(body(&intention.encode()), case("handshake/intention"));
+        }
+    }
+
+    #[test]
+    fn serverbound_packets_encode_as_vanilla_does() {
+        assert_eq!(body(&intention().encode()), case("handshake/intention"));
         assert_eq!(
             body(&encode_ping_request(0x0123_4567_89ab_cdef)),
             case("status/ping_request")
         );
+    }
+
+    #[test]
+    fn intention_decodes_what_vanilla_encodes() {
+        let mut frame = vec![0];
+        frame.extend(case("handshake/intention"));
+        assert_eq!(Intention::decode(&frame), Ok(intention()));
+        for broken in [
+            &frame[..frame.len() - 1],
+            &[frame.as_slice(), &[0]].concat(),
+        ] {
+            assert!(Intention::decode(broken).is_err());
+        }
+        let last = frame.len() - 1;
+        for (at, byte) in [(0, 1), (last, 0), (last, 4)] {
+            let mut frame = frame.clone();
+            frame[at] = byte;
+            assert!(Intention::decode(&frame).is_err(), "byte {at} = {byte}");
+        }
     }
 
     #[test]

@@ -11,11 +11,14 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_util::stream::SplitStream;
 use futures_util::{SinkExt as _, StreamExt as _};
 use hickory_resolver::config::{GOOGLE, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::RData;
 use hickory_resolver::{Resolver, TokioResolver};
+use pomme_protocol::status::Intention;
+use pomme_protocol::wire::read_varint;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
@@ -30,6 +33,12 @@ const MAX_MESSAGE: usize = (2 << 20) + 8;
 /// sends a keep-alive every 15 seconds, and the client drops one that goes
 /// quiet for 30.
 const IDLE: Duration = Duration::from_secs(60);
+
+/// How long the page has to send its handshake.
+const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
+
+/// More than a handshake frame takes: its host is at most 255 characters.
+const MAX_HANDSHAKE: usize = 1024;
 
 /// Below this, ports belong to services such as mail, not game servers.
 const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
@@ -59,7 +68,7 @@ pub async fn connect(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     if !guard::same_origin(&headers) {
-        tracing::warn!("Refused a cross-site connection to {host}:{port}");
+        tracing::warn!("Refused a cross-site connection to {host:?}:{port}");
         return StatusCode::FORBIDDEN.into_response();
     }
     let client = guard::client(&state.config, peer, &headers);
@@ -67,10 +76,6 @@ pub async fn connect(
         tracing::warn!("Rate limited {client}'s connections");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let Some(slot) = state.connections.open(&state.config, client) else {
-        tracing::warn!("Refused {client} another connection");
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    };
     let (host, port) = server_address(host, port).await;
     if port < FIRST_UNPRIVILEGED_PORT {
         return StatusCode::FORBIDDEN.into_response();
@@ -80,14 +85,19 @@ pub async fn connect(
             .filter(|address| reachable(&state.config, address.ip()))
             .collect(),
         Err(error) => {
-            tracing::warn!("Couldn't resolve {host}: {error}");
+            tracing::warn!("Couldn't resolve {host:?}: {error}");
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
     if addresses.is_empty() {
-        tracing::warn!("Refused {host}:{port}, which has no address it may reach");
+        tracing::warn!("Refused {host:?}:{port}, which has no address it may reach");
         return StatusCode::FORBIDDEN.into_response();
     }
+    // Only now, so a name that's slow to resolve doesn't hold a slot.
+    let Some(slot) = state.connections.open(&state.config, client) else {
+        tracing::warn!("Refused {client} another connection");
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     // The checked addresses themselves, so DNS can't answer differently twice.
     let tcp = match tokio::time::timeout(
         Duration::from_secs(5),
@@ -155,6 +165,7 @@ fn public(ip: IpAddr) -> bool {
                 || ip.is_multicast()
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
+                || (first & 0xffc0) == 0xfec0
                 || (first == 0x2001 && ip.segments()[1] == 0x0db8)
                 || ip.segments()[..3] == [0x64, 0xff9b, 1])
         }
@@ -174,11 +185,12 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         || a >= 240
         || (a == 100 && (64..128).contains(&b))
         || (a == 192 && b == 0 && ip.octets()[2] == 0)
+        || (a == 192 && b == 88 && ip.octets()[2] == 99)
         || (a == 198 && (18..20).contains(&b)))
 }
 
-/// `ip`, or the IPv4 address it carries as an IPv4-mapped, NAT64
-/// (`64:ff9b::/96`) or 6to4 (`2002::/16`) address.
+/// `ip`, or the IPv4 address it carries as an IPv4-mapped, IPv4-compatible,
+/// NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) address.
 fn unwrapped(ip: IpAddr) -> IpAddr {
     let IpAddr::V6(v6) = ip else {
         return ip;
@@ -186,22 +198,31 @@ fn unwrapped(ip: IpAddr) -> IpAddr {
     let segments = v6.segments();
     let carried = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
     let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
-    v6.to_ipv4_mapped()
+    v6.to_ipv4()
         .or_else(|| nat64.then(|| carried(segments[6], segments[7])))
         .or_else(|| (segments[0] == 0x2002).then(|| carried(segments[1], segments[2])))
         .map_or(ip, IpAddr::V4)
 }
 
-/// Copies bytes both ways until either side closes or both fall silent.
+/// Copies bytes both ways until either side closes or both fall silent, once
+/// the page has opened with a handshake: nothing reaches the server, or comes
+/// back from it, for a client that isn't speaking to a game server.
 async fn bridge(socket: WebSocket, tcp: TcpStream) {
     let _ = tcp.set_nodelay(true);
     let (mut from_server, mut to_server) = tcp.into_split();
     let (mut to_page, mut from_page) = socket.split();
+    let sent = tokio::time::timeout(HANDSHAKE_WAIT, opening(&mut from_page));
+    let Ok(Some(sent)) = sent.await else {
+        return;
+    };
+    if to_server.write_all(&sent).await.is_err() {
+        return;
+    }
     let activity = Activity::start();
     let upstream = async {
         while let Some(Ok(message)) = from_page.next().await {
             match message {
-                Message::Binary(bytes) => {
+                Message::Binary(bytes) if !bytes.is_empty() => {
                     activity.mark();
                     if to_server.write_all(&bytes).await.is_err() {
                         break;
@@ -228,6 +249,37 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
         () = downstream => {}
         () = activity.silent() => {}
     }
+}
+
+/// The page's first bytes, if they open with a handshake.
+async fn opening(from_page: &mut SplitStream<WebSocket>) -> Option<Vec<u8>> {
+    let mut sent = Vec::new();
+    while let Some(Ok(message)) = from_page.next().await {
+        match message {
+            Message::Binary(bytes) => sent.extend_from_slice(&bytes),
+            Message::Close(_) => break,
+            _ => continue,
+        }
+        if let Some(handshake) = opens_with_handshake(&sent) {
+            return handshake.then_some(sent);
+        }
+    }
+    None
+}
+
+/// Whether `sent` opens with a handshake frame, or `None` until enough of it
+/// is here to tell.
+fn opens_with_handshake(sent: &[u8]) -> Option<bool> {
+    let mut at = 0;
+    let Some(length) = read_varint(sent, &mut at) else {
+        // A length runs to five bytes at most.
+        return (sent.len() >= 5).then_some(false);
+    };
+    if length as usize > MAX_HANDSHAKE {
+        return Some(false);
+    }
+    let frame = sent.get(at..at + length as usize)?;
+    Some(Intention::decode(frame).is_ok())
 }
 
 /// When a connection last carried bytes either way.
@@ -263,7 +315,7 @@ impl Activity {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]
@@ -288,6 +340,9 @@ mod tests {
             "64:ff9b::a00:1",
             "64:ff9b:1::a00:1",
             "2002:a00:1::1",
+            "::a00:1",
+            "fec0::1",
+            "192.88.99.1",
         ] {
             assert!(!public(ip.parse().unwrap()), "{ip}");
         }
@@ -321,6 +376,45 @@ mod tests {
             assert!(tokio::time::timeout(step, &mut silent).await.is_err());
             activity.mark();
         }
-        assert!(tokio::time::timeout(IDLE, &mut silent).await.is_ok());
+        let late = IDLE + Duration::from_secs(1);
+        assert!(tokio::time::timeout(late, &mut silent).await.is_ok());
+    }
+
+    /// A status handshake as the page sends it, behind its length.
+    pub fn handshake() -> Vec<u8> {
+        let packet = Intention {
+            protocol_version: 776,
+            host: "play.example.org".into(),
+            port: 25565,
+            intent: pomme_protocol::status::ClientIntent::Status,
+        }
+        .encode();
+        let mut sent = vec![packet.len() as u8];
+        sent.extend(packet);
+        sent
+    }
+
+    #[test]
+    fn only_a_handshake_opens_a_connection() {
+        let mut sent = handshake();
+        for partial in 0..sent.len() {
+            assert_eq!(opens_with_handshake(&sent[..partial]), None, "{partial}");
+        }
+        assert_eq!(opens_with_handshake(&sent), Some(true));
+        sent.extend([1, 0]);
+        assert_eq!(opens_with_handshake(&sent), Some(true), "with what follows");
+
+        for other in [
+            b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n".as_slice(),
+            b"SSH-2.0-OpenSSH_9.6\r\n",
+            b"*1\r\n$4\r\nPING\r\n",
+            &[0xff; 5],
+            &[0xff, 0x7f, 0],
+        ] {
+            assert_ne!(opens_with_handshake(other), Some(true), "{other:?}");
+            let mut whole = other.to_vec();
+            whole.resize(MAX_HANDSHAKE, 0);
+            assert_eq!(opens_with_handshake(&whole), Some(false), "{other:?}");
+        }
     }
 }
