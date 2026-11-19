@@ -1,0 +1,73 @@
+# A piston pushing the player at the world border moves them only as far as
+# the border lets them go.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 312.5 -60 300.5 -90 0"
+
+[[step]]
+expect = { player = { position = [312.5, -60.0, 300.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [311, -61, 300] }
+
+[[step]]
+chat = "/worldborder center 300.0 300.0"
+
+[[step]]
+chat = "/worldborder set 25"
+
+[[step]]
+chat = "/setblock 311 -60 300 minecraft:piston[facing=east]"
+
+[[step]]
+expect = { block = "piston", at = [311, -60, 300] }
+
+# The head would carry the player a block east, to 313.3; the wall at 313,
+# the edge of the block the border runs through, lets them go 0.2.
+[[step]]
+chat = "/setblock 310 -60 300 minecraft:redstone_block"
+
+[[step]]
+expect = { block = "piston_head", at = [312, -60, 300] }
+
+[[step]]
+expect = { player = { position = [312.7, -60.0, 300.5] } }
+
+# And they are still there once the piston has finished moving.
+[[step]]
+wait_ticks = 20
+
+[[step]]
+expect = { player = { position = [312.7, -60.0, 300.5] } }
+
+[[step]]
+screenshot = "pushed_into_the_wall"
+
+# The world is shared, so the piston and the border go back.
+[[step]]
+chat = "/setblock 310 -60 300 minecraft:air"
+
+[[step]]
+chat = "/setblock 311 -60 300 minecraft:air"
+
+[[step]]
+chat = "/setblock 312 -60 300 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [312, -60, 300] }
+
+[[step]]
+chat = "/worldborder set 59999968"
+
+[[step]]
+chat = "/worldborder center 0 0"
+
+[[step]]
+wait_ms = 500
