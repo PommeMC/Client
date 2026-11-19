@@ -104,10 +104,11 @@ jobs:
             echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
             skip "${candidate:-No candidate} is waiting; publishing builds nothing."
           fi
+          nightly=$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)
           sha=$GITHUB_SHA
           if [ "$CHANNEL" = "candidate" ]; then
-            sha=$(git rev-parse -q --verify 'refs/tags/nightly^{commit}') \
-              || skip "No nightly to cut a candidate from."
+            sha=$nightly
+            [ -n "$sha" ] || skip "No nightly to cut a candidate from."
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
@@ -121,7 +122,7 @@ jobs:
           if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..${sha}")" ]; then
             skip "No new commits since ${last_tag}."
           fi
-          if [ "$CHANNEL" = "nightly" ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}')" = "$GITHUB_SHA" ]; then
+          if [ "$CHANNEL" = "nightly" ] && [ "$nightly" = "$GITHUB_SHA" ]; then
             skip "No new commits on master since the last nightly."
           fi
 
@@ -178,9 +179,9 @@ jobs:
           fi
           # The notes run from the last release that went out, not a tag left
           # by a candidate that was held back.
-          prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
-            --json tagName --jq '.[].tagName' \
-            | grep '^client-v' | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          published=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName')
+          prev=$(grep '^client-v' <<< "$published" | grep -vFx "$tag" | sort -V | tail -n1 || true)
           {
             echo "tag=$tag"
             echo "release_tag=$release_tag"
