@@ -292,11 +292,13 @@ pub(crate) fn tick_moving_pistons(game: &mut GameState) {
         if game.position_set && game.riding_vehicle_id.is_none() {
             // TODO: vanilla's client also moves other entities in the way;
             // the server's position updates do it here.
+            let extra_boxes = game.collidable_player_boxes();
             let world = crate::physics::collision::CollisionWorld::with_block_entities(
                 &game.chunk_store,
                 game.block_registry.block_state_table(),
                 &game.block_entity_anim,
-            );
+            )
+            .with_extra_boxes(&extra_boxes);
             movement::push_by_moving_piston(
                 &mut game.player,
                 world,
@@ -1650,6 +1652,7 @@ impl AppCore {
         connection
             .packet_tx
             .send(GamePacket::ClientCommand(ClientCommand::PerformRespawn));
+        self.input.reset_toggle_keys();
 
         game.death_confirm = false;
         game.respawn_sent = true;
@@ -2539,6 +2542,9 @@ impl AppCore {
                 NetworkEvent::ItemTags(tags) => {
                     game.recipe_book.set_item_tags(tags);
                 }
+                NetworkEvent::PlaceablePaintings(paintings) => {
+                    game.placeable_paintings = paintings;
+                }
                 NetworkEvent::BlockTags { tags } => {
                     game.block_registry.replace_tags(tags);
                 }
@@ -3134,6 +3140,25 @@ impl AppCore {
                         Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
+                NetworkEvent::InitializeBorder(init) => game.world_border.initialize(init),
+                NetworkEvent::SetBorderCenter { center_x, center_z } => {
+                    game.world_border.set_center(center_x, center_z);
+                }
+                NetworkEvent::SetBorderLerpSize {
+                    old_size,
+                    new_size,
+                    lerp_ticks,
+                } => {
+                    game.world_border
+                        .lerp_size_between(old_size, new_size, lerp_ticks);
+                }
+                NetworkEvent::SetBorderSize { size } => game.world_border.set_size(size),
+                NetworkEvent::SetBorderWarningDelay { warning_time } => {
+                    game.world_border.set_warning_time(warning_time);
+                }
+                NetworkEvent::SetBorderWarningDistance { warning_blocks } => {
+                    game.world_border.set_warning_blocks(warning_blocks);
+                }
                 NetworkEvent::EntitySpawned {
                     id,
                     uuid,
@@ -3441,6 +3466,12 @@ impl AppCore {
                 }
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
+                }
+                // `LocalPlayer.handleEntityEvent`.
+                NetworkEvent::PermissionLevel { id, level } => {
+                    if id == game.player.entity_id {
+                        game.player.permission_level = level;
+                    }
                 }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
@@ -3995,7 +4026,7 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                let extra_boxes = game.collidable_entity_boxes();
+                let extra_boxes = game.collidable_player_boxes();
                 movement::tick_dead(
                     &mut game.player,
                     crate::physics::collision::CollisionWorld::with_block_entities(
@@ -4022,6 +4053,9 @@ impl AppCore {
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
+            // Nothing ticks the jump an obstacle started, so it ends here.
+            game.player.auto_jump_time = 0;
+            game.player.auto_jumping = false;
             Self::send_abilities_packet(connection, game);
             Self::send_input_packet(&neutral, connection, game);
             self.send_sprint_command(connection, game);
@@ -4094,7 +4128,10 @@ impl AppCore {
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
-        let neutral = InputState::released();
+        // A screen takes the keys, not the hotbar selection: a neutral input
+        // on slot 0 would tell the server the held item changed.
+        let mut neutral = InputState::released();
+        neutral.set_selected_slot(self.input.selected_slot());
         let input = if input_live { &self.input } else { &neutral };
 
         // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
@@ -4196,6 +4233,7 @@ impl AppCore {
             registry: game.block_registry.render_view(),
             biome_climate: &game.biome_climate,
         };
+        game.interaction.world_border = game.world_border;
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
             input,
@@ -4240,7 +4278,7 @@ impl AppCore {
         let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
             jumpable: game.riding_jumpable_vehicle(),
         });
-        let extra_boxes = game.collidable_entity_boxes();
+        let extra_boxes = game.collidable_player_boxes();
         movement::tick(
             &mut game.player,
             input,
@@ -4352,8 +4390,9 @@ impl AppCore {
 
         let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
-        let current =
+        let mut current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
+        current.jump |= game.player.auto_jumping;
 
         if current != game.last_sent_input {
             sender.send(GamePacket::PlayerInput(serverbound_player_input(&current)));
@@ -4488,6 +4527,7 @@ impl AppCore {
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
+        game.player.auto_jump_enabled = self.menu.controls.auto_jump;
     }
 }
 

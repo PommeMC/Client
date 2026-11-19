@@ -263,6 +263,8 @@ pub struct GameState {
     /// Per-session recipe book, recipe container, ghost placement, and item
     /// tags.
     pub recipe_book: crate::recipe::RecipeBookState,
+    /// The painting variants `#minecraft:placeable` lists, by registry id.
+    pub placeable_paintings: Vec<i32>,
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
@@ -313,6 +315,7 @@ pub struct GameState {
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
+    pub world_border: crate::world::border::WorldBorder,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
@@ -384,6 +387,9 @@ pub struct GameState {
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
     pub last_skin_options: crate::ui::menu::SkinOptions,
+    /// Whether this connection has sent `ClientInformation` in the game
+    /// phase: vanilla's `remoteClientInformation`, null until it has.
+    client_information_sent: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -566,6 +572,7 @@ impl GameState {
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
             last_skin_options: skin_options,
+            client_information_sent: false,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -618,6 +625,7 @@ impl GameState {
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             block_registry,
             recipe_book: crate::recipe::RecipeBookState::default(),
+            placeable_paintings: Vec::new(),
             recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
@@ -652,6 +660,7 @@ impl GameState {
             rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
+            world_border: crate::world::border::WorldBorder::default(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
@@ -865,12 +874,31 @@ impl GameState {
             .collect()
     }
 
+    /// What the player collides with besides blocks
+    /// (`Entity.collectAllColliders`): the entities in the way, and the
+    /// world border when close to it.
+    // TODO: vanilla tests the box stretched along the move, which only
+    // differs for a player moving more than 0.4 of a block a tick.
+    pub fn collidable_player_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        let mut boxes = self.collidable_entity_boxes();
+        if !crate::player::is_spectator(self.player.game_mode) {
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*self.player.position, &self.player.bounding_box())
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
+    }
+
     /// What the boat the player steers collides with
     /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
     /// not its own passengers.
     pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
         let passengers = self.vehicle_passengers.get(&boat_id);
-        self.entity_store
+        let mut boxes: Vec<crate::physics::aabb::Aabb> = self
+            .entity_store
             .living
             .iter()
             .filter(|&(&id, e)| {
@@ -885,7 +913,17 @@ impl GameState {
                     EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
                 }
             })
-            .collect()
+            .collect();
+        if let Some(boat) = self.entity_store.living.get(&boat_id) {
+            let bounding_box = crate::entity::boat::boat_aabb(boat);
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*boat.position, &bounding_box)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
     }
 
     /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor
@@ -1533,6 +1571,20 @@ impl GameState {
         ]);
     }
 
+    /// Vanilla `broadcastClientInformation`'s test on saving the options:
+    /// what `ClientInformation` carries differs from the last one sent, or
+    /// none has gone out in the game phase yet.
+    fn client_information_outdated(
+        &self,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
+    ) -> bool {
+        !self.client_information_sent
+            || self.last_render_distance != render_distance
+            || self.client_options_changed(chat_options, skin_options)
+    }
+
     /// Whether the chat or skin options `ClientInformation` carries differ
     /// from the last ones sent.
     fn client_options_changed(
@@ -1558,6 +1610,7 @@ impl GameState {
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
         self.last_skin_options = skin_options;
+        self.client_information_sent = true;
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
         }
@@ -2710,7 +2763,9 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    // TODO: also skip blocks outside the world border once it's tracked.
+    if !game.world_border.contains_block(pos) {
+        return None;
+    }
     if block_state_data.is_air() {
         return None;
     }
@@ -3102,6 +3157,8 @@ pub fn update_game(
     // Sky time ticks unconditionally so it keeps flowing in menus.
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
+        // `ClientLevel.tick` moves the border before the time.
+        game.world_border.tick();
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
@@ -3257,6 +3314,10 @@ pub fn update_game(
         core.input.screen_opened();
     }
     core.input.menu_capture = screen_open;
+    core.input.controls = core.menu.controls;
+    core.input
+        .set_screen_open(screen_open || core.input.text_capture);
+    game.player.sprint_window = u32::from(core.menu.controls.sprint_window);
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
@@ -3479,6 +3540,9 @@ pub fn update_game(
             .player
             .prev_portal_effect_intensity
             .lerp(game.player.portal_effect_intensity, partial_tick);
+        let border_warning = game
+            .world_border
+            .warning_strength(game.player.position.x, game.player.position.z);
         hud::build_camera_overlays(
             &mut elements,
             sw,
@@ -3486,6 +3550,7 @@ pub fn update_game(
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
+            border_warning,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
@@ -4577,6 +4642,14 @@ pub fn update_game(
         let (effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
             gfx.renderer.menu_spans_width(spans, s)
         });
+        let operator_tab =
+            core.menu.controls.operator_items_tab && game.player.can_use_game_master_blocks();
+        game.creative_state.set_operator_tab(operator_tab.then(|| {
+            crate::ui::creative_inventory::operator_stacks(
+                &game.registries,
+                &game.placeable_paintings,
+            )
+        }));
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -5391,6 +5464,7 @@ pub fn update_game(
         &nameplate_renders,
         &sign_renders,
         &weather_columns,
+        &game.world_border.render_state(sky_partial_tick(core)),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {
@@ -5499,11 +5573,10 @@ pub fn update_game(
         PauseAction::None => {}
     }
 
-    // Vanilla `Options.broadcastOptions`, which sends only what changed.
+    // Vanilla `Options.broadcastOptions`.
     let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
     if core.menu.take_options_saved()
-        && (core.menu.render_distance != game.last_render_distance
-            || game.client_options_changed(chat_options, skin_options))
+        && game.client_information_outdated(core.menu.render_distance, chat_options, skin_options)
     {
         game.sync_client_information(
             connection,

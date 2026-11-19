@@ -1,0 +1,224 @@
+# The use key set to Toggle: one click raises a shield and leaves it up after
+# the button is let go, and the next click lowers it. Opening a screen lowers
+# it too, and it stays down once the screen closes.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# The game takes input again a frame after the menu goes.
+[[step]]
+wait_ms = 300
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+# Still up a second after the button was let go.
+[[step]]
+wait_ms = 1000
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+screenshot = "shield_stays_up"
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "inventory" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { player = { using_item = false } }
+
+# Back to Hold, since the options save.
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/gamemode creative"

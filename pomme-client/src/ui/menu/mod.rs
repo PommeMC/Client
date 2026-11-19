@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use pomme_install::client::Channel;
 use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
-use crate::app::input::{Action, KeyBindings};
+use crate::app::input::{Action, ControlOptions, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
@@ -85,6 +86,8 @@ struct Settings {
     vignette: bool,
     #[serde(default = "default_true")]
     entity_shadows: bool,
+    #[serde(default)]
+    nightly_builds: bool,
     #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
@@ -148,6 +151,8 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default)]
+    controls: ControlOptions,
     #[serde(default)]
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
@@ -336,6 +341,7 @@ impl Default for Settings {
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
+            nightly_builds: false,
             vsync: true,
             max_framerate: 120,
             inactivity_fps_limit: InactivityFpsLimit::default(),
@@ -366,6 +372,7 @@ impl Default for Settings {
             display_mode: 0,
             theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
+            controls: ControlOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
             last_server: String::new(),
@@ -706,6 +713,11 @@ enum Screen {
     Options,
     OptionsOnline,
     OptionsVideo,
+    /// Pomme's own settings and their category screens (Pomme-only).
+    OptionsPomme,
+    OptionsPommePerformance,
+    OptionsPommeShaders,
+    OptionsPommeUpdates,
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
@@ -731,6 +743,10 @@ impl Screen {
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
+            Self::OptionsPomme => Self::OptionsPomme,
+            Self::OptionsPommePerformance => Self::OptionsPommePerformance,
+            Self::OptionsPommeShaders => Self::OptionsPommeShaders,
+            Self::OptionsPommeUpdates => Self::OptionsPommeUpdates,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
@@ -927,6 +943,8 @@ pub struct MainMenu {
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
+    /// Whether updates follow master's nightly builds (Pomme-only).
+    nightly_builds: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub inactivity_fps_limit: InactivityFpsLimit,
@@ -962,6 +980,7 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
+    pub controls: ControlOptions,
     pub force_unicode_font: bool,
     pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
@@ -1103,6 +1122,7 @@ impl MainMenu {
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
+            nightly_builds: settings.nightly_builds,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             inactivity_fps_limit: settings.inactivity_fps_limit,
@@ -1137,6 +1157,7 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
+            controls: settings.controls.sanitized(),
             force_unicode_font: settings.force_unicode_font,
             japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
@@ -1365,6 +1386,7 @@ impl MainMenu {
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
+                nightly_builds: self.nightly_builds,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 inactivity_fps_limit: self.inactivity_fps_limit,
@@ -1395,6 +1417,7 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                controls: self.controls,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
                 last_server: self.last_mp_ip.clone(),
@@ -1476,6 +1499,15 @@ impl MainMenu {
         self.save_settings(key_bindings);
     }
 
+    /// The builds this client updates to at its next start.
+    pub fn update_channel(&self) -> Channel {
+        if self.nightly_builds {
+            Channel::Nightly
+        } else {
+            Channel::Stable
+        }
+    }
+
     pub fn open_options(&mut self, key_bindings: &KeyBindings) {
         // Stale after a disconnect; the in-game path re-sets it every frame.
         self.server_render_distance = 0;
@@ -1499,6 +1531,10 @@ impl MainMenu {
             Screen::Options
                 | Screen::OptionsOnline
                 | Screen::OptionsVideo
+                | Screen::OptionsPomme
+                | Screen::OptionsPommePerformance
+                | Screen::OptionsPommeShaders
+                | Screen::OptionsPommeUpdates
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
@@ -1788,6 +1824,30 @@ impl MainMenu {
             Screen::OptionsVideo => {
                 self.build_options_video(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::OptionsPomme => {
+                self.build_options_pomme(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::OptionsPommePerformance => self.build_options_pomme_performance(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeShaders => self.build_options_pomme_shaders(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeUpdates => self.build_options_pomme_updates(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
             Screen::OptionsSkinCustomization => {
                 self.build_options_skin(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }

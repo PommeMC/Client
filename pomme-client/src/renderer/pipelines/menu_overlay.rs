@@ -118,11 +118,44 @@ impl VertexSlot {
     }
 }
 
+/// The blend a batch draws with, each its own pipeline over the same
+/// shaders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayBlend {
+    Over,
+    /// Vanilla `RenderPipelines.CROSSHAIR`.
+    Invert,
+    /// Vanilla `RenderPipelines.VIGNETTE`.
+    Vignette,
+}
+
+impl OverlayBlend {
+    const ALL: [Self; 3] = [Self::Over, Self::Invert, Self::Vignette];
+
+    fn of(elem: &MenuElement) -> Self {
+        match elem {
+            MenuElement::ImageInvert { .. } => Self::Invert,
+            MenuElement::Vignette { .. } => Self::Vignette,
+            _ => Self::Over,
+        }
+    }
+
+    fn state(self) -> rhi::BlendState {
+        match self {
+            Self::Over => rhi::BlendState::TRANSLUCENT_PREMULTIPLIED_ALPHA,
+            // Transparent texels output rgb 0 / alpha 0, so the blend's
+            // ONE_MINUS_SRC_COLOR keeps dst.
+            Self::Invert => rhi::BlendState::INVERT,
+            Self::Vignette => rhi::BlendState::VIGNETTE,
+        }
+    }
+}
+
 struct DrawOp {
     start: u32,
     count: u32,
     scissor: Option<[f32; 4]>,
-    invert: bool,
+    blend: OverlayBlend,
 }
 
 /// Ends the current batch (if non-empty) as a `DrawOp` and starts the next
@@ -132,14 +165,14 @@ fn flush_draw_op(
     cmd_start: &mut u32,
     end: u32,
     scissor: Option<[f32; 4]>,
-    invert: bool,
+    blend: OverlayBlend,
 ) {
     if end > *cmd_start {
         draw_ops.push(DrawOp {
             start: *cmd_start,
             count: end - *cmd_start,
             scissor,
-            invert,
+            blend,
         });
     }
     *cmd_start = end;
@@ -460,7 +493,7 @@ impl MenuGeometry {
         let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
         let mut cmd_start: u32 = 0;
-        let mut cur_invert = false;
+        let mut cur_blend = OverlayBlend::Over;
         let mut obfuscation_rng = self.obfuscation_rng;
 
         for elem in elements {
@@ -482,7 +515,7 @@ impl MenuGeometry {
                     &mut cmd_start,
                     vertices.len() as u32,
                     scissor_stack.last().copied(),
-                    cur_invert,
+                    cur_blend,
                 );
                 if let MenuElement::ScissorPush { x, y, w, h } = elem {
                     // Nested regions clip to the intersection with the enclosing one.
@@ -502,18 +535,18 @@ impl MenuGeometry {
                 }
                 continue;
             }
-            // Invert-blended elements need their own pipeline, so they split the
-            // batch the same way a scissor change does.
-            let invert = matches!(elem, MenuElement::ImageInvert { .. });
-            if invert != cur_invert {
+            // An element with another blend needs its own pipeline, so it
+            // splits the batch the same way a scissor change does.
+            let blend = OverlayBlend::of(elem);
+            if blend != cur_blend {
                 flush_draw_op(
                     &mut draw_ops,
                     &mut cmd_start,
                     vertices.len() as u32,
                     scissor_stack.last().copied(),
-                    cur_invert,
+                    cur_blend,
                 );
-                cur_invert = invert;
+                cur_blend = blend;
             }
             match elem {
                 MenuElement::Rect {
@@ -870,15 +903,26 @@ impl MenuGeometry {
                         *tint,
                     );
                 }
-                MenuElement::Vignette { w, h, brightness } => {
-                    // Clamp mirrors vanilla Hud.extractVignette.
+                MenuElement::Vignette {
+                    w,
+                    h,
+                    brightness,
+                    warning,
+                } => {
+                    // Clamps and colour mirror vanilla `Hud.extractVignette`:
+                    // nearing the border takes red out of what the vignette
+                    // subtracts and adds green and blue, so the edges redden.
                     let b = brightness.clamp(0.0, 1.0);
+                    let warning = warning.clamp(0.0, 1.0);
+                    let red = b * (1.0 - warning);
+                    let green_blue = b + (1.0 - b) * warning;
+                    let color = [red, green_blue, green_blue, 1.0];
                     push_fullscreen_quad(
                         &mut vertices,
                         *w,
                         *h,
                         self.overlay_vignette_uv,
-                        [b, b, b, 1.0],
+                        color,
                         8.0,
                     );
                 }
@@ -921,15 +965,15 @@ impl MenuGeometry {
         }
 
         // Deferred tooltips always draw with the normal pipeline.
-        if cur_invert {
+        if cur_blend != OverlayBlend::Over {
             flush_draw_op(
                 &mut draw_ops,
                 &mut cmd_start,
                 vertices.len() as u32,
                 scissor_stack.last().copied(),
-                true,
+                cur_blend,
             );
-            cur_invert = false;
+            cur_blend = OverlayBlend::Over;
         }
 
         for elem in &deferred_tooltips {
@@ -952,6 +996,7 @@ impl MenuGeometry {
                     scale: *scale,
                     screen_w: *screen_w,
                     screen_h: *screen_h,
+                    widget: None,
                 };
                 self.push_bundle_tooltip(
                     &mut vertices,
@@ -994,6 +1039,10 @@ impl MenuGeometry {
                 scale: *scale,
                 screen_w: *screen_w,
                 screen_h: *screen_h,
+                widget: match elem {
+                    MenuElement::Tooltip { widget, .. } => *widget,
+                    _ => None,
+                },
             };
             // A plain-text tooltip wraps to its own lines first.
             let wrapped;
@@ -1026,7 +1075,7 @@ impl MenuGeometry {
             &mut cmd_start,
             vertices.len() as u32,
             scissor_stack.last().copied(),
-            cur_invert,
+            cur_blend,
         );
 
         MenuMesh {
@@ -1555,9 +1604,8 @@ impl MenuGeometry {
 pub struct MenuOverlayPipeline {
     pub geometry: MenuGeometry,
     pomme_logo: Option<image::RgbaImage>,
-    pipeline: rhi::backend::RenderPipeline,
-    /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
-    invert_pipeline: rhi::backend::RenderPipeline,
+    /// One per [`OverlayBlend`], in its order.
+    pipelines: [rhi::backend::RenderPipeline; 3],
     pipeline_layout: rhi::backend::PipelineLayout,
     globals_layout: rhi::backend::BindGroupLayout,
     tex_layout: rhi::backend::BindGroupLayout,
@@ -1604,8 +1652,7 @@ impl MenuOverlayPipeline {
         let pipeline_layout =
             rhi::backend::create_pipeline_layout(device, &[globals_layout, tex_layout], None);
 
-        let pipeline = create_pipeline(device, targets, pipeline_layout, false);
-        let invert_pipeline = create_pipeline(device, targets, pipeline_layout, true);
+        let pipelines = create_pipelines(device, targets, pipeline_layout);
 
         let (globals_sets, globals_buffers) = util::create_uniform_sets(
             device,
@@ -1711,8 +1758,7 @@ impl MenuOverlayPipeline {
         Ok(Self {
             geometry,
             pomme_logo,
-            pipeline,
-            invert_pipeline,
+            pipelines,
             pipeline_layout,
             globals_layout,
             tex_layout,
@@ -1847,23 +1893,17 @@ impl MenuOverlayPipeline {
             height: screen_h as u32,
         });
 
-        let pipeline_for = |invert: bool| {
-            if invert {
-                self.invert_pipeline
-            } else {
-                self.pipeline
-            }
-        };
+        let pipeline_for = |blend: OverlayBlend| self.pipelines[blend as usize];
         // Bind groups and vertex buffer stay valid across pipeline switches
-        // (both pipelines share the layout).
-        let mut bound_invert = draw_ops[0].invert;
-        pass.set_pipeline(&pipeline_for(bound_invert));
+        // (the pipelines share the layout).
+        let mut bound_blend = draw_ops[0].blend;
+        pass.set_pipeline(&pipeline_for(bound_blend));
         pass.set_bind_groups(0, &[self.globals_sets[frame], self.tex_set]);
         pass.set_vertex_buffer(0, vertex_buffer);
         for op in &draw_ops {
-            if bound_invert != op.invert {
-                pass.set_pipeline(&pipeline_for(op.invert));
-                bound_invert = op.invert;
+            if bound_blend != op.blend {
+                pass.set_pipeline(&pipeline_for(op.blend));
+                bound_blend = op.blend;
             }
             let rect = if let Some(s) = op.scissor {
                 rhi::Rect {
@@ -2062,10 +2102,10 @@ impl MenuOverlayPipeline {
         device: &rhi::backend::Device,
         targets: rhi::backend::PipelineTargets,
     ) {
-        self.pipeline.destroy(device);
-        self.invert_pipeline.destroy(device);
-        self.pipeline = create_pipeline(device, targets, self.pipeline_layout, false);
-        self.invert_pipeline = create_pipeline(device, targets, self.pipeline_layout, true);
+        for pipeline in &mut self.pipelines {
+            pipeline.destroy(device);
+        }
+        self.pipelines = create_pipelines(device, targets, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
@@ -2088,8 +2128,9 @@ impl MenuOverlayPipeline {
             destroy_texture_resources(device, res);
         }
 
-        self.pipeline.destroy(device);
-        self.invert_pipeline.destroy(device);
+        for pipeline in &mut self.pipelines {
+            pipeline.destroy(device);
+        }
         self.pipeline_layout.destroy(device);
         util::destroy_bind_groups(device, self.globals_sets.drain(..));
         self.tex_set.destroy(device);
@@ -2285,6 +2326,9 @@ pub enum MenuElement {
         scale: f32,
         screen_w: f32,
         screen_h: f32,
+        /// The hovered widget's top and height, when the tooltip is one of
+        /// `WidgetTooltipHolder`'s and so keeps clear of it.
+        widget: Option<(f32, f32)>,
     },
     /// `ClientBundleTooltip` under the bundle's styled name.
     BundleTooltip {
@@ -2346,6 +2390,7 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         brightness: f32,
+        warning: f32,
     },
     /// Full-screen pumpkin-blur camera overlay.
     PumpkinOverlay {
@@ -5077,6 +5122,7 @@ struct McTooltipDraw {
     scale: f32,
     screen_w: f32,
     screen_h: f32,
+    widget: Option<(f32, f32)>,
 }
 
 /// A laid-out tooltip, in framebuffer pixels.
@@ -5096,23 +5142,67 @@ struct BundleImage<'a> {
     weight: crate::ui::bundle::Frac,
 }
 
-/// `DefaultTooltipPositioner` then `TooltipRenderUtil.extractTooltipBackground`
-/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
-/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
-fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
-    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
-    let screen_w = (draw.screen_w / px).ceil() as i32;
-    let screen_h = (draw.screen_h / px).ceil() as i32;
-    let w = (content_w / px).round() as i32;
-    let h = (content_h / px).round() as i32;
-    let mut x = (draw.x / px).floor() as i32 + 12;
-    let mut y = (draw.y / px).floor() as i32 - 12;
+/// `DefaultTooltipPositioner`, in gui units.
+fn default_tooltip_position(
+    cursor: (i32, i32),
+    (screen_w, screen_h): (i32, i32),
+    (w, h): (i32, i32),
+) -> (i32, i32) {
+    let (mut x, mut y) = (cursor.0 + 12, cursor.1 - 12);
     if x + w > screen_w {
         x = (x - 24 - w).max(4);
     }
     if y + h + 3 > screen_h {
         y = screen_h - h - 3;
     }
+    (x, y)
+}
+
+/// `MenuTooltipPositioner` for a widget `height` tall at `top`, in gui units:
+/// below the widget, or above it where there is no room below.
+fn menu_tooltip_position(
+    cursor: (i32, i32),
+    (screen_w, screen_h): (i32, i32),
+    (w, h): (i32, i32),
+    (top, height): (i32, i32),
+) -> (i32, i32) {
+    let offset = |y: i32, widget_y: i32| {
+        let distance = (y - widget_y).abs().min(height) as f32 / height as f32;
+        let from = (height - 3) as f32;
+        (from + distance * (5.0 - from)).round() as i32
+    };
+    let mut x = cursor.0 + 12;
+    if x + w > screen_w - 5 {
+        x = (cursor.0 - 12 - w).max(9);
+    }
+    let y = cursor.1 + 3;
+    let padded_h = h + 3 + 3;
+    let bottom = top + height;
+    let lowest = bottom + 3 + offset(0, 0);
+    let y = if lowest + padded_h <= screen_h - 5 {
+        y + offset(y, top)
+    } else {
+        y - (padded_h + offset(y, bottom))
+    };
+    (x, y)
+}
+
+/// The tooltip's positioner then `TooltipRenderUtil.extractTooltipBackground`
+/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
+/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
+fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
+    let gui = |v: f32| (v / px).round() as i32;
+    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
+    let screen = (
+        (draw.screen_w / px).ceil() as i32,
+        (draw.screen_h / px).ceil() as i32,
+    );
+    let cursor = ((draw.x / px).floor() as i32, (draw.y / px).floor() as i32);
+    let size = (gui(content_w), gui(content_h));
+    let (x, y) = match draw.widget {
+        Some((top, height)) => menu_tooltip_position(cursor, screen, size, (gui(top), gui(height))),
+        None => default_tooltip_position(cursor, screen, size),
+    };
     let (text_x, text_y) = (x as f32 * px, y as f32 * px);
     let inset = (3.0 + 9.0) * px;
     TooltipBox {
@@ -5468,29 +5558,24 @@ const VERTEX_BUFFERS: [rhi::VertexBufferLayout<'static>; 1] = [rhi::vertex_buffe
     [Float32x2, Float32x2, Float32x4, Float32, Float32x2, Float32]
 )];
 
-/// The overlay pipeline, with the INVERT blend when `invert`.
-fn create_pipeline(
+/// The overlay pipeline for each [`OverlayBlend`], in its order.
+fn create_pipelines(
     device: &rhi::backend::Device,
     targets: rhi::backend::PipelineTargets,
     layout: rhi::backend::PipelineLayout,
-    invert: bool,
-) -> rhi::backend::RenderPipeline {
-    let desc = rhi::RenderPipelineDesc {
-        // Transparent texels output rgb 0 / alpha 0, so INVERT's
-        // ONE_MINUS_SRC_COLOR keeps dst.
-        blend: Some(if invert {
-            rhi::BlendState::INVERT
-        } else {
-            rhi::BlendState::TRANSLUCENT_PREMULTIPLIED_ALPHA
-        }),
-        ..rhi::RenderPipelineDesc::new(
-            "menu overlay",
-            shader::include_shader!("menu_overlay.vert"),
-            shader::include_shader!("menu_overlay.frag"),
-            &VERTEX_BUFFERS,
-        )
-    };
-    rhi::backend::create_render_pipeline(device, targets, layout, &desc)
+) -> [rhi::backend::RenderPipeline; 3] {
+    OverlayBlend::ALL.map(|blend| {
+        let desc = rhi::RenderPipelineDesc {
+            blend: Some(blend.state()),
+            ..rhi::RenderPipelineDesc::new(
+                "menu overlay",
+                shader::include_shader!("menu_overlay.vert"),
+                shader::include_shader!("menu_overlay.frag"),
+                &VERTEX_BUFFERS,
+            )
+        };
+        rhi::backend::create_render_pipeline(device, targets, layout, &desc)
+    })
 }
 
 #[cfg(test)]
@@ -5505,6 +5590,7 @@ mod tests {
             scale: 8.0,
             screen_w: 1000.0,
             screen_h: 1000.0,
+            widget: None,
         }
     }
 
@@ -5534,6 +5620,28 @@ mod tests {
         };
         let layout = tooltip_box(draw, 3.0, 120.0, 24.0);
         assert_eq!((layout.text_x, layout.text_y), (99.0 + 36.0, 99.0 - 36.0));
+    }
+
+    #[test]
+    fn a_widget_tooltip_sits_below_the_widget() {
+        let draw = McTooltipDraw {
+            widget: Some((40.0, 20.0)),
+            ..unscaled_tooltip(100.0, 50.0)
+        };
+        let layout = tooltip_box(draw, 1.0, 40.0, 8.0);
+        assert_eq!((layout.text_x, layout.text_y), (112.0, 62.0));
+    }
+
+    #[test]
+    fn a_widget_tooltip_goes_above_a_widget_near_the_bottom() {
+        let position = menu_tooltip_position((100, 80), (1000, 100), (40, 8), (70, 20));
+        assert_eq!(position, (112, 56));
+    }
+
+    #[test]
+    fn a_widget_tooltip_flips_left_of_the_cursor_at_the_right_edge() {
+        let position = menu_tooltip_position((990, 50), (1000, 1000), (40, 8), (40, 20));
+        assert_eq!(position.0, 990 - 12 - 40);
     }
 
     #[test]

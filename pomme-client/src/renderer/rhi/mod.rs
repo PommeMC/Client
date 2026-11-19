@@ -799,6 +799,18 @@ impl BlendState {
         },
         alpha: BlendComponent::REPLACE,
     };
+    /// Vanilla `RenderPipelines.VIGNETTE`: each channel of the target is
+    /// scaled by one minus the source's, and its alpha is kept.
+    pub const VIGNETTE: Self = Self {
+        color: BlendComponent {
+            src: BlendFactor::Zero,
+            dst: BlendFactor::OneMinusSrcColor,
+        },
+        alpha: BlendComponent {
+            src: BlendFactor::Zero,
+            dst: BlendFactor::One,
+        },
+    };
     /// Not one of vanilla's: the color blends over, the source alpha is
     /// written as is.
     pub const OVER_REPLACE_ALPHA: Self = Self {

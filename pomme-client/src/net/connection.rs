@@ -787,12 +787,21 @@ fn registry_tags(
     )
 }
 
-/// Forwards the item and `minecraft:block` tags of an `update_tags` packet.
+/// Forwards the item and `minecraft:block` tags of an `update_tags` packet,
+/// and the placeable paintings.
 fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &Tags) {
     send_ordered(
         event_tx,
         NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
     );
+    if let Some(paintings) = tags.get(super::PAINTING_VARIANT_REGISTRY) {
+        let placeable = paintings
+            .iter()
+            .find(|(name, _)| name.as_str() == "minecraft:placeable")
+            .map(|(_, elements)| elements.clone())
+            .unwrap_or_default();
+        send_ordered(event_tx, NetworkEvent::PlaceablePaintings(placeable));
+    }
     let Some(tags) = tags.get("minecraft:block") else {
         return;
     };

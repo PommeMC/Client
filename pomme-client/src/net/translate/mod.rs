@@ -118,6 +118,9 @@
 //!   `mount_screen_open` with identical fields; the id match aliases the pair
 //! - `EntityDataSerializers` lacks 1.21.11's `zombie_nautilus_variant` (28) and
 //!   trailing `humanoid_arm`, so the serializer remap differs
+//! - the world border counts its lerp in milliseconds and its warning time in
+//!   seconds, where 1.21.11 made both game ticks: `initialize_border`,
+//!   `set_border_lerp_size` and `set_border_warning_delay` are rewritten
 //!
 //! 1.21.8 -> 26.2 wire changes (all of 1.21.10's plus 1.21.9's, which the id
 //! remap and the rewrites below absorb):
@@ -501,6 +504,8 @@ struct GameIds {
     /// The item-carrying packets, for wire versions with a ported item
     /// grammar.
     items: Option<ItemIds>,
+    /// The rewrites 1.21.11 introduced, for wire versions below it.
+    v773: Option<Ids773>,
     /// The rewrites 1.21.9 introduced, for wire versions at or below it.
     v772: Option<Ids772>,
     /// The rewrites 1.21.6 introduced, for wire versions below it.
@@ -672,6 +677,14 @@ struct Ids770 {
     player_command_id: u32,
     player_command_old_id: u32,
     chunks_biomes_id: u32,
+}
+
+/// Native-space dispatch ids for the frame rewrites protocols at or below
+/// 773 need: 1.21.11 moved the world border's times to game ticks.
+struct Ids773 {
+    initialize_border_id: u32,
+    set_border_lerp_size_id: u32,
+    set_border_warning_delay_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites only protocols at or
@@ -888,6 +901,8 @@ use v769::*;
 
 mod v772;
 use v772::*;
+
+mod v773;
 
 mod v777;
 use v777::*;

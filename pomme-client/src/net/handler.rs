@@ -252,6 +252,12 @@ pub(crate) fn decode_raw_game_packet(
             ),
         )
     })
+    .or_else(|| {
+        claimed(
+            "border",
+            super::border_wire::handle_raw_border_packet(packet_id, payload, event_tx),
+        )
+    })
     .or_else(|| ignored(packet_id).then_some(("ignored", Ok(()))))
     .or_else(|| {
         claimed(
@@ -321,7 +327,6 @@ const IGNORED_PACKETS: &[&str] = &[
     "debug_sample",
     "game_rule_values",
     "game_test_highlight_pos",
-    "initialize_border",
     "low_disk_space_warning",
     "map_item_data",
     "merchant_offers",
@@ -335,11 +340,6 @@ const IGNORED_PACKETS: &[&str] = &[
     "projectile_power",
     "select_advancements_tab",
     "server_data",
-    "set_border_center",
-    "set_border_lerp_size",
-    "set_border_size",
-    "set_border_warning_delay",
-    "set_border_warning_distance",
     "set_default_spawn_position",
     "set_entity_link",
     "store_cookie",

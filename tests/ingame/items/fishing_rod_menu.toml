@@ -1,0 +1,92 @@
+# A cast fishing line stays out while a menu is open: after the pause menu
+# and the inventory, the next use reels it in. The rod sits in the second
+# hotbar slot, as a menu that reported the first slot selected would have
+# the server drop the line.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/item replace entity @s hotbar.1 with minecraft:fishing_rod"
+
+[[step]]
+expect = { slot = 37, item = "fishing_rod" }
+
+[[step]]
+press = { action = "key.hotbar.2" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { sound = "entity.fishing_bobber.throw" }
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+press = { key = "key.keyboard.escape" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 150
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { sound = "entity.fishing_bobber.retrieve" }
+
+# The server keeps the selected slot for the scripts after this one.
+[[step]]
+press = { action = "key.hotbar.1" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/gamemode creative"
