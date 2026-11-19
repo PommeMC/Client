@@ -253,6 +253,15 @@ fn brightness_label(brightness: f32) -> String {
     }
 }
 
+/// A chunk-distance slider's label, which reads as off at its `off` end.
+fn chunks_label(prefix: &str, chunks: u32, off: bool) -> String {
+    if off {
+        format!("{prefix} {}", on_off(false))
+    } else {
+        format!("{prefix} {chunks} chunks")
+    }
+}
+
 /// Vanilla `Options.percentValueLabel`, which truncates.
 fn percent_label(prefix: &str, value: f64) -> String {
     format!("{prefix} {}%", (value * 100.0) as i32)
@@ -620,16 +629,16 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
-            format!("{CHUNK_DETAIL} Off")
-        } else {
-            format!("{CHUNK_DETAIL} {} chunks", self.chunk_detail)
-        };
-        let dt = if self.distant_terrain == 0 {
-            format!("{DISTANT_TERRAIN} OFF")
-        } else {
-            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
-        };
+        let cd = chunks_label(
+            CHUNK_DETAIL,
+            self.chunk_detail,
+            self.chunk_detail >= super::CHUNK_DETAIL_OFF,
+        );
+        let dt = chunks_label(
+            DISTANT_TERRAIN,
+            self.distant_terrain,
+            self.distant_terrain == 0,
+        );
         let rows = [OptRow::Pair(&cd, &dt)];
         let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
             / super::CHUNK_DETAIL_SPAN)
@@ -1693,8 +1702,11 @@ impl MainMenu {
                 let hovered = enabled && hit;
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
+                // TODO: a widget focused from the keyboard shows its tooltip
+                // too, placed by `BelowOrAboveWidgetTooltipPositioner`.
                 if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
-                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
+                    let widget = (by, btn_h);
+                    common::push_widget_tooltip(&mut elements, cursor, sw, sh, gs, tip, widget);
                 }
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
                     let prev_focus = ctx.focus;
@@ -2785,6 +2797,7 @@ mod tests {
         nav: Vec<(&'static str, Screen)>,
         sliders: Vec<(&'static str, f32)>,
         disabled: Vec<&'static str>,
+        tooltips: Vec<(&'static str, &'static str)>,
     }
 
     impl Grid {
@@ -2797,6 +2810,7 @@ mod tests {
                 nav: Vec::new(),
                 sliders: Vec::new(),
                 disabled: Vec::new(),
+                tooltips: Vec::new(),
             }
         }
 
@@ -2819,7 +2833,7 @@ mod tests {
                 &self.sliders,
                 &self.disabled,
                 true,
-                &[],
+                &self.tooltips,
                 &text_width,
                 &self.key_bindings,
             )
@@ -3131,6 +3145,31 @@ mod tests {
         assert_eq!(rows[2].1, 63.0);
         assert_eq!(rows[12].1, 183.0);
         assert_eq!(options_frames(&mut menu, 240.0, 200.0), [(300.0, 214.0)]);
+    }
+
+    #[test]
+    fn a_hovered_widget_tooltip_carries_the_widget_it_keeps_clear_of() {
+        let mut grid = Grid::new("First", "Second");
+        grid.tooltips.push(("First", "tip"));
+        let hover = MenuInput {
+            cursor: (300.0, ROW_Y),
+            ..Default::default()
+        };
+        let elements = grid.frame(&hover).elements;
+        let button = elements.iter().find_map(|e| match e {
+            MenuElement::NineSlice { x, y, w, h, .. }
+                if common::hit_test(hover.cursor, [*x, *y, *w, *h]) =>
+            {
+                Some((*y, *h))
+            }
+            _ => None,
+        });
+        let tooltip = elements.iter().find_map(|e| match e {
+            MenuElement::Tooltip { widget, .. } => Some(*widget),
+            _ => None,
+        });
+        assert!(button.is_some());
+        assert_eq!(tooltip, Some(button));
     }
 
     #[test]
