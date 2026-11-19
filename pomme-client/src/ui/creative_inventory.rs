@@ -949,13 +949,24 @@ pub fn slot_center(
         }
         HoverTarget::Trash if state.tab.is_inventory_tab() => (INV_TRASH_X, INV_TRASH_Y),
         HoverTarget::Trash => return Err("the trash slot is on the inventory tab".into()),
-        _ if state.tab.is_inventory_tab() => {
-            return Err("hover only knows the item tabs' layout".into());
+        // The inventory tab lays out every slot of the inventory menu but the
+        // crafting ones.
+        HoverTarget::Hotbar(slot @ 5..=8) if state.tab.is_inventory_tab() => {
+            inventory_tab_armor_xy(usize::from(slot - SLOT_ARMOR_BASE))
+        }
+        HoverTarget::Hotbar(slot @ 9..=35) if state.tab.is_inventory_tab() => {
+            inventory_tab_main_xy(usize::from(slot - SLOT_MAIN_BASE))
+        }
+        HoverTarget::Hotbar(SLOT_OFFHAND) if state.tab.is_inventory_tab() => {
+            (INV_OFFHAND_X, INV_OFFHAND_Y)
+        }
+        HoverTarget::Catalog(_) if state.tab.is_inventory_tab() => {
+            return Err("the inventory tab has no catalog".into());
         }
         HoverTarget::Hotbar(slot @ 36..=44) => {
             (GRID_ORIGIN_X + f32::from(slot - 36) * SLOT_STRIDE, HOTBAR_Y)
         }
-        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't a hotbar slot")),
+        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't on this tab")),
         HoverTarget::Catalog(cell) if cell < GRID_COLS * GRID_ROWS => (
             GRID_ORIGIN_X + (cell % GRID_COLS) as f32 * SLOT_STRIDE,
             GRID_ORIGIN_Y + (cell / GRID_COLS) as f32 * SLOT_STRIDE,
@@ -1439,6 +1450,23 @@ fn slot_display(preview: &HashMap<u16, ItemStack>, slot_num: u16, actual: ItemSt
     preview.get(&slot_num).cloned().unwrap_or(actual)
 }
 
+/// Where the inventory tab puts armour slot `index`, head first: two columns
+/// either side of the player, two rows each.
+fn inventory_tab_armor_xy(index: usize) -> (f32, f32) {
+    (
+        INV_ARMOR_X + (index / 2) as f32 * INV_ARMOR_COL_STRIDE,
+        INV_ARMOR_Y + (index % 2) as f32 * INV_ARMOR_ROW_STRIDE,
+    )
+}
+
+/// Where the inventory tab puts main inventory slot `index`, row by row.
+fn inventory_tab_main_xy(index: usize) -> (f32, f32) {
+    (
+        GRID_ORIGIN_X + (index % GRID_COLS) as f32 * SLOT_STRIDE,
+        INV_MAIN_Y + (index / GRID_COLS) as f32 * SLOT_STRIDE,
+    )
+}
+
 fn draw_inventory_layout(
     elements: &mut Vec<MenuElement>,
     ox: f32,
@@ -1453,15 +1481,8 @@ fn draw_inventory_layout(
 
     let armor = inventory.armor_slots();
     for i in 0..4 {
-        let col = (i / 2) as f32;
-        let row = (i % 2) as f32;
-        let (x, y) = slot_xy(
-            ox,
-            oy,
-            scale,
-            INV_ARMOR_X + col * INV_ARMOR_COL_STRIDE,
-            INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
-        );
+        let (sx, sy) = inventory_tab_armor_xy(i);
+        let (x, y) = slot_xy(ox, oy, scale, sx, sy);
         let slot_num = SLOT_ARMOR_BASE + i as u16;
         let item = slot_display(preview, slot_num, item_or_empty(armor, i));
         clicked_slot = clicked_slot.or(slot_with_tooltip(
@@ -1495,13 +1516,8 @@ fn draw_inventory_layout(
     for row in 0..3usize {
         for col in 0..GRID_COLS {
             let idx = row * GRID_COLS + col;
-            let (x, y) = slot_xy(
-                ox,
-                oy,
-                scale,
-                GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
-                INV_MAIN_Y + row as f32 * SLOT_STRIDE,
-            );
+            let (sx, sy) = inventory_tab_main_xy(idx);
+            let (x, y) = slot_xy(ox, oy, scale, sx, sy);
             let slot_num = SLOT_MAIN_BASE + idx as u16;
             let item = slot_display(preview, slot_num, item_or_empty(main, idx));
             clicked_slot = clicked_slot.or(slot_with_tooltip(

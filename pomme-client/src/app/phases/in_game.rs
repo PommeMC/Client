@@ -231,6 +231,9 @@ pub struct GameState {
     pub respawn_sent: bool,
     pub inventory_open: bool,
     pub creative_inventory_open: bool,
+    /// The creative screen opened and has yet to hear of the inventory:
+    /// vanilla's `addSlotListener` in its `init`.
+    creative_listener_added: bool,
     pub creative_state: crate::ui::creative_inventory::CreativeState,
     /// The inventory menu's (container 0) latest server state id, echoed in
     /// container clicks; an open container keeps its own.
@@ -610,6 +613,7 @@ impl GameState {
             respawn_sent: false,
             inventory_open: false,
             creative_inventory_open: false,
+            creative_listener_added: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
             inventory_state_id: 0,
             cursor_item: pomme_item::ItemStack::Empty,
@@ -1091,7 +1095,7 @@ impl GameState {
     pub fn open_menu_id(&self) -> Option<i32> {
         if let Some(c) = &self.open_container {
             Some(c.id)
-        } else if self.inventory_open {
+        } else if self.inventory_open || self.creative_inventory_open {
             Some(0)
         } else {
             None
@@ -1156,6 +1160,7 @@ impl GameState {
 
     pub fn open_creative_inventory(&mut self) {
         self.creative_inventory_open = true;
+        self.creative_listener_added = true;
         self.creative_state.reopen();
     }
 
@@ -2539,7 +2544,17 @@ pub(crate) fn set_creative_slot(
     }
     // Optimistic local update; the server echoes via ContainerSetSlot.
     game.player.inventory.set_slot(slot_num as usize, item);
+    game.player.inventory.mark_slot_told(slot_num as usize);
     true
+}
+
+/// Vanilla `inventoryMenu.broadcastChanges` under the creative screen's
+/// listener: every slot that changed since a creative screen was last told of
+/// it goes to the server, lowest first.
+fn broadcast_creative_slots(game: &mut GameState, connection: &ConnectionHandle) {
+    for (slot, item) in game.player.inventory.take_changed_slots() {
+        send_creative_slot(game, connection, slot, item);
+    }
 }
 
 /// Vanilla `MultiPlayerGameMode.handleCreativeModeItemDrop`: the creative
@@ -4640,6 +4655,10 @@ pub fn update_game(
     }
 
     if game.creative_inventory_open && !dialog_open {
+        // Vanilla `addSlotListener` broadcasts as the screen opens.
+        if std::mem::take(&mut game.creative_listener_added) {
+            broadcast_creative_slots(game, connection);
+        }
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core
@@ -4721,11 +4740,13 @@ pub fn update_game(
         match action {
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
                 set_creative_slot(game, connection, slot_num, item);
+                broadcast_creative_slots(game, connection);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
                     set_creative_slot(game, connection, slot_num, item);
                 }
+                broadcast_creative_slots(game, connection);
             }
             // TODO: vanilla's client `LivingEntity.drop` also starts the local
             // arm swing; only the packet is sent here, as for the world drop.
