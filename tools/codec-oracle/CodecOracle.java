@@ -66,6 +66,12 @@ import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
+import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderCenterPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderLerpSizePacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderSizePacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDelayPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
@@ -94,6 +100,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.WeatheringCopper;
 import net.minecraft.world.level.block.state.BlockState;
@@ -140,6 +147,7 @@ public final class CodecOracle {
         login();
         configuration();
         sections();
+        border();
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
@@ -594,6 +602,32 @@ public final class CodecOracle {
     private static <T> void idsOf(JsonObject ids, String name, Registry<T> registry) {
         registry.listElements().forEach(entry ->
                 ids.addProperty(name + "/" + entry.key().identifier(), registry.getId(entry.value())));
+    }
+
+    /**
+     * The six world border packets, each built from one border: centred on
+     * (1.5, -2.5), shrinking from 60 to 20 over 300 ticks, at most 1000 wide,
+     * warning 7 blocks and 40 ticks ahead.
+     */
+    private static void border() {
+        WorldBorder border = new WorldBorder();
+        border.setCenter(1.5, -2.5);
+        border.setAbsoluteMaxSize(1000);
+        border.setWarningBlocks(7);
+        border.setWarningTime(40);
+        border.lerpSizeBetween(60.0, 20.0, 300L, 0L);
+        encode("border/initialize", ClientboundInitializeBorderPacket.STREAM_CODEC::encode,
+                new ClientboundInitializeBorderPacket(border));
+        encode("border/center", ClientboundSetBorderCenterPacket.STREAM_CODEC::encode,
+                new ClientboundSetBorderCenterPacket(border));
+        encode("border/lerp_size", ClientboundSetBorderLerpSizePacket.STREAM_CODEC::encode,
+                new ClientboundSetBorderLerpSizePacket(border));
+        encode("border/size", ClientboundSetBorderSizePacket.STREAM_CODEC::encode,
+                new ClientboundSetBorderSizePacket(border));
+        encode("border/warning_delay", ClientboundSetBorderWarningDelayPacket.STREAM_CODEC::encode,
+                new ClientboundSetBorderWarningDelayPacket(border));
+        encode("border/warning_distance", ClientboundSetBorderWarningDistancePacket.STREAM_CODEC::encode,
+                new ClientboundSetBorderWarningDistancePacket(border));
     }
 
     private static <P> void encode(String name, BiConsumer<RegistryFriendlyByteBuf, P> codec, P packet) {

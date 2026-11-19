@@ -154,81 +154,52 @@ impl WorldBorderPipeline {
         let anchor = camera.anchor();
         let anim = time_secs.rem_euclid(3.0) / 3.0;
 
-        let y_bot = (cam.y - radius).floor();
-        let y_top = (cam.y + radius).ceil();
-        let v_top = -(y_top as f32) * 0.5 + anim;
-        let v_bot = -(y_bot as f32) * 0.5 + anim;
+        // `WorldBorderRenderer.prepare`: the walls reach the far plane above
+        // and below the camera, the texture running half a tile a block.
+        let half_height = f64::from(camera.planes().1);
+        let (y_bot, y_top) = (cam.y - half_height, cam.y + half_height);
+        let v_top = -((cam.y * 0.5).rem_euclid(1.0) as f32) + anim;
+        let v_bot = v_top + half_height as f32;
 
         let z_start = (cam.z - radius).floor().clamp(min_z, max_z);
         let z_end = (cam.z + radius).ceil().clamp(min_z, max_z);
         let u0_z = (z_start.floor() as i64 & 1) as f32 * 0.5 + anim;
-        let u1_z = u0_z + (z_end - z_start) as f32 * 0.5;
+        let u_z = [u0_z, u0_z + (z_end - z_start) as f32 * 0.5];
 
         let x_start = (cam.x - radius).floor().clamp(min_x, max_x);
         let x_end = (cam.x + radius).ceil().clamp(min_x, max_x);
         let u0_x = (x_start.floor() as i64 & 1) as f32 * 0.5 + anim;
-        let u1_x = u0_x + (x_end - x_start) as f32 * 0.5;
+        let u_x = [u0_x, u0_x + (x_end - x_start) as f32 * 0.5];
 
-        let mut verts: Vec<WorldBorderVertex> = Vec::with_capacity(32);
+        let wall = |from: (f64, f64), to: (f64, f64)| {
+            [
+                DVec3::new(from.0, y_bot, from.1),
+                DVec3::new(to.0, y_bot, to.1),
+                DVec3::new(to.0, y_top, to.1),
+                DVec3::new(from.0, y_top, from.1),
+            ]
+        };
+        // West, east, north, south, each with the camera's distance inside it.
+        let corners = [
+            (wall((min_x, z_start), (min_x, z_end)), u_z),
+            (wall((max_x, z_end), (max_x, z_start)), u_z),
+            (wall((x_end, min_z), (x_start, min_z)), u_x),
+            (wall((x_start, max_z), (x_end, max_z)), u_x),
+        ];
+        let mut walls: Vec<_> = bounds
+            .distances_to(cam.x, cam.z)
+            .into_iter()
+            .zip(corners)
+            .collect();
+        // `WorldBorderRenderState.closestBorder`: the nearest first, as each
+        // writes its depth over the ones behind it.
+        walls.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-        if (cam.x - min_x).abs() <= radius && z_start < z_end {
-            push_wall_quad(
-                &mut verts,
-                anchor,
-                [
-                    DVec3::new(min_x, y_bot, z_start),
-                    DVec3::new(min_x, y_bot, z_end),
-                    DVec3::new(min_x, y_top, z_end),
-                    DVec3::new(min_x, y_top, z_start),
-                ],
-                [u0_z, u1_z, v_bot, v_top],
-                color,
-            );
-        }
-
-        if (cam.x - max_x).abs() <= radius && z_start < z_end {
-            push_wall_quad(
-                &mut verts,
-                anchor,
-                [
-                    DVec3::new(max_x, y_bot, z_end),
-                    DVec3::new(max_x, y_bot, z_start),
-                    DVec3::new(max_x, y_top, z_start),
-                    DVec3::new(max_x, y_top, z_end),
-                ],
-                [u0_z, u1_z, v_bot, v_top],
-                color,
-            );
-        }
-
-        if (cam.z - min_z).abs() <= radius && x_start < x_end {
-            push_wall_quad(
-                &mut verts,
-                anchor,
-                [
-                    DVec3::new(x_end, y_bot, min_z),
-                    DVec3::new(x_start, y_bot, min_z),
-                    DVec3::new(x_start, y_top, min_z),
-                    DVec3::new(x_end, y_top, min_z),
-                ],
-                [u0_x, u1_x, v_bot, v_top],
-                color,
-            );
-        }
-
-        if (cam.z - max_z).abs() <= radius && x_start < x_end {
-            push_wall_quad(
-                &mut verts,
-                anchor,
-                [
-                    DVec3::new(x_start, y_bot, max_z),
-                    DVec3::new(x_end, y_bot, max_z),
-                    DVec3::new(x_end, y_top, max_z),
-                    DVec3::new(x_start, y_top, max_z),
-                ],
-                [u0_x, u1_x, v_bot, v_top],
-                color,
-            );
+        let mut verts: Vec<WorldBorderVertex> = Vec::with_capacity(24);
+        for (distance, (corners, [u0, u1])) in walls {
+            if distance < radius {
+                push_wall_quad(&mut verts, anchor, corners, [u0, u1, v_bot, v_top], color);
+            }
         }
 
         if verts.is_empty() {
@@ -302,7 +273,7 @@ fn create_pipeline(
         layout,
         &rhi::RenderPipelineDesc {
             depth: Some(rhi::DepthState {
-                write: false,
+                write: true,
                 compare: rhi::CompareFunction::LessEqual,
                 bias: Some(rhi::DepthBias {
                     constant: -3,

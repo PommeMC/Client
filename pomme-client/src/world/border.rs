@@ -53,13 +53,22 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// `getDistanceToBorder`: to the nearest side, negative outside.
+    /// How far inside each side `(x, z)` is, negative outside: west, east,
+    /// north, south.
+    pub fn distances_to(&self, x: f64, z: f64) -> [f64; 4] {
+        [
+            x - self.min_x,
+            self.max_x - x,
+            z - self.min_z,
+            self.max_z - z,
+        ]
+    }
+
+    /// `getDistanceToBorder`: to the nearest side.
     pub fn distance_to(&self, x: f64, z: f64) -> f64 {
-        let from_north = z - self.min_z;
-        let from_south = self.max_z - z;
-        let from_west = x - self.min_x;
-        let from_east = self.max_x - x;
-        from_west.min(from_east).min(from_north).min(from_south)
+        self.distances_to(x, z)
+            .into_iter()
+            .fold(f64::INFINITY, f64::min)
     }
 }
 

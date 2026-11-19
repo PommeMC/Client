@@ -134,6 +134,56 @@ mod tests {
         ));
     }
 
+    /// Each packet as vanilla's own encoder wrote it (`CodecOracle.border`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        let read = |packet: &str, fixture: &str| {
+            let bytes = pomme_protocol::vanilla_fixtures::case(fixture);
+            let mut r = Reader::new(&bytes);
+            let event = read_border_event(packet, &mut r).unwrap().unwrap();
+            r.ensure_eof().unwrap();
+            event
+        };
+        let NetworkEvent::InitializeBorder(init) = read("initialize_border", "border/initialize")
+        else {
+            panic!("expected InitializeBorder");
+        };
+        assert_eq!(
+            init,
+            WorldBorderInit {
+                center_x: 1.5,
+                center_z: -2.5,
+                old_size: 60.0,
+                new_size: 20.0,
+                lerp_ticks: 300,
+                absolute_max_size: 1000,
+                warning_blocks: 7,
+                warning_time: 40,
+            }
+        );
+        assert!(matches!(
+            read("set_border_center", "border/center"),
+            NetworkEvent::SetBorderCenter { center_x, center_z } if (center_x, center_z) == (1.5, -2.5)
+        ));
+        assert!(matches!(
+            read("set_border_lerp_size", "border/lerp_size"),
+            NetworkEvent::SetBorderLerpSize { old_size, new_size, lerp_ticks: 300 }
+                if (old_size, new_size) == (60.0, 20.0)
+        ));
+        assert!(matches!(
+            read("set_border_size", "border/size"),
+            NetworkEvent::SetBorderSize { size } if size == 20.0
+        ));
+        assert!(matches!(
+            read("set_border_warning_delay", "border/warning_delay"),
+            NetworkEvent::SetBorderWarningDelay { warning_time: 40 }
+        ));
+        assert!(matches!(
+            read("set_border_warning_distance", "border/warning_distance"),
+            NetworkEvent::SetBorderWarningDistance { warning_blocks: 7 }
+        ));
+    }
+
     #[test]
     fn other_packets_are_left_alone() {
         assert!(read_border_event("set_time", &mut Reader::new(&[])).is_none());

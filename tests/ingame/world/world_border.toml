@@ -25,7 +25,7 @@ expect = { player = { position = [300.5, -60.0, 300.5] } }
 expect = { block = "grass_block", at = [312, -61, 300] }
 
 [[step]]
-chat = "/worldborder center 300 300"
+chat = "/worldborder center 300.0 300.0"
 
 [[step]]
 chat = "/worldborder set 25"
@@ -36,8 +36,9 @@ wait_ms = 1500
 [[step]]
 screenshot = "wall_ahead"
 
-# The east side is at 312.5, and the wall the player meets is the edge of
-# that block, at 313.
+# Centred on the corner of a block (a whole number centres on its middle),
+# the east side is at 312.5, and the wall the player meets is the edge of that
+# block, at 313.
 [[step]]
 key_down = { action = "key.forward" }
 
