@@ -952,6 +952,7 @@ impl MenuGeometry {
                     scale: *scale,
                     screen_w: *screen_w,
                     screen_h: *screen_h,
+                    widget: None,
                 };
                 self.push_bundle_tooltip(
                     &mut vertices,
@@ -994,6 +995,10 @@ impl MenuGeometry {
                 scale: *scale,
                 screen_w: *screen_w,
                 screen_h: *screen_h,
+                widget: match elem {
+                    MenuElement::Tooltip { widget, .. } => *widget,
+                    _ => None,
+                },
             };
             // A plain-text tooltip wraps to its own lines first.
             let wrapped;
@@ -2285,6 +2290,9 @@ pub enum MenuElement {
         scale: f32,
         screen_w: f32,
         screen_h: f32,
+        /// The hovered widget's top and height, when the tooltip is one of
+        /// `WidgetTooltipHolder`'s and so keeps clear of it.
+        widget: Option<(f32, f32)>,
     },
     /// `ClientBundleTooltip` under the bundle's styled name.
     BundleTooltip {
@@ -5077,6 +5085,7 @@ struct McTooltipDraw {
     scale: f32,
     screen_w: f32,
     screen_h: f32,
+    widget: Option<(f32, f32)>,
 }
 
 /// A laid-out tooltip, in framebuffer pixels.
@@ -5096,23 +5105,67 @@ struct BundleImage<'a> {
     weight: crate::ui::bundle::Frac,
 }
 
-/// `DefaultTooltipPositioner` then `TooltipRenderUtil.extractTooltipBackground`
-/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
-/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
-fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
-    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
-    let screen_w = (draw.screen_w / px).ceil() as i32;
-    let screen_h = (draw.screen_h / px).ceil() as i32;
-    let w = (content_w / px).round() as i32;
-    let h = (content_h / px).round() as i32;
-    let mut x = (draw.x / px).floor() as i32 + 12;
-    let mut y = (draw.y / px).floor() as i32 - 12;
+/// `DefaultTooltipPositioner`, in gui units.
+fn default_tooltip_position(
+    cursor: (i32, i32),
+    (screen_w, screen_h): (i32, i32),
+    (w, h): (i32, i32),
+) -> (i32, i32) {
+    let (mut x, mut y) = (cursor.0 + 12, cursor.1 - 12);
     if x + w > screen_w {
         x = (x - 24 - w).max(4);
     }
     if y + h + 3 > screen_h {
         y = screen_h - h - 3;
     }
+    (x, y)
+}
+
+/// `MenuTooltipPositioner` for a widget `height` tall at `top`, in gui units:
+/// below the widget, or above it where there is no room below.
+fn menu_tooltip_position(
+    cursor: (i32, i32),
+    (screen_w, screen_h): (i32, i32),
+    (w, h): (i32, i32),
+    (top, height): (i32, i32),
+) -> (i32, i32) {
+    let offset = |y: i32, widget_y: i32| {
+        let distance = (y - widget_y).abs().min(height) as f32 / height as f32;
+        let from = (height - 3) as f32;
+        (from + distance * (5.0 - from)).round() as i32
+    };
+    let mut x = cursor.0 + 12;
+    if x + w > screen_w - 5 {
+        x = (cursor.0 - 12 - w).max(9);
+    }
+    let y = cursor.1 + 3;
+    let padded_h = h + 3 + 3;
+    let bottom = top + height;
+    let lowest = bottom + 3 + offset(0, 0);
+    let y = if lowest + padded_h <= screen_h - 5 {
+        y + offset(y, top)
+    } else {
+        y - (padded_h + offset(y, bottom))
+    };
+    (x, y)
+}
+
+/// The tooltip's positioner then `TooltipRenderUtil.extractTooltipBackground`
+/// (PADDING 3, MARGIN 9) around a `content_w` x `content_h` box. Positioning
+/// runs in whole gui units of `px` framebuffer pixels, as vanilla's does.
+fn tooltip_box(draw: McTooltipDraw, px: f32, content_w: f32, content_h: f32) -> TooltipBox {
+    let gui = |v: f32| (v / px).round() as i32;
+    // `Window.guiScaledWidth` rounds up; the cursor's gui position truncates.
+    let screen = (
+        (draw.screen_w / px).ceil() as i32,
+        (draw.screen_h / px).ceil() as i32,
+    );
+    let cursor = ((draw.x / px).floor() as i32, (draw.y / px).floor() as i32);
+    let size = (gui(content_w), gui(content_h));
+    let (x, y) = match draw.widget {
+        Some((top, height)) => menu_tooltip_position(cursor, screen, size, (gui(top), gui(height))),
+        None => default_tooltip_position(cursor, screen, size),
+    };
     let (text_x, text_y) = (x as f32 * px, y as f32 * px);
     let inset = (3.0 + 9.0) * px;
     TooltipBox {
@@ -5505,6 +5558,7 @@ mod tests {
             scale: 8.0,
             screen_w: 1000.0,
             screen_h: 1000.0,
+            widget: None,
         }
     }
 
@@ -5534,6 +5588,28 @@ mod tests {
         };
         let layout = tooltip_box(draw, 3.0, 120.0, 24.0);
         assert_eq!((layout.text_x, layout.text_y), (99.0 + 36.0, 99.0 - 36.0));
+    }
+
+    #[test]
+    fn a_widget_tooltip_sits_below_the_widget() {
+        let draw = McTooltipDraw {
+            widget: Some((40.0, 20.0)),
+            ..unscaled_tooltip(100.0, 50.0)
+        };
+        let layout = tooltip_box(draw, 1.0, 40.0, 8.0);
+        assert_eq!((layout.text_x, layout.text_y), (112.0, 62.0));
+    }
+
+    #[test]
+    fn a_widget_tooltip_goes_above_a_widget_near_the_bottom() {
+        let position = menu_tooltip_position((100, 80), (1000, 100), (40, 8), (70, 20));
+        assert_eq!(position, (112, 56));
+    }
+
+    #[test]
+    fn a_widget_tooltip_flips_left_of_the_cursor_at_the_right_edge() {
+        let position = menu_tooltip_position((990, 50), (1000, 1000), (40, 8), (40, 20));
+        assert_eq!(position.0, 990 - 12 - 40);
     }
 
     #[test]

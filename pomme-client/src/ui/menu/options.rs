@@ -236,6 +236,15 @@ fn brightness_label(brightness: f32) -> String {
     }
 }
 
+/// A chunk-distance slider's label, which reads as off at its `off` end.
+fn chunks_label(prefix: &str, chunks: u32, off: bool) -> String {
+    if off {
+        format!("{prefix} {}", on_off(false))
+    } else {
+        format!("{prefix} {chunks} chunks")
+    }
+}
+
 /// Vanilla `Options.percentValueLabel`, which truncates.
 fn percent_label(prefix: &str, value: f64) -> String {
     format!("{prefix} {}%", (value * 100.0) as i32)
@@ -603,16 +612,16 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let cd = if self.chunk_detail >= super::CHUNK_DETAIL_OFF {
-            format!("{CHUNK_DETAIL} Off")
-        } else {
-            format!("{CHUNK_DETAIL} {} chunks", self.chunk_detail)
-        };
-        let dt = if self.distant_terrain == 0 {
-            format!("{DISTANT_TERRAIN} OFF")
-        } else {
-            format!("{DISTANT_TERRAIN} {} chunks", self.distant_terrain)
-        };
+        let cd = chunks_label(
+            CHUNK_DETAIL,
+            self.chunk_detail,
+            self.chunk_detail >= super::CHUNK_DETAIL_OFF,
+        );
+        let dt = chunks_label(
+            DISTANT_TERRAIN,
+            self.distant_terrain,
+            self.distant_terrain == 0,
+        );
         let rows = [OptRow::Pair(&cd, &dt)];
         let cd_frac = (self.chunk_detail.saturating_sub(super::CHUNK_DETAIL_MIN) as f32
             / super::CHUNK_DETAIL_SPAN)
@@ -1680,7 +1689,8 @@ impl MainMenu {
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
                 if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
-                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
+                    let widget = (by, btn_h);
+                    common::push_widget_tooltip(&mut elements, cursor, sw, sh, gs, tip, widget);
                 }
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
                     let prev_focus = ctx.focus;

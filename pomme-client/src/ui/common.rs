@@ -147,6 +147,32 @@ pub fn push_tooltip(
     gs: f32,
     text: &str,
 ) {
+    push_tooltip_for(elements, cursor, screen_w, screen_h, gs, text, None);
+}
+
+/// The tooltip of the hovered widget `widget.1` tall at `widget.0`, which it
+/// keeps clear of.
+pub fn push_widget_tooltip(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    text: &str,
+    widget: (f32, f32),
+) {
+    push_tooltip_for(elements, cursor, screen_w, screen_h, gs, text, Some(widget));
+}
+
+fn push_tooltip_for(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    text: &str,
+    widget: Option<(f32, f32)>,
+) {
     elements.push(MenuElement::Tooltip {
         x: cursor.0,
         y: cursor.1,
@@ -154,6 +180,7 @@ pub fn push_tooltip(
         scale: FONT_SIZE * gs,
         screen_w,
         screen_h,
+        widget,
     });
 }
 
