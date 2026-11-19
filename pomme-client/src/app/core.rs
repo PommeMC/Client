@@ -4024,6 +4024,9 @@ impl AppCore {
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
+            // Nothing ticks the jump an obstacle started, so it ends here.
+            game.player.auto_jump_time = 0;
+            game.player.auto_jumping = false;
             Self::send_abilities_packet(connection, game);
             Self::send_input_packet(&neutral, connection, game);
             self.send_sprint_command(connection, game);

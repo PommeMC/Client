@@ -737,6 +737,8 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
+        // TODO: 26.3's Quit Shortcuts option, between Sprint Window and
+        // Operator Items Tab.
         let o = self.controls;
         let sneak = format!("{SNEAK} {}", hold_or_toggle(o.toggle_crouch));
         let sprint = format!("{SPRINT} {}", hold_or_toggle(o.toggle_sprint));

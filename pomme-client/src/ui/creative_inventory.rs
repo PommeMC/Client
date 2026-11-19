@@ -190,6 +190,8 @@ impl CreativeTab {
                 title: "Spawn Eggs",
                 items: ItemSource::Static(SPAWN_EGGS_ITEMS),
             },
+            // TODO: the stacks that carry components: the four test block
+            // modes, a light per level and the four paintings.
             CreativeTab::OpBlocks => TabMeta {
                 row: Row::Bottom,
                 col: 6,
@@ -210,7 +212,7 @@ impl CreativeTab {
     /// The tab whose [`Self::id`] is `id`.
     #[cfg(feature = "test-harness")]
     pub fn from_id(id: &str) -> Option<Self> {
-        all_tabs().find(|tab| tab.id() == id)
+        shown_tabs(true).find(|tab| tab.id() == id)
     }
 
     /// The vanilla `creative_mode_tab` registry id.
@@ -277,11 +279,6 @@ const TABS: [CreativeTab; 12] = [
     CreativeTab::SpawnEggs,
     CreativeTab::SurvivalInventory,
 ];
-
-/// Every tab, the operator one included.
-fn all_tabs() -> impl Iterator<Item = CreativeTab> {
-    shown_tabs(true)
-}
 
 /// The tabs on show, the operator one only with `operator_tab`.
 fn shown_tabs(operator_tab: bool) -> impl Iterator<Item = CreativeTab> {
@@ -578,6 +575,7 @@ pub fn build_creative_inventory(
         clicked,
         right_clicked,
         carrying: state.cursor_item.is_present(),
+        operator_tab: state.operator_tab,
     };
 
     let drag_preview: Option<DragPreview> = match (&state.drag, &state.cursor_item) {
@@ -1049,6 +1047,7 @@ struct TooltipCtx<'a> {
     clicked: bool,
     right_clicked: bool,
     carrying: bool,
+    operator_tab: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1072,13 +1071,15 @@ struct DragPreview {
 
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
 
-fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
-    static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
+/// The titles of the shown tabs holding `kind`.
+fn tabs_containing(kind: ItemKind, operator_tab: bool) -> &'static [&'static str] {
+    type Index = HashMap<ItemKind, Vec<&'static str>>;
+    static INDEX: [OnceLock<Index>; 2] = [OnceLock::new(), OnceLock::new()];
     static EMPTY: &[&str] = &[];
-    INDEX
+    INDEX[usize::from(operator_tab)]
         .get_or_init(|| {
-            let mut map: HashMap<ItemKind, Vec<&'static str>> = HashMap::new();
-            for tab in all_tabs() {
+            let mut map = Index::new();
+            for tab in shown_tabs(operator_tab) {
                 let meta = tab.meta();
                 if let ItemSource::Static(list) = meta.items {
                     for &k in list {
@@ -1103,10 +1104,11 @@ fn build_item_tooltip_lines(
     registries: &azalea_core::registry_holder::RegistryHolder,
     advanced: bool,
     tab_names: bool,
+    operator_tab: bool,
 ) -> Vec<TooltipLine> {
     let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
     if tab_names && data.component_patch.iter().next().is_none() && !lines.is_empty() {
-        let tabs = tabs_containing(data.kind)
+        let tabs = tabs_containing(data.kind, operator_tab)
             .iter()
             .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
         lines.splice(1..1, tabs);
@@ -1127,7 +1129,13 @@ fn push_item_tooltip(
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
             y: tt.cursor.1,
-            lines: build_item_tooltip_lines(data, tt.registries, tt.advanced, tab_names),
+            lines: build_item_tooltip_lines(
+                data,
+                tt.registries,
+                tt.advanced,
+                tab_names,
+                tt.operator_tab,
+            ),
             scale: FONT_SIZE * tt.gs,
             screen_w: tt.screen_w,
             screen_h: tt.screen_h,
@@ -1645,7 +1653,8 @@ mod tests {
             search_items_cached(state.operator_tab).last(),
             OP_BLOCKS_ITEMS.last()
         );
-        assert_eq!(tabs_containing(command_block), ["Operator Utilities"]);
+        assert_eq!(tabs_containing(command_block, true), ["Operator Utilities"]);
+        assert!(tabs_containing(command_block, false).is_empty());
     }
 
     #[test]
