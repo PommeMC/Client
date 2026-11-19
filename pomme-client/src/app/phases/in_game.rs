@@ -384,6 +384,9 @@ pub struct GameState {
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
     pub last_skin_options: crate::ui::menu::SkinOptions,
+    /// Whether this connection has sent `ClientInformation` in the game
+    /// phase: vanilla's `remoteClientInformation`, null until it has.
+    client_information_sent: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -566,6 +569,7 @@ impl GameState {
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
             last_skin_options: skin_options,
+            client_information_sent: false,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -1533,6 +1537,20 @@ impl GameState {
         ]);
     }
 
+    /// Vanilla `broadcastClientInformation`'s test on saving the options:
+    /// what `ClientInformation` carries differs from the last one sent, or
+    /// none has gone out in the game phase yet.
+    fn client_information_outdated(
+        &self,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
+    ) -> bool {
+        !self.client_information_sent
+            || self.last_render_distance != render_distance
+            || self.client_options_changed(chat_options, skin_options)
+    }
+
     /// Whether the chat or skin options `ClientInformation` carries differ
     /// from the last ones sent.
     fn client_options_changed(
@@ -1558,6 +1576,7 @@ impl GameState {
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
         self.last_skin_options = skin_options;
+        self.client_information_sent = true;
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
         }
@@ -5506,11 +5525,10 @@ pub fn update_game(
         PauseAction::None => {}
     }
 
-    // Vanilla `Options.broadcastOptions`, which sends only what changed.
+    // Vanilla `Options.broadcastOptions`.
     let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
     if core.menu.take_options_saved()
-        && (core.menu.render_distance != game.last_render_distance
-            || game.client_options_changed(chat_options, skin_options))
+        && game.client_information_outdated(core.menu.render_distance, chat_options, skin_options)
     {
         game.sync_client_information(
             connection,
