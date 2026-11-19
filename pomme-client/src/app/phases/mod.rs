@@ -138,7 +138,28 @@ pub enum ConnectionPhase {
     /// Waiting on the integrated server. Singleplayer only.
     StartingWorld,
     Connecting,
+    /// Logged in and not yet in play; `world` when it began as
+    /// `StartingWorld`.
+    Configuring {
+        world: bool,
+    },
     Loading,
+}
+
+impl ConnectionPhase {
+    pub fn login_finished(&mut self) {
+        match self {
+            Self::StartingWorld => *self = Self::Configuring { world: true },
+            Self::Connecting => *self = Self::Configuring { world: false },
+            Self::Configuring { .. } | Self::Loading => {}
+        }
+    }
+
+    /// Login is done: vanilla's login listener titles a disconnect
+    /// `connect.failed`, its common listener `disconnect.lost`.
+    pub fn logged_in(&self) -> bool {
+        matches!(self, Self::Configuring { .. } | Self::Loading)
+    }
 }
 
 pub enum AppPhase {
@@ -279,6 +300,27 @@ pub fn draw_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_is_logged_in_from_configuration_on() {
+        use ConnectionPhase::*;
+        for (phase, logged_in) in [
+            (StartingWorld, false),
+            (Connecting, false),
+            (Configuring { world: false }, true),
+            (Configuring { world: true }, true),
+            (Loading, true),
+        ] {
+            assert_eq!(phase.logged_in(), logged_in);
+        }
+
+        let after_login = |mut phase: ConnectionPhase| {
+            phase.login_finished();
+            phase
+        };
+        assert!(after_login(Connecting) == Configuring { world: false });
+        assert!(after_login(StartingWorld) == Configuring { world: true });
+    }
 
     #[test]
     fn one_slow_frame_sets_both_lows() {

@@ -2262,6 +2262,11 @@ impl AppCore {
             .then(std::time::Instant::now);
             match event {
                 NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
+                NetworkEvent::LoggedIn => {
+                    if let Some(state) = connect_phase.as_deref_mut() {
+                        state.login_finished();
+                    }
+                }
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
