@@ -55,7 +55,7 @@ struct Config {
     /// The hostname the page is served at, such as play.pomme.rs. Requests
     /// naming any other host are refused, so no site can point its own name
     /// at the relay and use it. Without one, the relay answers to localhost.
-    #[arg(long)]
+    #[arg(long, value_parser = hostname)]
     public_host: Option<String>,
     /// Lets the page reach servers on private networks, for a relay run at
     /// home. A public relay must not, or anyone could reach what's behind it.
@@ -76,6 +76,14 @@ struct Config {
     /// from inside. Repeatable.
     #[arg(long = "block-address")]
     block_addresses: Vec<IpAddr>,
+}
+
+/// A hostname as a `Host` header names it, less the port.
+fn hostname(value: &str) -> Result<String, &'static str> {
+    if value.is_empty() || value.ends_with('.') || value.contains([':', '/']) {
+        return Err("expected a bare hostname, such as play.pomme.rs");
+    }
+    Ok(value.to_owned())
 }
 
 #[tokio::main]
@@ -124,6 +132,8 @@ fn app(config: Config, dir: &Path) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Request, StatusCode, header};
@@ -152,43 +162,76 @@ mod tests {
         address
     }
 
-    /// The page's WebSocket to `server` through `relay`.
-    async fn page(
-        relay: SocketAddr,
-        server: SocketAddr,
-    ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
-        let url = format!("ws://{relay}/connect/127.0.0.1/{}", server.port());
-        let mut request = url.into_client_request().unwrap();
+    /// Fails a step that takes longer than a refusal or a relayed byte
+    /// should, well inside the wait for a handshake.
+    async fn soon<T>(step: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), step)
+            .await
+            .expect("the step finishes")
+    }
+
+    /// The page's WebSocket through a relay to a server, and the server's end
+    /// of the connection, on which it has already sent `BANNER`.
+    async fn connected() -> (WebSocketStream<MaybeTlsStream<TcpStream>>, TcpStream) {
+        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let relay = relay().await;
+        let mut request = format!("ws://{relay}/connect/127.0.0.1/{port}")
+            .into_client_request()
+            .unwrap();
         let origin = format!("http://{relay}").parse().unwrap();
         request.headers_mut().insert(header::ORIGIN, origin);
-        tokio_tungstenite::connect_async(request).await.unwrap().0
+        let (page, _) = soon(tokio_tungstenite::connect_async(request))
+            .await
+            .unwrap();
+        let (mut tcp, _) = soon(server.accept()).await.unwrap();
+        tcp.write_all(BANNER).await.unwrap();
+        (page, tcp)
+    }
+
+    const BANNER: &[u8] = b"banner";
+
+    #[tokio::test]
+    async fn anything_but_a_handshake_reaches_nothing() {
+        let (mut page, mut tcp) = connected().await;
+        let request = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n".repeat(32);
+        page.send(Message::binary(request)).await.unwrap();
+
+        let mut received = Vec::new();
+        soon(tcp.read_to_end(&mut received)).await.unwrap();
+        assert!(received.is_empty(), "{received:?}");
+        while let Some(Ok(message)) = soon(page.next()).await {
+            assert!(message.is_close(), "{message:?}");
+        }
     }
 
     #[tokio::test]
-    async fn a_handshake_is_bridged_and_anything_else_reaches_nothing() {
-        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = server.local_addr().unwrap();
-        let relay = relay().await;
-
-        let mut other = page(relay, address).await;
-        let (mut tcp, _) = server.accept().await.unwrap();
-        let request = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n".repeat(32);
-        other.send(Message::binary(request)).await.unwrap();
-        let mut received = Vec::new();
-        tcp.read_to_end(&mut received).await.unwrap();
-        assert!(received.is_empty(), "{received:?}");
-
-        let mut page = page(relay, address).await;
-        let (mut tcp, _) = server.accept().await.unwrap();
+    async fn a_handshake_is_bridged() {
+        let (mut page, mut tcp) = connected().await;
         let mut opening = connect::tests::handshake();
         opening.extend([1, 0]);
-        page.send(Message::binary(opening.clone())).await.unwrap();
+        for piece in opening.chunks(7) {
+            page.send(Message::binary(piece.to_vec())).await.unwrap();
+        }
+
         let mut received = vec![0; opening.len()];
-        tcp.read_exact(&mut received).await.unwrap();
+        soon(tcp.read_exact(&mut received)).await.unwrap();
         assert_eq!(received, opening);
-        tcp.write_all(b"status").await.unwrap();
-        let reply = page.next().await.unwrap().unwrap();
-        assert_eq!(reply.into_data().as_ref(), b"status");
+        let reply = soon(page.next()).await.unwrap().unwrap();
+        assert_eq!(reply.into_data().as_ref(), BANNER);
+    }
+
+    #[test]
+    fn a_public_host_is_a_bare_hostname() {
+        assert_eq!(hostname("play.pomme.rs"), Ok("play.pomme.rs".to_owned()));
+        for value in [
+            "",
+            "play.pomme.rs.",
+            "play.pomme.rs:443",
+            "https://play.pomme.rs",
+        ] {
+            assert!(hostname(value).is_err(), "{value}");
+        }
     }
 
     async fn get(uri: &str, headers: &[(&str, &str)]) -> Response {

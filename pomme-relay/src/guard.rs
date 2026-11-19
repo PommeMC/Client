@@ -45,12 +45,15 @@ fn serves(config: &Config, host: &str) -> bool {
 
 /// Whether a request came from a page of this relay's own origin, going by
 /// its `Origin`, which browsers set on every cross-origin and WebSocket
-/// request and pages can't forge.
-pub fn same_origin(headers: &HeaderMap) -> bool {
+/// request and pages can't forge. A public relay's page is served over TLS.
+pub fn same_origin(config: &Config, headers: &HeaderMap) -> bool {
     text(headers, header::ORIGIN)
         .and_then(|origin| origin.split_once("://"))
         .zip(text(headers, header::HOST))
-        .is_some_and(|((_, origin_host), host)| origin_host == host)
+        .is_some_and(|((scheme, origin_host), host)| {
+            origin_host.eq_ignore_ascii_case(host)
+                && (config.public_host.is_none() || scheme == "https")
+        })
 }
 
 /// Whether a browser sent the request from a page of another site. Requests
@@ -103,8 +106,11 @@ pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMa
             .to_str()
             .ok()?
             .rsplit(',')
-            .next()?;
-        address.trim().parse().ok()
+            .next()?
+            .trim();
+        // Some proxies add the client's port.
+        let with_port = || address.parse().ok().map(|socket: SocketAddr| socket.ip());
+        address.parse().ok().or_else(with_port)
     };
     let address = if config.trust_proxy {
         forwarded().unwrap_or_else(|| {
@@ -234,6 +240,8 @@ mod tests {
         assert_eq!(client(true, &["203.0.113.7"]), "203.0.113.7");
         assert_eq!(client(true, &["1.2.3.4, 203.0.113.7"]), "203.0.113.7");
         assert_eq!(client(true, &["1.2.3.4", "203.0.113.7"]), "203.0.113.7");
+        assert_eq!(client(true, &["203.0.113.7:5678"]), "203.0.113.7");
+        assert_eq!(client(true, &["[2001:db8::1]:5678"]), "2001:db8::");
         assert_eq!(client(true, &["nonsense"]), "10.0.0.1");
         assert_eq!(client(true, &[]), "10.0.0.1");
         assert_eq!(client(false, &["203.0.113.7"]), "10.0.0.1");
@@ -249,9 +257,18 @@ mod tests {
             }
             headers
         };
-        assert!(same_origin(&headers(Some("https://play.pomme.rs"))));
-        assert!(!same_origin(&headers(Some("https://evil.example"))));
-        assert!(!same_origin(&headers(None)));
+        let same_origin = |public_host, origin| same_origin(&config(public_host), &headers(origin));
+        for public_host in [None, Some("play.pomme.rs")] {
+            assert!(same_origin(public_host, Some("https://play.pomme.rs")));
+            assert!(same_origin(public_host, Some("https://Play.Pomme.rs")));
+            assert!(!same_origin(public_host, Some("https://evil.example")));
+            assert!(!same_origin(public_host, None));
+        }
+        assert!(same_origin(None, Some("http://play.pomme.rs")));
+        assert!(!same_origin(
+            Some("play.pomme.rs"),
+            Some("http://play.pomme.rs")
+        ));
     }
 
     #[test]

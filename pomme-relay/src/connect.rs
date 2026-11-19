@@ -26,8 +26,12 @@ use tokio::time::Instant;
 use crate::limits::Spend;
 use crate::{AppState, Config, guard};
 
-/// Vanilla's largest packet, plus room for its length prefix.
-const MAX_MESSAGE: usize = (2 << 20) + 8;
+/// Several times what the page sends in one message, which is a piece of the
+/// stream and not a whole packet.
+const MAX_MESSAGE: usize = 256 * 1024;
+
+/// How long a name may take to resolve, and then a server to accept.
+const REACH_WAIT: Duration = Duration::from_secs(5);
 
 /// A connection silent both ways for this long is closed. A server in play
 /// sends a keep-alive every 15 seconds, and the client drops one that goes
@@ -39,6 +43,10 @@ const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
 
 /// More than a handshake frame takes: its host is at most 255 characters.
 const MAX_HANDSHAKE: usize = 1024;
+
+/// The bytes a frame's length may take, past which a server drops the
+/// connection.
+const MAX_LENGTH_PREFIX: usize = 3;
 
 /// Below this, ports belong to services such as mail, not game servers.
 const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
@@ -67,7 +75,7 @@ pub async fn connect(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !guard::same_origin(&headers) {
+    if !guard::same_origin(&state.config, &headers) {
         tracing::warn!("Refused a cross-site connection to {host:?}:{port}");
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -80,14 +88,12 @@ pub async fn connect(
     if port < FIRST_UNPRIVILEGED_PORT {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let addresses: Vec<SocketAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
+    let lookup = tokio::net::lookup_host((host.as_str(), port));
+    let addresses: Vec<SocketAddr> = match in_time("resolve", &host, lookup).await {
         Ok(addresses) => addresses
             .filter(|address| reachable(&state.config, address.ip()))
             .collect(),
-        Err(error) => {
-            tracing::warn!("Couldn't resolve {host:?}: {error}");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
+        Err(status) => return status.into_response(),
     };
     if addresses.is_empty() {
         tracing::warn!("Refused {host:?}:{port}, which has no address it may reach");
@@ -99,23 +105,12 @@ pub async fn connect(
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     // The checked addresses themselves, so DNS can't answer differently twice.
-    let tcp = match tokio::time::timeout(
-        Duration::from_secs(5),
-        TcpStream::connect(addresses.as_slice()),
-    )
-    .await
-    {
-        Ok(Ok(tcp)) => tcp,
-        Ok(Err(error)) => {
-            tracing::warn!("Couldn't reach {host}:{port}: {error}");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-        Err(_) => {
-            tracing::warn!("Reaching {host}:{port} timed out");
-            return StatusCode::GATEWAY_TIMEOUT.into_response();
-        }
+    let dial = TcpStream::connect(addresses.as_slice());
+    let tcp = match in_time("reach", &host, dial).await {
+        Ok(tcp) => tcp,
+        Err(status) => return status.into_response(),
     };
-    tracing::info!("Connected {client} to {host}:{port}");
+    tracing::info!("Connected {client} to {host:?}:{port}");
     upgrade
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
@@ -125,6 +120,26 @@ pub async fn connect(
         })
 }
 
+/// What `step` gives within [`REACH_WAIT`], or the status for it failing or
+/// taking longer, having logged which.
+async fn in_time<T>(
+    verb: &str,
+    host: &str,
+    step: impl Future<Output = std::io::Result<T>>,
+) -> Result<T, StatusCode> {
+    match tokio::time::timeout(REACH_WAIT, step).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            tracing::warn!("Couldn't {verb} {host:?}: {error}");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+        Err(_) => {
+            tracing::warn!("Couldn't {verb} {host:?} in time");
+            Err(StatusCode::GATEWAY_TIMEOUT)
+        }
+    }
+}
+
 /// Where `host:port` is served: at the default port, the target of its
 /// `_minecraft._tcp` SRV record when it has one, as the desktop client finds
 /// it.
@@ -132,7 +147,8 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
     if port != 25565 {
         return (host, port);
     }
-    let Ok(lookup) = RESOLVER.srv_lookup(format!("_minecraft._tcp.{host}")).await else {
+    let lookup = RESOLVER.srv_lookup(format!("_minecraft._tcp.{host}"));
+    let Ok(Ok(lookup)) = tokio::time::timeout(REACH_WAIT, lookup).await else {
         return (host, port);
     };
     match lookup.answers().first().map(|record| &record.data) {
@@ -159,15 +175,21 @@ fn public(ip: IpAddr) -> bool {
     match unwrapped(ip) {
         IpAddr::V4(ip) => public_v4(ip),
         IpAddr::V6(ip) => {
-            let first = ip.segments()[0];
-            !(ip.is_loopback()
-                || ip.is_unspecified()
+            let segments = ip.segments();
+            let first = segments[0];
+            // `::/96` holds loopback, the unspecified address and the old
+            // IPv4-compatible form; `::ffff:0:0/96` is IPv4-translated.
+            !(segments[..6] == [0; 6]
+                || segments[..6] == [0, 0, 0, 0, 0xffff, 0]
                 || ip.is_multicast()
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
                 || (first & 0xffc0) == 0xfec0
-                || (first == 0x2001 && ip.segments()[1] == 0x0db8)
-                || ip.segments()[..3] == [0x64, 0xff9b, 1])
+                || segments[..2] == [0x2001, 0]
+                || segments[..2] == [0x2001, 0x0db8]
+                || (first & 0xfff0) == 0x3ff0
+                || segments[..4] == [0x100, 0, 0, 0]
+                || segments[..3] == [0x64, 0xff9b, 1])
         }
     }
 }
@@ -189,8 +211,8 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         || (a == 198 && (18..20).contains(&b)))
 }
 
-/// `ip`, or the IPv4 address it carries as an IPv4-mapped, IPv4-compatible,
-/// NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) address.
+/// `ip`, or the IPv4 address it carries as an IPv4-mapped, NAT64
+/// (`64:ff9b::/96`) or 6to4 (`2002::/16`) address.
 fn unwrapped(ip: IpAddr) -> IpAddr {
     let IpAddr::V6(v6) = ip else {
         return ip;
@@ -198,7 +220,7 @@ fn unwrapped(ip: IpAddr) -> IpAddr {
     let segments = v6.segments();
     let carried = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
     let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
-    v6.to_ipv4()
+    v6.to_ipv4_mapped()
         .or_else(|| nat64.then(|| carried(segments[6], segments[7])))
         .or_else(|| (segments[0] == 0x2002).then(|| carried(segments[1], segments[2])))
         .map_or(ip, IpAddr::V4)
@@ -215,7 +237,8 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
     let Ok(Some(sent)) = sent.await else {
         return;
     };
-    if to_server.write_all(&sent).await.is_err() {
+    let written = tokio::time::timeout(IDLE, to_server.write_all(&sent));
+    if !matches!(written.await, Ok(Ok(()))) {
         return;
     }
     let activity = Activity::start();
@@ -272,10 +295,9 @@ async fn opening(from_page: &mut SplitStream<WebSocket>) -> Option<Vec<u8>> {
 fn opens_with_handshake(sent: &[u8]) -> Option<bool> {
     let mut at = 0;
     let Some(length) = read_varint(sent, &mut at) else {
-        // A length runs to five bytes at most.
-        return (sent.len() >= 5).then_some(false);
+        return (sent.len() >= MAX_LENGTH_PREFIX).then_some(false);
     };
-    if length as usize > MAX_HANDSHAKE {
+    if at > MAX_LENGTH_PREFIX || length as usize > MAX_HANDSHAKE {
         return Some(false);
     }
     let frame = sent.get(at..at + length as usize)?;
@@ -341,6 +363,11 @@ pub mod tests {
             "64:ff9b:1::a00:1",
             "2002:a00:1::1",
             "::a00:1",
+            "::808:808",
+            "::ffff:0:7f00:1",
+            "2001::1",
+            "100::1",
+            "3fff::1",
             "fec0::1",
             "192.88.99.1",
         ] {
@@ -410,6 +437,7 @@ pub mod tests {
             b"*1\r\n$4\r\nPING\r\n",
             &[0xff; 5],
             &[0xff, 0x7f, 0],
+            &[0x80, 0x80, 0x80, 0],
         ] {
             assert_ne!(opens_with_handshake(other), Some(true), "{other:?}");
             let mut whole = other.to_vec();

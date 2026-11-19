@@ -4,11 +4,12 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use axum::BoxError;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::TryStreamExt as _;
+use futures_util::StreamExt as _;
 
 use crate::limits::Spend;
 use crate::{AppState, guard};
@@ -159,10 +160,13 @@ pub async fn relay(
         }
     }
     let limits = state.limits;
-    let relayed = upstream.bytes_stream().inspect_ok(move |chunk| {
-        if spend == Spend::Download {
-            limits.downloaded(client, chunk.len());
+    let relayed = upstream.bytes_stream().map(move |chunk| {
+        let chunk = chunk.map_err(BoxError::from)?;
+        if spend == Spend::Download && !limits.downloaded(client, chunk.len()) {
+            tracing::warn!("Cut {client}'s download short at what it may download");
+            return Err(BoxError::from("over the download limit"));
         }
+        Ok(chunk)
     });
     response
         .body(Body::from_stream(relayed))
