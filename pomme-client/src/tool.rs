@@ -2,14 +2,13 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use azalea_inventory::components::{CustomData, Tool as WireTool};
 use pomme_item::ItemStackData;
+use pomme_item::components::{CustomData, Tool as WireTool};
 use pomme_protocol::version::NATIVE;
 use pomme_registry::builtin::{BlockKind, DataComponentKind, ItemKind};
 use pomme_registry::identifier::Identifier;
 use pomme_registry::{HolderSet, Registry};
 
-use crate::net::item_codec::patched;
 use crate::world::block::{BlockStateTable, BlockTags};
 
 /// First protocol whose shears use the `shears_*_breaking_speed` tags (26.2).
@@ -30,24 +29,23 @@ fn legacy_mining_enchantments(stack: &ItemStackData, protocol: i32) -> LegacyMin
     if protocol > 766 {
         return LegacyMiningEnchantments::default();
     }
-    let Some(custom) = patched::<CustomData>(&stack.component_patch) else {
+    let Some(custom) = stack
+        .component_patch
+        .read::<CustomData>()
+        .and_then(|custom| custom.nbt.compound())
+    else {
         return LegacyMiningEnchantments::default();
     };
 
     if protocol == 766 {
         return LegacyMiningEnchantments {
-            efficiency: custom.nbt.int(LEGACY_EFFICIENCY_KEY).unwrap_or_default(),
-            aqua_affinity: custom
-                .nbt
-                .byte(LEGACY_AQUA_AFFINITY_KEY)
-                .unwrap_or_default()
-                != 0,
+            efficiency: custom.int(LEGACY_EFFICIENCY_KEY).unwrap_or_default(),
+            aqua_affinity: custom.byte(LEGACY_AQUA_AFFINITY_KEY).unwrap_or_default() != 0,
         };
     }
 
     let mut result = LegacyMiningEnchantments::default();
     let Some(enchantments) = custom
-        .nbt
         .list("Enchantments")
         .and_then(|list| list.compounds())
     else {
@@ -410,7 +408,9 @@ pub fn stack_tool(stack: &ItemStackData, protocol: i32) -> Option<Cow<'static, T
         // TODO: Tool values on 766-773 (1.20.5 through 1.21.10) are skipped,
         // so server-customised tools there mine at the item's default speed.
         if protocol >= 774 {
-            return patched::<WireTool>(&stack.component_patch)
+            return stack
+                .component_patch
+                .read::<WireTool>()
                 .map(|tool| Cow::Owned(from_wire(&tool, protocol)));
         }
     }
@@ -420,10 +420,9 @@ pub fn stack_tool(stack: &ItemStackData, protocol: i32) -> Option<Cow<'static, T
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::ToolRule as WireToolRule;
+    use pomme_item::components::ToolRule as WireToolRule;
 
     use super::*;
-    use crate::net::item_codec::set_fork_component;
 
     fn test_tags() -> BlockTags {
         crate::world::block::block_tags_for_test(
@@ -500,7 +499,8 @@ mod tests {
 
     /// A pre-1.20.5 stack with its `Enchantments` NBT list in CustomData.
     fn enchanted_stack(kind: ItemKind, enchantments: &[(&str, i16)]) -> ItemStackData {
-        use simdnbt::owned::{Nbt, NbtCompound, NbtList, NbtTag};
+        use pomme_item::components::Nbt;
+        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
         let list = enchantments
             .iter()
@@ -520,9 +520,9 @@ mod tests {
         )]);
         let mut stack = ItemStackData::new(kind, 1);
         let custom = CustomData {
-            nbt: Nbt::new("".into(), root),
+            nbt: Nbt::new(&NbtTag::Compound(root)),
         };
-        set_fork_component(&mut stack.component_patch, custom);
+        stack.component_patch.write(&custom);
         stack
     }
 
@@ -640,7 +640,7 @@ mod tests {
             damage_per_block: 1,
             can_destroy_blocks_in_creative: true,
         };
-        set_fork_component(&mut stack.component_patch, wire);
+        stack.component_patch.write(&wire);
 
         let tool = stack_tool(&stack, 775).expect("26.1 Tool patch");
         let tags = test_tags();
@@ -671,7 +671,7 @@ mod tests {
             damage_per_block: 7,
             can_destroy_blocks_in_creative: false,
         };
-        set_fork_component(&mut stack.component_patch, wire);
+        stack.component_patch.write(&wire);
 
         let tool = stack_tool(&stack, NATIVE.protocol).expect("explicit tool override");
         let tags = test_tags();

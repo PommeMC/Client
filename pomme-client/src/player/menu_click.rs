@@ -4,16 +4,14 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
-use pomme_item::components::BundleContents;
+use pomme_item::components::{BundleContents, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
-use crate::net::item_codec::Components;
 use crate::player::inventory::{
     ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START, CRAFT_INPUT_START, CRAFT_OUTPUT, MAIN_START, OFFHAND,
 };
@@ -754,8 +752,8 @@ fn safe_insert(
 /// Vanilla `Player.getEquipmentSlotForItem`: the slot the player wears
 /// `item` in, if it is something they can wear.
 fn worn_slot(item: &ItemStackData) -> Option<EquipmentSlot> {
-    item.get_component::<Equippable>()
-        .filter(|equippable| crate::player::interaction::player_can_equip(equippable))
+    item.component::<Equippable>()
+        .filter(crate::player::interaction::player_can_equip)
         .map(|equippable| equippable.slot)
 }
 

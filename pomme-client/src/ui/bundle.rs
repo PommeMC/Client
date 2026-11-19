@@ -1,8 +1,6 @@
-use azalea_inventory::components::{Bees, TooltipDisplay};
-use pomme_item::components::{BundleContents, MaxStackSize};
+use pomme_item::components::{Bees, BundleContents, MaxStackSize, TooltipDisplay};
 use pomme_item::{ItemStack, ItemStackData};
 
-use crate::net::item_codec::Components;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 pub const NO_SELECTION: i32 = -1;
@@ -99,7 +97,7 @@ pub fn item_weight(data: &ItemStackData) -> Option<Frac> {
         return weight(&bundle.items)?.add(Frac(1, 16));
     }
     if data
-        .get_component::<Bees>()
+        .component::<Bees>()
         .is_some_and(|bees| !bees.occupants.is_empty())
     {
         return Some(Frac::ONE);
@@ -283,7 +281,7 @@ pub fn push_tooltip(
     footer: Vec<TooltipLine>,
     (cursor, screen_w, screen_h, gui_scale): ((f32, f32), f32, f32, f32),
 ) {
-    let display = data.get_component::<TooltipDisplay>();
+    let display = data.component::<TooltipDisplay>();
     if display.as_ref().is_some_and(|d| d.hide_tooltip) {
         return;
     }

@@ -4,16 +4,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
-use azalea_inventory::components::{
-    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
-};
 use pomme_item::ItemStackData;
-use pomme_item::components::{BlockItemStateProperties, ChargedProjectiles};
+use pomme_item::components::{
+    BlockItemStateProperties, ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion,
+    MapColor, PotionContents,
+};
 use pomme_registry::Registry as AzaleaRegistry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
-
-use crate::net::item_codec::Components;
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
@@ -567,23 +565,23 @@ fn evaluate_item_tint(
         // Vanilla preserves the configured default alpha for dye/firework, but
         // opacifies component colors.
         model::ItemTintSource::Dye { default } => stack
-            .and_then(|stack| stack.get_component::<DyedColor>())
+            .and_then(|stack| stack.component::<DyedColor>())
             .map(|color| opaque_rgb(color.rgb as u32))
             .unwrap_or(default),
         model::ItemTintSource::Firework { default } => stack
-            .and_then(|stack| stack.get_component::<FireworkExplosion>())
+            .and_then(|stack| stack.component::<FireworkExplosion>())
             .and_then(|explosion| average_rgb(&explosion.colors))
             .unwrap_or(default),
         model::ItemTintSource::Potion { default } => stack
-            .and_then(|stack| stack.get_component::<PotionContents>())
+            .and_then(|stack| stack.component::<PotionContents>())
             .map(|contents| potion_contents_color(&contents, default))
             .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::MapColor { default } => stack
-            .and_then(|stack| stack.get_component::<MapColor>())
+            .and_then(|stack| stack.component::<MapColor>())
             .map(|color| opaque_rgb(color.color as u32))
             .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::CustomModelData { index, default } => stack
-            .and_then(|stack| stack.get_component::<CustomModelData>())
+            .and_then(|stack| stack.component::<CustomModelData>())
             .and_then(|data| data.colors.get(index).copied())
             .map(|color| opaque_rgb(color as u32))
             .unwrap_or_else(|| opaque_rgb(default)),
@@ -754,14 +752,14 @@ mod load_progress_tests {
 
 #[cfg(test)]
 mod tint_tests {
-    use azalea_inventory::components::CustomModelData;
     use pomme_item::ItemStack;
+    use pomme_item::components::CustomModelData;
 
     use super::*;
 
     #[test]
     fn custom_model_data_tint_uses_requested_color_index_and_default() {
-        let stack = ItemStack::from(ItemKind::Stone).with_component(CustomModelData {
+        let stack = ItemStack::from(ItemKind::Stone).with(&CustomModelData {
             floats: vec![],
             flags: vec![],
             strings: vec![],

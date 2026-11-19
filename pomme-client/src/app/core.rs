@@ -23,7 +23,6 @@ use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
-use crate::net::item_codec::Components;
 use crate::net::{DimensionInfo, NetworkEvent};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
@@ -323,7 +322,7 @@ fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i
 /// The texture of what `e` holds in its main hand, for its eating crumbs.
 fn mouth_item_texture(e: &crate::entity::LivingEntity) -> Option<String> {
     let pomme_item::ItemStack::Present(held) =
-        e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)?
+        e.equipment(pomme_item::components::EquipmentSlot::Mainhand)?
     else {
         return None;
     };
@@ -4670,11 +4669,11 @@ fn worn_for<'a>(
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> crate::player::interaction::Worn<'a> {
     use azalea_core::registry_holder::components::PreventArmorChange;
-    use azalea_inventory::components::{Enchantments, Equippable};
+    use pomme_item::components::{Enchantments, Equippable};
     use pomme_registry::DataRegistry;
 
     let Some(equippable) = stack
-        .and_then(|s| s.get_component::<Equippable>())
+        .and_then(|s| s.component::<Equippable>())
         .filter(|e| e.swappable)
     else {
         return Default::default();
@@ -4682,9 +4681,9 @@ fn worn_for<'a>(
     let worn = inventory.equipped(equippable.slot, selected);
     let locked = !creative
         && worn
-            .and_then(|w| w.get_component::<Enchantments>())
+            .and_then(|w| w.component::<Enchantments>())
             .is_some_and(|e| {
-                e.levels.keys().any(|enchantment| {
+                e.levels.iter().any(|(enchantment, _)| {
                     registries
                         .enchantment
                         .map

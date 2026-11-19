@@ -4651,7 +4651,9 @@ version = "0.1.0"
 dependencies = [
  "pomme-protocol",
  "pomme-registry",
+ "pomme-text",
  "serde_json",
+ "simdnbt",
 ]
 
 [[package]]

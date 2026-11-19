@@ -16,7 +16,6 @@ use super::{NetworkEvent, item_codec};
 use crate::chat_component::ComponentText;
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
-use crate::net::item_codec::Components;
 use crate::position::BlockPos;
 
 /// `ItemEntity.DATA_ITEM`.
@@ -77,7 +76,7 @@ pub(super) fn read_entity_data(
 
 fn send_item_data(id: i32, stack: &ItemStackData, event_tx: &Sender<NetworkEvent>) {
     let damage = stack
-        .get_component::<azalea_inventory::components::Damage>()
+        .component::<pomme_item::components::Damage>()
         .map(|component| component.amount)
         .unwrap_or(0);
     send_ordered(

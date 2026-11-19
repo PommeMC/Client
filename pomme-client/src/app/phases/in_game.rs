@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_inventory::components::EquipmentSlot;
 use glam::FloatExt as _;
+use pomme_item::components::EquipmentSlot;
 use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 

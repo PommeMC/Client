@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::operations::{ClickOperation, PickupClick};
-use pomme_item::components::BlockItemStateProperties;
+use pomme_item::components::{BlockItemStateProperties, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::{DataComponentKind, ItemKind};
@@ -1356,8 +1355,7 @@ fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
         8 => EquipmentSlot::Feet,
         _ => return true,
     };
-    crate::net::item_codec::default_component::<Equippable>(item.kind)
-        .is_some_and(|e| e.slot == required)
+    pomme_item::defaults::component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
 }
 
 /// A drag can cover a slot only if the item may go there and the slot is empty

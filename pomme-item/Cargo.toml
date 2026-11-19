@@ -8,4 +8,9 @@ license = "GPL-3.0-or-later"
 [dependencies]
 pomme-protocol = { path = "../pomme-protocol" }
 pomme-registry = { path = "../pomme-registry" }
+pomme-text = { path = "../pomme-text" }
 serde_json = { workspace = true }
+simdnbt = "0.10"
+
+[dev-dependencies]
+pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }

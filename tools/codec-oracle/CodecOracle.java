@@ -138,9 +138,15 @@ public final class CodecOracle {
         Registry<WorldClock> clocks = builtIn(Registries.WORLD_CLOCK);
         Registry<Biome> biomes = builtIn(Registries.BIOME);
         Registry<Dialog> dialogs = builtIn(Registries.DIALOG);
+        Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments = builtIn(Registries.ENCHANTMENT);
         registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs,
+                enchantments,
                 net.minecraft.core.registries.BuiltInRegistries.ITEM,
-                net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE));
+                net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT,
+                net.minecraft.core.registries.BuiltInRegistries.POTION,
+                net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT,
+                net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE));
 
         lifecycle(dimensionTypes, clocks);
         status();
@@ -148,6 +154,7 @@ public final class CodecOracle {
         configuration();
         sections();
         border();
+        components(enchantments);
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
@@ -212,6 +219,7 @@ public final class CodecOracle {
         idsOf(ids, "dimension_type", dimensionTypes);
         idsOf(ids, "world_clock", clocks);
         idsOf(ids, "dialog", dialogs);
+        idsOf(ids, "enchantment", enchantments);
         out.add("registry_ids", ids);
         JsonObject sizes = new JsonObject();
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
@@ -628,6 +636,62 @@ public final class CodecOracle {
                 new ClientboundSetBorderWarningDelayPacket(border));
         encode("border/warning_distance", ClientboundSetBorderWarningDistancePacket.STREAM_CODEC::encode,
                 new ClientboundSetBorderWarningDistancePacket(border));
+    }
+
+    /**
+     * Item component values no item has by default, each through its type's
+     * own stream codec.
+     */
+    private static void components(Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments) {
+        component("dyed_color", net.minecraft.core.component.DataComponents.DYED_COLOR,
+                new net.minecraft.world.item.component.DyedItemColor(0x123456));
+        component("map_color", net.minecraft.core.component.DataComponents.MAP_COLOR,
+                new net.minecraft.world.item.component.MapItemColor(0x46402e));
+        component("unbreakable", net.minecraft.core.component.DataComponents.UNBREAKABLE,
+                net.minecraft.util.Unit.INSTANCE);
+        component("custom_name", net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+                Component.literal("Excalibur").withStyle(ChatFormatting.GOLD));
+        component("custom_model_data", net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA,
+                new net.minecraft.world.item.component.CustomModelData(List.of(1.5f), List.of(true, false),
+                        List.of("a"), List.of(0xff0000)));
+        component("firework_explosion", net.minecraft.core.component.DataComponents.FIREWORK_EXPLOSION,
+                new net.minecraft.world.item.component.FireworkExplosion(
+                        net.minecraft.world.item.component.FireworkExplosion.Shape.STAR, IntList.of(1, 2),
+                        IntList.of(3), true, false));
+        component("profile", net.minecraft.core.component.DataComponents.PROFILE,
+                net.minecraft.world.item.component.ResolvableProfile.createUnresolved("Steve"));
+        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+        tag.putInt("level", 3);
+        component("custom_data", net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                net.minecraft.world.item.component.CustomData.of(tag));
+        net.minecraft.world.item.enchantment.ItemEnchantments.Mutable levels =
+                new net.minecraft.world.item.enchantment.ItemEnchantments.Mutable(
+                        net.minecraft.world.item.enchantment.ItemEnchantments.EMPTY);
+        levels.set(enchantments.getOrThrow(net.minecraft.world.item.enchantment.Enchantments.SHARPNESS), 5);
+        component("enchantments", net.minecraft.core.component.DataComponents.ENCHANTMENTS, levels.toImmutable());
+        component("potion_contents", net.minecraft.core.component.DataComponents.POTION_CONTENTS,
+                new net.minecraft.world.item.alchemy.PotionContents(
+                        Optional.of(net.minecraft.world.item.alchemy.Potions.STRONG_SWIFTNESS), Optional.of(0x123456),
+                        List.of(new net.minecraft.world.effect.MobEffectInstance(
+                                net.minecraft.world.effect.MobEffects.SPEED, 200, 1)),
+                        Optional.of("custom")));
+        component("tooltip_display", net.minecraft.core.component.DataComponents.TOOLTIP_DISPLAY,
+                new net.minecraft.world.item.component.TooltipDisplay(true,
+                        new it.unimi.dsi.fastutil.objects.ReferenceLinkedOpenHashSet<>(List.of(
+                                net.minecraft.core.component.DataComponents.DAMAGE,
+                                net.minecraft.core.component.DataComponents.LORE))));
+        component("use_cooldown", net.minecraft.core.component.DataComponents.USE_COOLDOWN,
+                new net.minecraft.world.item.component.UseCooldown(1.5f,
+                        Optional.of(Identifier.withDefaultNamespace("pearl"))));
+        component("equippable", net.minecraft.core.component.DataComponents.EQUIPPABLE,
+                net.minecraft.world.item.equipment.Equippable.builder(net.minecraft.world.entity.EquipmentSlot.HEAD)
+                        .setEquipSound(Holder.direct(net.minecraft.sounds.SoundEvent.createFixedRangeEvent(
+                                Identifier.withDefaultNamespace("custom"), 16.0f)))
+                        .build());
+    }
+
+    private static <T> void component(String name, net.minecraft.core.component.DataComponentType<T> type, T value) {
+        encode("component/" + name, type.streamCodec()::encode, value);
     }
 
     private static <P> void encode(String name, BiConsumer<RegistryFriendlyByteBuf, P> codec, P packet) {

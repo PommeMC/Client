@@ -2,9 +2,9 @@
 //! session: translated frames already carry the native layout, and item and
 //! menu ids are remapped from the wire version's.
 
-use azalea_inventory::components::EquipmentSlot;
 use crossbeam_channel::Sender;
 use pomme_item::ItemStack;
+use pomme_item::components::EquipmentSlot;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::container::{self, ContainerPacket};
 use pomme_protocol::{ClientRegistry, item};

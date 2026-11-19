@@ -9,10 +9,10 @@ pub mod villager;
 
 use std::collections::HashMap;
 
-use azalea_inventory::components::EquipmentSlot;
 use dimensions::EntityDimensions;
 use glam::DVec3;
 use pomme_item::ItemStack;
+use pomme_item::components::EquipmentSlot;
 use pomme_registry::builtin::EntityKind;
 
 use crate::attribute::AttributeMap;
