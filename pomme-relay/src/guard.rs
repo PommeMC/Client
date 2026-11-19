@@ -1,0 +1,220 @@
+//! What keeps a public relay from being used by anyone but its own page: the
+//! hostnames it answers for, the headers every response carries, and the cap
+//! on each client's game connections.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+use crate::{AppState, Config, relay};
+
+/// Refuses requests for hostnames the relay doesn't serve, then marks every
+/// response with the [`SECURITY_HEADERS`] its route didn't set itself.
+pub async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = text(request.headers(), header::HOST);
+    if !host.is_some_and(|host| serves(&state.config, host)) {
+        tracing::warn!("Refused a request for host {host:?}");
+        return StatusCode::MISDIRECTED_REQUEST.into_response();
+    }
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (name, value) in SECURITY_HEADERS.iter() {
+        headers.entry(name).or_insert_with(|| value.clone());
+    }
+    response
+}
+
+/// Whether `host`, a `Host` header, names this relay: localhost, or the
+/// public hostname it was given.
+fn serves(config: &Config, host: &str) -> bool {
+    let name = host
+        .rsplit_once(':')
+        .filter(|(_, port)| port.parse::<u16>().is_ok())
+        .map_or(host, |(name, _)| name);
+    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+        || config.public_host.as_deref() == Some(name)
+}
+
+/// Whether a request came from a page of this relay's own origin, going by
+/// its `Origin`, which browsers set on every cross-origin and WebSocket
+/// request and pages can't forge.
+pub fn same_origin(headers: &HeaderMap) -> bool {
+    text(headers, header::ORIGIN)
+        .and_then(|origin| origin.split_once("://"))
+        .zip(text(headers, header::HOST))
+        .is_some_and(|((_, origin_host), host)| origin_host == host)
+}
+
+/// Whether a browser sent the request from a page of another site. Requests
+/// that name none come from outside a browser, which no page can make.
+pub fn cross_site(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|site| site != "same-origin")
+}
+
+/// The page may run only its own scripts and wasm, and fetch only the relay
+/// and the hosts it relays (which the service worker sends here).
+static SECURITY_HEADERS: LazyLock<Vec<(header::HeaderName, HeaderValue)>> = LazyLock::new(|| {
+    let relayed: String = relay::ALLOWED_HOSTS
+        .iter()
+        .map(|(host, _)| format!(" https://{host}"))
+        .collect();
+    let policy = format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+         connect-src 'self'{relayed}; worker-src 'self'; object-src 'none'; \
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    [
+        (header::CONTENT_SECURITY_POLICY, policy.as_str()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"),
+        (
+            header::HeaderName::from_static("cross-origin-opener-policy"),
+            "same-origin",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name, HeaderValue::from_str(value).expect("a valid header")))
+    .collect()
+});
+
+/// The client a request came from: the peer, or behind a trusted reverse
+/// proxy the address it appended to `X-Forwarded-For`.
+pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMap) -> IpAddr {
+    let forwarded = || {
+        text(headers, "x-forwarded-for")?
+            .rsplit(',')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    config
+        .trust_proxy
+        .then(forwarded)
+        .flatten()
+        .unwrap_or(peer.0.ip())
+}
+
+fn text(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// The game connections open, per client and in all.
+#[derive(Default)]
+pub struct Connections(Mutex<Counts>);
+
+type Counts = (HashMap<IpAddr, usize>, usize);
+
+impl Connections {
+    /// A slot for one more of `client`'s connections, if it and the relay are
+    /// under their caps. It's given back when dropped.
+    pub fn open(self: &Arc<Self>, config: &Config, client: IpAddr) -> Option<Slot> {
+        let mut counts = self.counts();
+        let (by_client, total) = &mut *counts;
+        let open = by_client.entry(client).or_default();
+        if *open >= config.connections_per_client || *total >= config.max_connections {
+            return None;
+        }
+        *open += 1;
+        *total += 1;
+        Some(Slot {
+            connections: Arc::clone(self),
+            client,
+        })
+    }
+
+    fn counts(&self) -> MutexGuard<'_, Counts> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+pub struct Slot {
+    connections: Arc<Connections>,
+    client: IpAddr,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut counts = self.connections.counts();
+        let (by_client, total) = &mut *counts;
+        *total -= 1;
+        if let Some(open) = by_client.get_mut(&self.client) {
+            *open -= 1;
+            if *open == 0 {
+                by_client.remove(&self.client);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(public_host: Option<&str>) -> Config {
+        Config {
+            public_host: public_host.map(str::to_owned),
+            connections_per_client: 2,
+            max_connections: 3,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn serves_localhost_and_its_public_host_only() {
+        let config = config(Some("play.pomme.rs"));
+        for host in [
+            "localhost:8090",
+            "127.0.0.1:8090",
+            "[::1]:8090",
+            "play.pomme.rs",
+        ] {
+            assert!(serves(&config, host), "{host}");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:8090",
+            "play.pomme.rs.evil.example",
+        ] {
+            assert!(!serves(&config, host), "{host}");
+        }
+    }
+
+    #[test]
+    fn same_origin_needs_an_origin_naming_the_host() {
+        let headers = |origin: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("play.pomme.rs"));
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+            }
+            headers
+        };
+        assert!(same_origin(&headers(Some("https://play.pomme.rs"))));
+        assert!(!same_origin(&headers(Some("https://evil.example"))));
+        assert!(!same_origin(&headers(None)));
+    }
+
+    #[test]
+    fn connections_stop_at_each_cap_and_come_back() {
+        let config = config(None);
+        let connections = Arc::new(Connections::default());
+        let [a, b]: [IpAddr; 2] = ["1.1.1.1".parse().unwrap(), "2.2.2.2".parse().unwrap()];
+        let a1 = connections.open(&config, a).unwrap();
+        let _a2 = connections.open(&config, a).unwrap();
+        assert!(connections.open(&config, a).is_none(), "per client");
+        let _b1 = connections.open(&config, b).unwrap();
+        assert!(connections.open(&config, b).is_none(), "in all");
+        drop(a1);
+        assert!(connections.open(&config, b).is_some());
+    }
+}

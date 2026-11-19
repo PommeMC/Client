@@ -1,0 +1,17 @@
+[package]
+name = "pomme-relay"
+description = "Serves the browser build and relays its requests to the Mojang and Microsoft services browsers can't reach directly."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

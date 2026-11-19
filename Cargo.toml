@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "pomme-android",
+    "pomme-relay",
     "pomme-ios",
     "pomme-auth",
     "pomme-install",
