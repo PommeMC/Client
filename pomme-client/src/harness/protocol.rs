@@ -193,6 +193,9 @@ pub struct Press {
 pub struct Key {
     pub action: Option<String>,
     pub key: Option<String>,
+    /// A `key_down` that is the system's repeat of a key already held.
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 /// Key binding `action` set to `keys` (input ids), or back to its defaults
