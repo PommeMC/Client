@@ -139,6 +139,8 @@ pub const fn rgb(hex: u32) -> [f32; 4] {
     ]
 }
 
+// TODO: the widget tooltips on the title, worlds, server and friends screens
+// still come through here; they belong on `push_widget_tooltip`.
 pub fn push_tooltip(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),

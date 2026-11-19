@@ -1688,6 +1688,8 @@ impl MainMenu {
                 let hovered = enabled && hit;
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
+                // TODO: a widget focused from the keyboard shows its tooltip
+                // too, placed by `BelowOrAboveWidgetTooltipPositioner`.
                 if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
                     let widget = (by, btn_h);
                     common::push_widget_tooltip(&mut elements, cursor, sw, sh, gs, tip, widget);
@@ -2781,6 +2783,7 @@ mod tests {
         nav: Vec<(&'static str, Screen)>,
         sliders: Vec<(&'static str, f32)>,
         disabled: Vec<&'static str>,
+        tooltips: Vec<(&'static str, &'static str)>,
     }
 
     impl Grid {
@@ -2793,6 +2796,7 @@ mod tests {
                 nav: Vec::new(),
                 sliders: Vec::new(),
                 disabled: Vec::new(),
+                tooltips: Vec::new(),
             }
         }
 
@@ -2815,7 +2819,7 @@ mod tests {
                 &self.sliders,
                 &self.disabled,
                 true,
-                &[],
+                &self.tooltips,
                 &text_width,
                 &self.key_bindings,
             )
@@ -3127,6 +3131,31 @@ mod tests {
         assert_eq!(rows[2].1, 63.0);
         assert_eq!(rows[12].1, 183.0);
         assert_eq!(options_frames(&mut menu, 240.0, 200.0), [(300.0, 214.0)]);
+    }
+
+    #[test]
+    fn a_hovered_widget_tooltip_carries_the_widget_it_keeps_clear_of() {
+        let mut grid = Grid::new("First", "Second");
+        grid.tooltips.push(("First", "tip"));
+        let hover = MenuInput {
+            cursor: (300.0, ROW_Y),
+            ..Default::default()
+        };
+        let elements = grid.frame(&hover).elements;
+        let button = elements.iter().find_map(|e| match e {
+            MenuElement::NineSlice { x, y, w, h, .. }
+                if common::hit_test(hover.cursor, [*x, *y, *w, *h]) =>
+            {
+                Some((*y, *h))
+            }
+            _ => None,
+        });
+        let tooltip = elements.iter().find_map(|e| match e {
+            MenuElement::Tooltip { widget, .. } => Some(*widget),
+            _ => None,
+        });
+        assert!(button.is_some());
+        assert_eq!(tooltip, Some(button));
     }
 
     #[test]
