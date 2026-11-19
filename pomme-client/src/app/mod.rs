@@ -227,6 +227,9 @@ fn start_connecting(
         (None, Transport::Memory { .. }) => None,
     };
     let connection = spawn_connection(&core.tokio_rt, connect_args);
+    // An options save from before the session is no reason to tell this
+    // server: the configuration phase sends the options as they stand.
+    core.menu.take_options_saved();
     let game = GameState::new(
         &*gfx.renderer,
         core.resources(),
