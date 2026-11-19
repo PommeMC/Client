@@ -1,6 +1,6 @@
 # Pomme's own settings (Pomme-only): a button under the Options grid opens
 # them, one screen per category. Performance holds Chunk Detail and Distant
-# Terrain, Shaders holds Shader Pack, Updates holds Nightly Builds.
+# Terrain, Shaders holds Shader Pack, Updates holds Client Updates.
 
 pomme_only = true
 
@@ -132,7 +132,7 @@ mouse_up = "left"
 wait_ms = 300
 
 [[step]]
-cursor_to_button = "Nightly Builds: OFF"
+cursor = [213, 200]
 
 [[step]]
 wait_ms = 300
@@ -141,10 +141,25 @@ wait_ms = 300
 screenshot = "updates"
 
 [[step]]
+cursor_to_button = "Client Updates: Weekly"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "weekly"
+
+[[step]]
 mouse_down = "left"
 
 [[step]]
 mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "daily"
 
 [[step]]
 cursor = [213, 200]
@@ -153,11 +168,11 @@ cursor = [213, 200]
 wait_ms = 300
 
 [[step]]
-screenshot = "nightly_on"
+screenshot = "updates_daily"
 
-# Back off, since the options save.
+# Back to Weekly, since the options save.
 [[step]]
-cursor_to_button = "Nightly Builds: ON"
+cursor_to_button = "Client Updates: Daily"
 
 [[step]]
 mouse_down = "left"

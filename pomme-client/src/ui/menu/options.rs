@@ -193,7 +193,24 @@ const MENU_BACKGROUND_BLUR: &str = "Menu Background Blur:";
 const CHUNK_DETAIL: &str = "Chunk Detail:";
 const DISTANT_TERRAIN: &str = "Distant Terrain:";
 const SHADER_PACK: &str = "Shader Pack:";
-const NIGHTLY_BUILDS: &str = "Nightly Builds:";
+const CLIENT_UPDATES: &str = "Client Updates:";
+
+/// The Client Updates button's value and hover text on `channel`.
+fn client_updates_text(channel: Channel) -> (&'static str, &'static str) {
+    match channel {
+        Channel::Stable => (
+            "Weekly",
+            "Updates once a week, when the game starts. Each weekly release has been played \
+             for a few days first. Switching back from Daily keeps the current build until the \
+             next weekly release.",
+        ),
+        Channel::Nightly => (
+            "Daily",
+            "Updates every day, when the game starts. You get new features and fixes sooner, \
+             but daily builds have only passed automated checks and may have bugs.",
+        ),
+    }
+}
 const CHUNK_FADE: &str = "Chunk Fade:";
 const INACTIVITY_FPS_LIMIT: &str = "Reduce fps when:";
 
@@ -677,13 +694,10 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
-        let nightly_label = format!("{NIGHTLY_BUILDS} {}", on_off(self.nightly_builds));
-        let rows = [OptRow::PairLeft(&nightly_label)];
-        let tooltips: &[(&str, &str)] = &[(
-            NIGHTLY_BUILDS,
-            "Updates to each night's build when the game starts, not only to releases. Nightly \
-             builds are less tested.",
-        )];
+        let (value, tooltip) = client_updates_text(self.update_channel());
+        let label = format!("{CLIENT_UPDATES} {value}");
+        let rows = [OptRow::PairLeft(&label)];
+        let tooltips: &[(&str, &str)] = &[(CLIENT_UPDATES, tooltip)];
         self.build_options_grid(
             sw,
             sh,
@@ -1778,7 +1792,7 @@ impl MainMenu {
                         self.cloud_mode = self.cloud_mode.cycle();
                         self.save_settings(key_bindings);
                     }
-                    if label.starts_with(NIGHTLY_BUILDS) {
+                    if label.starts_with(CLIENT_UPDATES) {
                         self.nightly_builds = !self.nightly_builds;
                         self.save_settings(key_bindings);
                     }
@@ -2889,8 +2903,8 @@ mod tests {
     }
 
     #[test]
-    fn the_nightly_builds_toggle_moves_the_update_channel_and_is_saved() {
-        let (mut grid, _cleanup) = saving_grid("Nightly Builds: OFF");
+    fn the_client_updates_button_moves_the_update_channel_and_is_saved() {
+        let (mut grid, _cleanup) = saving_grid("Client Updates: Weekly");
         assert_eq!(grid.menu.update_channel(), Channel::Stable);
 
         assert!(grid.frame(&click(300.0)).clicked_button);
