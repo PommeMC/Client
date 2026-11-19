@@ -3055,26 +3055,21 @@ impl AppCore {
                         }
                     }
                     if game.inventory_open || game.creative_inventory_open {
-                        if game.inventory_open && matches!(game_mode, 1 | 3) {
-                            game.recipe_book_ui
-                                .reset_for_closed_screen(&mut game.recipe_book);
-                        }
-                        match game_mode {
-                            1 => {
-                                game.inventory_open = false;
-                                if !game.creative_inventory_open {
-                                    game.open_creative_inventory();
-                                }
+                        // Vanilla's two inventory screens swap on
+                        // `hasInfiniteMaterials` alone, so a spectator keeps
+                        // the survival one.
+                        if game_mode == 1 {
+                            if game.inventory_open {
+                                game.recipe_book_ui
+                                    .reset_for_closed_screen(&mut game.recipe_book);
                             }
-                            3 => {
-                                game.inventory_open = false;
-                                game.close_creative_inventory();
-                                self.apply_cursor_grab(window, Some(game));
+                            game.inventory_open = false;
+                            if !game.creative_inventory_open {
+                                game.open_creative_inventory();
                             }
-                            _ => {
-                                game.inventory_open = true;
-                                game.close_creative_inventory();
-                            }
+                        } else {
+                            game.inventory_open = true;
+                            game.close_creative_inventory();
                         }
                     }
                 }

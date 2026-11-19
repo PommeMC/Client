@@ -4748,20 +4748,22 @@ pub fn update_game(
                 }
                 broadcast_creative_slots(game, connection);
             }
+            // The swing of `player.drop` goes first, then the dropped stack,
+            // then the slot it left.
             // TODO: vanilla's client `LivingEntity.drop` also starts the local
             // arm swing; only the packet is sent here, as for the world drop.
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
-                drop_creative_item(game, connection, item);
                 send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
+                drop_creative_item(game, connection, item);
             }
             crate::ui::creative_inventory::CreativeAction::DropSlot {
                 slot,
                 dropped,
                 remaining,
             } => {
-                set_creative_slot(game, connection, slot, remaining);
-                drop_creative_item(game, connection, dropped);
                 send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
+                drop_creative_item(game, connection, dropped);
+                set_creative_slot(game, connection, slot, remaining);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
