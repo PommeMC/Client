@@ -315,6 +315,7 @@ pub struct GameState {
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
+    pub world_border: crate::world::border::WorldBorder,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
@@ -659,6 +660,7 @@ impl GameState {
             rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
+            world_border: crate::world::border::WorldBorder::default(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
@@ -872,12 +874,31 @@ impl GameState {
             .collect()
     }
 
+    /// What the player collides with besides blocks
+    /// (`Entity.collectAllColliders`): the entities in the way, and the
+    /// world border when close to it.
+    // TODO: vanilla tests the box stretched along the move, which only
+    // differs for a player moving more than 0.4 of a block a tick.
+    pub fn collidable_player_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        let mut boxes = self.collidable_entity_boxes();
+        if !crate::player::is_spectator(self.player.game_mode) {
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*self.player.position, &self.player.bounding_box())
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
+    }
+
     /// What the boat the player steers collides with
     /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
     /// not its own passengers.
     pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
         let passengers = self.vehicle_passengers.get(&boat_id);
-        self.entity_store
+        let mut boxes: Vec<crate::physics::aabb::Aabb> = self
+            .entity_store
             .living
             .iter()
             .filter(|&(&id, e)| {
@@ -892,7 +913,17 @@ impl GameState {
                     EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
                 }
             })
-            .collect()
+            .collect();
+        if let Some(boat) = self.entity_store.living.get(&boat_id) {
+            let bounding_box = crate::entity::boat::boat_aabb(boat);
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*boat.position, &bounding_box)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
     }
 
     /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor
@@ -2732,7 +2763,9 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    // TODO: also skip blocks outside the world border once it's tracked.
+    if !game.world_border.contains_block(pos) {
+        return None;
+    }
     if block_state_data.is_air() {
         return None;
     }
@@ -3124,6 +3157,8 @@ pub fn update_game(
     // Sky time ticks unconditionally so it keeps flowing in menus.
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
+        // `ClientLevel.tick` moves the border before the time.
+        game.world_border.tick();
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
@@ -3505,6 +3540,9 @@ pub fn update_game(
             .player
             .prev_portal_effect_intensity
             .lerp(game.player.portal_effect_intensity, partial_tick);
+        let border_warning = game
+            .world_border
+            .warning_strength(game.player.position.x, game.player.position.z);
         hud::build_camera_overlays(
             &mut elements,
             sw,
@@ -3512,6 +3550,7 @@ pub fn update_game(
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
+            border_warning,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
@@ -5425,6 +5464,7 @@ pub fn update_game(
         &nameplate_renders,
         &sign_renders,
         &weather_columns,
+        &game.world_border.render_state(sky_partial_tick(core)),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {

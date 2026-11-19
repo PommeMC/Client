@@ -3,6 +3,7 @@ mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
 mod block_wire;
+mod border_wire;
 pub(crate) mod capture;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
@@ -432,6 +433,27 @@ pub enum NetworkEvent {
         clocks: Vec<(String, pomme_protocol::lifecycle::ClockState)>,
     },
     WeatherUpdate(Weather),
+    InitializeBorder(crate::world::border::WorldBorderInit),
+    SetBorderCenter {
+        center_x: f64,
+        center_z: f64,
+    },
+    /// The border's size moves from `old_size` to `new_size` over
+    /// `lerp_ticks` game ticks.
+    SetBorderLerpSize {
+        old_size: f64,
+        new_size: f64,
+        lerp_ticks: i64,
+    },
+    SetBorderSize {
+        size: f64,
+    },
+    SetBorderWarningDelay {
+        warning_time: i32,
+    },
+    SetBorderWarningDistance {
+        warning_blocks: i32,
+    },
     GameModeChanged {
         game_mode: u8,
         /// `Some` = authoritative previous mode from login/respawn (which may

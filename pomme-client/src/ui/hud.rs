@@ -585,14 +585,14 @@ pub fn build_camera_overlays(
     vignette_brightness: Option<f32>,
     pumpkin: bool,
     portal_intensity: f32,
+    border_warning: f32,
 ) {
     if let Some(brightness) = vignette_brightness {
-        // TODO: nearing the world border tints the vignette cyan (no border
-        // tracking yet).
         elements.push(MenuElement::Vignette {
             w: screen_w,
             h: screen_h,
             brightness,
+            warning: border_warning,
         });
     }
     if pumpkin {

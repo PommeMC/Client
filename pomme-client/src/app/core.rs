@@ -292,11 +292,13 @@ pub(crate) fn tick_moving_pistons(game: &mut GameState) {
         if game.position_set && game.riding_vehicle_id.is_none() {
             // TODO: vanilla's client also moves other entities in the way;
             // the server's position updates do it here.
+            let extra_boxes = game.collidable_player_boxes();
             let world = crate::physics::collision::CollisionWorld::with_block_entities(
                 &game.chunk_store,
                 game.block_registry.block_state_table(),
                 &game.block_entity_anim,
-            );
+            )
+            .with_extra_boxes(&extra_boxes);
             movement::push_by_moving_piston(
                 &mut game.player,
                 world,
@@ -3133,6 +3135,25 @@ impl AppCore {
                         Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
+                NetworkEvent::InitializeBorder(init) => game.world_border.initialize(init),
+                NetworkEvent::SetBorderCenter { center_x, center_z } => {
+                    game.world_border.set_center(center_x, center_z);
+                }
+                NetworkEvent::SetBorderLerpSize {
+                    old_size,
+                    new_size,
+                    lerp_ticks,
+                } => {
+                    game.world_border
+                        .lerp_size_between(old_size, new_size, lerp_ticks);
+                }
+                NetworkEvent::SetBorderSize { size } => game.world_border.set_size(size),
+                NetworkEvent::SetBorderWarningDelay { warning_time } => {
+                    game.world_border.set_warning_time(warning_time);
+                }
+                NetworkEvent::SetBorderWarningDistance { warning_blocks } => {
+                    game.world_border.set_warning_blocks(warning_blocks);
+                }
                 NetworkEvent::EntitySpawned {
                     id,
                     uuid,
@@ -4000,7 +4021,7 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                let extra_boxes = game.collidable_entity_boxes();
+                let extra_boxes = game.collidable_player_boxes();
                 movement::tick_dead(
                     &mut game.player,
                     crate::physics::collision::CollisionWorld::with_block_entities(
@@ -4207,6 +4228,7 @@ impl AppCore {
             registry: game.block_registry.render_view(),
             biome_climate: &game.biome_climate,
         };
+        game.interaction.world_border = game.world_border;
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
             input,
@@ -4251,7 +4273,7 @@ impl AppCore {
         let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
             jumpable: game.riding_jumpable_vehicle(),
         });
-        let extra_boxes = game.collidable_entity_boxes();
+        let extra_boxes = game.collidable_player_boxes();
         movement::tick(
             &mut game.player,
             input,
