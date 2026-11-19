@@ -87,6 +87,10 @@ press = { action = "key.menu" }
 [[step]]
 expect = { menu = "none" }
 
+# The game takes input again a frame after the menu goes.
+[[step]]
+wait_ms = 300
+
 [[step]]
 mouse_down = "right"
 
