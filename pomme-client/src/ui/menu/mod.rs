@@ -682,13 +682,18 @@ impl Disconnection {
         }
     }
 
-    /// A world that couldn't be opened: `QuickPlay.joinSingleplayerWorld`'s
-    /// screen, `gui.toWorld` back to the world list.
-    // TODO: its `quickplay.error.title` only fits a quick play launch; a
-    // world picked from the list has no vanilla screen for this.
-    pub fn world(reason: String) -> Self {
+    /// A world that couldn't be opened, `gui.toWorld` back to the world
+    /// list: `QuickPlay.joinSingleplayerWorld`'s screen for a quick play
+    /// launch, else titled `selectWorld.access_failure`.
+    // TODO: vanilla shows a world picked from the list failing as a toast
+    // of that title over the world list, not a screen.
+    pub fn world(reason: String, quick_play: bool) -> Self {
         Self {
-            title: "Failed to Quick Play",
+            title: if quick_play {
+                "Failed to Quick Play"
+            } else {
+                "Failed to access world"
+            },
             reason,
             button: "Back to World List",
             back: DisconnectBack::WorldList,

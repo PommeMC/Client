@@ -199,8 +199,8 @@ pub async fn connect_to_server(
         .is_some_and(|t| t.no_config_phase());
     if !no_config {
         send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
-        send_ordered(&event_tx, NetworkEvent::LoggedIn);
     }
+    send_ordered(&event_tx, NetworkEvent::LoggedIn);
 
     let joined = if no_config {
         tracing::info!("Skipping configuration phase");

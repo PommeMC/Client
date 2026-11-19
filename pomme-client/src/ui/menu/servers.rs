@@ -1206,8 +1206,14 @@ mod tests {
                 DisconnectBack::ServerList,
             ),
             (
-                Disconnection::world("No such world".into()),
+                Disconnection::world("No such world".into(), true),
                 "Failed to Quick Play",
+                "Back to World List",
+                DisconnectBack::WorldList,
+            ),
+            (
+                Disconnection::world("No such world".into(), false),
+                "Failed to access world",
                 "Back to World List",
                 DisconnectBack::WorldList,
             ),

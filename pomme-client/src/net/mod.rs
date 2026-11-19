@@ -142,7 +142,7 @@ pub enum NetworkEvent {
     ProtocolSelected {
         protocol: i32,
     },
-    /// Login is done and configuration starts.
+    /// Login is done: configuration starts, or play where there is none.
     LoggedIn,
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),

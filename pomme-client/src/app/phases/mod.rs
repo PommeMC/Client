@@ -138,24 +138,27 @@ pub enum ConnectionPhase {
     /// Waiting on the integrated server. Singleplayer only.
     StartingWorld,
     Connecting,
-    /// Logged in, in the configuration phase.
-    Configuring,
+    /// Logged in and not yet in play; `world` when it began as
+    /// `StartingWorld`.
+    Configuring {
+        world: bool,
+    },
     Loading,
 }
 
 impl ConnectionPhase {
-    /// A server connection starts configuring. A world being started keeps
-    /// its phase, and with it one status until the terrain appears.
     pub fn login_finished(&mut self) {
-        if *self == Self::Connecting {
-            *self = Self::Configuring;
+        match self {
+            Self::StartingWorld => *self = Self::Configuring { world: true },
+            Self::Connecting => *self = Self::Configuring { world: false },
+            Self::Configuring { .. } | Self::Loading => {}
         }
     }
 
     /// Login is done: vanilla's login listener titles a disconnect
     /// `connect.failed`, its common listener `disconnect.lost`.
     pub fn logged_in(&self) -> bool {
-        matches!(self, Self::Configuring | Self::Loading)
+        matches!(self, Self::Configuring { .. } | Self::Loading)
     }
 }
 
@@ -304,7 +307,8 @@ mod tests {
         for (phase, logged_in) in [
             (StartingWorld, false),
             (Connecting, false),
-            (Configuring, true),
+            (Configuring { world: false }, true),
+            (Configuring { world: true }, true),
             (Loading, true),
         ] {
             assert_eq!(phase.logged_in(), logged_in);
@@ -314,8 +318,8 @@ mod tests {
             phase.login_finished();
             phase
         };
-        assert!(after_login(Connecting) == Configuring);
-        assert!(after_login(StartingWorld) == StartingWorld);
+        assert!(after_login(Connecting) == Configuring { world: false });
+        assert!(after_login(StartingWorld) == Configuring { world: true });
     }
 
     #[test]

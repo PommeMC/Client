@@ -18,7 +18,7 @@ pub enum MenuUpdateResult {
 
 /// Starts the integrated server for save folder `folder` and connects to it;
 /// on failure the menu shows why.
-pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
+pub fn open_world(core: &mut AppCore, folder: &str, quick_play: bool) -> MenuUpdateResult {
     // Vanilla `quickplay.error.invalid_identifier`.
     let opened = core
         .menu
@@ -29,8 +29,10 @@ pub fn open_world(core: &mut AppCore, folder: &str) -> MenuUpdateResult {
         Ok(opened) => opened,
         Err(reason) => {
             tracing::error!("Failed to open {folder}: {reason}");
-            core.menu
-                .show_disconnect(Disconnection::world(reason), &core.input.key_bindings);
+            core.menu.show_disconnect(
+                Disconnection::world(reason, quick_play),
+                &core.input.key_bindings,
+            );
             return MenuUpdateResult::None;
         }
     };
@@ -66,7 +68,7 @@ pub fn quick_play(core: &mut AppCore, play: QuickPlay) -> MenuUpdateResult {
             )),
             world: None,
         },
-        QuickPlay::Singleplayer(folder) => open_world(core, &folder),
+        QuickPlay::Singleplayer(folder) => open_world(core, &folder, true),
     }
 }
 
@@ -173,7 +175,7 @@ pub fn update_menu(
                 world: None,
             };
         }
-        MenuAction::PlayWorld { folder } => return open_world(core, &folder),
+        MenuAction::PlayWorld { folder } => return open_world(core, &folder, false),
         MenuAction::ChangeTheme(theme) => {
             core.reload_resource_theme(theme, &mut gfx.renderer);
             core.menu.commit_theme(theme, &core.input.key_bindings);
