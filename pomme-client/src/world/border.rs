@@ -1,280 +1,324 @@
-use std::time::{Duration, Instant};
+//! Vanilla `WorldBorder`: the square the server keeps players in, which the
+//! client collides with, draws and warns about.
 
-use glam::{DVec2, DVec3, dvec3};
+use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
 use crate::position::BlockPos;
 
-pub const DEFAULT_BORDER_SIZE: f64 = 29999984.0;
-pub const DEFAULT_MAX_SIZE: f64 = 29999984.0;
-pub const DEFAULT_WARNING_BLOCKS: f64 = 5.0;
-pub const DEFAULT_WARNING_TIME_SECS: u32 = 15;
-pub const BORDER_BOX_EXTENT: f64 = 30000000.0;
+/// How far the collision boxes reach past the border, standing in for
+/// vanilla's infinite shape.
+const BOX_EXTENT: f64 = 3.0e7;
 
+/// Vanilla `BorderStatus`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BorderStatus {
-    Stationary,
-    Shrinking,
     Growing,
+    Shrinking,
+    Stationary,
 }
 
+impl BorderStatus {
+    /// `BorderStatus.getColor`, as RGB.
+    pub fn color(self) -> [f32; 3] {
+        let rgb: u32 = match self {
+            Self::Growing => 0x40FF80,
+            Self::Shrinking => 0xFF3030,
+            Self::Stationary => 0x20A0FF,
+        };
+        [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0)
+    }
+}
+
+/// `ClientboundInitializeBorderPacket`'s fields.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldBorderInit {
     pub center_x: f64,
     pub center_z: f64,
     pub old_size: f64,
     pub new_size: f64,
-    pub lerp_time_ms: u64,
-    pub max_size: u32,
-    pub warning_blocks: u32,
-    pub warning_time: u32,
+    pub lerp_ticks: i64,
+    pub absolute_max_size: i32,
+    pub warning_blocks: i32,
+    pub warning_time: i32,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// The border's four sides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_z: f64,
+    pub max_z: f64,
+}
+
+impl Bounds {
+    /// `getDistanceToBorder`: to the nearest side, negative outside.
+    pub fn distance_to(&self, x: f64, z: f64) -> f64 {
+        let from_north = z - self.min_z;
+        let from_south = self.max_z - z;
+        let from_west = x - self.min_x;
+        let from_east = self.max_x - x;
+        from_west.min(from_east).min(from_north).min(from_south)
+    }
+}
+
+/// `WorldBorderRenderState`: the border as a frame draws it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorderRenderState {
+    pub bounds: Bounds,
+    pub tint: [f32; 3],
+}
+
+/// `WorldBorder.BorderExtent`: a border at rest, or one moving to a new size
+/// over a number of game ticks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Extent {
+    Static {
+        size: f64,
+    },
+    Moving {
+        from: f64,
+        to: f64,
+        lerp_duration: i64,
+        lerp_progress: i64,
+        size: f64,
+        previous_size: f64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldBorder {
-    pub center: DVec2,
-    pub old_size: f64,
-    pub new_size: f64,
-    pub lerp_start: Instant,
-    pub lerp_duration: Duration,
-    pub max_size: f64,
-    pub warning_blocks: f64,
-    pub warning_time_secs: u32,
+    center_x: f64,
+    center_z: f64,
+    absolute_max_size: i32,
+    warning_blocks: i32,
+    warning_time: i32,
+    extent: Extent,
 }
 
 impl Default for WorldBorder {
     fn default() -> Self {
         Self {
-            center: DVec2::ZERO,
-            old_size: DEFAULT_BORDER_SIZE,
-            new_size: DEFAULT_BORDER_SIZE,
-            lerp_start: Instant::now(),
-            lerp_duration: Duration::ZERO,
-            max_size: DEFAULT_MAX_SIZE,
-            warning_blocks: DEFAULT_WARNING_BLOCKS,
-            warning_time_secs: DEFAULT_WARNING_TIME_SECS,
+            center_x: 0.0,
+            center_z: 0.0,
+            absolute_max_size: 29999984,
+            warning_blocks: 5,
+            warning_time: 15,
+            extent: Extent::Static { size: 5.9999968E7 },
         }
     }
 }
 
-#[allow(dead_code)]
 impl WorldBorder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn size(&self, now: Instant) -> f64 {
-        if self.lerp_duration.is_zero() {
-            return self.new_size;
-        }
-
-        let elapsed = now.saturating_duration_since(self.lerp_start);
-        if elapsed >= self.lerp_duration {
-            return self.new_size;
-        }
-
-        let progress = elapsed.as_secs_f64() / self.lerp_duration.as_secs_f64();
-        let clamped = progress.clamp(0.0, 1.0);
-        self.old_size + (self.new_size - self.old_size) * clamped
-    }
-
-    pub fn status(&self, now: Instant) -> BorderStatus {
-        if self.lerp_duration.is_zero() {
-            return BorderStatus::Stationary;
-        }
-
-        let elapsed = now.saturating_duration_since(self.lerp_start);
-        if elapsed >= self.lerp_duration {
-            return BorderStatus::Stationary;
-        }
-
-        if self.new_size < self.old_size {
-            BorderStatus::Shrinking
-        } else if self.new_size > self.old_size {
-            BorderStatus::Growing
+    /// `ClientPacketListener.handleInitializeBorder`.
+    pub fn initialize(&mut self, init: WorldBorderInit) {
+        self.set_center(init.center_x, init.center_z);
+        if init.lerp_ticks > 0 {
+            self.lerp_size_between(init.old_size, init.new_size, init.lerp_ticks);
         } else {
-            BorderStatus::Stationary
+            self.set_size(init.new_size);
+        }
+        self.absolute_max_size = init.absolute_max_size;
+        self.warning_blocks = init.warning_blocks;
+        self.warning_time = init.warning_time;
+    }
+
+    pub fn set_center(&mut self, x: f64, z: f64) {
+        self.center_x = x;
+        self.center_z = z;
+    }
+
+    pub fn set_size(&mut self, size: f64) {
+        self.extent = Extent::Static { size };
+    }
+
+    /// `lerpSizeBetween`: the size moves from `from` to `to` over `ticks`
+    /// game ticks.
+    pub fn lerp_size_between(&mut self, from: f64, to: f64, ticks: i64) {
+        self.extent = if from == to {
+            Extent::Static { size: to }
+        } else {
+            Extent::moving(from, to, ticks, ticks, from)
+        };
+    }
+
+    pub fn set_warning_blocks(&mut self, blocks: i32) {
+        self.warning_blocks = blocks;
+    }
+
+    pub fn set_warning_time(&mut self, time: i32) {
+        self.warning_time = time;
+    }
+
+    /// `WorldBorder.tick`, once a game tick.
+    pub fn tick(&mut self) {
+        if let Extent::Moving {
+            from,
+            to,
+            lerp_duration,
+            lerp_progress,
+            size,
+            ..
+        } = self.extent
+        {
+            self.extent = if lerp_progress <= 1 {
+                Extent::Static { size: to }
+            } else {
+                Extent::moving(from, to, lerp_duration, lerp_progress - 1, size)
+            };
         }
     }
 
-    pub fn color(&self, now: Instant) -> [f32; 4] {
-        match self.status(now) {
-            BorderStatus::Stationary => [0.1255, 0.6275, 1.0, 1.0],
-            BorderStatus::Shrinking => [1.0, 0.1882, 0.1882, 1.0],
-            BorderStatus::Growing => [0.251, 1.0, 0.502, 1.0],
+    pub fn status(&self) -> BorderStatus {
+        match self.extent {
+            Extent::Static { .. } => BorderStatus::Stationary,
+            Extent::Moving { from, to, .. } if to < from => BorderStatus::Shrinking,
+            Extent::Moving { .. } => BorderStatus::Growing,
         }
     }
 
-    pub fn min_x(&self, now: Instant) -> f64 {
-        let half = self.size(now) * 0.5;
-        (self.center.x - half).max(-self.max_size)
+    /// The size `partial_tick` of the way from the last tick to this one.
+    fn size_at(&self, partial_tick: f32) -> f64 {
+        match self.extent {
+            Extent::Static { size } => size,
+            Extent::Moving {
+                size,
+                previous_size,
+                ..
+            } => previous_size + f64::from(partial_tick) * (size - previous_size),
+        }
     }
 
-    pub fn max_x(&self, now: Instant) -> f64 {
-        let half = self.size(now) * 0.5;
-        (self.center.x + half).min(self.max_size)
+    /// `getMinX` and its three siblings `partial_tick` into the tick: half
+    /// the size either side of the centre, within the absolute maximum.
+    pub fn bounds(&self, partial_tick: f32) -> Bounds {
+        let half = self.size_at(partial_tick) / 2.0;
+        let max = f64::from(self.absolute_max_size);
+        let side = |value: f64| value.clamp(-max, max);
+        Bounds {
+            min_x: side(self.center_x - half),
+            max_x: side(self.center_x + half),
+            min_z: side(self.center_z - half),
+            max_z: side(self.center_z + half),
+        }
     }
 
-    pub fn min_z(&self, now: Instant) -> f64 {
-        let half = self.size(now) * 0.5;
-        (self.center.y - half).max(-self.max_size)
+    /// `WorldBorderRenderer.extract`.
+    pub fn render_state(&self, partial_tick: f32) -> BorderRenderState {
+        BorderRenderState {
+            bounds: self.bounds(partial_tick),
+            tint: self.status().color(),
+        }
     }
 
-    pub fn max_z(&self, now: Instant) -> f64 {
-        let half = self.size(now) * 0.5;
-        (self.center.y + half).min(self.max_size)
+    /// `isWithinBounds(x, z, margin)`.
+    fn is_within_bounds(&self, x: f64, z: f64, margin: f64) -> bool {
+        let bounds = self.bounds(0.0);
+        x >= bounds.min_x - margin
+            && x < bounds.max_x + margin
+            && z >= bounds.min_z - margin
+            && z < bounds.max_z + margin
     }
 
-    pub fn is_inside(&self, pos: DVec3, now: Instant) -> bool {
-        let min_x = self.min_x(now);
-        let max_x = self.max_x(now);
-        let min_z = self.min_z(now);
-        let max_z = self.max_z(now);
-
-        pos.x >= min_x && pos.x <= max_x && pos.z >= min_z && pos.z <= max_z
+    /// `isWithinBounds(BlockPos)`: the block's low corner is inside.
+    pub fn contains_block(&self, pos: BlockPos) -> bool {
+        self.is_within_bounds(f64::from(pos.x), f64::from(pos.z), 0.0)
     }
 
-    pub fn is_block_inside(&self, pos: BlockPos, now: Instant) -> bool {
-        let min_x = self.min_x(now);
-        let max_x = self.max_x(now);
-        let min_z = self.min_z(now);
-        let max_z = self.max_z(now);
-
-        let bx = pos.x as f64;
-        let bz = pos.z as f64;
-        bx >= min_x && (bx + 1.0) <= max_x && bz >= min_z && (bz + 1.0) <= max_z
+    pub fn distance_to_border(&self, x: f64, z: f64) -> f64 {
+        self.bounds(0.0).distance_to(x, z)
     }
 
-    pub fn is_inside_bounds(&self, aabb: &Aabb, now: Instant, margin: f64) -> bool {
-        let min_x = self.min_x(now);
-        let max_x = self.max_x(now);
-        let min_z = self.min_z(now);
-        let max_z = self.max_z(now);
-
-        aabb.max.x > min_x - margin
-            && aabb.min.x < max_x + margin
-            && aabb.max.z > min_z - margin
-            && aabb.min.z < max_z + margin
+    /// `isInsideCloseToBorder` for an entity at `position` with `bounding_box`.
+    fn is_inside_close_to_border(&self, position: DVec3, bounding_box: &Aabb) -> bool {
+        let size = bounding_box.max - bounding_box.min;
+        let bb_max = size.x.abs().max(size.z.abs()).max(1.0);
+        self.distance_to_border(position.x, position.z) < bb_max * 2.0
+            && self.is_within_bounds(position.x, position.z, bb_max)
     }
 
-    pub fn distance_to_border(&self, pos: DVec3, now: Instant) -> f64 {
-        let min_x = self.min_x(now);
-        let max_x = self.max_x(now);
-        let min_z = self.min_z(now);
-        let max_z = self.max_z(now);
-
-        let dist_min_x = pos.x - min_x;
-        let dist_max_x = max_x - pos.x;
-        let dist_min_z = pos.z - min_z;
-        let dist_max_z = max_z - pos.z;
-
-        dist_min_x.min(dist_max_x).min(dist_min_z).min(dist_max_z)
-    }
-
-    pub fn should_collide(&self, aabb: &Aabb, now: Instant) -> bool {
-        let size_x = (aabb.max.x - aabb.min.x).abs();
-        let size_z = (aabb.max.z - aabb.min.z).abs();
-        let max_extent = size_x.max(size_z).max(1.0);
-
-        let center = dvec3(
-            (aabb.min.x + aabb.max.x) * 0.5,
-            (aabb.min.y + aabb.max.y) * 0.5,
-            (aabb.min.z + aabb.max.z) * 0.5,
-        );
-        let dist = self.distance_to_border(center, now);
-        dist < max_extent * 2.0 && self.is_inside_bounds(aabb, now, 0.0)
-    }
-
-    pub fn collision_boxes(&self, aabb: &Aabb, now: Instant) -> Option<[Aabb; 4]> {
-        if !self.should_collide(aabb, now) {
+    /// `getCollisionShape` for an entity `Entity.collectAllColliders` finds
+    /// inside and close to the border: everything outside the border's whole
+    /// blocks, as four boxes. `None` for any other entity.
+    pub fn collision_boxes(&self, position: DVec3, bounding_box: &Aabb) -> Option<[Aabb; 4]> {
+        if !self.is_inside_close_to_border(position, bounding_box) {
             return None;
         }
-
-        let min_x = self.min_x(now);
-        let max_x = self.max_x(now);
-        let min_z = self.min_z(now);
-        let max_z = self.max_z(now);
-
-        let far = BORDER_BOX_EXTENT;
-
+        let bounds = self.bounds(0.0);
+        let (min_x, max_x) = (bounds.min_x.floor(), bounds.max_x.ceil());
+        let (min_z, max_z) = (bounds.min_z.floor(), bounds.max_z.ceil());
+        let far = BOX_EXTENT;
+        let wall = |min: (f64, f64), max: (f64, f64)| {
+            Aabb::new(dvec3(min.0, -far, min.1), dvec3(max.0, far, max.1))
+        };
         Some([
-            Aabb::new(
-                dvec3(min_x - far, -far, min_z - far),
-                dvec3(min_x, far, max_z + far),
-            ),
-            Aabb::new(
-                dvec3(max_x, -far, min_z - far),
-                dvec3(max_x + far, far, max_z + far),
-            ),
-            Aabb::new(
-                dvec3(min_x - far, -far, min_z - far),
-                dvec3(max_x + far, far, min_z),
-            ),
-            Aabb::new(
-                dvec3(min_x - far, -far, max_z),
-                dvec3(max_x + far, far, max_z + far),
-            ),
+            wall((min_x - far, min_z - far), (min_x, max_z + far)),
+            wall((max_x, min_z - far), (max_x + far, max_z + far)),
+            wall((min_x - far, min_z - far), (max_x + far, min_z)),
+            wall((min_x - far, max_z), (max_x + far, max_z + far)),
         ])
     }
 
-    pub fn warning_factor(&self, pos: DVec3, now: Instant) -> f32 {
-        let dist = self.distance_to_border(pos, now);
-        if dist <= 0.0 {
-            return 1.0;
+    /// `getLerpSpeed`: blocks of size a tick.
+    fn lerp_speed(&self) -> f64 {
+        match self.extent {
+            Extent::Static { .. } => 0.0,
+            Extent::Moving {
+                from,
+                to,
+                lerp_duration,
+                ..
+            } => (from - to).abs() / lerp_duration as f64,
         }
-        if self.warning_blocks <= 0.0 || dist >= self.warning_blocks {
-            return 0.0;
-        }
-
-        let ratio = 1.0 - (dist / self.warning_blocks);
-        ratio.clamp(0.0, 1.0) as f32
     }
 
-    pub fn apply_initialize(&mut self, init: WorldBorderInit, now: Instant) {
-        self.center = DVec2::new(init.center_x, init.center_z);
-        self.old_size = init.old_size;
-        self.new_size = init.new_size;
-        self.lerp_start = now;
-        self.lerp_duration = Duration::from_millis(init.lerp_time_ms);
-        self.max_size = if init.max_size == 0 {
-            DEFAULT_MAX_SIZE
-        } else {
-            init.max_size as f64
+    /// `Hud.extractVignette`'s border warning for a camera at `(x, z)`: 0 away
+    /// from the border, rising to 1 at it. The warning distance grows to what
+    /// a moving border covers in the warning time.
+    pub fn warning_strength(&self, x: f64, z: f64) -> f32 {
+        let (size, target) = match self.extent {
+            Extent::Static { size } => (size, size),
+            Extent::Moving { size, to, .. } => (size, to),
         };
-        self.warning_blocks = init.warning_blocks as f64;
-        self.warning_time_secs = init.warning_time;
+        let distance = self.distance_to_border(x, z) as f32;
+        let moving_threshold =
+            (self.lerp_speed() * f64::from(self.warning_time)).min((target - size).abs());
+        let warning_distance = f64::from(self.warning_blocks).max(moving_threshold);
+        if f64::from(distance) < warning_distance {
+            (1.0 - (f64::from(distance) / warning_distance) as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
+}
 
-    pub fn apply_center(&mut self, center_x: f64, center_z: f64) {
-        self.center = DVec2::new(center_x, center_z);
-    }
-
-    pub fn apply_size(&mut self, size: f64) {
-        self.old_size = size;
-        self.new_size = size;
-        self.lerp_duration = Duration::ZERO;
-    }
-
-    pub fn apply_lerp_size(
-        &mut self,
-        old_size: f64,
-        new_size: f64,
-        lerp_time_ms: u64,
-        now: Instant,
-    ) {
-        self.old_size = old_size;
-        self.new_size = new_size;
-        self.lerp_start = now;
-        self.lerp_duration = Duration::from_millis(lerp_time_ms);
-    }
-
-    pub fn apply_warning_distance(&mut self, warning_blocks: u32) {
-        self.warning_blocks = warning_blocks as f64;
-    }
-
-    pub fn apply_warning_delay(&mut self, warning_time: u32) {
-        self.warning_time_secs = warning_time;
+impl Extent {
+    /// A moving border `lerp_progress` ticks from its end, which was
+    /// `previous_size` wide a tick ago.
+    fn moving(
+        from: f64,
+        to: f64,
+        lerp_duration: i64,
+        lerp_progress: i64,
+        previous_size: f64,
+    ) -> Self {
+        let duration = lerp_duration as f64;
+        // `MovingBorderExtent.calculateSize`.
+        let progress = (duration - lerp_progress as f64) / duration;
+        let size = if progress < 1.0 {
+            from + progress * (to - from)
+        } else {
+            to
+        };
+        Self::Moving {
+            from,
+            to,
+            lerp_duration,
+            lerp_progress,
+            size,
+            previous_size,
+        }
     }
 }
 
@@ -282,161 +326,186 @@ impl WorldBorder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_border_is_centered_and_huge() {
-        let border = WorldBorder::new();
-        let now = Instant::now();
-        assert_eq!(border.center, DVec2::ZERO);
-        assert_eq!(border.size(now), DEFAULT_BORDER_SIZE);
-        assert_eq!(border.status(now), BorderStatus::Stationary);
-        assert!(border.is_inside(DVec3::new(0.0, 64.0, 0.0), now));
-        assert!(border.is_inside(DVec3::new(1000.0, 64.0, -1000.0), now));
+    fn border(center: (f64, f64), size: f64) -> WorldBorder {
+        let mut border = WorldBorder::default();
+        border.set_center(center.0, center.1);
+        border.set_size(size);
+        border
+    }
+
+    fn player_box(x: f64) -> (DVec3, Aabb) {
+        let position = dvec3(x, 64.0, 0.0);
+        let half = dvec3(0.3, 0.0, 0.3);
+        (
+            position,
+            Aabb::new(position - half, position + half + dvec3(0.0, 1.8, 0.0)),
+        )
     }
 
     #[test]
-    fn small_border_bounds_and_inside() {
-        let mut border = WorldBorder::new();
-        let now = Instant::now();
-        border.apply_initialize(
-            WorldBorderInit {
-                center_x: 10.0,
-                center_z: 20.0,
-                old_size: 100.0,
-                new_size: 100.0,
-                lerp_time_ms: 0,
-                max_size: 29999984,
-                warning_blocks: 5,
-                warning_time: 15,
-            },
-            now,
+    fn the_default_border_is_vanillas() {
+        let border = WorldBorder::default();
+        assert_eq!(border.status(), BorderStatus::Stationary);
+        // The size is wider than the absolute maximum clamps it to.
+        assert_eq!(border.bounds(0.0).max_x, 29999984.0);
+        assert_eq!(border.bounds(0.0).min_z, -29999984.0);
+        assert!(border.contains_block(BlockPos::new(1000, 64, -1000)));
+    }
+
+    #[test]
+    fn bounds_follow_the_centre_and_size() {
+        let border = border((10.0, 20.0), 100.0);
+        assert_eq!(
+            border.bounds(0.0),
+            Bounds {
+                min_x: -40.0,
+                max_x: 60.0,
+                min_z: -30.0,
+                max_z: 70.0
+            }
         );
-        assert_eq!(border.min_x(now), -40.0);
-        assert_eq!(border.max_x(now), 60.0);
-        assert_eq!(border.min_z(now), -30.0);
-        assert_eq!(border.max_z(now), 70.0);
-
-        assert!(border.is_inside(DVec3::new(10.0, 64.0, 20.0), now));
-        assert!(border.is_inside(DVec3::new(-40.0, 64.0, -30.0), now));
-        assert!(border.is_inside(DVec3::new(60.0, 64.0, 70.0), now));
-        assert!(!border.is_inside(DVec3::new(61.0, 64.0, 20.0), now));
-        assert!(!border.is_inside(DVec3::new(10.0, 64.0, -31.0), now));
+        // The low corner counts; the high side is exclusive.
+        assert!(border.contains_block(BlockPos::new(-40, 0, -30)));
+        assert!(border.contains_block(BlockPos::new(59, 0, 69)));
+        assert!(!border.contains_block(BlockPos::new(60, 0, 20)));
+        assert_eq!(border.distance_to_border(10.0, 20.0), 50.0);
+        assert_eq!(border.distance_to_border(61.0, 20.0), -1.0);
     }
 
     #[test]
-    fn lerp_size_and_status() {
-        let mut border = WorldBorder::new();
-        let start = Instant::now();
-        border.apply_lerp_size(100.0, 50.0, 1000, start);
-        assert_eq!(border.status(start), BorderStatus::Shrinking);
+    fn a_lerp_moves_once_a_tick_and_ends_at_rest() {
+        let mut border = WorldBorder::default();
+        border.lerp_size_between(100.0, 50.0, 10);
+        assert_eq!(border.status(), BorderStatus::Shrinking);
+        assert_eq!(border.bounds(0.0).max_x, 50.0);
 
-        let half = start + Duration::from_millis(500);
-        assert!((border.size(half) - 75.0).abs() < 1e-4);
-        assert_eq!(border.status(half), BorderStatus::Shrinking);
+        border.tick();
+        assert_eq!(border.bounds(1.0).max_x, 47.5);
+        // Half way through the tick the drawn side is half way there.
+        assert_eq!(border.bounds(0.5).max_x, 48.75);
 
-        let end = start + Duration::from_millis(1000);
-        assert_eq!(border.size(end), 50.0);
-        assert_eq!(border.status(end), BorderStatus::Stationary);
+        for _ in 0..8 {
+            border.tick();
+        }
+        assert_eq!(border.status(), BorderStatus::Shrinking);
+        border.tick();
+        assert_eq!(border.status(), BorderStatus::Stationary);
+        assert_eq!(border.bounds(0.0).max_x, 25.0);
+
+        border.lerp_size_between(50.0, 100.0, 10);
+        assert_eq!(border.status(), BorderStatus::Growing);
+        border.lerp_size_between(50.0, 50.0, 10);
+        assert_eq!(border.status(), BorderStatus::Stationary);
     }
 
     #[test]
-    fn warning_factor_near_border() {
-        let mut border = WorldBorder::new();
-        let now = Instant::now();
-        border.apply_initialize(
-            WorldBorderInit {
-                center_x: 0.0,
-                center_z: 0.0,
-                old_size: 20.0,
-                new_size: 20.0,
-                lerp_time_ms: 0,
-                max_size: 29999984,
-                warning_blocks: 5,
-                warning_time: 15,
-            },
-            now,
-        );
-        assert_eq!(border.warning_factor(DVec3::new(0.0, 64.0, 0.0), now), 0.0);
-        assert_eq!(border.warning_factor(DVec3::new(5.0, 64.0, 0.0), now), 0.0);
-        assert!((border.warning_factor(DVec3::new(7.5, 64.0, 0.0), now) - 0.5).abs() < 1e-4);
-        assert_eq!(border.warning_factor(DVec3::new(10.0, 64.0, 0.0), now), 1.0);
-        assert_eq!(border.warning_factor(DVec3::new(11.0, 64.0, 0.0), now), 1.0);
+    fn initializing_takes_every_field_and_lerps_only_with_ticks() {
+        let init = WorldBorderInit {
+            center_x: 5.0,
+            center_z: -5.0,
+            old_size: 40.0,
+            new_size: 20.0,
+            lerp_ticks: 0,
+            absolute_max_size: 1000,
+            warning_blocks: 3,
+            warning_time: 100,
+        };
+        let mut border = WorldBorder::default();
+        border.initialize(init);
+        assert_eq!(border.status(), BorderStatus::Stationary);
+        assert_eq!(border.bounds(0.0).max_x, 15.0);
+
+        border.initialize(WorldBorderInit {
+            lerp_ticks: 20,
+            ..init
+        });
+        assert_eq!(border.status(), BorderStatus::Shrinking);
+        assert_eq!(border.bounds(0.0).max_x, 25.0);
+
+        border.set_size(5000.0);
+        assert_eq!(border.bounds(0.0).max_x, 1000.0);
     }
 
     #[test]
-    fn border_collision_blocks_outgoing_movement() {
+    fn collision_boxes_sit_on_the_whole_blocks_around_the_border() {
+        let border = border((0.0, 0.0), 25.0);
+        let (position, bounding_box) = player_box(12.0);
+        let boxes = border.collision_boxes(position, &bounding_box).unwrap();
+        // 12.5 rounds out to 13: west, east, north, south.
+        assert_eq!(boxes[0].max.x, -13.0);
+        assert_eq!(boxes[1].min.x, 13.0);
+        assert_eq!(boxes[2].max.z, -13.0);
+        assert_eq!(boxes[3].min.z, 13.0);
+    }
+
+    #[test]
+    fn only_an_entity_inside_and_close_collides_with_the_border() {
+        let border = border((0.0, 0.0), 20.0);
+        let collides = |x: f64| {
+            let (position, bounding_box) = player_box(x);
+            border.collision_boxes(position, &bounding_box).is_some()
+        };
+        assert!(!collides(0.0));
+        assert!(collides(8.5));
+        // Just outside still collides, within the box's width of the side.
+        assert!(collides(10.5));
+        assert!(!collides(15.0));
+    }
+
+    #[test]
+    fn the_border_stops_a_move_out_and_lets_one_back_in() {
         use crate::entity::components::Velocity;
         use crate::physics::block_shape::CollisionContext;
         use crate::physics::collision::{CollisionWorld, resolve_collision};
         use crate::world::block::BlockStateTable;
         use crate::world::chunk::ChunkStore;
 
-        let mut border = WorldBorder::new();
-        let now = Instant::now();
-        border.apply_initialize(
-            WorldBorderInit {
-                center_x: 0.0,
-                center_z: 0.0,
-                old_size: 20.0,
-                new_size: 20.0,
-                lerp_time_ms: 0,
-                max_size: 29999984,
-                warning_blocks: 5,
-                warning_time: 15,
-            },
-            now,
-        );
-
-        let player_aabb = Aabb::new(dvec3(9.4, 64.0, -0.3), dvec3(10.0, 65.8, 0.3));
-        let boxes = border.collision_boxes(&player_aabb, now).unwrap();
-
+        let border = border((0.0, 0.0), 25.0);
+        let (position, bounding_box) = player_box(12.5);
+        let boxes = border.collision_boxes(position, &bounding_box).unwrap();
         let chunks = ChunkStore::new(2);
-        let table = BlockStateTable::native();
-        let world = CollisionWorld::new(&chunks, table).with_extra_boxes(&boxes);
-        let ctx = CollisionContext::EMPTY;
-
-        let (resolved, _) = resolve_collision(
-            world,
-            player_aabb,
-            Velocity::new(0.5, 0.0, 0.0),
-            0.6,
-            true,
-            &ctx,
-        );
-        assert_eq!(resolved.x, 0.0);
-
-        let (resolved_inward, _) = resolve_collision(
-            world,
-            player_aabb,
-            Velocity::new(-0.5, 0.0, 0.0),
-            0.6,
-            true,
-            &ctx,
-        );
-        assert!((resolved_inward.x - (-0.5)).abs() < 1e-6);
+        let world =
+            CollisionWorld::new(&chunks, BlockStateTable::native()).with_extra_boxes(&boxes);
+        let resolve = |dx: f64| {
+            resolve_collision(
+                world,
+                bounding_box,
+                Velocity::new(dx, 0.0, 0.0),
+                0.6,
+                true,
+                &CollisionContext::EMPTY,
+            )
+            .0
+            .x
+        };
+        // The box's east side is at 12.8, two tenths short of the wall at 13.
+        assert!((resolve(1.0) - 0.2).abs() < 1.0e-9);
+        assert_eq!(resolve(-1.0), -1.0);
     }
 
     #[test]
-    fn border_collision_none_when_far_or_outside() {
-        let mut border = WorldBorder::new();
-        let now = Instant::now();
-        border.apply_initialize(
-            WorldBorderInit {
-                center_x: 0.0,
-                center_z: 0.0,
-                old_size: 20.0,
-                new_size: 20.0,
-                lerp_time_ms: 0,
-                max_size: 29999984,
-                warning_blocks: 5,
-                warning_time: 15,
-            },
-            now,
+    fn the_warning_rises_toward_the_border_and_widens_while_it_moves() {
+        let mut border = border((0.0, 0.0), 20.0);
+        border.set_warning_blocks(5);
+        assert_eq!(border.warning_strength(0.0, 0.0), 0.0);
+        assert_eq!(border.warning_strength(5.0, 0.0), 0.0);
+        assert_eq!(border.warning_strength(7.5, 0.0), 0.5);
+        assert_eq!(border.warning_strength(10.0, 0.0), 1.0);
+        assert_eq!(border.warning_strength(11.0, 0.0), 1.0);
+
+        // Shrinking 80 blocks in 100 ticks with 50 ticks of warning: 40
+        // blocks of warning, so 20 from the side is half way in.
+        border.set_warning_time(50);
+        border.lerp_size_between(100.0, 20.0, 100);
+        assert_eq!(border.warning_strength(30.0, 0.0), 0.5);
+    }
+
+    #[test]
+    fn status_colours_are_vanillas() {
+        assert_eq!(
+            BorderStatus::Shrinking.color(),
+            [1.0, 48.0 / 255.0, 48.0 / 255.0]
         );
-
-        let far_aabb = Aabb::new(dvec3(-0.3, 64.0, -0.3), dvec3(0.3, 65.8, 0.3));
-        assert!(border.collision_boxes(&far_aabb, now).is_none());
-
-        let outside_aabb = Aabb::new(dvec3(15.0, 64.0, -0.3), dvec3(15.6, 65.8, 0.3));
-        assert!(border.collision_boxes(&outside_aabb, now).is_none());
+        assert_eq!(BorderStatus::Stationary.color()[2], 1.0);
     }
 }

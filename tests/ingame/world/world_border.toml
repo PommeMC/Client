@@ -1,0 +1,92 @@
+# The world border: its wall is drawn, a player walking into it stops at the
+# edge of the block it runs through, the screen edges redden beside it, and a
+# timed shrink takes its time in game ticks.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 300.5 -60 300.5 -90 0"
+
+[[step]]
+expect = { player = { position = [300.5, -60.0, 300.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [312, -61, 300] }
+
+[[step]]
+chat = "/worldborder center 300 300"
+
+[[step]]
+chat = "/worldborder set 25"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "wall_ahead"
+
+# The east side is at 312.5, and the wall the player meets is the edge of
+# that block, at 313.
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+expect = { player = { position = [312.7, -60.0, 300.5] } }
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "at_the_wall"
+
+[[step]]
+chat = "/tp @s 300.5 -60 300.5 -90 0"
+
+[[step]]
+expect = { player = { position = [300.5, -60.0, 300.5] } }
+
+# A shrink over 200 ticks is still under way, and red, 40 ticks in.
+[[step]]
+chat = "/worldborder set 45"
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+chat = "/worldborder set 25 200"
+
+[[step]]
+wait_ticks = 40
+
+[[step]]
+screenshot = "shrinking"
+
+[[step]]
+wait_ticks = 200
+
+[[step]]
+screenshot = "shrunk"
+
+# The world is shared, so the border goes back.
+[[step]]
+chat = "/worldborder set 59999968"
+
+[[step]]
+chat = "/worldborder center 0 0"
+
+[[step]]
+wait_ms = 500

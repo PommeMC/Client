@@ -3131,53 +3131,24 @@ impl AppCore {
                         Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
-                NetworkEvent::InitializeBorder {
-                    center_x,
-                    center_z,
-                    old_size,
-                    new_size,
-                    lerp_time_ms,
-                    max_size,
-                    warning_blocks,
-                    warning_time,
-                } => {
-                    game.world_border.apply_initialize(
-                        crate::world::border::WorldBorderInit {
-                            center_x,
-                            center_z,
-                            old_size,
-                            new_size,
-                            lerp_time_ms,
-                            max_size,
-                            warning_blocks,
-                            warning_time,
-                        },
-                        std::time::Instant::now(),
-                    );
-                }
+                NetworkEvent::InitializeBorder(init) => game.world_border.initialize(init),
                 NetworkEvent::SetBorderCenter { center_x, center_z } => {
-                    game.world_border.apply_center(center_x, center_z);
+                    game.world_border.set_center(center_x, center_z);
                 }
                 NetworkEvent::SetBorderLerpSize {
                     old_size,
                     new_size,
-                    lerp_time_ms,
+                    lerp_ticks,
                 } => {
-                    game.world_border.apply_lerp_size(
-                        old_size,
-                        new_size,
-                        lerp_time_ms,
-                        std::time::Instant::now(),
-                    );
+                    game.world_border
+                        .lerp_size_between(old_size, new_size, lerp_ticks);
                 }
-                NetworkEvent::SetBorderSize { size } => {
-                    game.world_border.apply_size(size);
-                }
-                NetworkEvent::SetBorderWarningDelay { warning_delay } => {
-                    game.world_border.apply_warning_delay(warning_delay);
+                NetworkEvent::SetBorderSize { size } => game.world_border.set_size(size),
+                NetworkEvent::SetBorderWarningDelay { warning_time } => {
+                    game.world_border.set_warning_time(warning_time);
                 }
                 NetworkEvent::SetBorderWarningDistance { warning_blocks } => {
-                    game.world_border.apply_warning_distance(warning_blocks);
+                    game.world_border.set_warning_blocks(warning_blocks);
                 }
                 NetworkEvent::EntitySpawned {
                     id,
@@ -4241,6 +4212,7 @@ impl AppCore {
             registry: game.block_registry.render_view(),
             biome_climate: &game.biome_climate,
         };
+        game.interaction.world_border = game.world_border;
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
             input,

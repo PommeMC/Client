@@ -867,16 +867,20 @@ impl GameState {
             .collect()
     }
 
+    /// What the player collides with besides blocks
+    /// (`Entity.collectAllColliders`): the entities in the way, and the
+    /// world border when close to it.
+    // TODO: vanilla tests the box stretched along the move, which only
+    // differs for a player moving more than 0.4 of a block a tick.
     pub fn collidable_player_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
         let mut boxes = self.collidable_entity_boxes();
         if !crate::player::is_spectator(self.player.game_mode) {
-            let now = std::time::Instant::now();
-            if let Some(border_boxes) = self
-                .world_border
-                .collision_boxes(&self.player.bounding_box(), now)
-            {
-                boxes.extend_from_slice(&border_boxes);
-            }
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*self.player.position, &self.player.bounding_box())
+                    .into_iter()
+                    .flatten(),
+            );
         }
         boxes
     }
@@ -904,13 +908,13 @@ impl GameState {
             })
             .collect();
         if let Some(boat) = self.entity_store.living.get(&boat_id) {
-            let now = std::time::Instant::now();
-            if let Some(border_boxes) = self
-                .world_border
-                .collision_boxes(&crate::entity::boat::boat_aabb(boat), now)
-            {
-                boxes.extend_from_slice(&border_boxes);
-            }
+            let bounding_box = crate::entity::boat::boat_aabb(boat);
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*boat.position, &bounding_box)
+                    .into_iter()
+                    .flatten(),
+            );
         }
         boxes
     }
@@ -2737,10 +2741,7 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    if !game
-        .world_border
-        .is_block_inside(pos, std::time::Instant::now())
-    {
+    if !game.world_border.contains_block(pos) {
         return None;
     }
     if block_state_data.is_air() {
@@ -3134,6 +3135,8 @@ pub fn update_game(
     // Sky time ticks unconditionally so it keeps flowing in menus.
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
+        // `ClientLevel.tick` moves the border before the time.
+        game.world_border.tick();
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
@@ -3511,9 +3514,9 @@ pub fn update_game(
             .player
             .prev_portal_effect_intensity
             .lerp(game.player.portal_effect_intensity, partial_tick);
-        let warning_factor = game
+        let border_warning = game
             .world_border
-            .warning_factor(*game.player.position, std::time::Instant::now());
+            .warning_strength(game.player.position.x, game.player.position.z);
         hud::build_camera_overlays(
             &mut elements,
             sw,
@@ -3521,7 +3524,7 @@ pub fn update_game(
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
-            warning_factor,
+            border_warning,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
@@ -5427,7 +5430,7 @@ pub fn update_game(
         &nameplate_renders,
         &sign_renders,
         &weather_columns,
-        Some(&game.world_border),
+        &game.world_border.render_state(sky_partial_tick(core)),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {

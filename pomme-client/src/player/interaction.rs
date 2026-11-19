@@ -193,6 +193,9 @@ struct ConsumeEffects {
 
 pub struct InteractionState {
     pub target: Option<HitResult>,
+    /// The level's border, which `MultiPlayerGameMode` keeps breaking and
+    /// using blocks inside of.
+    pub world_border: crate::world::border::WorldBorder,
     seq: u32,
     carried_slot: u8,
     last_teleport_seq: u32,
@@ -225,6 +228,7 @@ impl InteractionState {
     pub fn new() -> Self {
         Self {
             target: None,
+            world_border: Default::default(),
             seq: 0,
             // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
             // a fresh inventory selects, so a join sends nothing until it
@@ -958,6 +962,9 @@ impl InteractionState {
         look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> UseResult {
+        if !self.world_border.contains_block(hit.block_pos) {
+            return UseResult::Fail;
+        }
         self.seq += 1;
         sender.send(GamePacket::UseItemOn {
             hand,
@@ -1408,6 +1415,9 @@ impl InteractionState {
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
+        if !self.world_border.contains_block(hit.block_pos) {
+            return;
+        }
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
 
         let block_state_data = block_registry.block_state_data(state);

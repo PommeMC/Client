@@ -428,33 +428,26 @@ pub enum NetworkEvent {
         clocks: Vec<(String, pomme_protocol::lifecycle::ClockState)>,
     },
     WeatherUpdate(Weather),
-    InitializeBorder {
-        center_x: f64,
-        center_z: f64,
-        old_size: f64,
-        new_size: f64,
-        lerp_time_ms: u64,
-        max_size: u32,
-        warning_blocks: u32,
-        warning_time: u32,
-    },
+    InitializeBorder(crate::world::border::WorldBorderInit),
     SetBorderCenter {
         center_x: f64,
         center_z: f64,
     },
+    /// The border's size moves from `old_size` to `new_size` over
+    /// `lerp_ticks` game ticks.
     SetBorderLerpSize {
         old_size: f64,
         new_size: f64,
-        lerp_time_ms: u64,
+        lerp_ticks: i64,
     },
     SetBorderSize {
         size: f64,
     },
     SetBorderWarningDelay {
-        warning_delay: u32,
+        warning_time: i32,
     },
     SetBorderWarningDistance {
-        warning_blocks: u32,
+        warning_blocks: i32,
     },
     GameModeChanged {
         game_mode: u8,

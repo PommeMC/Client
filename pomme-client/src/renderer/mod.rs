@@ -226,7 +226,7 @@ enum RenderMode<'a> {
         nameplates: &'a [NameplateRenderInfo],
         signs: &'a [SignRenderInfo],
         weather: &'a [WeatherColumn],
-        world_border: Option<&'a crate::world::border::WorldBorder>,
+        world_border: &'a crate::world::border::BorderRenderState,
         cloud_mode: CloudMode,
         render_distance: u32,
         /// How far distant terrain draws, in chunks; 0 for none.
@@ -1739,7 +1739,7 @@ impl Renderer {
         nameplates: &[NameplateRenderInfo],
         signs: &[SignRenderInfo],
         weather: &[WeatherColumn],
-        world_border: Option<&crate::world::border::WorldBorder>,
+        world_border: &crate::world::border::BorderRenderState,
         cloud_mode: CloudMode,
         render_distance: u32,
         distant_terrain: u32,
@@ -2772,15 +2772,13 @@ impl Renderer {
                         weather,
                     );
 
-                    if let Some(border) = world_border {
-                        self.world_border_pipeline.update_and_draw(
-                            &mut pass,
-                            frame,
-                            &self.camera,
-                            border,
-                            *render_distance as f32 * 16.0,
-                        );
-                    }
+                    self.world_border_pipeline.update_and_draw(
+                        &mut pass,
+                        frame,
+                        &self.camera,
+                        world_border,
+                        *render_distance as f32 * 16.0,
+                    );
 
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);

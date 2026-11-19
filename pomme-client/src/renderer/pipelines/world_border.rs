@@ -5,7 +5,10 @@ use glam::DVec3;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::{rhi, shader, util};
 use crate::resources::{ResourceManager, resource_id};
-use crate::world::border::WorldBorder;
+use crate::world::border::BorderRenderState;
+
+/// `WorldBorderRenderer.RENDERING_OFFSET`: the walls sit this far inside.
+const RENDERING_OFFSET: f64 = 0.01;
 
 const MAX_BORDER_VERTS: usize = 128;
 
@@ -58,7 +61,9 @@ impl WorldBorderPipeline {
             "border_vertices",
         );
 
-        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::LINEAR_REPEAT);
+        // TODO: vanilla's `MipmappedTexture` gives the forcefield four mip
+        // levels; this one has none.
+        let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST_REPEAT);
 
         let texture = util::load_asset_texture(
             device,
@@ -116,23 +121,19 @@ impl WorldBorderPipeline {
         pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
         camera: &Camera,
-        border: &WorldBorder,
+        border: &BorderRenderState,
         render_distance_blocks: f32,
     ) {
-        let now = Instant::now();
-        let time_secs = now.duration_since(self.start_time).as_secs_f32();
-        let min_x = border.min_x(now);
-        let max_x = border.max_x(now);
-        let min_z = border.min_z(now);
-        let max_z = border.max_z(now);
-
+        let time_secs = self.start_time.elapsed().as_secs_f32();
         let cam = *camera.position;
-        let radius = render_distance_blocks.max(32.0) as f64;
+        let radius = f64::from(render_distance_blocks);
 
-        let dist_to_border = (cam.x - min_x)
-            .min(max_x - cam.x)
-            .min(cam.z - min_z)
-            .min(max_z - cam.z);
+        let bounds = border.bounds;
+        let dist_to_border = bounds.distance_to(cam.x, cam.z);
+        let min_x = bounds.min_x + RENDERING_OFFSET;
+        let max_x = bounds.max_x - RENDERING_OFFSET;
+        let min_z = bounds.min_z + RENDERING_OFFSET;
+        let max_z = bounds.max_z - RENDERING_OFFSET;
 
         if cam.x < min_x - radius
             || cam.x > max_x + radius
@@ -143,14 +144,12 @@ impl WorldBorderPipeline {
             return;
         }
 
-        let alpha = ((1.0 - (dist_to_border / radius).max(0.0)).powi(4).min(1.0) as f32)
-            * border.color(now)[3];
+        let alpha = (1.0 - dist_to_border / radius).powi(4).clamp(0.0, 1.0) as f32;
         if alpha <= 0.0 {
             return;
         }
-
-        let mut color = border.color(now);
-        color[3] = alpha;
+        let [red, green, blue] = border.tint;
+        let color = [red, green, blue, alpha];
 
         let anchor = camera.anchor();
         let anim = time_secs.rem_euclid(3.0) / 3.0;
