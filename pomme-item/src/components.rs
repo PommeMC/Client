@@ -3,7 +3,7 @@
 
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::{self as wire, ItemCodec};
-use pomme_protocol::wire::write_varint;
+use pomme_protocol::wire::{write_utf, write_varint};
 use pomme_registry::builtin::DataComponentKind;
 
 use crate::ItemStack;
@@ -109,6 +109,39 @@ impl Component for ChargedProjectiles {
     }
 }
 
+/// Vanilla `BlockItemStateProperties`: block state properties the placed
+/// block takes from its item, each a name and a value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockItemStateProperties {
+    pub properties: Vec<(String, String)>,
+}
+
+impl BlockItemStateProperties {
+    /// `ByteBufCodecs.STRING_UTF8`'s length limit.
+    const MAX_STRING: usize = 32767;
+}
+
+impl Component for BlockItemStateProperties {
+    const KIND: DataComponentKind = DataComponentKind::BlockState;
+
+    fn read(r: &mut Reader) -> DecodeResult<Self> {
+        let properties = r.list(usize::MAX, |r| {
+            let name = r.utf(Self::MAX_STRING)?.to_owned();
+            let value = r.utf(Self::MAX_STRING)?.to_owned();
+            Ok((name, value))
+        })?;
+        Ok(Self { properties })
+    }
+
+    fn write(&self, buf: &mut Vec<u8>) {
+        write_varint(buf, self.properties.len() as u32);
+        for (name, value) in &self.properties {
+            write_utf(buf, name);
+            write_utf(buf, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pomme_registry::Registry;
@@ -129,6 +162,16 @@ mod tests {
             bytes.extend([count, 0, 0]);
         }
         bytes
+    }
+
+    #[test]
+    fn block_state_properties_are_a_map_of_strings() {
+        let bytes = [1, 5, b'l', b'e', b'v', b'e', b'l', 2, b'1', b'5'];
+        let state = BlockItemStateProperties {
+            properties: vec![("level".into(), "15".into())],
+        };
+        assert_eq!(read::<BlockItemStateProperties>(&bytes).unwrap(), state);
+        assert_eq!(*state.to_bytes(), bytes);
     }
 
     #[test]

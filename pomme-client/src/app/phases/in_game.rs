@@ -263,6 +263,8 @@ pub struct GameState {
     /// Per-session recipe book, recipe container, ghost placement, and item
     /// tags.
     pub recipe_book: crate::recipe::RecipeBookState,
+    /// The painting variants `#minecraft:placeable` lists, by registry id.
+    pub placeable_paintings: Vec<i32>,
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
@@ -622,6 +624,7 @@ impl GameState {
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             block_registry,
             recipe_book: crate::recipe::RecipeBookState::default(),
+            placeable_paintings: Vec::new(),
             recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
@@ -4600,9 +4603,14 @@ pub fn update_game(
         let (effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
             gfx.renderer.menu_spans_width(spans, s)
         });
-        game.creative_state.set_operator_tab(
-            core.menu.controls.operator_items_tab && game.player.can_use_game_master_blocks(),
-        );
+        let operator_tab =
+            core.menu.controls.operator_items_tab && game.player.can_use_game_master_blocks();
+        game.creative_state.set_operator_tab(operator_tab.then(|| {
+            crate::ui::creative_inventory::operator_stacks(
+                &game.registries,
+                &game.placeable_paintings,
+            )
+        }));
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,

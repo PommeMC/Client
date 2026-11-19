@@ -1019,10 +1019,16 @@ pub fn bake_item_models(
             continue;
         }
         bake(item_name, &parts);
-        for (charge, node) in charge_type_cases(&json) {
+        let variants = select_cases(&json, "charge_type")
+            .into_iter()
+            .map(|(charge, node)| (charge_model_key(item_name, charge), node))
+            .chain(block_state_cases(&json).map(|(property, value, node)| {
+                (block_state_model_key(item_name, property, value), node)
+            }));
+        for (key, node) in variants {
             let mut parts = Vec::new();
             collect_parts_from_node(node, None, &mut parts);
-            bake(&charge_model_key(item_name, charge), &parts);
+            bake(&key, &parts);
         }
         // The bundle's selected-item model composes these around the
         // selected stack at draw time.
@@ -1520,12 +1526,39 @@ pub fn charge_model_key(item_name: &str, charge: &str) -> String {
     format!("__pomme_{item_name}_charge_{charge}")
 }
 
-/// Each `when` of an item definition's root `minecraft:charge_type` select,
-/// with its model node.
-fn charge_type_cases(json: &serde_json::Value) -> Vec<(&str, &serde_json::Value)> {
-    let Some(root) = json.get("model").filter(|root| {
-        node_type(root) == Some("select") && node_property(root) == Some("charge_type")
-    }) else {
+/// The item-model key a root `minecraft:block_state` select's case bakes
+/// under, for a stack whose `block_state` component sets `property` to
+/// `value` (vanilla `ItemBlockState`).
+pub fn block_state_model_key(item_name: &str, property: &str, value: &str) -> String {
+    format!("__pomme_{item_name}_block_state_{property}_{value}")
+}
+
+/// Each case of an item definition's root `minecraft:block_state` select: the
+/// block state property it reads, the value, and the model node.
+fn block_state_cases(
+    json: &serde_json::Value,
+) -> impl Iterator<Item = (&str, &str, &serde_json::Value)> {
+    let property = json
+        .get("model")
+        .and_then(|root| root.get("block_state_property"))
+        .and_then(serde_json::Value::as_str);
+    property.into_iter().flat_map(move |property| {
+        select_cases(json, "block_state")
+            .into_iter()
+            .map(move |(value, node)| (property, value, node))
+    })
+}
+
+/// Each `when` of an item definition's root select on `property`, with its
+/// model node.
+fn select_cases<'a>(
+    json: &'a serde_json::Value,
+    property: &str,
+) -> Vec<(&'a str, &'a serde_json::Value)> {
+    let Some(root) = json
+        .get("model")
+        .filter(|root| node_type(root) == Some("select") && node_property(root) == Some(property))
+    else {
         return Vec::new();
     };
     let cases = root.get("cases").and_then(serde_json::Value::as_array);
@@ -3208,7 +3241,7 @@ mod tests {
             ],
             "fallback": {"type": "minecraft:model", "model": "item/x"}
         }});
-        let cases: Vec<_> = charge_type_cases(&json)
+        let cases: Vec<_> = select_cases(&json, "charge_type")
             .into_iter()
             .map(|(when, node)| (when, node["model"].as_str().unwrap()))
             .collect();
@@ -3221,7 +3254,28 @@ mod tests {
             ]
         );
         let trim = serde_json::json!({"model": {"type": "minecraft:select", "property": "minecraft:trim_material", "cases": []}});
-        assert!(charge_type_cases(&trim).is_empty());
+        assert!(select_cases(&trim, "charge_type").is_empty());
+    }
+
+    #[test]
+    fn block_state_cases_name_the_property_they_read() {
+        let json = serde_json::json!({"model": {
+            "type": "minecraft:select",
+            "property": "minecraft:block_state",
+            "block_state_property": "level",
+            "cases": [
+                {"when": "0", "model": {"type": "minecraft:model", "model": "item/light_00"}},
+                {"when": "15", "model": {"type": "minecraft:model", "model": "item/light_15"}},
+            ],
+        }});
+        let cases: Vec<_> = block_state_cases(&json)
+            .map(|(property, value, _)| (property, value))
+            .collect();
+        assert_eq!(cases, [("level", "0"), ("level", "15")]);
+        assert_eq!(
+            block_state_model_key("light", "level", "15"),
+            "__pomme_light_block_state_level_15"
+        );
     }
 
     #[test]

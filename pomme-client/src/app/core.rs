@@ -2535,6 +2535,9 @@ impl AppCore {
                 NetworkEvent::ItemTags(tags) => {
                     game.recipe_book.set_item_tags(tags);
                 }
+                NetworkEvent::PlaceablePaintings(paintings) => {
+                    game.placeable_paintings = paintings;
+                }
                 NetworkEvent::BlockTags { tags } => {
                     game.block_registry.replace_tags(tags);
                 }

@@ -3,9 +3,10 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
+use pomme_item::components::BlockItemStateProperties;
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
-use pomme_registry::builtin::ItemKind;
+use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,
@@ -190,8 +191,6 @@ impl CreativeTab {
                 title: "Spawn Eggs",
                 items: ItemSource::Static(SPAWN_EGGS_ITEMS),
             },
-            // TODO: the stacks that carry components: the four test block
-            // modes, a light per level and the four paintings.
             CreativeTab::OpBlocks => TabMeta {
                 row: Row::Bottom,
                 col: 6,
@@ -291,6 +290,8 @@ pub struct CreativeState {
     /// Vanilla `hasPermissions`: the Operator Items Tab option on for a
     /// player who can use game master blocks, which shows that tab.
     operator_tab: bool,
+    /// That tab's stacks after its plain items (see [`operator_stacks`]).
+    operator_stacks: Vec<ItemStack>,
     pub scroll: f32,
     pub search: crate::ui::text_edit::TextFieldState,
     /// Client-side carried stack (the item riding the cursor). Creative-only.
@@ -312,6 +313,7 @@ impl CreativeState {
         Self {
             tab: CreativeTab::BuildingBlocks,
             operator_tab: false,
+            operator_stacks: Vec::new(),
             scroll: 0.0,
             // Vanilla search box: 50 chars.
             search: crate::ui::text_edit::TextFieldState::new(50),
@@ -337,11 +339,13 @@ impl CreativeState {
         self.sync_search_focus();
     }
 
-    /// Vanilla `tryRefreshInvalidatedTabs`: a selected tab that stops
+    /// Shows the operator tab with `stacks` after its plain items, or hides
+    /// it. Vanilla `tryRefreshInvalidatedTabs`: a selected tab that stops
     /// displaying gives way to the default one.
-    pub fn set_operator_tab(&mut self, shown: bool) {
-        self.operator_tab = shown;
-        if !shown && self.tab == CreativeTab::OpBlocks {
+    pub fn set_operator_tab(&mut self, stacks: Option<Vec<ItemStack>>) {
+        self.operator_tab = stacks.is_some();
+        self.operator_stacks = stacks.unwrap_or_default();
+        if !self.operator_tab && self.tab == CreativeTab::OpBlocks {
             self.select_tab(CreativeTab::BuildingBlocks);
         }
     }
@@ -1593,28 +1597,107 @@ fn draw_scrollbar(
 
 fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
     match state.tab.meta().items {
-        ItemSource::Static(list) => list.iter().map(|&kind| stack_of(kind)).collect(),
+        ItemSource::Static(list) => {
+            let extra: &[ItemStack] = if state.tab == CreativeTab::OpBlocks {
+                &state.operator_stacks
+            } else {
+                &[]
+            };
+            list.iter()
+                .map(|&kind| stack_of(kind))
+                .chain(extra.iter().cloned())
+                .collect()
+        }
         ItemSource::Search => {
             let raw = state.search.value().to_lowercase();
             let needle = raw.strip_prefix('#').unwrap_or(&raw);
+            let matches = |kind: ItemKind| {
+                needle.is_empty() || item_resource_name(kind).to_lowercase().contains(needle)
+            };
             search_items_cached(state.operator_tab)
                 .iter()
-                .filter(|kind| {
-                    needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(needle)
-                })
                 .map(|&kind| stack_of(kind))
+                .chain(state.operator_stacks.iter().cloned())
+                .filter(|stack| matches(stack.kind()))
                 .collect()
         }
         ItemSource::Empty => Vec::new(),
     }
 }
 
+/// `CreativeModeTabs`' operator tab after its plain items: a test block per
+/// mode, a light per level from the brightest, and a painting of each variant
+/// `#minecraft:placeable` leaves out, smallest first.
+pub fn operator_stacks(
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    placeable_paintings: &[i32],
+) -> Vec<ItemStack> {
+    let with_state = |kind, property: &str, value: String| {
+        let mut stack = stack_data(kind);
+        stack.component_patch.write(&BlockItemStateProperties {
+            properties: vec![(property.to_owned(), value)],
+        });
+        ItemStack::Present(stack)
+    };
+    let test_blocks = ["start", "log", "fail", "accept"]
+        .into_iter()
+        .map(|mode| with_state(ItemKind::TestBlock, "mode", mode.to_owned()));
+    let lights = (0..=15)
+        .rev()
+        .map(|level| with_state(ItemKind::Light, "level", level.to_string()));
+
+    let sizes: Vec<(i32, i32)> = registries
+        .extra
+        .get(&crate::net::PAINTING_VARIANT_REGISTRY.into())
+        .into_iter()
+        .flat_map(|registry| registry.map.values())
+        .map(|variant| {
+            (
+                variant.int("width").unwrap_or(1),
+                variant.int("height").unwrap_or(1),
+            )
+        })
+        .collect();
+    let paintings = preset_paintings(&sizes, placeable_paintings)
+        .into_iter()
+        .map(|id| {
+            let mut stack = stack_data(ItemKind::Painting);
+            // A `Holder` naming a registered variant: its id plus one.
+            let mut variant = Vec::new();
+            pomme_protocol::wire::write_varint(&mut variant, id + 1);
+            stack
+                .component_patch
+                .set(DataComponentKind::PaintingVariant, variant);
+            ItemStack::Present(stack)
+        });
+
+    test_blocks.chain(lights).chain(paintings).collect()
+}
+
+/// The ids of the painting variants sized `sizes` (width, height) that
+/// `placeable` leaves out, in `PAINTING_COMPARATOR`'s order: by area, then by
+/// width.
+fn preset_paintings(sizes: &[(i32, i32)], placeable: &[i32]) -> Vec<u32> {
+    let mut ids: Vec<u32> = (0..sizes.len() as u32)
+        .filter(|&id| !placeable.contains(&(id as i32)))
+        .collect();
+    ids.sort_by_key(|&id| {
+        let (width, height) = sizes[id as usize];
+        (width * height, width)
+    });
+    ids
+}
+
 fn stack_of(kind: ItemKind) -> ItemStack {
-    ItemStack::Present(ItemStackData {
+    ItemStack::Present(stack_data(kind))
+}
+
+fn stack_data(kind: ItemKind) -> ItemStackData {
+    ItemStackData {
         kind,
         count: 1,
         component_patch: Default::default(),
-    })
+    }
 }
 
 /// The search tab's items: every shown tab's, in tab order.
@@ -1647,7 +1730,7 @@ mod tests {
         assert!(!state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
         assert!(!search_items_cached(state.operator_tab).contains(&command_block));
 
-        state.set_operator_tab(true);
+        state.set_operator_tab(Some(Vec::new()));
         assert!(state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
         assert_eq!(
             search_items_cached(state.operator_tab).last(),
@@ -1658,16 +1741,62 @@ mod tests {
     }
 
     #[test]
+    fn the_operator_tab_adds_a_test_block_per_mode_and_a_light_per_level() {
+        let stacks = operator_stacks(&Default::default(), &[]);
+        let states: Vec<(ItemKind, String, String)> = stacks
+            .iter()
+            .map(|stack| {
+                let ItemStack::Present(data) = stack else {
+                    panic!("an empty stack");
+                };
+                let state = data.component::<BlockItemStateProperties>().unwrap();
+                let [(property, value)] = state.properties.try_into().unwrap();
+                (data.kind, property, value)
+            })
+            .collect();
+        assert_eq!(states.len(), 20);
+        let modes: Vec<&str> = states[..4].iter().map(|s| s.2.as_str()).collect();
+        assert_eq!(modes, ["start", "log", "fail", "accept"]);
+        assert!(
+            states[..4]
+                .iter()
+                .all(|s| s.0 == ItemKind::TestBlock && s.1 == "mode")
+        );
+        assert_eq!(states[4], (ItemKind::Light, "level".into(), "15".into()));
+        assert_eq!(states[19], (ItemKind::Light, "level".into(), "0".into()));
+
+        let mut state = CreativeState::new();
+        state.set_operator_tab(Some(stacks));
+        state.select_tab(CreativeTab::OpBlocks);
+        assert_eq!(visible_items(&state).len(), OP_BLOCKS_ITEMS.len() + 20);
+        state.select_tab(CreativeTab::Search);
+        state.search.set_value("light", 100.0, &|_| 0.0);
+        let lights = visible_items(&state)
+            .iter()
+            .filter(|stack| stack.kind() == ItemKind::Light)
+            .count();
+        assert_eq!(lights, 16);
+    }
+
+    #[test]
+    fn preset_paintings_skip_the_placeable_and_sort_by_area_then_width() {
+        // Ids 0 and 3 are placeable; of the rest, 4 is smallest, then the
+        // narrower of the two with area 4, then registry order.
+        let sizes = [(1, 1), (4, 1), (2, 2), (1, 2), (1, 1), (2, 2)];
+        assert_eq!(preset_paintings(&sizes, &[0, 3]), [4, 2, 5, 1]);
+    }
+
+    #[test]
     fn losing_the_operator_tab_while_on_it_selects_the_default_tab() {
         let mut state = CreativeState::new();
-        state.set_operator_tab(true);
+        state.set_operator_tab(Some(Vec::new()));
         state.select_tab(CreativeTab::OpBlocks);
         state.scroll = 0.5;
 
-        state.set_operator_tab(true);
+        state.set_operator_tab(Some(Vec::new()));
         assert!(state.tab == CreativeTab::OpBlocks);
 
-        state.set_operator_tab(false);
+        state.set_operator_tab(None);
         assert!(state.tab == CreativeTab::BuildingBlocks);
         assert_eq!(state.scroll, 0.0);
     }
