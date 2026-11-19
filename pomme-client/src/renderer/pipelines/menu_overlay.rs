@@ -985,6 +985,7 @@ impl MenuGeometry {
                 item_tints,
                 selected,
                 weight,
+                footer,
                 scale,
                 screen_w,
                 screen_h,
@@ -1010,6 +1011,7 @@ impl MenuGeometry {
                         item_tints,
                         selected: *selected,
                         weight: *weight,
+                        footer,
                     },
                 );
                 continue;
@@ -1277,9 +1279,17 @@ impl MenuGeometry {
         } else {
             rows * 24
         };
-        // The name line is 10 tall and the image follows a 2px first-line gap.
-        let w = gui_width(self.spans_width(image.title, scale)).max(96);
-        let h = 10 + body_h + 21;
+        // The name line is 10 tall and the image follows a 2px first-line gap;
+        // each line after the image is 10 more.
+        let footer_w = image
+            .footer
+            .iter()
+            .map(|line| gui_width(self.spans_width(&line.spans, scale)));
+        let w = footer_w
+            .fold(gui_width(self.spans_width(image.title, scale)), i32::max)
+            .max(96);
+        let image_h = body_h + 21;
+        let h = 10 + image_h + 10 * image.footer.len() as i32;
         let layout = tooltip_box(draw, px, w as f32 * px, h as f32 * px);
         self.push_tooltip_frame(vertices, layout.bg, px);
         text(
@@ -1466,6 +1476,17 @@ impl MenuGeometry {
                 &spans,
                 label_x,
                 bar_y + 3.0 * px,
+            );
+        }
+        for (i, line) in image.footer.iter().enumerate() {
+            let y = top + (image_h + 10 * i as i32) as f32 * px;
+            text(
+                vertices,
+                drawn_objects,
+                obfuscation_rng,
+                &line.spans,
+                layout.text_x,
+                y,
             );
         }
     }
@@ -2340,6 +2361,8 @@ pub enum MenuElement {
         item_tints: Vec<Vec<u32>>,
         selected: i32,
         weight: crate::ui::bundle::Frac,
+        /// The tooltip's lines after its name, which follow the image.
+        footer: Vec<TooltipLine>,
         scale: f32,
         screen_w: f32,
         screen_h: f32,
@@ -5140,6 +5163,7 @@ struct BundleImage<'a> {
     item_tints: &'a [Vec<u32>],
     selected: i32,
     weight: crate::ui::bundle::Frac,
+    footer: &'a [TooltipLine],
 }
 
 /// `DefaultTooltipPositioner`, in gui units.

@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
+use azalea_inventory::operations::{ClickOperation, PickupClick};
 use pomme_item::components::BlockItemStateProperties;
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
@@ -17,6 +18,7 @@ use super::creative_tab_data::{
     REDSTONE_BLOCKS_ITEMS, SPAWN_EGGS_ITEMS, TOOLS_AND_UTILITIES_ITEMS,
 };
 use crate::player::inventory::{Inventory, item_resource_name};
+use crate::player::menu_click::{self, BundleClick, ContainerKind};
 use crate::renderer::PlayerPreview;
 use crate::renderer::pipelines::entity_renderer::armor_render_infos;
 use crate::renderer::pipelines::menu_overlay::{
@@ -301,6 +303,9 @@ pub struct CreativeState {
     /// Last left-click (slot, time) for double-click detection.
     last_left_click: Option<(u16, Instant)>,
     scroll_dragging: bool,
+    /// The real inventory slot under the cursor this frame, whose bundle the
+    /// caller's `BundleMouseActions` reads.
+    pub hovered_slot: Option<u16>,
 }
 
 struct DragState {
@@ -321,6 +326,7 @@ impl CreativeState {
             drag: None,
             last_left_click: None,
             scroll_dragging: false,
+            hovered_slot: None,
         }
     }
 
@@ -360,6 +366,19 @@ impl CreativeState {
         self.select_tab(self.tab);
     }
 
+    /// The tab lines a real slot's tooltip gives `data` after its name, for
+    /// the caller's bundle tooltip.
+    pub fn tab_name_lines(&self, data: &ItemStackData) -> Vec<TooltipLine> {
+        tab_name_lines(data, self.operator_tab)
+    }
+
+    /// What `ItemPickerMenu`'s slot numbering adds to a real slot in the
+    /// bundle selection packet: the item tabs put their hotbar after the 45
+    /// catalog slots, the inventory tab numbers as the inventory menu does.
+    pub fn bundle_packet_offset(&self) -> u16 {
+        if self.tab.is_inventory_tab() { 0 } else { 9 }
+    }
+
     /// Discards the carried stack and any pending drag/double-click state.
     /// Must run whenever the screen closes, or a stale drag would re-commit on
     /// reopen.
@@ -367,6 +386,7 @@ impl CreativeState {
         self.cursor_item = ItemStack::Empty;
         self.drag = None;
         self.last_left_click = None;
+        self.hovered_slot = None;
     }
 }
 
@@ -504,6 +524,7 @@ pub fn build_creative_inventory(
     shift: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
     mut effects: Vec<MenuElement>,
+    bundle: &mut BundleClick,
 ) -> CreativeAction {
     // Vanilla creative keyPressed: T on a non-search tab jumps to the search
     // tab without typing the character (`ignoreTextInput`).
@@ -702,6 +723,11 @@ pub fn build_creative_inventory(
         hit
     };
 
+    state.hovered_slot = real_hit
+        .as_ref()
+        .map(|hit| hit.slot)
+        .filter(|&slot| slot != SLOT_TRASH);
+
     // Real-slot clicks and click-drag distribution.
     if let Some(drag) = &mut state.drag {
         let held = match drag.button {
@@ -719,6 +745,11 @@ pub fn build_creative_inventory(
             {
                 drag.slots.push(hit.slot);
             }
+        } else if let &[slot] = drag.slots.as_slice() {
+            // Vanilla `quickCraftToSlots`: a drag over one slot is a click.
+            let button = drag.button;
+            state.drag = None;
+            action = click_slot(state, inventory, slot, button, bundle);
         } else {
             // Released: commit the split and keep the remainder on the cursor.
             if let Some(preview) = &drag_preview {
@@ -754,18 +785,17 @@ pub fn build_creative_inventory(
                 action = CreativeAction::SetSlots(items);
             }
         } else if let ItemStack::Present(carried) = &state.cursor_item {
-            // Carrying: start a drag on an eligible slot, else swap immediately.
+            // Carrying: start a drag on an eligible slot, else click at once.
             if drag_slot_eligible(carried, inventory, hit.slot) {
                 state.drag = Some(DragState {
                     button: kind,
                     slots: vec![hit.slot],
                 });
             } else {
-                action = apply_slot_action(state, inventory, hit.slot, kind);
+                action = click_slot(state, inventory, hit.slot, kind, bundle);
             }
         } else {
-            // Empty cursor: pick up / take half immediately.
-            action = apply_slot_action(state, inventory, hit.slot, kind);
+            action = click_slot(state, inventory, hit.slot, kind, bundle);
         }
     }
 
@@ -919,13 +949,24 @@ pub fn slot_center(
         }
         HoverTarget::Trash if state.tab.is_inventory_tab() => (INV_TRASH_X, INV_TRASH_Y),
         HoverTarget::Trash => return Err("the trash slot is on the inventory tab".into()),
-        _ if state.tab.is_inventory_tab() => {
-            return Err("hover only knows the item tabs' layout".into());
+        // The inventory tab lays out every slot of the inventory menu but the
+        // crafting ones.
+        HoverTarget::Hotbar(slot @ 5..=8) if state.tab.is_inventory_tab() => {
+            inventory_tab_armor_xy(usize::from(slot - SLOT_ARMOR_BASE))
+        }
+        HoverTarget::Hotbar(slot @ 9..=35) if state.tab.is_inventory_tab() => {
+            inventory_tab_main_xy(usize::from(slot - SLOT_MAIN_BASE))
+        }
+        HoverTarget::Hotbar(SLOT_OFFHAND) if state.tab.is_inventory_tab() => {
+            (INV_OFFHAND_X, INV_OFFHAND_Y)
+        }
+        HoverTarget::Catalog(_) if state.tab.is_inventory_tab() => {
+            return Err("the inventory tab has no catalog".into());
         }
         HoverTarget::Hotbar(slot @ 36..=44) => {
             (GRID_ORIGIN_X + f32::from(slot - 36) * SLOT_STRIDE, HOTBAR_Y)
         }
-        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't a hotbar slot")),
+        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't on this tab")),
         HoverTarget::Catalog(cell) if cell < GRID_COLS * GRID_ROWS => (
             GRID_ORIGIN_X + (cell % GRID_COLS) as f32 * SLOT_STRIDE,
             GRID_ORIGIN_Y + (cell / GRID_COLS) as f32 * SLOT_STRIDE,
@@ -1100,8 +1141,7 @@ fn tabs_containing(kind: ItemKind, operator_tab: bool) -> &'static [&'static str
 
 /// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the stack's
 /// tooltip, with the tabs holding it after its name unless `tab_names` is
-/// off (a catalog slot in a category tab). The tabs hold default stacks, so
-/// one with components set is in none of them.
+/// off (a catalog slot in a category tab).
 // TODO: the search tab's matching item tags, which follow the name there.
 fn build_item_tooltip_lines(
     data: &ItemStackData,
@@ -1111,13 +1151,22 @@ fn build_item_tooltip_lines(
     operator_tab: bool,
 ) -> Vec<TooltipLine> {
     let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
-    if tab_names && data.component_patch.iter().next().is_none() && !lines.is_empty() {
-        let tabs = tabs_containing(data.kind, operator_tab)
-            .iter()
-            .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
-        lines.splice(1..1, tabs);
+    if tab_names && !lines.is_empty() {
+        lines.splice(1..1, tab_name_lines(data, operator_tab));
     }
     lines
+}
+
+/// The shown tabs holding `data`, a line each. The tabs hold default stacks,
+/// so one with components set is in none of them.
+fn tab_name_lines(data: &ItemStackData, operator_tab: bool) -> Vec<TooltipLine> {
+    if data.component_patch.iter().next().is_some() {
+        return Vec::new();
+    }
+    tabs_containing(data.kind, operator_tab)
+        .iter()
+        .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR))
+        .collect()
 }
 
 fn push_item_tooltip(
@@ -1199,7 +1248,12 @@ fn slot_with_tooltip(
 ) -> Option<SlotHit> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
-        push_item_tooltip(elements, item, tt, true);
+        // A bundle in a real slot gets its own tooltip, from the caller.
+        let bundle =
+            slot_num.is_some() && item.as_present().is_some_and(crate::ui::bundle::is_bundle);
+        if !bundle {
+            push_item_tooltip(elements, item, tt, true);
+        }
         if let Some(slot) = slot_num {
             let click = if tt.clicked {
                 Some(ClickKind::Left)
@@ -1214,38 +1268,32 @@ fn slot_with_tooltip(
     None
 }
 
-/// A single (non-drag) click on a real player-inventory slot. With an empty
-/// cursor it picks up the slot (left = whole, right = half); while carrying it
-/// swaps — reachable only for a different item, since empty/same-item slots go
-/// through the drag path — unless the slot rejects the item (armor).
-fn apply_slot_action(
+/// Vanilla `slotClicked` on a real slot: `inventoryMenu.clicked` with a
+/// pickup, bundles and all, whose changed slots `broadcastChanges` sends.
+fn click_slot(
     state: &mut CreativeState,
     inventory: &Inventory,
-    slot_num: u16,
+    slot: u16,
     kind: ClickKind,
+    bundle: &mut BundleClick,
 ) -> CreativeAction {
-    let slot_item = inventory.slot(slot_num as usize).clone();
-    match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
-        ItemStack::Empty => match (&slot_item, kind) {
-            (ItemStack::Empty, _) => CreativeAction::None,
-            (ItemStack::Present(_), ClickKind::Left) => {
-                state.cursor_item = slot_item;
-                CreativeAction::SetSlot(slot_num, ItemStack::Empty)
-            }
-            (ItemStack::Present(data), ClickKind::Right) => {
-                let take = (data.count + 1) / 2;
-                state.cursor_item = stack_with_count(data, take);
-                CreativeAction::SetSlot(slot_num, stack_with_count(data, data.count - take))
-            }
-        },
-        ItemStack::Present(carried) => {
-            if !may_place(slot_num, &carried) {
-                state.cursor_item = ItemStack::Present(carried);
-                return CreativeAction::None;
-            }
-            state.cursor_item = slot_item;
-            CreativeAction::SetSlot(slot_num, ItemStack::Present(carried))
-        }
+    let slot = Some(slot);
+    let op = ClickOperation::Pickup(match kind {
+        ClickKind::Left => PickupClick::Left { slot },
+        ClickKind::Right => PickupClick::Right { slot },
+    });
+    let changed = menu_click::apply_click(
+        ContainerKind::Player,
+        inventory.slots(),
+        &mut state.cursor_item,
+        &op,
+        true,
+        bundle,
+    );
+    if changed.is_empty() {
+        CreativeAction::None
+    } else {
+        CreativeAction::SetSlots(changed)
     }
 }
 
@@ -1402,6 +1450,23 @@ fn slot_display(preview: &HashMap<u16, ItemStack>, slot_num: u16, actual: ItemSt
     preview.get(&slot_num).cloned().unwrap_or(actual)
 }
 
+/// Where the inventory tab puts armour slot `index`, head first: two columns
+/// either side of the player, two rows each.
+fn inventory_tab_armor_xy(index: usize) -> (f32, f32) {
+    (
+        INV_ARMOR_X + (index / 2) as f32 * INV_ARMOR_COL_STRIDE,
+        INV_ARMOR_Y + (index % 2) as f32 * INV_ARMOR_ROW_STRIDE,
+    )
+}
+
+/// Where the inventory tab puts main inventory slot `index`, row by row.
+fn inventory_tab_main_xy(index: usize) -> (f32, f32) {
+    (
+        GRID_ORIGIN_X + (index % GRID_COLS) as f32 * SLOT_STRIDE,
+        INV_MAIN_Y + (index / GRID_COLS) as f32 * SLOT_STRIDE,
+    )
+}
+
 fn draw_inventory_layout(
     elements: &mut Vec<MenuElement>,
     ox: f32,
@@ -1416,15 +1481,8 @@ fn draw_inventory_layout(
 
     let armor = inventory.armor_slots();
     for i in 0..4 {
-        let col = (i / 2) as f32;
-        let row = (i % 2) as f32;
-        let (x, y) = slot_xy(
-            ox,
-            oy,
-            scale,
-            INV_ARMOR_X + col * INV_ARMOR_COL_STRIDE,
-            INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
-        );
+        let (sx, sy) = inventory_tab_armor_xy(i);
+        let (x, y) = slot_xy(ox, oy, scale, sx, sy);
         let slot_num = SLOT_ARMOR_BASE + i as u16;
         let item = slot_display(preview, slot_num, item_or_empty(armor, i));
         clicked_slot = clicked_slot.or(slot_with_tooltip(
@@ -1458,13 +1516,8 @@ fn draw_inventory_layout(
     for row in 0..3usize {
         for col in 0..GRID_COLS {
             let idx = row * GRID_COLS + col;
-            let (x, y) = slot_xy(
-                ox,
-                oy,
-                scale,
-                GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
-                INV_MAIN_Y + row as f32 * SLOT_STRIDE,
-            );
+            let (sx, sy) = inventory_tab_main_xy(idx);
+            let (x, y) = slot_xy(ox, oy, scale, sx, sy);
             let slot_num = SLOT_MAIN_BASE + idx as u16;
             let item = slot_display(preview, slot_num, item_or_empty(main, idx));
             clicked_slot = clicked_slot.or(slot_with_tooltip(
@@ -1862,8 +1915,17 @@ mod tests {
     const OUTSIDE: (f32, f32) = (-50.0, -50.0);
 
     fn run(state: &mut CreativeState, inventory: &Inventory, frame: Frame) -> CreativeAction {
+        run_into(&mut Vec::new(), state, inventory, frame)
+    }
+
+    fn run_into(
+        elements: &mut Vec<MenuElement>,
+        state: &mut CreativeState,
+        inventory: &Inventory,
+        frame: Frame,
+    ) -> CreativeAction {
         build_creative_inventory(
-            &mut Vec::new(),
+            elements,
             state,
             SCREEN.0,
             SCREEN.1,
@@ -1887,6 +1949,7 @@ mod tests {
             frame.shift,
             &|_, _| 0.0,
             Vec::new(),
+            &mut BundleClick::default(),
         )
     }
 
@@ -1947,6 +2010,96 @@ mod tests {
 
         run(&mut state, &Inventory::new(), click(false));
         assert!(state.cursor_item.is_empty());
+    }
+
+    #[test]
+    fn a_carried_bundle_takes_the_clicked_stack_and_a_carried_stack_goes_into_a_bundle() {
+        let bundle_of = |stack: &ItemStack| {
+            stack
+                .as_present()
+                .and_then(crate::ui::bundle::contents)
+                .map_or(0, |contents| {
+                    contents.items.iter().map(ItemStack::count).sum()
+                })
+        };
+        let left_click = |slot| Frame {
+            cursor: centre(HoverTarget::Hotbar(slot)),
+            clicked: true,
+            ..Default::default()
+        };
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Dirt, 16));
+        inventory.set_slot(37, ItemStack::new(ItemKind::Bundle, 1));
+
+        // Holding the bundle, a click on the dirt puts it in the bundle.
+        let mut state = CreativeState::new();
+        state.cursor_item = ItemStack::new(ItemKind::Bundle, 1);
+        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(36)) else {
+            panic!("expected the dirt's slot to change");
+        };
+        assert_eq!(slots, [(36, ItemStack::Empty)]);
+        assert_eq!(bundle_of(&state.cursor_item), 16);
+
+        // Holding the dirt, a click on the bundle does the same from the
+        // other side.
+        let mut state = CreativeState::new();
+        state.cursor_item = ItemStack::new(ItemKind::Dirt, 16);
+        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(37)) else {
+            panic!("expected the bundle's slot to change");
+        };
+        assert!(state.cursor_item.is_empty());
+        assert!(matches!(slots.as_slice(), [(37, bundle)] if bundle_of(bundle) == 16));
+    }
+
+    #[test]
+    fn the_bundle_selection_packet_numbers_slots_as_the_open_tab_does() {
+        let mut state = CreativeState::new();
+        // An item tab's hotbar follows its 45 catalog slots: slot 36 is 45.
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::Search);
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::SurvivalInventory);
+        assert_eq!(state.bundle_packet_offset(), 0);
+    }
+
+    #[test]
+    fn only_a_default_stack_names_the_tabs_that_hold_it() {
+        let state = CreativeState::new();
+        let ItemStack::Present(empty) = ItemStack::new(ItemKind::Bundle, 1) else {
+            panic!("a bundle");
+        };
+        let lines = state.tab_name_lines(&empty);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].text, "Tools & Utilities");
+
+        let mut filled = empty.clone();
+        filled
+            .component_patch
+            .set(DataComponentKind::BundleContents, vec![0]);
+        assert!(state.tab_name_lines(&filled).is_empty());
+    }
+
+    #[test]
+    fn a_real_slot_reports_its_hover_and_leaves_a_bundle_tooltip_to_the_caller() {
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Dirt, 16));
+        inventory.set_slot(37, ItemStack::new(ItemKind::Bundle, 1));
+        let tooltips = |slot| {
+            let mut state = CreativeState::new();
+            let mut elements = Vec::new();
+            let hover = Frame {
+                cursor: centre(HoverTarget::Hotbar(slot)),
+                ..Default::default()
+            };
+            run_into(&mut elements, &mut state, &inventory, hover);
+            assert_eq!(state.hovered_slot, Some(slot));
+            elements
+                .iter()
+                .filter(|e| matches!(e, MenuElement::TooltipLines { .. }))
+                .count()
+        };
+        assert_eq!(tooltips(36), 1);
+        assert_eq!(tooltips(37), 0);
     }
 
     #[test]
