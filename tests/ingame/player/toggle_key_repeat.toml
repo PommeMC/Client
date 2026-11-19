@@ -1,0 +1,209 @@
+# A key set to Toggle flips again each time the system repeats it while it is
+# held: with use on a keyboard key, the press raises a shield, the first
+# repeat lowers it, the second raises it, and letting go leaves it up.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:shield"
+
+[[step]]
+expect = { slot = 36, item = "shield" }
+
+[[step]]
+bind = { action = "key.use", keys = ["key.keyboard.u"] }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# The game takes input again a frame after the menu goes.
+[[step]]
+wait_ms = 300
+
+[[step]]
+key_down = { key = "key.keyboard.u" }
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+key_down = { key = "key.keyboard.u", repeat = true }
+
+[[step]]
+expect = { player = { using_item = false } }
+
+[[step]]
+key_down = { key = "key.keyboard.u", repeat = true }
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+key_up = { key = "key.keyboard.u" }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+expect = { player = { using_item = true } }
+
+[[step]]
+press = { key = "key.keyboard.u" }
+
+[[step]]
+expect = { player = { using_item = false } }
+
+# The default binding first: closing the options screen saves the bindings too.
+[[step]]
+bind = { action = "key.use" }
+
+# Back to Hold, since the options save.
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/gamemode creative"

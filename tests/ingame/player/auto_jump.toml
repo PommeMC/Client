@@ -1,0 +1,215 @@
+# Auto-Jump: walking into a block-high step stops the player at it with the
+# option off, and carries them up onto it with the option on. A tall wall at
+# the end of the step is where the walk ends.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 400.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [400.5, -60.0, 0.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [400, -61, 6] }
+
+[[step]]
+chat = "/fill 400 -60 3 400 -60 5 minecraft:stone"
+
+[[step]]
+chat = "/fill 399 -60 6 401 -56 6 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [400, -56, 6] }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+expect = { player = { position = [400.5, -60.0, 2.7] } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "stopped_at_step"
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Auto-Jump: OFF"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Auto-Jump: ON"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# The game takes input again a frame after the menu goes.
+[[step]]
+wait_ms = 300
+
+[[step]]
+chat = "/tp @s 400.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [400.5, -60.0, 0.5] } }
+
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+expect = { player = { position = [400.5, -59.0, 5.7] } }
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+screenshot = "jumped_onto_step"
+
+[[step]]
+key_up = { action = "key.forward" }
+
+# Off again, since the options save.
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Auto-Jump: ON"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Auto-Jump: OFF"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+chat = "/fill 399 -60 3 401 -56 6 minecraft:air"
+
+[[step]]
+expect = { block = "air", at = [400, -60, 3] }

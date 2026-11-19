@@ -1650,6 +1650,7 @@ impl AppCore {
         connection
             .packet_tx
             .send(GamePacket::ClientCommand(ClientCommand::PerformRespawn));
+        self.input.reset_toggle_keys();
 
         game.death_confirm = false;
         game.respawn_sent = true;
@@ -2533,6 +2534,9 @@ impl AppCore {
                 }
                 NetworkEvent::ItemTags(tags) => {
                     game.recipe_book.set_item_tags(tags);
+                }
+                NetworkEvent::PlaceablePaintings(paintings) => {
+                    game.placeable_paintings = paintings;
                 }
                 NetworkEvent::BlockTags { tags } => {
                     game.block_registry.replace_tags(tags);
@@ -3437,6 +3441,12 @@ impl AppCore {
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
+                // `LocalPlayer.handleEntityEvent`.
+                NetworkEvent::PermissionLevel { id, level } => {
+                    if id == game.player.entity_id {
+                        game.player.permission_level = level;
+                    }
+                }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
                         && let Some(texture) = mouth_item_texture(fox)
@@ -4017,6 +4027,9 @@ impl AppCore {
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
+            // Nothing ticks the jump an obstacle started, so it ends here.
+            game.player.auto_jump_time = 0;
+            game.player.auto_jumping = false;
             Self::send_abilities_packet(connection, game);
             Self::send_input_packet(&neutral, connection, game);
             self.send_sprint_command(connection, game);
@@ -4089,7 +4102,10 @@ impl AppCore {
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
-        let neutral = InputState::released();
+        // A screen takes the keys, not the hotbar selection: a neutral input
+        // on slot 0 would tell the server the held item changed.
+        let mut neutral = InputState::released();
+        neutral.set_selected_slot(self.input.selected_slot());
         let input = if input_live { &self.input } else { &neutral };
 
         // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
@@ -4347,8 +4363,9 @@ impl AppCore {
 
         let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
-        let current =
+        let mut current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
+        current.jump |= game.player.auto_jumping;
 
         if current != game.last_sent_input {
             sender.send(GamePacket::PlayerInput(serverbound_player_input(&current)));
@@ -4483,6 +4500,7 @@ impl AppCore {
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
+        game.player.auto_jump_enabled = self.menu.controls.auto_jump;
     }
 }
 

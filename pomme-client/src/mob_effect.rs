@@ -21,6 +21,7 @@ const fn effect(name: &'static str, beneficial: bool, color: u32) -> MobEffectIn
 }
 
 pub const HASTE: u32 = 2;
+pub const JUMP_BOOST: u32 = 7;
 pub const MINING_FATIGUE: u32 = 3;
 pub const CONDUIT_POWER: u32 = 28;
 

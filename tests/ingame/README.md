@@ -68,6 +68,10 @@ min_version = "1.20.5"
 that version. Gate only for what the server can't do; a script failing because
 of a client bug stays a failure.
 
+A script about a Pomme extension, which vanilla has no screen or option for,
+sets `pomme_only = true` the same way. The vanilla harness prints `SKIP` for
+it instead of failing.
+
 ## Wire fixtures
 
 `just wire-fixtures <version>...` runs `world/join` on each version with
@@ -156,7 +160,9 @@ press = { action = "key.drop", ctrl = true }  # a key binding's default key, or
                                               # physical key; ctrl is optional
 [[step]]
 key_down = { action = "key.forward" }        # held until key_up, which
-                                              # takes the same key
+                                              # takes the same key; repeat =
+                                              # true is the system repeating
+                                              # a key already held
 [[step]]
 focus = false                                 # the window losing focus,
                                               # letting go of held keys and
@@ -279,4 +285,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`, optional `keep_chat`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them; `key_down` takes an optional `repeat`), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`, optional `keep_chat`).
