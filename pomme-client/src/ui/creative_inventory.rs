@@ -366,6 +366,12 @@ impl CreativeState {
         self.select_tab(self.tab);
     }
 
+    /// The tab lines a real slot's tooltip gives `data` after its name, for
+    /// the caller's bundle tooltip.
+    pub fn tab_name_lines(&self, data: &ItemStackData) -> Vec<TooltipLine> {
+        tab_name_lines(data, self.operator_tab)
+    }
+
     /// What `ItemPickerMenu`'s slot numbering adds to a real slot in the
     /// bundle selection packet: the item tabs put their hotbar after the 45
     /// catalog slots, the inventory tab numbers as the inventory menu does.
@@ -1124,8 +1130,7 @@ fn tabs_containing(kind: ItemKind, operator_tab: bool) -> &'static [&'static str
 
 /// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the stack's
 /// tooltip, with the tabs holding it after its name unless `tab_names` is
-/// off (a catalog slot in a category tab). The tabs hold default stacks, so
-/// one with components set is in none of them.
+/// off (a catalog slot in a category tab).
 // TODO: the search tab's matching item tags, which follow the name there.
 fn build_item_tooltip_lines(
     data: &ItemStackData,
@@ -1135,13 +1140,22 @@ fn build_item_tooltip_lines(
     operator_tab: bool,
 ) -> Vec<TooltipLine> {
     let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
-    if tab_names && data.component_patch.iter().next().is_none() && !lines.is_empty() {
-        let tabs = tabs_containing(data.kind, operator_tab)
-            .iter()
-            .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
-        lines.splice(1..1, tabs);
+    if tab_names && !lines.is_empty() {
+        lines.splice(1..1, tab_name_lines(data, operator_tab));
     }
     lines
+}
+
+/// The shown tabs holding `data`, a line each. The tabs hold default stacks,
+/// so one with components set is in none of them.
+fn tab_name_lines(data: &ItemStackData, operator_tab: bool) -> Vec<TooltipLine> {
+    if data.component_patch.iter().next().is_some() {
+        return Vec::new();
+    }
+    tabs_containing(data.kind, operator_tab)
+        .iter()
+        .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR))
+        .collect()
 }
 
 fn push_item_tooltip(
@@ -2019,6 +2033,34 @@ mod tests {
         };
         assert!(state.cursor_item.is_empty());
         assert!(matches!(slots.as_slice(), [(37, bundle)] if bundle_of(bundle) == 16));
+    }
+
+    #[test]
+    fn the_bundle_selection_packet_numbers_slots_as_the_open_tab_does() {
+        let mut state = CreativeState::new();
+        // An item tab's hotbar follows its 45 catalog slots: slot 36 is 45.
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::Search);
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::SurvivalInventory);
+        assert_eq!(state.bundle_packet_offset(), 0);
+    }
+
+    #[test]
+    fn only_a_default_stack_names_the_tabs_that_hold_it() {
+        let state = CreativeState::new();
+        let ItemStack::Present(empty) = ItemStack::new(ItemKind::Bundle, 1) else {
+            panic!("a bundle");
+        };
+        let lines = state.tab_name_lines(&empty);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].text, "Tools & Utilities");
+
+        let mut filled = empty.clone();
+        filled
+            .component_patch
+            .set(DataComponentKind::BundleContents, vec![0]);
+        assert!(state.tab_name_lines(&filled).is_empty());
     }
 
     #[test]

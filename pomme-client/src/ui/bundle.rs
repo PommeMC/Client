@@ -3,7 +3,7 @@ use pomme_item::components::{BundleContents, MaxStackSize};
 use pomme_item::{ItemStack, ItemStackData};
 
 use crate::net::item_codec::Components;
-use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 pub const NO_SELECTION: i32 = -1;
 
@@ -271,17 +271,17 @@ pub fn push_selected_icon(elements: &mut Vec<MenuElement>, data: &ItemStackData,
 }
 
 /// Vanilla `BundleItem.getTooltipImage`: the bundle tooltip under its name,
-/// or just the name when `TooltipDisplay` hides the contents.
+/// or just the name when `TooltipDisplay` hides the contents. `footer` is the
+/// tooltip's lines after the name, which the image goes ahead of; the last
+/// argument is the cursor, the screen size and the GUI scale.
 // TODO: the name's lore and advanced lines, once containers show item
 // tooltips; and `TOOLTIP_STYLE`'s custom sprites.
 pub fn push_tooltip(
     elements: &mut Vec<MenuElement>,
     data: &ItemStackData,
     selected: i32,
-    cursor: (f32, f32),
-    screen_w: f32,
-    screen_h: f32,
-    gui_scale: f32,
+    footer: Vec<TooltipLine>,
+    (cursor, screen_w, screen_h, gui_scale): ((f32, f32), f32, f32, f32),
 ) {
     let display = data.get_component::<TooltipDisplay>();
     if display.as_ref().is_some_and(|d| d.hide_tooltip) {
@@ -306,6 +306,7 @@ pub fn push_tooltip(
             item_tints: Vec::new(),
             selected,
             weight,
+            footer,
             scale,
             screen_w,
             screen_h,
@@ -313,7 +314,9 @@ pub fn push_tooltip(
         None => MenuElement::TooltipLines {
             x,
             y,
-            lines: vec![crate::renderer::pipelines::menu_overlay::TooltipLine::from_spans(title)],
+            lines: std::iter::once(TooltipLine::from_spans(title))
+                .chain(footer)
+                .collect(),
             scale,
             screen_w,
             screen_h,

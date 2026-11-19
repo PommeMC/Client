@@ -2464,7 +2464,8 @@ fn shown_bundle_items(game: &GameState, slot: u16) -> usize {
 /// steps through its contents, and its tooltip stands in for the plain one.
 /// Returns whether it drew that tooltip. `packet_offset` is what the open
 /// screen's own slot numbering adds to `hovered` in the selection packet;
-/// the last argument is the cursor, the screen size and the GUI scale.
+/// `tab_names` adds the creative screen's tab lines to the tooltip; the last
+/// argument is the cursor, the screen size and the GUI scale.
 #[allow(clippy::too_many_arguments)]
 fn bundle_slot_hover(
     elements: &mut Vec<MenuElement>,
@@ -2473,6 +2474,7 @@ fn bundle_slot_hover(
     menu_id: i32,
     hovered: Option<u16>,
     packet_offset: u16,
+    tab_names: bool,
     scroll: (f32, f32),
     (cursor, sw, sh, gs): ((f32, f32), f32, f32, f32),
 ) -> bool {
@@ -2507,7 +2509,12 @@ fn bundle_slot_hover(
     }
     let selected = game.selected_bundle_item(menu_id, slot);
     bundle::push_selected_icon(elements, &data, selected);
-    bundle::push_tooltip(elements, &data, selected, cursor, sw, sh, gs);
+    let footer = if tab_names {
+        game.creative_state.tab_name_lines(&data)
+    } else {
+        Vec::new()
+    };
+    bundle::push_tooltip(elements, &data, selected, footer, (cursor, sw, sh, gs));
     true
 }
 
@@ -4598,6 +4605,7 @@ pub fn update_game(
             menu_id,
             hovered,
             0,
+            false,
             menu_scroll,
             (core.input.cursor_pos(), sw, sh, gs),
         );
@@ -4743,6 +4751,7 @@ pub fn update_game(
             0,
             game.creative_state.hovered_slot,
             game.creative_state.bundle_packet_offset(),
+            true,
             bundle_scroll,
             (cursor, sw, sh, gs),
         );
