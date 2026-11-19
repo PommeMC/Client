@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{ConnectInfo, Path, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::limits::Spend;
@@ -37,13 +37,26 @@ const DROPPED_REQUEST_HEADERS: &[&str] = &[
     "referer",
     "cookie",
     "connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "transfer-encoding",
+    "upgrade",
     "content-length",
     "accept-encoding",
     "forwarded",
+    "via",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-proto",
     "x-real-ip",
+    "true-client-ip",
+    "cdn-loop",
+    "cf-connecting-ip",
+    "cf-ipcountry",
+    "cf-ray",
+    "cf-visitor",
 ];
 
 /// Response headers passed back; the rest belong to the relay's own hop.
@@ -64,9 +77,11 @@ const DATA_TYPES: &[&str] = &[
 ];
 
 /// Gives up on a host that won't answer, or a download that stalls, rather
-/// than holding the relay's connections open.
+/// than holding the relay's connections open. A redirect is passed back, not
+/// followed: its target was never checked against [`ALLOWED_HOSTS`].
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(60))
         .build()
@@ -75,13 +90,15 @@ pub fn client() -> reqwest::Client {
 
 pub async fn relay(
     State(state): State<AppState>,
-    Path((host, path)): Path<(String, String)>,
     peer: ConnectInfo<SocketAddr>,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     method: Method,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let Some((host, rest)) = target(&uri) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     if guard::cross_site(&headers) {
         tracing::warn!("Refused a cross-site request for {host}");
         return StatusCode::FORBIDDEN.into_response();
@@ -95,11 +112,7 @@ pub async fn relay(
         tracing::warn!("Rate limited {client}'s requests for {host}");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let mut url = format!("https://{host}/{path}");
-    if let Some(query) = query {
-        url.push('?');
-        url.push_str(&query);
-    }
+    let url = format!("https://{host}/{rest}");
     let mut forwarded = headers;
     for name in DROPPED_REQUEST_HEADERS {
         forwarded.remove(*name);
@@ -136,6 +149,16 @@ pub async fn relay(
         .expect("the relayed response builds")
 }
 
+/// The host, and the path and query after it, of a request under `/relay`,
+/// as the page wrote them: decoding the path would turn an encoded `?` or `/`
+/// into a real one.
+fn target(uri: &Uri) -> Option<(&str, &str)> {
+    uri.path_and_query()?
+        .as_str()
+        .strip_prefix('/')?
+        .split_once('/')
+}
+
 /// Whether `content_type` is one of [`DATA_TYPES`].
 fn data(content_type: &HeaderValue) -> bool {
     content_type
@@ -152,6 +175,16 @@ fn data(content_type: &HeaderValue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_path_and_query_pass_through_as_written() {
+        let uri = Uri::from_static("/api.mojang.com/a%3Fb%2Fc?d=e%20f");
+        assert_eq!(target(&uri), Some(("api.mojang.com", "a%3Fb%2Fc?d=e%20f")));
+        let uri = Uri::from_static("/api.mojang.com/");
+        assert_eq!(target(&uri), Some(("api.mojang.com", "")));
+        let uri = Uri::from_static("/api.mojang.com");
+        assert_eq!(target(&uri), None);
+    }
 
     #[test]
     fn only_data_types_pass() {

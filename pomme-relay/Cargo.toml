@@ -4,6 +4,7 @@ description = "Serves the browser build and relays its requests to the Mojang an
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+publish = false
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -15,3 +16,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-th
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }

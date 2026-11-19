@@ -3,6 +3,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -17,12 +18,18 @@ use hickory_resolver::proto::rr::RData;
 use hickory_resolver::{Resolver, TokioResolver};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use crate::limits::Spend;
 use crate::{AppState, Config, guard};
 
 /// Vanilla's largest packet, plus room for its length prefix.
 const MAX_MESSAGE: usize = (2 << 20) + 8;
+
+/// A connection silent both ways for this long is closed. A server in play
+/// sends a keep-alive every 15 seconds, and the client drops one that goes
+/// quiet for 30.
+const IDLE: Duration = Duration::from_secs(60);
 
 /// Below this, ports belong to services such as mail, not game servers.
 const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
@@ -148,7 +155,8 @@ fn public(ip: IpAddr) -> bool {
                 || ip.is_multicast()
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
-                || (first == 0x2001 && ip.segments()[1] == 0x0db8))
+                || (first == 0x2001 && ip.segments()[1] == 0x0db8)
+                || ip.segments()[..3] == [0x64, 0xff9b, 1])
         }
     }
 }
@@ -169,33 +177,32 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         || (a == 198 && (18..20).contains(&b)))
 }
 
-/// `ip`, or the IPv4 address it carries as an IPv4-mapped or NAT64
-/// (`64:ff9b::/96`) address.
+/// `ip`, or the IPv4 address it carries as an IPv4-mapped, NAT64
+/// (`64:ff9b::/96`) or 6to4 (`2002::/16`) address.
 fn unwrapped(ip: IpAddr) -> IpAddr {
     let IpAddr::V6(v6) = ip else {
         return ip;
     };
     let segments = v6.segments();
+    let carried = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
     let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
     v6.to_ipv4_mapped()
-        .or_else(|| {
-            nat64.then(|| {
-                let [.., hi, lo] = segments;
-                Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo))
-            })
-        })
+        .or_else(|| nat64.then(|| carried(segments[6], segments[7])))
+        .or_else(|| (segments[0] == 0x2002).then(|| carried(segments[1], segments[2])))
         .map_or(ip, IpAddr::V4)
 }
 
-/// Copies bytes both ways until either side closes.
+/// Copies bytes both ways until either side closes or both fall silent.
 async fn bridge(socket: WebSocket, tcp: TcpStream) {
     let _ = tcp.set_nodelay(true);
     let (mut from_server, mut to_server) = tcp.into_split();
     let (mut to_page, mut from_page) = socket.split();
+    let activity = Activity::start();
     let upstream = async {
         while let Some(Ok(message)) = from_page.next().await {
             match message {
                 Message::Binary(bytes) => {
+                    activity.mark();
                     if to_server.write_all(&bytes).await.is_err() {
                         break;
                     }
@@ -208,6 +215,7 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
     let downstream = async {
         let mut buffer = vec![0; 64 * 1024];
         while let Ok(read @ 1..) = from_server.read(&mut buffer).await {
+            activity.mark();
             let bytes = Bytes::copy_from_slice(&buffer[..read]);
             if to_page.send(Message::Binary(bytes)).await.is_err() {
                 break;
@@ -218,6 +226,39 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
     tokio::select! {
         () = upstream => {}
         () = downstream => {}
+        () = activity.silent() => {}
+    }
+}
+
+/// When a connection last carried bytes either way.
+struct Activity {
+    start: Instant,
+    last_millis: AtomicU64,
+}
+
+impl Activity {
+    fn start() -> Self {
+        Self {
+            start: Instant::now(),
+            last_millis: AtomicU64::new(0),
+        }
+    }
+
+    fn mark(&self) {
+        let millis = self.start.elapsed().as_millis() as u64;
+        self.last_millis.store(millis, Ordering::Relaxed);
+    }
+
+    /// Returns once [`IDLE`] has passed since the last [`Self::mark`].
+    async fn silent(&self) {
+        loop {
+            let last = Duration::from_millis(self.last_millis.load(Ordering::Relaxed));
+            let deadline = self.start + last + IDLE;
+            if Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep_until(deadline).await;
+        }
     }
 }
 
@@ -245,6 +286,8 @@ mod tests {
             "fe80::1",
             "::ffff:192.168.0.1",
             "64:ff9b::a00:1",
+            "64:ff9b:1::a00:1",
+            "2002:a00:1::1",
         ] {
             assert!(!public(ip.parse().unwrap()), "{ip}");
         }
@@ -257,9 +300,27 @@ mod tests {
             block_addresses: vec!["203.0.113.7".parse().unwrap()],
             ..Config::default()
         };
-        for ip in ["203.0.113.7", "::ffff:203.0.113.7", "64:ff9b::cb00:7107"] {
+        for ip in [
+            "203.0.113.7",
+            "::ffff:203.0.113.7",
+            "64:ff9b::cb00:7107",
+            "2002:cb00:7107::1",
+        ] {
             assert!(!reachable(&config, ip.parse().unwrap()), "{ip}");
         }
         assert!(reachable(&config, "192.168.0.1".parse().unwrap()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_connection_ends_and_traffic_keeps_it_open() {
+        let activity = Activity::start();
+        let silent = activity.silent();
+        tokio::pin!(silent);
+        let step = IDLE - Duration::from_secs(1);
+        for _ in 0..3 {
+            assert!(tokio::time::timeout(step, &mut silent).await.is_err());
+            activity.mark();
+        }
+        assert!(tokio::time::timeout(IDLE, &mut silent).await.is_ok());
     }
 }

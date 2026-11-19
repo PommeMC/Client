@@ -3,7 +3,7 @@
 //! on each client's game connections.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -87,7 +87,9 @@ static SECURITY_HEADERS: LazyLock<Vec<(header::HeaderName, HeaderValue)>> = Lazy
 });
 
 /// The client a request came from: the peer, or behind a trusted reverse
-/// proxy the address it appended to `X-Forwarded-For`.
+/// proxy the address it appended to `X-Forwarded-For`. An IPv6 client is its
+/// /64, the smallest block one subscriber is given, so it can't take a fresh
+/// address for every request.
 pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMap) -> IpAddr {
     let forwarded = || {
         text(headers, "x-forwarded-for")?
@@ -97,11 +99,20 @@ pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMa
             .parse()
             .ok()
     };
-    config
-        .trust_proxy
-        .then(forwarded)
-        .flatten()
-        .unwrap_or(peer.0.ip())
+    network(
+        config
+            .trust_proxy
+            .then(forwarded)
+            .flatten()
+            .unwrap_or(peer.0.ip()),
+    )
+}
+
+fn network(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from(u128::from(ip) & !u128::from(u64::MAX))),
+        ip => ip,
+    }
 }
 
 fn text(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> {
@@ -202,6 +213,16 @@ mod tests {
         assert!(same_origin(&headers(Some("https://play.pomme.rs"))));
         assert!(!same_origin(&headers(Some("https://evil.example"))));
         assert!(!same_origin(&headers(None)));
+    }
+
+    #[test]
+    fn an_ipv6_client_is_its_whole_block() {
+        let network = |ip: &str| network(ip.parse().unwrap()).to_string();
+        assert_eq!(network("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
+        assert_eq!(network("2001:db8:1:2::9"), "2001:db8:1:2::");
+        assert_eq!(network("2001:db8:1:3::9"), "2001:db8:1:3::");
+        assert_eq!(network("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(network("203.0.113.7"), "203.0.113.7");
     }
 
     #[test]
