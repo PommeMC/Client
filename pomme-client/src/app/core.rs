@@ -1650,6 +1650,7 @@ impl AppCore {
         connection
             .packet_tx
             .send(GamePacket::ClientCommand(ClientCommand::PerformRespawn));
+        self.input.reset_toggle_keys();
 
         game.death_confirm = false;
         game.respawn_sent = true;
@@ -3437,6 +3438,12 @@ impl AppCore {
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
+                // `LocalPlayer.handleEntityEvent`.
+                NetworkEvent::PermissionLevel { id, level } => {
+                    if id == game.player.entity_id {
+                        game.player.permission_level = level;
+                    }
+                }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
                         && let Some(texture) = mouth_item_texture(fox)
@@ -4350,8 +4357,9 @@ impl AppCore {
 
         let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
-        let current =
+        let mut current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
+        current.jump |= game.player.auto_jumping;
 
         if current != game.last_sent_input {
             sender.send(GamePacket::PlayerInput(serverbound_player_input(&current)));
@@ -4486,6 +4494,7 @@ impl AppCore {
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
+        game.player.auto_jump_enabled = self.menu.controls.auto_jump;
     }
 }
 

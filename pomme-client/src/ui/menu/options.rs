@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::core::AppCore;
+use crate::app::input::controls::MAX_SPRINT_WINDOW;
 use crate::app::input::{InputKey, NOT_BOUND};
 use crate::app::phases::in_game::GameState;
 use crate::chat_component::ComponentText;
@@ -232,10 +233,22 @@ const SAVE_CHAT_DRAFTS: &str = "Save Unsent Chats:";
 const FORCE_UNICODE_FONT: &str = "Force Unicode Font:";
 const JAPANESE_GLYPH_VARIANTS: &str = "Japanese Glyph Variants:";
 const INVERT_MOUSE_X: &str = "Invert Mouse X:";
+const SNEAK: &str = "Sneak:";
+const SPRINT: &str = "Sprint:";
+const ATTACK: &str = "Attack/Destroy:";
+const USE: &str = "Use Item/Place Block:";
+const AUTO_JUMP: &str = "Auto-Jump:";
+const SPRINT_WINDOW: &str = "Sprint Window:";
+const OPERATOR_ITEMS_TAB: &str = "Operator Items Tab:";
 const INVERT_MOUSE_Y: &str = "Invert Mouse Y:";
 
 /// The `chatDelay` slider's `IntRange(0, 60)`, in tenths of a second.
 const CHAT_DELAY_MAX_TENTHS: i32 = 60;
+
+/// A `ToggleKeyMapping`'s option value, `options.key.toggle` or `.hold`.
+fn hold_or_toggle(toggles: bool) -> &'static str {
+    if toggles { "Toggle" } else { "Hold" }
+}
 
 fn on_off(value: bool) -> &'static str {
     if value { "ON" } else { "OFF" }
@@ -424,6 +437,7 @@ impl MainMenu {
             CHAT_DELAY => CHAT_DELAY_MAX_TENTHS as f32,
             MENU_BACKGROUND_BLUR => f32::from(MAX_MENU_BACKGROUND_BLURRINESS),
             CHUNK_FADE => f32::from(super::MAX_CHUNK_FADE),
+            SPRINT_WINDOW => f32::from(MAX_SPRINT_WINDOW),
             _ => return None,
         })
     }
@@ -723,26 +737,37 @@ impl MainMenu {
         text_width_fn: common::TextWidthFn,
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
+        let o = self.controls;
+        let sneak = format!("{SNEAK} {}", hold_or_toggle(o.toggle_crouch));
+        let sprint = format!("{SPRINT} {}", hold_or_toggle(o.toggle_sprint));
+        let attack = format!("{ATTACK} {}", hold_or_toggle(o.toggle_attack));
+        let use_item = format!("{USE} {}", hold_or_toggle(o.toggle_use));
+        let auto_jump = format!("{AUTO_JUMP} {}", on_off(o.auto_jump));
+        let sprint_window = if o.sprint_window == 0 {
+            format!("{SPRINT_WINDOW} {}", on_off(false))
+        } else {
+            format!("{SPRINT_WINDOW} {}", o.sprint_window)
+        };
+        let operator_tab = format!("{OPERATOR_ITEMS_TAB} {}", on_off(o.operator_items_tab));
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Mouse Settings...", "Key Binds..."),
-            OptRow::Pair("Sneak: Hold", "Sprint: Hold"),
-            OptRow::Pair("Attack/Destroy: Hold", "Use Item/Place Block: Hold"),
-            OptRow::Pair("Auto-Jump: OFF", "Sprint Window: 7"),
-            OptRow::PairLeft("Operator Items Tab: OFF"),
+            OptRow::Pair(&sneak, &sprint),
+            OptRow::Pair(&attack, &use_item),
+            OptRow::Pair(&auto_jump, &sprint_window),
+            OptRow::PairLeft(&operator_tab),
         ];
         let nav: &[(&str, Screen)] = &[
             ("Mouse Settings...", Screen::OptionsMouse),
             ("Key Binds...", Screen::OptionsKeybinds),
         ];
-        let disabled = &[
-            "Sneak:",
-            "Sprint:",
-            "Attack/Destroy:",
-            "Use Item/Place Block:",
-            "Auto-Jump:",
-            "Sprint Window:",
-            "Operator Items Tab:",
-        ];
+        let sliders: &[(&str, f32)] = &[(
+            SPRINT_WINDOW,
+            f32::from(o.sprint_window) / f32::from(MAX_SPRINT_WINDOW),
+        )];
+        let tooltips: &[(&str, &str)] = &[(
+            SPRINT_WINDOW,
+            "Time window in ticks where double-tapping the forward key activates sprint.",
+        )];
         self.build_options_grid(
             sw,
             sh,
@@ -751,10 +776,10 @@ impl MainMenu {
             Screen::Options,
             &rows,
             nav,
+            sliders,
             &[],
-            disabled,
             true,
-            &[],
+            tooltips,
             text_width_fn,
             key_bindings,
         )
@@ -1839,6 +1864,21 @@ impl MainMenu {
                         self.invert_mouse_x = !self.invert_mouse_x;
                         self.save_settings(key_bindings);
                     }
+                    let controls = &mut self.controls;
+                    let control = [
+                        (SNEAK, &mut controls.toggle_crouch),
+                        (SPRINT, &mut controls.toggle_sprint),
+                        (ATTACK, &mut controls.toggle_attack),
+                        (USE, &mut controls.toggle_use),
+                        (AUTO_JUMP, &mut controls.auto_jump),
+                        (OPERATOR_ITEMS_TAB, &mut controls.operator_items_tab),
+                    ]
+                    .into_iter()
+                    .find(|(prefix, _)| label.starts_with(prefix));
+                    if let Some((_, value)) = control {
+                        *value = !*value;
+                        self.save_settings(key_bindings);
+                    }
                     if label.starts_with(INVERT_MOUSE_Y) {
                         self.invert_mouse_y = !self.invert_mouse_y;
                         self.save_settings(key_bindings);
@@ -1943,6 +1983,7 @@ impl MainMenu {
                     self.set_menu_background_blurriness((v * span).round() as u8)
                 }
                 CHUNK_FADE => self.set_chunk_fade((v * span).round() as u8),
+                SPRINT_WINDOW => self.controls.sprint_window = (v * span).round() as u8,
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
                 BRIGHTNESS => self.brightness = v,
@@ -2880,6 +2921,66 @@ mod tests {
     fn saved_settings(grid: &Grid) -> Settings {
         let saved = std::fs::read_to_string(grid.menu.settings_dir.join("options.json")).unwrap();
         serde_json::from_str(&saved).unwrap()
+    }
+
+    #[test]
+    fn a_controls_button_flips_its_option_and_is_saved() {
+        let (mut grid, _cleanup) = saving_grid("Sneak: Hold");
+        assert!(grid.frame(&click(300.0)).clicked_button);
+        assert!(grid.menu.controls.toggle_crouch);
+        assert!(saved_settings(&grid).controls.toggle_crouch);
+
+        for (label, read) in [
+            (
+                "Sprint: Hold",
+                (|o| o.toggle_sprint) as fn(ControlOptions) -> bool,
+            ),
+            ("Attack/Destroy: Hold", |o| o.toggle_attack),
+            ("Use Item/Place Block: Hold", |o| o.toggle_use),
+            ("Auto-Jump: OFF", |o| o.auto_jump),
+            ("Operator Items Tab: OFF", |o| o.operator_items_tab),
+        ] {
+            let (mut grid, _cleanup) = saving_grid(label);
+            grid.frame(&click(300.0));
+            assert!(read(grid.menu.controls), "{label}");
+        }
+    }
+
+    #[test]
+    fn the_controls_screen_labels_follow_its_options() {
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("pomme-controls-labels-test", &mut key_bindings);
+        menu.controls = ControlOptions {
+            toggle_crouch: true,
+            sprint_window: 0,
+            ..ControlOptions::default()
+        };
+        let texts: Vec<String> = menu
+            .build_options_controls(
+                800.0,
+                600.0,
+                &MenuInput::default(),
+                &|_, _| 0.0,
+                &key_bindings,
+            )
+            .elements
+            .into_iter()
+            .filter_map(|e| match e {
+                MenuElement::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        for label in [
+            "Sneak: Toggle",
+            "Sprint: Hold",
+            "Attack/Destroy: Hold",
+            "Use Item/Place Block: Hold",
+            "Auto-Jump: OFF",
+            "Sprint Window: OFF",
+            "Operator Items Tab: OFF",
+        ] {
+            assert!(texts.iter().any(|text| text == label), "{label}: {texts:?}");
+        }
     }
 
     #[test]

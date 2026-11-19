@@ -17,12 +17,14 @@ use crate::app::state_slot::StateSlot;
 
 pub mod action;
 
+pub mod controls;
 pub mod input_key;
 pub mod key_bindings;
 mod metadata;
 pub mod touch;
 
 pub use action::Action;
+pub use controls::ControlOptions;
 pub use input_key::InputKey;
 pub use key_bindings::KeyBindings;
 pub use metadata::{ActionId, BindingMetadata, DisplayText, NOT_BOUND, StringId};
@@ -42,6 +44,9 @@ pub const SHORT_RUMBLE_TIME: u32 = 5;
 
 pub struct InputState {
     pub key_bindings: KeyBindings,
+    /// The Controls screen's options, as the menu holds them.
+    pub controls: ControlOptions,
+    toggle_keys: controls::ToggleKeys,
     pressed: HashSet<KeyCode>,
     modifiers: Modifiers,
     /// Ctrl held by a harness `press`, for one frame.
@@ -185,6 +190,8 @@ impl InputState {
 
         Self {
             key_bindings: KeyBindings::default(),
+            controls: ControlOptions::default(),
+            toggle_keys: controls::ToggleKeys::default(),
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
             #[cfg(feature = "test-harness")]
@@ -485,7 +492,11 @@ impl InputState {
             gilrs::EventType::ButtonReleased(button, _) => (button, false),
             _ => return,
         };
-        for action in self.bound_actions(InputKey::Controller(button)) {
+        let actions = self.bound_actions(InputKey::Controller(button));
+        if pressed {
+            self.press_toggle_keys(&actions);
+        }
+        for action in actions {
             match action {
                 // TODO: gamepad spectator-menu support (vanilla has none).
                 Action::NextHotbarSlot if pressed && !self.spectator && !self.menu_capture => {
@@ -555,6 +566,7 @@ impl InputState {
             }
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.bound_gamepad_button_down(action),
+            _ if self.controls.toggles(action) => self.toggle_keys.is_down(action),
             // DropItem and SwapOffhand are click-count driven (`consume_click`);
             // this is their held state only.
             Action::Sneak
@@ -729,6 +741,31 @@ impl InputState {
         self.clear_just_pressed_actions();
     }
 
+    /// Tells the toggling keys whether a screen is up, chat and text fields
+    /// included.
+    pub fn set_screen_open(&mut self, open: bool) {
+        self.toggle_keys
+            .set_screen_open(open, &self.controls, &self.key_bindings);
+    }
+
+    /// `KeyMapping.resetToggleKeys`, which respawning runs.
+    pub fn reset_toggle_keys(&mut self) {
+        self.toggle_keys.reset();
+    }
+
+    /// `KeyMapping.set(key, true)` reaching the toggling mappings among
+    /// `actions`, which vanilla runs only with no screen open.
+    fn press_toggle_keys(&mut self, actions: &[Action]) {
+        if !self.gameplay() {
+            return;
+        }
+        for &action in actions {
+            if self.controls.toggles(action) {
+                self.toggle_keys.press(action);
+            }
+        }
+    }
+
     /// Digit presses queued for the spectator menu since the last tick.
     pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.spectator_slot_presses)
@@ -883,6 +920,7 @@ impl InputState {
     fn press_bound_actions(&mut self, input: InputKey) {
         let actions = self.bound_actions(input);
         let gameplay = self.gameplay();
+        self.press_toggle_keys(&actions);
         // Vanilla `handleKeybinds` visits slots in order: the last selects,
         // and in spectator each one reaches the menu.
         if gameplay {
@@ -1737,6 +1775,67 @@ mod binding_lookup_tests {
         assert_eq!(input.selected_slot(), 0);
         assert!(!input.consume_click(Action::DropItem));
         assert_eq!(input.hotbar_key_just_pressed(), Some(2));
+    }
+
+    fn toggling_sneak() -> InputState {
+        let mut input = InputState::released();
+        input.controls.toggle_crouch = true;
+        input
+    }
+
+    fn tap(input: &mut InputState, code: KeyCode) {
+        input.on_key(code, ElementState::Pressed, false);
+        input.on_key(code, ElementState::Released, false);
+    }
+
+    #[test]
+    fn a_toggling_key_flips_on_each_press_and_ignores_its_release() {
+        let mut input = toggling_sneak();
+        tap(&mut input, KeyCode::ShiftLeft);
+        assert!(input.performing_action(Action::Sneak));
+        tap(&mut input, KeyCode::ShiftLeft);
+        assert!(!input.performing_action(Action::Sneak));
+
+        // Sprint still holds: its own option is off.
+        input.on_key(KeyCode::ControlLeft, ElementState::Pressed, false);
+        assert!(input.performing_action(Action::Sprint));
+        input.on_key(KeyCode::ControlLeft, ElementState::Released, false);
+        assert!(!input.performing_action(Action::Sprint));
+    }
+
+    #[test]
+    fn a_toggling_mouse_button_flips_attack() {
+        let mut input = InputState::released();
+        input.controls.toggle_attack = true;
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.on_mouse_button(MouseButton::Left, ElementState::Released);
+        assert!(input.performing_action(Action::Destroy));
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        assert!(!input.performing_action(Action::Destroy));
+    }
+
+    #[test]
+    fn a_screen_takes_a_toggled_key_and_gives_it_back() {
+        let mut input = toggling_sneak();
+        tap(&mut input, KeyCode::ShiftLeft);
+
+        input.menu_capture = true;
+        input.set_screen_open(true);
+        assert!(!input.performing_action(Action::Sneak));
+        // A press for the screen isn't the key's.
+        tap(&mut input, KeyCode::ShiftLeft);
+
+        input.menu_capture = false;
+        input.set_screen_open(false);
+        assert!(input.performing_action(Action::Sneak));
+    }
+
+    #[test]
+    fn respawning_lets_go_of_a_toggled_key() {
+        let mut input = toggling_sneak();
+        tap(&mut input, KeyCode::ShiftLeft);
+        input.reset_toggle_keys();
+        assert!(!input.performing_action(Action::Sneak));
     }
 
     #[test]

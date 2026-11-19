@@ -139,6 +139,39 @@ impl CollisionWorld<'_> {
         false
     }
 
+    /// `BlockState.getCollisionShape` at `pos`, as boxes in the world.
+    pub fn block_boxes(&self, pos: BlockPos, ctx: &CollisionContext) -> Vec<Aabb> {
+        let state = self.chunks.get_block_state(pos.x, pos.y, pos.z);
+        let mut boxes = Vec::new();
+        if !self.special_boxes(state, pos, &mut boxes) {
+            state_boxes(
+                self.block_state_table,
+                state,
+                pos,
+                ctx,
+                DVec3::ZERO,
+                &mut boxes,
+            );
+        }
+        boxes
+    }
+
+    /// `Level.getCollisions` over `region` in the order vanilla walks it: the
+    /// entities' boxes, then each block's by `Cursor3D` (x fastest, z slowest).
+    pub fn collisions_in_order(&self, region: &Aabb, ctx: &CollisionContext) -> Vec<Aabb> {
+        let mut aabbs: Vec<Aabb> = self
+            .extra_boxes
+            .iter()
+            .copied()
+            .filter(|extra| extra.intersects(region))
+            .collect();
+        let mut blocks: Vec<(BlockPos, Vec<Aabb>)> = Vec::new();
+        self.for_each_block_collision(region, ctx, |pos, boxes| blocks.push((pos, boxes.to_vec())));
+        blocks.sort_by_key(|(pos, _)| (pos.z, pos.y, pos.x));
+        aabbs.extend(blocks.into_iter().flat_map(|(_, boxes)| boxes));
+        aabbs
+    }
+
     fn for_each_block_collision(
         &self,
         region: &Aabb,

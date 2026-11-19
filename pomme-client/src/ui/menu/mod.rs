@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
-use crate::app::input::{Action, KeyBindings};
+use crate::app::input::{Action, ControlOptions, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
@@ -151,6 +151,8 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default)]
+    controls: ControlOptions,
     #[serde(default)]
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
@@ -370,6 +372,7 @@ impl Default for Settings {
             display_mode: 0,
             theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
+            controls: ControlOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
             last_server: String::new(),
@@ -900,6 +903,7 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
+    pub controls: ControlOptions,
     pub force_unicode_font: bool,
     pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
@@ -1076,6 +1080,7 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
+            controls: settings.controls.sanitized(),
             force_unicode_font: settings.force_unicode_font,
             japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
@@ -1335,6 +1340,7 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                controls: self.controls,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
                 last_server: self.last_mp_ip.clone(),

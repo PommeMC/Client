@@ -596,6 +596,11 @@ pub enum NetworkEvent {
     FoxEat {
         id: i32,
     },
+    /// Entity events 24 to 28: a player's permission level, 0 to 4.
+    PermissionLevel {
+        id: i32,
+        level: u8,
+    },
     /// Entity event 64: an armadillo peeks out of its shell.
     ArmadilloPeek {
         id: i32,

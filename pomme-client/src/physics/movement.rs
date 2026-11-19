@@ -45,7 +45,6 @@ const JUMP_DELAY_TICKS: u32 = 10;
 const FLUID_JUMP_THRESHOLD: f64 = 0.4;
 // Vanilla `LivingEntity.jumpInLiquid` / `goDownInWater` add/subtract 0.04f.
 const LIQUID_JUMP_ACCELERATION: f32 = 0.04;
-const DEFAULT_SPRINT_WINDOW: u32 = 7;
 const FLY_TOGGLE_WINDOW: u32 = 7;
 // Mth.equal(double, double) widens the float EPSILON constant to double.
 const MTH_EQUAL_EPSILON: f64 = 1.0e-5_f32 as f64;
@@ -85,7 +84,12 @@ pub fn tick(
     if is_passenger {
         player.velocity = Velocity::new(0.0, 0.0, 0.0);
     }
-    let raw_jump_held = input.performing_action(input::Action::Jump);
+    // `LocalPlayer.aiStep`: an auto-jump presses jump for its tick.
+    player.auto_jumping = player.auto_jump_time > 0;
+    if player.auto_jumping {
+        player.auto_jump_time -= 1;
+    }
+    let raw_jump_held = input.performing_action(input::Action::Jump) || player.auto_jumping;
     movement_sound::advance_tick(&mut player.movement_sounds);
 
     // `Player.tick` snapshots `wasUnderwater` before `Entity.baseTick`
@@ -124,7 +128,15 @@ pub fn tick(
 
     let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
 
-    update_fly_state(player, input, world, tags, vehicle, sin_y_rot, cos_y_rot);
+    update_fly_state(
+        player,
+        raw_jump_held,
+        world,
+        tags,
+        vehicle,
+        sin_y_rot,
+        cos_y_rot,
+    );
 
     // `LocalPlayer.aiStep`'s `goDownInWater`, before the living jump.
     if player.in_water
@@ -339,7 +351,7 @@ pub fn tick_dead(
 // a second one inside it toggles flight.
 fn update_fly_state(
     player: &mut LocalPlayer,
-    input: &InputState,
+    jump_held: bool,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
     vehicle: Option<Vehicle>,
@@ -353,7 +365,7 @@ fn update_fly_state(
                 player.flying = true;
                 player.abilities_dirty = true;
             }
-        } else if !player.was_jump_pressed && input.performing_action(input::Action::Jump) {
+        } else if !player.was_jump_pressed && jump_held && !player.auto_jumping {
             if player.jump_trigger_time == 0 {
                 player.jump_trigger_time = FLY_TOGGLE_WINDOW;
             } else if !player.swimming && vehicle.is_none_or(|v| v.jumpable) {
@@ -739,9 +751,154 @@ fn apply_collision(
     player.minor_horizontal_collision = horizontal_collision
         && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
     let mv = settle_after_move(player, world, tags, resolved, on_ground, collided, &ctx);
+    update_auto_jump(
+        player,
+        input,
+        world,
+        tags,
+        is_passenger,
+        (resolved.x as f32, resolved.z as f32),
+        (sin_y_rot, cos_y_rot),
+    );
     if !is_passenger {
         movement_sound::emit(player, world, tags, shift_down, mv);
     }
+}
+
+/// `LocalPlayer.updateAutoJump`, after each of the player's own moves: walking
+/// into something between half a block and a jump tall, with room above,
+/// starts a jump for the next tick. `(xa, za)` is the move just made.
+fn update_auto_jump(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    world: CollisionWorld<'_>,
+    tags: &BlockTags,
+    is_passenger: bool,
+    (xa, za): (f32, f32),
+    (sin_y_rot, cos_y_rot): (f32, f32),
+) {
+    let shift_down = input.performing_action(input::Action::Sneak);
+    let (move_x, move_y) = move_vector(input);
+    // `canAutoJump`.
+    if !player.auto_jump_enabled
+        || player.auto_jump_time > 0
+        || !player.on_ground
+        || shift_down
+        || is_passenger
+        || move_x * move_x + move_y * move_y <= 0.0
+        || f64::from(block_jump_factor(player, world, tags)) < 1.0
+    {
+        return;
+    }
+
+    let move_begin: DVec3 = player.position.into();
+    let move_end = move_begin + dvec3(f64::from(xa), 0.0, f64::from(za));
+    let mut move_diff = dvec3(f64::from(xa), 0.0, f64::from(za));
+    let current_speed = movement_speed(player);
+    let mut move_dist_sq = move_diff.length_squared() as f32;
+    if move_dist_sq <= 0.001 {
+        let input_xa = current_speed * move_x;
+        let input_za = current_speed * move_y;
+        move_diff = dvec3(
+            f64::from(input_xa * cos_y_rot - input_za * sin_y_rot),
+            0.0,
+            f64::from(input_za * cos_y_rot + input_xa * sin_y_rot),
+        );
+        move_dist_sq = move_diff.length_squared() as f32;
+        if move_dist_sq <= 0.001 {
+            return;
+        }
+    }
+    let move_dist_inverted = 1.0 / mth_sqrt(move_dist_sq);
+    let move_dir = move_diff * f64::from(move_dist_inverted);
+    let (facing_x, facing_z) = forward_xz(player);
+    if ((facing_x * move_dir.x + facing_z * move_dir.z) as f32) < -0.15 {
+        return;
+    }
+
+    let ctx = collision_context(player, shift_down);
+    let has_collision = |pos: BlockPos| !world.block_boxes(pos, &ctx).is_empty();
+    let mut ceiling_pos = BlockPos::containing(dvec3(
+        move_begin.x,
+        player.bounding_box().max.y,
+        move_begin.z,
+    ));
+    if has_collision(ceiling_pos) {
+        return;
+    }
+    ceiling_pos = ceiling_pos.relative(Direction::Up);
+    if has_collision(ceiling_pos) {
+        return;
+    }
+
+    let mut jump_height = 1.2_f32;
+    if let Some(amplifier) = player.effects.amplifier(crate::mob_effect::JUMP_BOOST) {
+        jump_height += (amplifier + 1) as f32 * 0.75;
+    }
+    let look_ahead_dist = (current_speed * 7.0).max(1.0 / move_dist_inverted);
+    let seg_begin = move_begin;
+    let seg_end = move_end + move_dir * f64::from(look_ahead_dist);
+    let player_width = (PLAYER_HALF_WIDTH * 2.0) as f32;
+    let player_height = player.height() as f32;
+    let reach = seg_end + dvec3(0.0, f64::from(player_height), 0.0);
+    let test_box = Aabb::new(seg_begin.min(reach), seg_begin.max(reach)).inflate(dvec3(
+        f64::from(player_width),
+        0.0,
+        f64::from(player_width),
+    ));
+    let lift = dvec3(0.0, f64::from(0.51_f32), 0.0);
+    let (seg_begin, seg_end) = (seg_begin + lift, seg_end + lift);
+    let right_offset = dvec3(-move_dir.z, 0.0, move_dir.x) * f64::from(player_width * 0.5);
+    // `AABB.intersects(Vec3, Vec3)`: against the box the two points span.
+    let crosses = |aabb: &Aabb, a: DVec3, b: DVec3| aabb.intersects(&Aabb::new(a.min(b), a.max(b)));
+    let collisions = world.collisions_in_order(&test_box, &ctx);
+    let Some(obstacle) = collisions.iter().find(|aabb| {
+        crosses(aabb, seg_begin - right_offset, seg_end - right_offset)
+            || crosses(aabb, seg_begin + right_offset, seg_end + right_offset)
+    }) else {
+        return;
+    };
+
+    let mut obstacle_height = obstacle.max.y as f32;
+    let obstacle_pos = BlockPos::containing((obstacle.min + obstacle.max) * 0.5);
+    let mut steps = 1;
+    while (steps as f32) < jump_height {
+        let above_pos = BlockPos::new(obstacle_pos.x, obstacle_pos.y + steps, obstacle_pos.z);
+        let top = world
+            .block_boxes(above_pos, &ctx)
+            .iter()
+            .map(|aabb| aabb.max.y - f64::from(above_pos.y))
+            .reduce(f64::max);
+        if let Some(top) = top {
+            obstacle_height = top as f32 + above_pos.y as f32;
+            if f64::from(obstacle_height) - move_begin.y > f64::from(jump_height) {
+                return;
+            }
+        }
+        if steps > 1 {
+            ceiling_pos = ceiling_pos.relative(Direction::Up);
+            if has_collision(ceiling_pos) {
+                return;
+            }
+        }
+        steps += 1;
+    }
+
+    let y_delta = (f64::from(obstacle_height) - move_begin.y) as f32;
+    if y_delta <= 0.5 || y_delta > jump_height {
+        return;
+    }
+    player.auto_jump_time = 1;
+}
+
+/// The horizontal part of `Entity.getForward`, the look direction.
+fn forward_xz(player: &LocalPlayer) -> (f64, f64) {
+    let y_rot = -player.look_dir.y_rot_deg() * DEG_TO_RAD - std::f32::consts::PI;
+    let x_cos = -mth_cos(-player.look_dir.x_rot_deg() * DEG_TO_RAD);
+    (
+        f64::from(mth_sin(y_rot) * x_cos),
+        f64::from(mth_cos(y_rot) * x_cos),
+    )
 }
 
 /// Which axes `Entity.move`'s collision shortened `delta` on.
@@ -926,7 +1083,7 @@ fn update_sprint_state(
             if player.sprint_toggle_timer > 0 {
                 player.set_sprinting(true);
             } else {
-                player.sprint_toggle_timer = DEFAULT_SPRINT_WINDOW;
+                player.sprint_toggle_timer = player.sprint_window;
             }
         }
         if input.performing_action(input::Action::Sprint) {
@@ -2649,7 +2806,7 @@ mod tests {
         forward.set_key_pressed_for_test(KeyCode::KeyW, true);
         update_sprint_state(&mut player, &forward, true, false, None);
         assert_eq!(
-            player.sprint_toggle_timer, DEFAULT_SPRINT_WINDOW,
+            player.sprint_toggle_timer, player.sprint_window,
             "previous shift clears the old window before the new forward edge arms a fresh one"
         );
         assert!(!player.sprinting);
@@ -2661,6 +2818,152 @@ mod tests {
         backward.set_key_pressed_for_test(KeyCode::KeyS, true);
         update_sprint_state(&mut player, &backward, false, false, None);
         assert_eq!(player.sprint_toggle_timer, 0);
+    }
+
+    #[test]
+    fn the_double_tap_arms_for_the_sprint_window_and_never_at_zero() {
+        let mut forward = InputState::released();
+        forward.set_key_pressed_for_test(KeyCode::KeyW, true);
+        for (window, sprints) in [(3, true), (0, false)] {
+            let mut player = LocalPlayer::new();
+            player.food = 20;
+            player.sprint_window = window;
+            update_sprint_state(&mut player, &forward, true, false, None);
+            assert_eq!(player.sprint_toggle_timer, window);
+
+            // Let go, then press again inside the window.
+            player.was_forward_pressed = false;
+            update_sprint_state(&mut player, &forward, true, false, None);
+            assert_eq!(player.sprinting, sprints);
+        }
+    }
+
+    /// A stone floor at y 63 around a player standing on it at (8.5, 8.5),
+    /// facing and walking south, with auto-jump on.
+    fn auto_jump_scene() -> (ChunkStore, LocalPlayer, InputState) {
+        let chunks = ChunkStore::with_origin_chunk();
+        for x in 5..=11 {
+            for z in 5..=13 {
+                place(&chunks, "stone", (x, 63, z));
+            }
+        }
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(8.5, 64.0, 8.5).into();
+        player.on_ground = true;
+        let mut input = InputState::released();
+        input.set_key_pressed_for_test(KeyCode::KeyW, true);
+        (chunks, player, input)
+    }
+
+    fn place(chunks: &ChunkStore, block: &str, pos: (i32, i32, i32)) {
+        place_state(chunks, block, &[], pos);
+    }
+
+    fn place_state(
+        chunks: &ChunkStore,
+        block: &str,
+        properties: &[(&str, &str)],
+        (x, y, z): (i32, i32, i32),
+    ) {
+        let state = BlockStateTable::native().find_state(block, properties);
+        chunks.set_block_state(x, y, z, state, BlockStateTable::native());
+    }
+
+    /// Whether a step south of 0.1 starts an auto-jump.
+    fn starts_auto_jump(chunks: &ChunkStore, player: &mut LocalPlayer, input: &InputState) -> bool {
+        let (sin, cos) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
+        update_auto_jump(
+            player,
+            input,
+            CollisionWorld::new(chunks, BlockStateTable::native()),
+            &BlockTags::default(),
+            false,
+            (0.0, 0.1),
+            (sin, cos),
+        );
+        player.auto_jump_time == 1
+    }
+
+    #[test]
+    fn walking_into_a_block_high_step_starts_an_auto_jump() {
+        let (chunks, mut player, input) = auto_jump_scene();
+        assert!(!starts_auto_jump(&chunks, &mut player, &input));
+
+        place(&chunks, "stone", (8, 64, 9));
+        assert!(starts_auto_jump(&chunks, &mut player, &input));
+    }
+
+    #[test]
+    fn auto_jump_needs_the_option_ground_and_no_sneaking() {
+        let (chunks, player, input) = auto_jump_scene();
+        place(&chunks, "stone", (8, 64, 9));
+
+        let mut off = LocalPlayer::new();
+        off.position = player.position;
+        off.on_ground = true;
+        off.auto_jump_enabled = false;
+        assert!(!starts_auto_jump(&chunks, &mut off, &input));
+
+        let mut airborne = LocalPlayer::new();
+        airborne.position = player.position;
+        assert!(!starts_auto_jump(&chunks, &mut airborne, &input));
+
+        let mut sneaking = input;
+        sneaking.set_key_pressed_for_test(KeyCode::ShiftLeft, true);
+        let mut player = player;
+        assert!(!starts_auto_jump(&chunks, &mut player, &sneaking));
+
+        let still = InputState::released();
+        assert!(!starts_auto_jump(&chunks, &mut player, &still));
+    }
+
+    #[test]
+    fn auto_jump_skips_what_is_too_low_too_tall_or_roofed_over() {
+        let (slab_world, mut player, input) = auto_jump_scene();
+        place_state(&slab_world, "stone_slab", &[("type", "bottom")], (8, 64, 9));
+        assert!(!starts_auto_jump(&slab_world, &mut player, &input));
+        place_state(&slab_world, "stone_slab", &[("type", "top")], (8, 64, 9));
+        assert!(starts_auto_jump(&slab_world, &mut player, &input));
+
+        let (wall, mut player, input) = auto_jump_scene();
+        place(&wall, "stone", (8, 64, 9));
+        place(&wall, "stone", (8, 65, 9));
+        assert!(!starts_auto_jump(&wall, &mut player, &input));
+
+        let (roofed, mut player, input) = auto_jump_scene();
+        place(&roofed, "stone", (8, 64, 9));
+        place(&roofed, "stone", (8, 66, 8));
+        assert!(!starts_auto_jump(&roofed, &mut player, &input));
+    }
+
+    #[test]
+    fn auto_jump_ignores_a_step_behind_the_way_the_player_faces() {
+        let (chunks, mut player, input) = auto_jump_scene();
+        place(&chunks, "stone", (8, 64, 9));
+        player.look_dir = crate::entity::components::LookDirection::new(180.0, 0.0);
+        assert!(!starts_auto_jump(&chunks, &mut player, &input));
+    }
+
+    #[test]
+    fn an_auto_jump_jumps_the_next_tick_without_arming_the_flight_toggle() {
+        let (chunks, mut player, _) = auto_jump_scene();
+        let anim = BlockEntityAnimStore::default();
+        player.may_fly = true;
+        player.auto_jump_time = 1;
+        tick(
+            &mut player,
+            &InputState::released(),
+            test_world(&chunks, &anim),
+            &BlockTags::default(),
+            1.0,
+            false,
+            None,
+        );
+        assert!(player.auto_jumping);
+        assert!(player.was_jump_pressed);
+        assert!(player.velocity.y > 0.0);
+        assert_eq!(player.auto_jump_time, 0);
+        assert_eq!(player.jump_trigger_time, 0);
     }
 
     #[test]

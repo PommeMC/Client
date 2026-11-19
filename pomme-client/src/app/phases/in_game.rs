@@ -3257,6 +3257,10 @@ pub fn update_game(
         core.input.screen_opened();
     }
     core.input.menu_capture = screen_open;
+    core.input.controls = core.menu.controls;
+    core.input
+        .set_screen_open(screen_open || core.input.text_capture);
+    game.player.sprint_window = u32::from(core.menu.controls.sprint_window);
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
@@ -4577,6 +4581,9 @@ pub fn update_game(
         let (effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
             gfx.renderer.menu_spans_width(spans, s)
         });
+        game.creative_state.set_operator_tab(
+            core.menu.controls.operator_items_tab && game.player.can_use_game_master_blocks(),
+        );
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,

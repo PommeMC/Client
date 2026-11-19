@@ -79,7 +79,6 @@ pub enum CreativeTab {
     FoodAndDrinks,
     Ingredients,
     SpawnEggs,
-    #[allow(dead_code)]
     OpBlocks,
     SurvivalInventory,
 }
@@ -211,7 +210,7 @@ impl CreativeTab {
     /// The tab whose [`Self::id`] is `id`.
     #[cfg(feature = "test-harness")]
     pub fn from_id(id: &str) -> Option<Self> {
-        TABS.into_iter().find(|tab| tab.id() == id)
+        all_tabs().find(|tab| tab.id() == id)
     }
 
     /// The vanilla `creative_mode_tab` registry id.
@@ -279,8 +278,22 @@ const TABS: [CreativeTab; 12] = [
     CreativeTab::SurvivalInventory,
 ];
 
+/// Every tab, the operator one included.
+fn all_tabs() -> impl Iterator<Item = CreativeTab> {
+    shown_tabs(true)
+}
+
+/// The tabs on show, the operator one only with `operator_tab`.
+fn shown_tabs(operator_tab: bool) -> impl Iterator<Item = CreativeTab> {
+    TABS.into_iter()
+        .chain(operator_tab.then_some(CreativeTab::OpBlocks))
+}
+
 pub struct CreativeState {
     pub tab: CreativeTab,
+    /// Vanilla `hasPermissions`: the Operator Items Tab option on for a
+    /// player who can use game master blocks, which shows that tab.
+    operator_tab: bool,
     pub scroll: f32,
     pub search: crate::ui::text_edit::TextFieldState,
     /// Client-side carried stack (the item riding the cursor). Creative-only.
@@ -301,6 +314,7 @@ impl CreativeState {
     pub fn new() -> Self {
         Self {
             tab: CreativeTab::BuildingBlocks,
+            operator_tab: false,
             scroll: 0.0,
             // Vanilla search box: 50 chars.
             search: crate::ui::text_edit::TextFieldState::new(50),
@@ -324,6 +338,19 @@ impl CreativeState {
         self.scroll = 0.0;
         self.search.clear();
         self.sync_search_focus();
+    }
+
+    /// Vanilla `tryRefreshInvalidatedTabs`: a selected tab that stops
+    /// displaying gives way to the default one.
+    pub fn set_operator_tab(&mut self, shown: bool) {
+        self.operator_tab = shown;
+        if !shown && self.tab == CreativeTab::OpBlocks {
+            self.select_tab(CreativeTab::BuildingBlocks);
+        }
+    }
+
+    fn tabs(&self) -> impl Iterator<Item = CreativeTab> + use<> {
+        shown_tabs(self.operator_tab)
     }
 
     /// Vanilla `init` re-selects the remembered tab, so the screen reopens on
@@ -519,7 +546,7 @@ pub fn build_creative_inventory(
 
     let mut action = CreativeAction::None;
 
-    let tab_hit = tab_hit_test(ox, oy, scale, cursor, clicked);
+    let tab_hit = tab_hit_test(state, ox, oy, scale, cursor, clicked);
     if let Some(new_tab) = tab_hit
         && new_tab != state.tab
     {
@@ -807,7 +834,7 @@ pub fn build_creative_inventory(
         }
     }
 
-    push_tab_tooltip(elements, ox, oy, scale, &tt);
+    push_tab_tooltip(elements, state, ox, oy, scale, &tt);
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if (clicked || right_clicked)
@@ -939,7 +966,7 @@ fn draw_tabs(
     let tab_w = TAB_W * scale;
     let tab_h = TAB_H * scale;
     let icon_size = TAB_ICON_SIZE * scale;
-    for &tab in TABS.iter() {
+    for tab in state.tabs() {
         let selected = state.tab == tab;
         if selected != selected_pass {
             continue;
@@ -974,6 +1001,7 @@ fn draw_tabs(
 }
 
 fn tab_hit_test(
+    state: &CreativeState,
     ox: f32,
     oy: f32,
     scale: f32,
@@ -983,7 +1011,8 @@ fn tab_hit_test(
     if !clicked {
         return None;
     }
-    TABS.into_iter()
+    state
+        .tabs()
         .find(|&tab| hit_test(cursor, tab_hit_rect(tab, ox, oy, scale)))
 }
 
@@ -1049,7 +1078,7 @@ fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
     INDEX
         .get_or_init(|| {
             let mut map: HashMap<ItemKind, Vec<&'static str>> = HashMap::new();
-            for tab in TABS.iter() {
+            for tab in all_tabs() {
                 let meta = tab.meta();
                 if let ItemSource::Static(list) = meta.items {
                     for &k in list {
@@ -1108,6 +1137,7 @@ fn push_item_tooltip(
 
 fn push_tab_tooltip(
     elements: &mut Vec<MenuElement>,
+    state: &CreativeState,
     ox: f32,
     oy: f32,
     scale: f32,
@@ -1118,7 +1148,7 @@ fn push_tab_tooltip(
     }
     let inset_w = 21.0 * scale;
     let inset_h = 27.0 * scale;
-    for &tab in TABS.iter() {
+    for tab in state.tabs() {
         let meta = tab.meta();
         let x = tab_x(meta.col, scale, ox);
         let hit_y_off = match meta.row {
@@ -1559,7 +1589,7 @@ fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
         ItemSource::Search => {
             let raw = state.search.value().to_lowercase();
             let needle = raw.strip_prefix('#').unwrap_or(&raw);
-            search_items_cached()
+            search_items_cached(state.operator_tab)
                 .iter()
                 .filter(|kind| {
                     needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(needle)
@@ -1579,12 +1609,13 @@ fn stack_of(kind: ItemKind) -> ItemStack {
     })
 }
 
-fn search_items_cached() -> &'static [ItemKind] {
-    static CACHE: OnceLock<Vec<ItemKind>> = OnceLock::new();
-    CACHE.get_or_init(|| {
+/// The search tab's items: every shown tab's, in tab order.
+fn search_items_cached(operator_tab: bool) -> &'static [ItemKind] {
+    static CACHE: [OnceLock<Vec<ItemKind>>; 2] = [OnceLock::new(), OnceLock::new()];
+    CACHE[usize::from(operator_tab)].get_or_init(|| {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for tab in TABS.iter() {
+        for tab in shown_tabs(operator_tab) {
             if let ItemSource::Static(list) = tab.meta().items {
                 for &kind in list {
                     if seen.insert(kind) {
@@ -1600,6 +1631,37 @@ fn search_items_cached() -> &'static [ItemKind] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_operator_tab_shows_only_when_allowed_and_joins_the_search() {
+        let mut state = CreativeState::new();
+        let command_block = OP_BLOCKS_ITEMS[0];
+        assert!(!state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
+        assert!(!search_items_cached(state.operator_tab).contains(&command_block));
+
+        state.set_operator_tab(true);
+        assert!(state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
+        assert_eq!(
+            search_items_cached(state.operator_tab).last(),
+            OP_BLOCKS_ITEMS.last()
+        );
+        assert_eq!(tabs_containing(command_block), ["Operator Utilities"]);
+    }
+
+    #[test]
+    fn losing_the_operator_tab_while_on_it_selects_the_default_tab() {
+        let mut state = CreativeState::new();
+        state.set_operator_tab(true);
+        state.select_tab(CreativeTab::OpBlocks);
+        state.scroll = 0.5;
+
+        state.set_operator_tab(true);
+        assert!(state.tab == CreativeTab::OpBlocks);
+
+        state.set_operator_tab(false);
+        assert!(state.tab == CreativeTab::BuildingBlocks);
+        assert_eq!(state.scroll, 0.0);
+    }
 
     #[test]
     fn wheel_moves_a_row_per_line_and_clamps() {
