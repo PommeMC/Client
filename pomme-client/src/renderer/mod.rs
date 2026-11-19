@@ -2772,6 +2772,12 @@ impl Renderer {
                         weather,
                     );
 
+                    if *show_chunk_borders {
+                        self.chunk_border_pipeline.draw(&mut pass, frame);
+                    }
+                    self.world_text_pipeline.draw(&mut pass, frame);
+                    // Last in the pass, as in vanilla: the walls write depth,
+                    // which would cut off anything drawn behind them after.
                     self.world_border_pipeline.update_and_draw(
                         &mut pass,
                         frame,
@@ -2779,11 +2785,6 @@ impl Renderer {
                         world_border,
                         *render_distance as f32 * 16.0,
                     );
-
-                    if *show_chunk_borders {
-                        self.chunk_border_pipeline.draw(&mut pass, frame);
-                    }
-                    self.world_text_pipeline.draw(&mut pass, frame);
                     self.gpu_stamp(&encoder, frame, "clouds");
                     cull_ms
                 };
