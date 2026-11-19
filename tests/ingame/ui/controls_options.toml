@@ -1,0 +1,223 @@
+# The Controls screen: each button flips its option and shows the new value,
+# and the Sprint Window slider says what it does.
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor = [213, 200]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "controls"
+
+[[step]]
+cursor_to_button = "Sneak: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Sneak: Toggle"
+
+[[step]]
+cursor_to_button = "Sprint: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Sprint: Toggle"
+
+[[step]]
+cursor_to_button = "Attack/Destroy: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Attack/Destroy: Toggle"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+cursor_to_button = "Auto-Jump: OFF"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Auto-Jump: ON"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: OFF"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: ON"
+
+# Over the Sprint Window slider, for its tooltip.
+[[step]]
+cursor = [293, 125]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "flipped"
+
+[[step]]
+cursor_to_button = "Sneak: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Sneak: Hold"
+
+[[step]]
+cursor_to_button = "Sprint: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Sprint: Hold"
+
+[[step]]
+cursor_to_button = "Attack/Destroy: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Attack/Destroy: Hold"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Toggle"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Use Item/Place Block: Hold"
+
+[[step]]
+cursor_to_button = "Auto-Jump: ON"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Auto-Jump: OFF"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: ON"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: OFF"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }

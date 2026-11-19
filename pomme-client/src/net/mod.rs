@@ -133,6 +133,9 @@ pub struct DimensionInfo {
     pub environment: Box<crate::world::environment::Environment>,
 }
 
+/// The painting variants' registry, which also names its tags.
+pub(crate) const PAINTING_VARIANT_REGISTRY: &str = "minecraft:painting_variant";
+
 pub enum NetworkEvent {
     /// Ordered before login/configuration events on both transports.
     ProtocolSelected {
@@ -144,6 +147,8 @@ pub enum NetworkEvent {
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
     ItemTags(crate::recipe::ItemTags),
+    /// The painting variants `#minecraft:placeable` lists, by registry id.
+    PlaceablePaintings(Vec<i32>),
     BlockTags {
         tags: Vec<(String, Vec<i32>)>,
     },
@@ -595,6 +600,11 @@ pub enum NetworkEvent {
     /// Entity event 45: a fox eats the food in its mouth.
     FoxEat {
         id: i32,
+    },
+    /// Entity events 24 to 28: a player's permission level, 0 to 4.
+    PermissionLevel {
+        id: i32,
+        level: u8,
     },
     /// Entity event 64: an armadillo peeks out of its shell.
     ArmadilloPeek {

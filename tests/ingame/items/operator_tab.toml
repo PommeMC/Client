@@ -1,0 +1,208 @@
+# Operator Items Tab: with the option on, an operator in creative gets the
+# Operator Utilities tab. Turning it off while that tab is selected hides the
+# tab and falls back to the first one.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Operator Items Tab: OFF"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: ON"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+# The game takes input again a frame after the menu goes.
+[[step]]
+wait_ms = 300
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative" }
+
+[[step]]
+hover = { tab = "op_blocks" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "creative", tab = "op_blocks" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "operator_tab"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }
+
+# Off again, since the options save.
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+# Options...
+[[step]]
+cursor = [161, 151]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Controls..."
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Operator Items Tab: ON"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+cursor_to_button = "Operator Items Tab: OFF"
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+cursor_to_button = "Done"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "none" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative", tab = "building_blocks" }
+
+[[step]]
+cursor = [2, 2]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "tab_hidden"
+
+[[step]]
+close_menu = true
+
+[[step]]
+expect = { menu = "none" }

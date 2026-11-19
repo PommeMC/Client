@@ -155,8 +155,8 @@ fn run_anywhere(command: &Command, core: &mut AppCore, phase: &mut AppPhase) -> 
         }),
         Command::KeyDown(key) | Command::KeyUp(key) => {
             keyboard_key(&key.action, &key.key).map(|code| {
-                core.input
-                    .hold_key(code, matches!(command, Command::KeyDown(_)));
+                let down = matches!(command, Command::KeyDown(_));
+                core.input.hold_key(code, down, key.repeat);
                 Value::Null
             })
         }

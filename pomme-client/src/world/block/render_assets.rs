@@ -8,7 +8,7 @@ use azalea_inventory::components::{
     CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
 };
 use pomme_item::ItemStackData;
-use pomme_item::components::ChargedProjectiles;
+use pomme_item::components::{BlockItemStateProperties, ChargedProjectiles};
 use pomme_registry::Registry as AzaleaRegistry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
@@ -271,8 +271,9 @@ impl BlockRenderAssets {
         self.item_models.get(name)
     }
 
-    /// The model `name` draws with for this stack: its loaded variant
-    /// (vanilla `Charge` select property) if it bakes one, else `name`.
+    /// The model `name` draws with for this stack: the variant its loaded
+    /// projectile or its `block_state` component selects (vanilla `Charge`
+    /// and `ItemBlockState`) if it bakes one, else `name`.
     pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
         let charge = stack
             .component::<ChargedProjectiles>()
@@ -281,9 +282,18 @@ impl BlockRenderAssets {
                 let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
                 if rocket { "rocket" } else { "arrow" }
             });
+        let block_state = stack.component::<BlockItemStateProperties>();
+        let state_keys = block_state.iter().flat_map(|state| {
+            state
+                .properties
+                .iter()
+                .map(|(property, value)| model::block_state_model_key(name, property, value))
+        });
         charge
             .map(|charge| model::charge_model_key(name, charge))
-            .filter(|key| {
+            .into_iter()
+            .chain(state_keys)
+            .find(|key| {
                 self.item_models.contains_key(key) || self.flat_item_texture_keys.contains_key(key)
             })
             .unwrap_or_else(|| name.to_string())
