@@ -329,6 +329,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_hive_holding_bees_weighs_a_whole_bundle() {
+        use pomme_item::components::{BeehiveOccupant, Nbt};
+        use pomme_registry::builtin::EntityKind;
+        use simdnbt::owned::{NbtCompound, NbtTag};
+
+        let empty = ItemStackData::new(ItemKind::BeeNest, 1);
+        assert_eq!(item_weight(&empty), Some(Frac::new(1, 64)));
+        let occupied = empty.with(&Bees {
+            occupants: vec![BeehiveOccupant {
+                entity: EntityKind::Bee,
+                entity_data: Nbt::new(&NbtTag::Compound(NbtCompound::new())),
+                ticks_in_hive: 0,
+                min_ticks_in_hive: 0,
+            }],
+        });
+        assert_eq!(item_weight(&occupied), Some(Frac::ONE));
+    }
+
+    #[test]
     fn shown_items_match_vanilla_grid_rules() {
         for (count, expected) in [(0, 0), (1, 1), (4, 4), (5, 5), (8, 8), (12, 12), (13, 8)] {
             assert_eq!(shown_count(count), expected, "count {count}");

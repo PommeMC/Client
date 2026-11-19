@@ -37,13 +37,13 @@ macro_rules! id_enum {
                 }
             }
 
-            pub(crate) fn read(
+            pub(crate) fn read_id(
                 r: &mut pomme_protocol::codec::Reader,
             ) -> pomme_protocol::codec::DecodeResult<Self> {
                 r.varint().map(Self::from_id)
             }
 
-            pub(crate) fn write(self, buf: &mut Vec<u8>) {
+            pub(crate) fn write_id(self, buf: &mut Vec<u8>) {
                 pomme_protocol::wire::write_varint(buf, self.id());
             }
         }

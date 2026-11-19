@@ -302,6 +302,62 @@ mod tests {
         );
     }
 
+    fn plain(text: &Text) -> String {
+        match text.component().unwrap().content {
+            pomme_text::Content::Text(text) => text,
+            other => panic!("plain text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn texts_and_entity_data_match_vanilla_encoder() {
+        use pomme_registry::Holder;
+        use pomme_registry::builtin::{Attribute, EntityKind};
+
+        let lore = fixture::<Lore>("lore");
+        assert_eq!(
+            lore.lines.iter().map(plain).collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+
+        let trim = fixture::<Trim>("trim");
+        let (Holder::Direct(material), Holder::Direct(pattern)) = (&trim.material, &trim.pattern)
+        else {
+            panic!("an inline material and pattern, got {trim:?}");
+        };
+        assert_eq!(material.assets.base_suffix, "test");
+        assert!(material.assets.overrides.is_empty());
+        assert_eq!(plain(&material.description), "Test Material");
+        assert_eq!(pattern.asset_id.to_string(), "minecraft:test");
+        assert_eq!(plain(&pattern.description), "Test Trim");
+        assert!(pattern.decal);
+
+        let bees = fixture::<Bees>("bees");
+        let [bee] = bees.occupants.as_slice() else {
+            panic!("one bee, got {:?}", bees.occupants);
+        };
+        assert_eq!(bee.entity, EntityKind::Bee);
+        assert_eq!(bee.entity_data.compound().unwrap().int("Age"), Some(7));
+        assert_eq!((bee.ticks_in_hive, bee.min_ticks_in_hive), (5, 10));
+
+        let modifiers = fixture::<AttributeModifiers>("attribute_modifiers");
+        let [entry] = modifiers.modifiers.as_slice() else {
+            panic!("one modifier, got {:?}", modifiers.modifiers);
+        };
+        assert_eq!(entry.kind, Attribute::Armor);
+        assert_eq!(entry.modifier.id.to_string(), "minecraft:a");
+        assert_eq!(entry.modifier.amount, 2.5);
+        assert_eq!(
+            entry.modifier.operation,
+            AttributeModifierOperation::AddMultipliedBase
+        );
+        assert_eq!(entry.slot, EquipmentSlotGroup::Chest);
+        let AttributeModifierDisplay::Override { text } = &entry.display else {
+            panic!("an override, got {:?}", entry.display);
+        };
+        assert_eq!(plain(text), "Sturdy");
+    }
+
     /// A value no item has by default: written, then read back the same.
     fn round_trips<T: Component + PartialEq + std::fmt::Debug>(value: &T) {
         assert_eq!(T::from_bytes(&value.to_bytes()).as_ref(), Some(value));

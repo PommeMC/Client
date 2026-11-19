@@ -1424,6 +1424,8 @@ fn ingredient_items<'a>(
     }
 }
 
+// TODO: `Trim` holds an inline material and pattern itself; this goes once
+// the tooltip stops reading the stack through the fork, which can't.
 #[derive(Clone, Debug, PartialEq)]
 struct ResolvedDirectTrim {
     material: Holder<pomme_registry::data::TrimMaterial, components::DirectTrimMaterial>,

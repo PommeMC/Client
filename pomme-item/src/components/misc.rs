@@ -37,7 +37,7 @@ impl Component for FireworkExplosion {
 
     fn read(r: &mut Reader) -> DecodeResult<Self> {
         Ok(Self {
-            shape: FireworkExplosionShape::read(r)?,
+            shape: FireworkExplosionShape::read_id(r)?,
             colors: r.list(usize::MAX, Reader::i32)?,
             fade_colors: r.list(usize::MAX, Reader::i32)?,
             has_trail: r.bool()?,
@@ -46,7 +46,7 @@ impl Component for FireworkExplosion {
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
-        self.shape.write(buf);
+        self.shape.write_id(buf);
         write_list(buf, &self.colors, |buf, color| write_i32(buf, *color));
         write_list(buf, &self.fade_colors, |buf, color| write_i32(buf, *color));
         write_bool(buf, self.has_trail);

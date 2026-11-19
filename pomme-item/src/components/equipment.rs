@@ -118,7 +118,7 @@ impl Component for Equippable {
 
     fn read(r: &mut Reader) -> DecodeResult<Self> {
         Ok(Self {
-            slot: EquipmentSlot::read(r)?,
+            slot: EquipmentSlot::read_id(r)?,
             equip_sound: sound(r)?,
             asset_id: r.optional(identifier)?,
             camera_overlay: r.optional(identifier)?,
@@ -133,7 +133,7 @@ impl Component for Equippable {
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
-        self.slot.write(buf);
+        self.slot.write_id(buf);
         write_sound(buf, &self.equip_sound);
         write_optional(buf, &self.asset_id, write_identifier);
         write_optional(buf, &self.camera_overlay, write_identifier);
@@ -319,9 +319,9 @@ impl Component for AttributeModifiers {
                 modifier: AttributeModifier {
                     id: identifier(r)?,
                     amount: r.f64()?,
-                    operation: AttributeModifierOperation::read(r)?,
+                    operation: AttributeModifierOperation::read_id(r)?,
                 },
-                slot: EquipmentSlotGroup::read(r)?,
+                slot: EquipmentSlotGroup::read_id(r)?,
                 // `Display.Type` by id, out of range reading as the first.
                 display: match r.varint()? {
                     1 => AttributeModifierDisplay::Hidden,
@@ -340,8 +340,8 @@ impl Component for AttributeModifiers {
             write_registry(buf, &entry.kind);
             write_identifier(buf, &entry.modifier.id);
             buf.extend_from_slice(&entry.modifier.amount.to_be_bytes());
-            entry.modifier.operation.write(buf);
-            entry.slot.write(buf);
+            entry.modifier.operation.write_id(buf);
+            entry.slot.write_id(buf);
             match &entry.display {
                 AttributeModifierDisplay::Default => write_varint(buf, 0),
                 AttributeModifierDisplay::Hidden => write_varint(buf, 1),

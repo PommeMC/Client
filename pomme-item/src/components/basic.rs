@@ -114,11 +114,11 @@ impl Component for Rarity {
     const KIND: DataComponentKind = DataComponentKind::Rarity;
 
     fn read(r: &mut Reader) -> DecodeResult<Self> {
-        Self::read(r)
+        Self::read_id(r)
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
-        (*self).write(buf);
+        self.write_id(buf);
     }
 }
 
@@ -154,12 +154,12 @@ impl Component for Dye {
     const KIND: DataComponentKind = DataComponentKind::Dye;
 
     fn read(r: &mut Reader) -> DecodeResult<Self> {
-        let color = DyeColor::read(r)?;
+        let color = DyeColor::read_id(r)?;
         Ok(Self { color })
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
-        self.color.write(buf);
+        self.color.write_id(buf);
     }
 }
 

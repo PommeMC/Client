@@ -280,7 +280,7 @@ impl Component for Consumable {
     fn read(r: &mut Reader) -> DecodeResult<Self> {
         Ok(Self {
             consume_seconds: r.f32()?,
-            animation: ItemUseAnimation::read(r)?,
+            animation: ItemUseAnimation::read_id(r)?,
             sound: sound(r)?,
             has_consume_particles: r.bool()?,
             on_consume_effects: r.list(usize::MAX, ConsumeEffect::read)?,
@@ -289,7 +289,7 @@ impl Component for Consumable {
 
     fn write(&self, buf: &mut Vec<u8>) {
         write_f32(buf, self.consume_seconds);
-        self.animation.write(buf);
+        self.animation.write_id(buf);
         write_sound(buf, &self.sound);
         write_bool(buf, self.has_consume_particles);
         write_list(buf, &self.on_consume_effects, |buf, effect| {

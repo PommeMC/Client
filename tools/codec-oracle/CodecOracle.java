@@ -141,6 +141,7 @@ public final class CodecOracle {
         Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments = builtIn(Registries.ENCHANTMENT);
         registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs,
                 enchantments,
+                net.minecraft.core.registries.BuiltInRegistries.ATTRIBUTE,
                 net.minecraft.core.registries.BuiltInRegistries.ITEM,
                 net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT,
@@ -639,8 +640,8 @@ public final class CodecOracle {
     }
 
     /**
-     * Item component values no item has by default, each through its type's
-     * own stream codec.
+     * Item component values no item has by default, or has only empty, each
+     * through its type's own stream codec.
      */
     private static void components(Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments) {
         component("dyed_color", net.minecraft.core.component.DataComponents.DYED_COLOR,
@@ -687,6 +688,33 @@ public final class CodecOracle {
                 net.minecraft.world.item.equipment.Equippable.builder(net.minecraft.world.entity.EquipmentSlot.HEAD)
                         .setEquipSound(Holder.direct(net.minecraft.sounds.SoundEvent.createFixedRangeEvent(
                                 Identifier.withDefaultNamespace("custom"), 16.0f)))
+                        .build());
+        component("lore", net.minecraft.core.component.DataComponents.LORE,
+                new net.minecraft.world.item.component.ItemLore(List.of(
+                        Component.literal("First"), Component.literal("Second").withStyle(ChatFormatting.RED))));
+        component("trim", net.minecraft.core.component.DataComponents.TRIM,
+                new net.minecraft.world.item.equipment.trim.ArmorTrim(
+                        Holder.direct(new net.minecraft.world.item.equipment.trim.TrimMaterial(
+                                net.minecraft.world.item.equipment.trim.MaterialAssetGroup.create("test"),
+                                Component.literal("Test Material"))),
+                        Holder.direct(new TrimPattern(Identifier.withDefaultNamespace("test"),
+                                Component.literal("Test Trim"), true))));
+        net.minecraft.nbt.CompoundTag bee = new net.minecraft.nbt.CompoundTag();
+        bee.putInt("Age", 7);
+        component("bees", net.minecraft.core.component.DataComponents.BEES,
+                new net.minecraft.world.item.component.Bees(List.of(
+                        new net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant(
+                                net.minecraft.world.item.component.TypedEntityData.of(
+                                        net.minecraft.world.entity.EntityTypes.BEE, bee), 5, 10))));
+        component("attribute_modifiers", net.minecraft.core.component.DataComponents.ATTRIBUTE_MODIFIERS,
+                net.minecraft.world.item.component.ItemAttributeModifiers.builder()
+                        .add(net.minecraft.world.entity.ai.attributes.Attributes.ARMOR,
+                                new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+                                        Identifier.withDefaultNamespace("a"), 2.5,
+                                        net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation.ADD_MULTIPLIED_BASE),
+                                net.minecraft.world.entity.EquipmentSlotGroup.CHEST,
+                                new net.minecraft.world.item.component.ItemAttributeModifiers.Display.OverrideText(
+                                        Component.literal("Sturdy")))
                         .build());
     }
 
