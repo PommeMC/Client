@@ -532,7 +532,7 @@ mod tests {
     /// (`CodecOracle.entities`).
     #[test]
     fn matches_vanilla_encoder() {
-        use crate::vanilla_fixtures::{decoded, registry_id};
+        use crate::vanilla_fixtures::{assert_decoded, decoded, registry_id};
 
         let vanilla = |name| decoded(name, read);
         let position = DVec3::new(1.5, -60.0, 3.25);
@@ -656,8 +656,6 @@ mod tests {
                 EntityPacket::Remove { ids: vec![5, 7] },
             ),
         ];
-        for (name, expected) in cases {
-            assert_eq!(vanilla(name), expected, "{name}");
-        }
+        assert_decoded(read, cases);
     }
 }

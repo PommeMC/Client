@@ -228,13 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn camera_vehicle_and_sign_editor_read_as_vanilla_writes_them() {
+    fn vehicle_and_sign_editor_read_as_vanilla_writes_them() {
         use crate::vanilla_fixtures::case;
 
-        assert_eq!(
-            decode("set_camera", &[0xAC, 0x02]),
-            PlayerPacket::Camera { entity: 300 }
-        );
         assert_eq!(
             decode("move_vehicle", &case("move_vehicle/clientbound")),
             PlayerPacket::MoveVehicle {
@@ -366,5 +362,90 @@ mod tests {
                 duration: 100
             }
         );
+    }
+
+    /// Vanilla's own encoding of the player-state packets
+    /// (`CodecOracle.player`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, registry_id};
+
+        let haste = registry_id("mob_effect", "minecraft:haste");
+        let cases = [
+            (
+                "set_health/hungry",
+                PlayerPacket::Health {
+                    health: 15.5,
+                    food: 18,
+                    saturation: 2.0,
+                },
+            ),
+            (
+                "set_experience/level_30",
+                PlayerPacket::Experience {
+                    progress: 0.25,
+                    level: 30,
+                    total: 1395,
+                },
+            ),
+            (
+                "update_attributes/max_health",
+                PlayerPacket::Attributes {
+                    entity: 9,
+                    snapshots: vec![AttributeSnapshot {
+                        attribute: registry_id("attribute", "minecraft:max_health"),
+                        base: 20.0,
+                        modifiers: vec![AttributeModifier {
+                            id: "minecraft:test".into(),
+                            amount: 4.0,
+                            operation: 2,
+                        }],
+                    }],
+                },
+            ),
+            (
+                "update_mob_effect/haste",
+                PlayerPacket::UpdateEffect {
+                    entity: 1,
+                    effect: haste,
+                    amplifier: 1,
+                    duration: 200,
+                    flags: EFFECT_AMBIENT | EFFECT_SHOW_ICON,
+                },
+            ),
+            (
+                "remove_mob_effect/haste",
+                PlayerPacket::RemoveEffect {
+                    entity: 1,
+                    effect: haste,
+                },
+            ),
+            ("set_held_slot/fifth", PlayerPacket::HeldSlot { slot: 4 }),
+            (
+                "player_abilities/flying",
+                PlayerPacket::Abilities {
+                    flags: ABILITY_FLYING | ABILITY_CAN_FLY,
+                    flying_speed: 0.05,
+                    walking_speed: 0.1,
+                },
+            ),
+            (
+                "game_event/thunder",
+                PlayerPacket::GameEvent {
+                    event: 8,
+                    param: 0.5,
+                },
+            ),
+            (
+                "player_combat_kill/fell",
+                PlayerPacket::CombatKill {
+                    player: 3,
+                    // The NBT string "Tester fell".
+                    message: [&[8, 0, 11][..], b"Tester fell"].concat().into(),
+                },
+            ),
+            ("set_camera/other", PlayerPacket::Camera { entity: 300 }),
+        ];
+        assert_decoded(read, cases);
     }
 }
