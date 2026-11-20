@@ -2892,23 +2892,13 @@ fn attribute_tooltip_lines(
             {
                 continue;
             }
-            // `display` is the codec's `{type, value}`, azalea's
-            // `{"override": {text}}`, or a bare type name.
-            let (display_type, override_text) = match entry.get("display") {
-                Some(serde_json::Value::String(kind)) => (kind.as_str(), None),
-                Some(serde_json::Value::Object(display)) => {
-                    match display.get("type").and_then(serde_json::Value::as_str) {
-                        Some(kind) => (kind, display.get("value")),
-                        None => display
-                            .iter()
-                            .next()
-                            .map_or(("default", None), |(kind, value)| {
-                                (kind.as_str(), value.get("text"))
-                            }),
-                    }
-                }
-                _ => ("default", None),
-            };
+            // `Display.CODEC`: `{type, value}`, left out for the default.
+            let display = entry.get("display");
+            let display_type = display
+                .and_then(|display| display.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("default");
+            let override_text = display.and_then(|display| display.get("value"));
             if display_type == "hidden" {
                 continue;
             }
@@ -5034,45 +5024,20 @@ mod tests {
     }
 
     #[test]
-    fn a_modifiers_override_text_replaces_its_line_in_either_shape() {
-        // The fork's values, whose serialized shape a stack's JSON still has.
-        use azalea_inventory::components::{
-            AttributeModifier, AttributeModifierDisplay, AttributeModifiers,
-            AttributeModifiersEntry, EquipmentSlotGroup,
-        };
-        let entry = AttributeModifiersEntry {
-            kind: pomme_registry::builtin::Attribute::Armor,
-            modifier: AttributeModifier {
-                id: "minecraft:a".into(),
-                amount: 1.0,
-                operation:
-                    azalea_core::attribute_modifier_operation::AttributeModifierOperation::AddValue,
-            },
-            slot: EquipmentSlotGroup::Chest,
-            display: AttributeModifierDisplay::Override {
-                text: "Sturdy".into(),
-            },
-        };
-        let azalea = serde_json::to_value(AttributeModifiers {
-            modifiers: vec![entry],
-        })
-        .unwrap();
-        let codec = serde_json::json!([{
-            "type": "minecraft:armor", "id": "minecraft:a", "amount": 1.0,
-            "operation": "add_value", "slot": "chest",
-            "display": {"type": "override", "value": "Sturdy"}
-        }]);
-        for modifiers in [azalea, codec] {
-            let lines = item_tooltip_lines(
-                &serde_json::json!({
-                    "id": "minecraft:stick",
-                    "components": {"minecraft:attribute_modifiers": modifiers}
-                }),
-                None,
-                false,
-            );
-            assert_eq!(line_text(&lines.last().unwrap().spans), "Sturdy");
-        }
+    fn a_modifiers_override_text_replaces_its_line() {
+        let lines = item_tooltip_lines(
+            &serde_json::json!({
+                "id": "minecraft:stick",
+                "components": {"minecraft:attribute_modifiers": [{
+                    "type": "minecraft:armor", "id": "minecraft:a", "amount": 1.0,
+                    "operation": "add_value", "slot": "chest",
+                    "display": {"type": "override", "value": "Sturdy"}
+                }]}
+            }),
+            None,
+            false,
+        );
+        assert_eq!(line_text(&lines.last().unwrap().spans), "Sturdy");
     }
 
     #[test]
