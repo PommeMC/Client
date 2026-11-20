@@ -72,7 +72,7 @@ time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"
 # SRV records, which the system resolver can't look up.
 hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
-# The login key exchange and the packet stream cipher (`net::crypt`).
+# The packet stream cipher (`net::crypt`).
 aes = "0.9"
 cfb8 = "0.9"
 # Pomme's own block state type, under the name the azalea crates find it by.
