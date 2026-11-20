@@ -1015,6 +1015,8 @@ public final class CodecOracle {
     }
 
     /// An instance of `type` whose constructor is skipped, with `fields` set.
+    /// The fields are final: a JDK that stops reflection from writing those
+    /// needs another way to build these packets.
     private static <P> P withFields(Class<P> type, Map<String, Object> fields) throws Exception {
         java.lang.reflect.Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
         theUnsafe.setAccessible(true);
