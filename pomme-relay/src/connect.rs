@@ -33,7 +33,8 @@ use crate::{AppState, Config, guard};
 /// stream and not a whole packet.
 const MAX_MESSAGE: usize = 256 * 1024;
 
-/// How long a name may take to resolve, and then a server to accept.
+/// How long each step of reaching a server may take: finding its SRV record,
+/// resolving its name, and connecting to it.
 const REACH_WAIT: Duration = Duration::from_secs(5);
 
 /// A connection silent both ways for this long is closed. A server in play
@@ -50,6 +51,10 @@ const MAX_HANDSHAKE: usize = 1024;
 /// The bytes a frame's length may take, past which a server drops the
 /// connection.
 const MAX_LENGTH_PREFIX: usize = 3;
+
+/// What a message costs its client on top of its bytes, for its frame and
+/// the handling of it, so that empty ones aren't free.
+const MESSAGE_COST: usize = 16;
 
 /// The most of a name's addresses dialed, all at once.
 const MAX_DIALED: usize = 4;
@@ -99,8 +104,8 @@ pub async fn connect(
     let lookup = RESOLVER.lookup_ip(host.as_str());
     // A name that doesn't resolve is refused as one with no address the relay
     // may reach is, so the answer doesn't say which names exist behind it.
-    let addresses: Vec<SocketAddr> = in_time("resolve", &host, lookup)
-        .await
+    let found = in_time("resolve", &host, lookup).await;
+    let addresses: Vec<SocketAddr> = found
         .iter()
         .flat_map(|found| found.iter())
         .filter(|ip| reachable(&state.config, *ip))
@@ -108,7 +113,9 @@ pub async fn connect(
         .map(|ip| SocketAddr::new(ip, port))
         .collect();
     if addresses.is_empty() {
-        tracing::warn!("Refused {host:?}:{port}, which has no address it may reach");
+        if found.is_ok() {
+            tracing::warn!("Refused {host:?}:{port}, which has no address it may reach");
+        }
         return StatusCode::FORBIDDEN.into_response();
     }
     // Only now, so a name that's slow to resolve doesn't hold a slot.
@@ -215,6 +222,9 @@ impl FromStr for Network {
                 bits: u128::BITS,
             });
         };
+        if unwrapped(address) != address {
+            return Err("expected a network of IPv4 addresses written as IPv4");
+        }
         let (width, mapped) = match address {
             IpAddr::V4(_) => (Ipv4Addr::BITS, u128::BITS - Ipv4Addr::BITS),
             IpAddr::V6(_) => (u128::BITS, 0),
@@ -307,23 +317,24 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
     let _ = tcp.set_nodelay(true);
     let (mut from_server, mut to_server) = tcp.into_split();
     let (mut to_page, mut from_page) = socket.split();
-    let sent = tokio::time::timeout(HANDSHAKE_WAIT, opening(&mut from_page));
+    let charged = |bytes: usize| limits.relayed(client, bytes + MESSAGE_COST);
+    let sent = tokio::time::timeout(HANDSHAKE_WAIT, opening(&mut from_page, charged));
     let Ok(Some(sent)) = sent.await else {
         return;
     };
+    let written = tokio::time::timeout(IDLE, to_server.write_all(&sent));
+    if !matches!(written.await, Ok(Ok(()))) {
+        return;
+    }
     let activity = Activity::start();
     let carried = |bytes: usize| {
         activity.mark();
-        let allowed = limits.relayed(client, bytes);
+        let allowed = charged(bytes);
         if !allowed {
             tracing::warn!("Closed {client}'s connection at what it may have relayed");
         }
         allowed
     };
-    let written = tokio::time::timeout(IDLE, to_server.write_all(&sent));
-    if !carried(sent.len()) || !matches!(written.await, Ok(Ok(()))) {
-        return;
-    }
     let upstream = async {
         while let Some(Ok(message)) = from_page.next().await {
             match message {
@@ -335,7 +346,7 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
                 Message::Close(_) => break,
                 // Not carried on, but the relay still had to receive it.
                 other => {
-                    if !limits.relayed(client, other.into_data().len()) {
+                    if !charged(other.into_data().len()) {
                         break;
                     }
                 }
@@ -359,13 +370,16 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
     }
 }
 
-/// The page's first bytes, if they open with a handshake and it sent nothing
-/// else first.
-async fn opening(from_page: &mut SplitStream<WebSocket>) -> Option<Vec<u8>> {
+/// The page's first bytes, each message `charged` to it, if they open with a
+/// handshake and it sent nothing else first.
+async fn opening(
+    from_page: &mut SplitStream<WebSocket>,
+    charged: impl Fn(usize) -> bool,
+) -> Option<Vec<u8>> {
     let mut sent = Vec::new();
     while let Some(Ok(message)) = from_page.next().await {
         match message {
-            Message::Binary(bytes) => sent.extend_from_slice(&bytes),
+            Message::Binary(bytes) if charged(bytes.len()) => sent.extend_from_slice(&bytes),
             _ => break,
         }
         if let Some(handshake) = opens_with_handshake(&sent) {
@@ -517,6 +531,9 @@ pub mod tests {
             "play.pomme.rs",
             "203.0.113.7/33",
             "2001:db8::/129",
+            "64:ff9b::/96",
+            "2002:c633:6400::/40",
+            "::ffff:198.51.100.0/120",
             "203.0.113.7/",
         ] {
             assert!(written.parse::<Network>().is_err(), "{written}");
