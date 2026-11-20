@@ -12,9 +12,11 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
+use pomme_protocol::entity::{self, EntityPacket};
 use pomme_protocol::hud::{self, BossFlags, BossOp, HudPacket};
 use pomme_protocol::lifecycle::{self, LifecyclePacket};
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
+use pomme_protocol::player::{self, PlayerPacket};
 use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
 use pomme_protocol::sound::{self, SoundPacket};
@@ -868,13 +870,23 @@ fn registry_id(
     table.id_of(reg, name).unwrap()
 }
 
-/// Translates a hand-built old-version game frame and decodes the result
-/// with azalea's 26.2 codecs.
-fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
-    let translated = translation_for(protocol)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
+/// Translates a hand-built old-version game frame: the native payload of
+/// packet `name`, after its id, for the packets pomme has no reader for.
+fn translate_to_payload(protocol: i32, old: Vec<u8>, name: &str) -> Vec<u8> {
+    translate_and_read(protocol, old, name, |_, r| {
+        Some(r.bytes(r.remaining()).map(<[u8]>::to_vec))
+    })
+}
+
+/// The game's own 26.2 frame for packet `name`, from codec fixture `case`.
+fn fixture_frame(name: &str, case: &str) -> Vec<u8> {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Phase::Game, Direction::Clientbound, name),
+    );
+    frame.extend(pomme_protocol::vanilla_fixtures::case(case));
+    frame
 }
 
 /// Translates a hand-built old-version game frame and decodes the result
@@ -889,14 +901,37 @@ fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<
 /// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
 /// A native 26.2 game frame for packet `name`, decoded with `read`.
 fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
+    read_frame(Phase::Game, frame, name, read)
+}
+
+/// The same for a configuration frame.
+fn read_config_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
+    read_frame(Phase::Configuration, frame, name, read)
+}
+
+fn read_frame<P>(phase: Phase, frame: &[u8], name: &str, read: RawRead<P>) -> P {
     let mut r = pomme_protocol::codec::Reader::new(frame);
     assert_eq!(
         r.varint(),
-        Ok(table_id(Phase::Game, Direction::Clientbound, name))
+        Ok(table_id(phase, Direction::Clientbound, name))
     );
     let decoded = read(name, &mut r).unwrap().unwrap();
     r.ensure_eof().unwrap();
     decoded
+}
+
+/// A `registry_data` frame's entries, in id order, after checking it is the
+/// dimension types.
+fn dimension_type_entries(frame: &[u8]) -> Vec<pomme_protocol::configuration::RegistryEntry> {
+    use pomme_protocol::configuration::{self, ConfigPacket};
+
+    let ConfigPacket::RegistryData(data) =
+        read_config_frame(frame, "registry_data", configuration::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(data.registry, "minecraft:dimension_type");
+    data.entries
 }
 
 /// An item 765 and 26.2 number differently (27 against 54), so a stack that
@@ -929,79 +964,39 @@ fn no_translation_without_coverage() {
 /// (`ClientboundLoginFinishedPacket.STREAM_CODEC`); the shim pads a zero one.
 #[test]
 fn translate_login_finished_26_1() {
-    use azalea_protocol::packets::login::ClientboundLoginPacket;
-    use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+    use pomme_protocol::login::{self, LoginPacket};
 
-    let packet = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
-        game_profile: azalea_auth::game_profile::GameProfile {
-            uuid: uuid::Uuid::from_u128(0xfeed_beef),
-            name: "Purdze".into(),
-            properties: Default::default(),
-        },
-        session_id: uuid::Uuid::from_u128(0xdead),
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-    // A 26.1 frame is the same bytes without the trailing UUID.
-    let old = frame[..frame.len() - 16].to_vec().into_boxed_slice();
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, login_id(775, "login_finished"));
+    old.extend_from_slice(&0xfeed_beef_u128.to_be_bytes());
+    old.extend_from_slice(&[6, b'P', b'u', b'r', b'd', b'z', b'e']);
+    old.push(0); // no properties
 
-    let translated = translation_for(775).translate_login_frame(old);
-    let decoded: ClientboundLoginPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
-    let ClientboundLoginPacket::LoginFinished(decoded) = decoded else {
-        panic!("wrong packet: {decoded:?}");
+    let translated = translation_for(775).translate_login_frame(old.into_boxed_slice());
+    let Ok(LoginPacket::Finished(finished)) = login::read_frame(&translated) else {
+        panic!("wrong packet");
     };
-    assert_eq!(decoded.game_profile.name, "Purdze");
-    assert_eq!(
-        decoded.game_profile.uuid,
-        uuid::Uuid::from_u128(0xfeed_beef)
-    );
-    assert_eq!(decoded.session_id, uuid::Uuid::nil());
+    assert_eq!(finished.profile.name, "Purdze");
+    assert_eq!(finished.profile.id, 0xfeed_beef);
+    assert_eq!(finished.session_id, 0);
 }
 
 /// 26.2 added `onlineMode` before the trailing `enforcesSecureChat` bool
 /// (`ClientboundLoginPacket.write`); the shim inserts `false`.
 #[test]
 fn translate_game_login_26_1() {
-    use azalea_core::game_type::{GameMode, OptionalGameType};
-    use azalea_protocol::packets::game::ClientboundGamePacket;
-    use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use pomme_registry::DataRegistry;
-
-    let packet = ClientboundGamePacket::Login(ClientboundLogin {
-        player_id: MinecraftEntityId(7),
-        hardcore: false,
-        levels: vec!["minecraft:overworld".into()],
-        max_players: 20,
-        chunk_radius: 12,
-        simulation_distance: 10,
-        reduced_debug_info: false,
-        show_death_screen: true,
-        do_limited_crafting: false,
-        common: azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-            dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
-            dimension: "minecraft:overworld".into(),
-            seed: 42,
-            game_type: GameMode::Survival,
-            previous_game_type: OptionalGameType(None),
-            is_debug: false,
-            is_flat: false,
-            last_death_location: None,
-            portal_cooldown: 0,
-            sea_level: 63,
-        },
-        online_mode: false,
-        enforces_secure_chat: true,
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let mut native = fixture_frame("login", "login/fresh");
     // A 26.1 frame is the same bytes without the online_mode bool, which
     // sits right before the trailing enforces_secure_chat bool.
-    let mut old = frame.to_vec();
-    old.remove(old.len() - 2);
+    let online_mode = native.len() - 2;
+    let mut old = native.clone();
+    old.remove(online_mode);
 
     let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
-    assert_eq!(&translated[..], &frame[..]);
+    native[online_mode] = 0;
+    assert_eq!(&translated[..], &native[..]);
 }
 
 /// 26.1's team `Parameters` order is `displayName, options, visibility,
@@ -1266,95 +1261,50 @@ fn remap_game_ids_774() {
     wire::write_varint(&mut old, 19); // food
     old.extend_from_slice(&4.5f32.to_be_bytes());
 
-    let ClientboundGamePacket::SetHealth(p) = translate_and_decode(774, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.health, 18.0);
-    assert_eq!(p.food, 19);
-    assert_eq!(p.saturation, 4.5);
+    assert_eq!(
+        translate_and_read(774, old, "set_health", player::read),
+        PlayerPacket::Health {
+            health: 18.0,
+            food: 19,
+            saturation: 4.5,
+        }
+    );
 }
 
 /// The serializer-id walker (see `translate_entity_data`): 1.21.11
 /// `cow_variant` is 22, 26.2's is 23.
 #[test]
 fn translate_entity_data_774() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(774, Direction::Clientbound, "set_entity_data"),
+    // index 0, serializer byte, value 2; index 17, cow_variant, holder id 4
+    assert_eq!(
+        entity_data_bytes(774, &[0, 0, 2, 17, 22, 4]),
+        [0, 0, 2, 17, 23, 4]
     );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-    old.extend_from_slice(&[17, 22, 4]); // index 17, cow_variant, holder id 4
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, MinecraftEntityId(9));
-    let items = &p.packed_items.0;
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].index, 0);
-    assert!(matches!(
-        items[0].value,
-        azalea_entity::EntityDataValue::Byte(2)
-    ));
-    assert_eq!(items[1].index, 17);
-    assert!(matches!(
-        items[1].value,
-        azalea_entity::EntityDataValue::CowVariant(_)
-    ));
 }
 
 #[test]
 fn translate_entity_profile_774() {
-    use azalea_buf::AzBuf;
-    use azalea_inventory::components::Profile;
+    // A profile with nothing known and no skin patch, then a humanoid arm.
+    let mut values = vec![0, 37];
+    values.extend_from_slice(&[0; 8]);
+    values.extend_from_slice(&[1, 38, 1]);
 
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(774, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9);
-    old.extend_from_slice(&[0, 37]);
-    Profile::default().azalea_write(&mut old).unwrap();
-    old.extend_from_slice(&[1, 38, 1, 0xFF]);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
-        panic!("wrong packet");
-    };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::ResolvableProfile(_)
-    ));
-    assert!(matches!(
-        p.packed_items.0[1].value,
-        azalea_entity::EntityDataValue::HumanoidArm(_)
-    ));
+    // 26.2's last two serializers.
+    let humanoid_arm = pomme_protocol::entity_data::SERIALIZERS_26_2.len() as u8 - 1;
+    let mut native = vec![0, humanoid_arm - 1];
+    native.extend_from_slice(&[0; 8]);
+    native.extend_from_slice(&[1, humanoid_arm, 1]);
+    assert_eq!(entity_data_bytes(774, &values), native);
 }
 
 #[test]
 fn translate_empty_entity_particles_774() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(774, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9);
-    old.extend_from_slice(&[10, 17, 0, 11, 8, 1, 0xFF]);
+    use pomme_protocol::entity_data::Value;
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
-        panic!("wrong packet");
-    };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::Particles(_)
-    ));
-    assert!(matches!(
-        p.packed_items.0[1].value,
-        azalea_entity::EntityDataValue::Boolean(true)
-    ));
+    // index 10, particles, none; index 11, boolean, true
+    let entries = entity_data_entries(774, &[10, 17, 0, 11, 8, 1]);
+    let values: Vec<_> = entries.into_iter().map(|entry| entry.value).collect();
+    assert_eq!(values, [Value::Other, Value::Bool(true)]);
 }
 
 /// A stack component the walker doesn't know falls back to the verbatim-tail
@@ -1362,23 +1312,13 @@ fn translate_empty_entity_particles_774() {
 /// native registry, varint payload) keeps the verbatim bytes decodable.
 #[test]
 fn translate_entity_item_stack_fallback_774() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(774, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9);
     // index 5, serializer 7 (item stack): count 1, item 1, 1 added
     // component, 0 removed, component 3 (damage) = 7.
-    old.extend_from_slice(&[5, 7, 1, 1, 1, 0, 3, 7, 0xFF]);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
-        panic!("wrong packet");
+    let entries = entity_data_entries(774, &[5, 7, 1, 1, 1, 0, 3, 7]);
+    let pomme_protocol::entity_data::Value::Item(Some(stack)) = &entries[0].value else {
+        panic!("wrong value");
     };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::ItemStack(_)
-    ));
+    assert_eq!(stack.patch.added, [(3, Box::from([7u8]))]);
 }
 
 /// `translate_item_stack`'s component ids against the native registry table.
@@ -1564,26 +1504,11 @@ fn remap_outbound_ids_774() {
 /// 1.21.11 map doesn't account for.
 #[test]
 fn translate_entity_data_773() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(773, Direction::Clientbound, "set_entity_data"),
+    // index 0, serializer byte, value 2; index 17, sniffer_state, ordinal 2
+    assert_eq!(
+        entity_data_bytes(773, &[0, 0, 2, 17, 30, 2]),
+        [0, 0, 2, 17, 35, 2]
     );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-    old.extend_from_slice(&[17, 30, 2]); // index 17, sniffer_state, ordinal 2
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(773, old) else {
-        panic!("wrong packet");
-    };
-    let items = &p.packed_items.0;
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[1].index, 17);
-    assert!(matches!(
-        items[1].value,
-        azalea_entity::EntityDataValue::SnifferState(_)
-    ));
 }
 
 /// 1.21.11 renamed `horse_screen_open` -> `mount_screen_open` with identical
@@ -1600,12 +1525,10 @@ fn translate_horse_screen_open_773() {
     old.push(3); // inventory columns
     old.extend_from_slice(&42i32.to_be_bytes());
 
-    let ClientboundGamePacket::MountScreenOpen(p) = translate_and_decode(773, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    assert_eq!(p.inventory_columns, 3);
-    assert_eq!(p.entity_id, MinecraftEntityId(42));
+    assert_eq!(
+        translate_to_payload(773, old, "mount_screen_open"),
+        [1, 3, 0, 0, 0, 42]
+    );
 }
 
 // 1.21.8's serverbound layouts and the 26.x-era clientbound rewrites match
@@ -1620,27 +1543,11 @@ fn translate_horse_screen_open_773() {
 #[test]
 fn translate_entity_data_old_versions() {
     for protocol in [772, 771, 770] {
-        let mut old = Vec::new();
-        wire::write_varint(
-            &mut old,
-            old_id(protocol, Direction::Clientbound, "set_entity_data"),
-        );
-        wire::write_varint(&mut old, 9); // entity id
-        old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-        old.extend_from_slice(&[17, 31, 2]); // index 17, sniffer_state, ordinal 2
-        old.push(0xFF);
-
-        let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(protocol, old) else {
-            panic!("wrong packet");
-        };
-        let items = &p.packed_items.0;
-        assert_eq!(items.len(), 2, "{protocol}");
-        assert_eq!(items[1].index, 17, "{protocol}");
-        assert!(
-            matches!(
-                items[1].value,
-                azalea_entity::EntityDataValue::SnifferState(_)
-            ),
+        // index 0, serializer byte, value 2; index 17, sniffer_state,
+        // ordinal 2
+        assert_eq!(
+            entity_data_bytes(protocol, &[0, 0, 2, 17, 31, 2]),
+            [0, 0, 2, 17, 35, 2],
             "{protocol}"
         );
     }
@@ -1651,29 +1558,11 @@ fn translate_entity_data_old_versions() {
 #[test]
 fn translate_entity_data_compound_tag_old_versions() {
     for protocol in [772, 771, 770] {
-        let mut old = Vec::new();
-        wire::write_varint(
-            &mut old,
-            old_id(protocol, Direction::Clientbound, "set_entity_data"),
-        );
-        wire::write_varint(&mut old, 9); // entity id
-        old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-        old.extend_from_slice(&[19, 16, 0x0A, 0x00]); // shoulder parrot compound
-        old.extend_from_slice(&[8, 8, 1]); // index 8, boolean, true
-        old.push(0xFF);
-
-        let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(protocol, old) else {
-            panic!("wrong packet");
-        };
-        let items = &p.packed_items.0;
-        assert_eq!(items.len(), 2, "{protocol}");
-        assert_eq!(items[0].index, 0, "{protocol}");
-        assert_eq!(items[1].index, 8, "{protocol}");
-        assert!(
-            matches!(
-                items[1].value,
-                azalea_entity::EntityDataValue::Boolean(true)
-            ),
+        // index 0, serializer byte, value 2; the shoulder parrot compound;
+        // index 8, boolean, true
+        assert_eq!(
+            entity_data_bytes(protocol, &[0, 0, 2, 19, 16, 0x0A, 0x00, 8, 8, 1]),
+            [0, 0, 2, 8, 8, 1],
             "{protocol}"
         );
     }
@@ -1728,38 +1617,28 @@ fn translate_entity_data_particles_772() {
 /// with an empty skin patch (see `translate_old_profile`).
 #[test]
 fn translate_entity_item_profile_772() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(772, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
+    use pomme_item::components::{Component, Profile, ProfileContents};
+
     // index 5, serializer 7 (item stack): count 1, item 5, 1 added, 0
     // removed, component 61 (profile).
-    old.extend_from_slice(&[5, 7, 1, 5, 1, 0, 61]);
-    old.extend_from_slice(&[1, 5, b'S', b't', b'e', b'v', b'e']); // name
-    old.push(0); // no uuid
-    old.push(0); // no properties
-    old.push(0xFF);
+    let mut values = vec![5, 7, 1, 5, 1, 0, 61];
+    values.extend_from_slice(&[1, 5, b'S', b't', b'e', b'v', b'e']); // name
+    values.push(0); // no uuid
+    values.push(0); // no properties
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    let azalea_entity::EntityDataValue::ItemStack(stack) = &p.packed_items.0[0].value else {
+    let entries = entity_data_entries(772, &values);
+    let pomme_protocol::entity_data::Value::Item(Some(stack)) = &entries[0].value else {
         panic!("wrong value");
     };
-    let azalea_inventory::ItemStack::Present(data) = stack else {
-        panic!("empty stack");
+    let [(_, profile)] = &stack.patch.added[..] else {
+        panic!("components: {:?}", stack.patch.added);
     };
-    let profile = data
-        .component_patch
-        .get::<azalea_inventory::components::Profile>()
-        .expect("profile component");
-    let azalea_inventory::components::PartialOrFullProfile::Partial(partial) = &*profile.unpack
-    else {
+    let profile = Profile::from_bytes(profile).expect("profile component");
+    let ProfileContents::Partial { name, .. } = profile.contents else {
         panic!("expected the partial-profile arm");
     };
-    assert_eq!(partial.name.as_deref(), Some("Steve"));
+    assert_eq!(name.as_deref(), Some("Steve"));
+    assert_eq!(profile.skin_patch, Default::default());
 }
 
 /// The velocity the shorts -> `LpVec3` tests write and expect back.
@@ -1784,8 +1663,8 @@ fn write_floats(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
 }
 
 /// Compares within the `LpVec3` quantization error.
-fn assert_velocity(v: azalea_core::position::Vec3) {
-    for (got, expected) in [v.x, v.y, v.z].into_iter().zip(VELOCITY_772) {
+fn assert_velocity(v: DVec3) {
+    for (got, expected) in v.to_array().into_iter().zip(VELOCITY_772) {
         assert!((got - expected).abs() < 1e-3, "{got} != {expected}");
     }
 }
@@ -1809,21 +1688,30 @@ fn translate_add_entity_old_versions() {
         for c in [100.5f64, 64.0, -20.25] {
             old.extend_from_slice(&c.to_be_bytes());
         }
-        old.extend_from_slice(&[10, 20, 30]); // x/y/head rotation
+        old.extend_from_slice(&[64, 128, 192]); // x/y/head rotation
         wire::write_varint(&mut old, 0); // data
         write_velocity_shorts(&mut old);
 
-        let ClientboundGamePacket::AddEntity(p) = translate_and_decode(protocol, old) else {
+        let EntityPacket::Add {
+            id,
+            position,
+            movement,
+            x_rot,
+            y_rot,
+            y_head_rot,
+            ..
+        } = translate_and_read(protocol, old, "add_entity", entity::read)
+        else {
             panic!("wrong packet");
         };
-        assert_eq!(p.id, MinecraftEntityId(7), "{protocol}");
+        assert_eq!(id, 7, "{protocol}");
+        assert_eq!(position, DVec3::new(100.5, 64.0, -20.25), "{protocol}");
+        assert_velocity(movement);
         assert_eq!(
-            (p.position.x, p.position.y, p.position.z),
-            (100.5, 64.0, -20.25),
+            (x_rot, y_rot, y_head_rot),
+            (90.0, -180.0, -90.0),
             "{protocol}"
         );
-        assert_velocity(azalea_core::position::Vec3::from(p.movement));
-        assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 30), "{protocol}");
     }
 }
 
@@ -1838,11 +1726,13 @@ fn translate_set_entity_motion_772() {
     wire::write_varint(&mut old, 9); // entity id
     write_velocity_shorts(&mut old);
 
-    let ClientboundGamePacket::SetEntityMotion(p) = translate_and_decode(772, old) else {
+    let EntityPacket::Motion { id, velocity } =
+        translate_and_read(772, old, "set_entity_motion", entity::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, MinecraftEntityId(9));
-    assert_velocity(azalea_core::position::Vec3::from(p.delta));
+    assert_eq!(id, 9);
+    assert_velocity(velocity);
 }
 
 /// 1.21.9 added a relative-rotation bool after each `player_rotation`
@@ -1881,24 +1771,22 @@ fn translate_set_default_spawn_772() {
     old.extend_from_slice(&64u64.to_be_bytes());
     old.extend_from_slice(&45.0f32.to_be_bytes()); // angle
 
-    let ClientboundGamePacket::SetDefaultSpawnPosition(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.global_pos.dimension.to_string(), "minecraft:overworld");
+    let mut native = Vec::new();
+    wire::write_utf(&mut native, "minecraft:overworld");
+    native.extend_from_slice(&64u64.to_be_bytes());
+    native.extend_from_slice(&45.0f32.to_be_bytes()); // yaw
+    native.extend_from_slice(&0.0f32.to_be_bytes()); // pitch
     assert_eq!(
-        (p.global_pos.pos.x, p.global_pos.pos.y, p.global_pos.pos.z),
-        (0, 64, 0)
+        translate_to_payload(772, old, "set_default_spawn_position"),
+        native
     );
-    assert_eq!(p.yaw, 45.0);
-    assert_eq!(p.pitch, 0.0);
 }
 
 /// 1.21.9 inserted `radius`/`blockCount` after the explosion center and
 /// appended a block-particle list; the particle and sound ids between them
 /// are remapped into 26.2's space (a 1.21.8 server sends `explosion` 22 and
 /// the `entity.generic.explode` holder 615 + 1; 26.2 numbers them 30 and
-/// 699). Byte-exact against a hand-built native frame so azalea's decode
-/// quirks can't mask an id drift.
+/// 699).
 #[test]
 fn translate_explode_772() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
@@ -1945,72 +1833,6 @@ fn translate_explode_772() {
     );
     expected.push(0); // no block particles
     assert_eq!(&translated[..], &expected[..]);
-
-    let packet =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
-    let ClientboundGamePacket::Explode(p) = packet else {
-        panic!("wrong packet");
-    };
-    assert_eq!((p.center.x, p.center.y, p.center.z), (1.0, 65.0, -2.0));
-    assert_eq!(p.radius, 0.0);
-    assert_eq!(p.block_count, 0);
-    let knockback = p.player_knockback.expect("knockback");
-    assert_eq!((knockback.x, knockback.y, knockback.z), (0.1, 0.2, 0.3));
-    assert!(p.block_particles.is_empty());
-}
-
-/// Pins the azalea bug the raw explode path in
-/// `handler::handle_raw_game_packet` works around: a native 26.2 explosion with
-/// vanilla's default block particles (`Level.
-/// DEFAULT_EXPLOSION_BLOCK_PARTICLES`) doesn't decode faithfully through
-/// azalea's typed codec. When it does, the raw path can go.
-#[test]
-fn azalea_explode_still_misdecodes_native_particles() {
-    use azalea_entity::particle::Particle;
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let table = RegistryTable::native();
-    let particle = |name| registry_id(table, ClientRegistry::ParticleType, name);
-
-    let mut raw = Vec::new();
-    wire::write_varint(
-        &mut raw,
-        table_id(Phase::Game, Direction::Clientbound, "explode"),
-    );
-    for c in [1.0f64, 65.0, -2.0] {
-        raw.extend_from_slice(&c.to_be_bytes());
-    }
-    raw.extend_from_slice(&4.0f32.to_be_bytes()); // radius
-    raw.extend_from_slice(&7i32.to_be_bytes()); // block count
-    raw.push(0); // no knockback
-    wire::write_varint(&mut raw, particle("explosion_emitter"));
-    wire::write_varint(
-        &mut raw,
-        registry_id(table, ClientRegistry::SoundEvent, "entity.generic.explode") + 1,
-    );
-    wire::write_varint(&mut raw, 2);
-    for (name, scaling) in [("poof", 0.5f32), ("smoke", 1.0)] {
-        wire::write_varint(&mut raw, particle(name));
-        raw.extend_from_slice(&scaling.to_be_bytes());
-        raw.extend_from_slice(&1.0f32.to_be_bytes()); // speed
-        wire::write_varint(&mut raw, 1); // weight
-    }
-
-    let decoded = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
-        &mut std::io::Cursor::new(&raw[..]),
-    );
-    let faithful = matches!(
-        &decoded,
-        Ok(ClientboundGamePacket::Explode(p))
-            if p.explosion_particle == Particle::ExplosionEmitter
-                && p.block_particles.len() == 2
-                && p.block_particles[0].value.particle == Particle::Poof
-                && p.block_particles[1].value.particle == Particle::Smoke
-    );
-    assert!(
-        !faithful,
-        "azalea now decodes native explosions: {decoded:?}"
-    );
 }
 
 /// 1.21.5's `player_command` action enum still opens with PRESS/RELEASE_
@@ -2036,22 +1858,8 @@ fn translate_player_command_770() {
 /// 26.2, past the four variant serializers 1.21.5 added.
 #[test]
 fn translate_entity_data_769() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(769, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[17, 27, 2]); // index 17, sniffer_state, ordinal 2
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(769, old) else {
-        panic!("wrong packet");
-    };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::SnifferState(_)
-    ));
+    // index 17, sniffer_state, ordinal 2
+    assert_eq!(entity_data_bytes(769, &[17, 27, 2]), [17, 35, 2]);
 }
 
 /// 1.21.4 team `Parameters` carry nametag visibility and collision rule as
@@ -2223,19 +2031,26 @@ fn player_chat_frame(protocol: i32, chat_type: u32) -> Vec<u8> {
         &mut old,
         old_id(protocol, Direction::Clientbound, "player_chat"),
     );
-    old.extend_from_slice(&[7; 16]); // sender uuid
-    wire::write_varint(&mut old, 3); // index
-    old.push(0); // no signature
-    old.extend_from_slice(&[2, b'h', b'i']); // content
-    old.extend_from_slice(&11u64.to_be_bytes()); // timestamp
-    old.extend_from_slice(&13u64.to_be_bytes()); // salt
-    old.push(0); // no last-seen entries
-    old.push(0); // no unsigned content
-    old.push(0); // filter: pass-through
-    wire::write_varint(&mut old, chat_type);
-    old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
-    old.push(0); // no target
+    old.extend(player_chat_body(chat_type));
     old
+}
+
+/// The fields of that frame, which 26.2 keeps after its `globalIndex`.
+fn player_chat_body(chat_type: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&[7; 16]); // sender uuid
+    wire::write_varint(&mut body, 3); // index
+    body.push(0); // no signature
+    body.extend_from_slice(&[2, b'h', b'i']); // content
+    body.extend_from_slice(&11u64.to_be_bytes()); // timestamp
+    body.extend_from_slice(&13u64.to_be_bytes()); // salt
+    body.push(0); // no last-seen entries
+    body.push(0); // no unsigned content
+    body.push(0); // filter: pass-through
+    wire::write_varint(&mut body, chat_type);
+    body.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
+    body.push(0); // no target
+    body
 }
 
 /// Pre-1.20.5 sends the chat type as a direct registry id where 26.2 wants a
@@ -2243,14 +2058,11 @@ fn player_chat_frame(protocol: i32, chat_type: u32) -> Vec<u8> {
 /// follows" sentinel, so leaving it alone makes normal chat undecodable.
 #[test]
 fn translate_player_chat_765() {
-    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(765, player_chat_frame(765, 0))
-    else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.global_index, 0);
-    assert_eq!(p.index, 3);
-    assert_eq!(p.body.content, "hi");
-    assert_eq!(chat_kind(&p.chat_type), 0);
+    // A zero `globalIndex`, then the chat type as the holder of id 0.
+    assert_eq!(
+        translate_to_payload(765, player_chat_frame(765, 0), "player_chat"),
+        [&[0][..], &player_chat_body(1)].concat()
+    );
 }
 
 /// `disguised_chat` carries the same `ChatType.Bound` tail, after the message
@@ -2267,33 +2079,21 @@ fn translate_disguised_chat_765() {
     old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
     old.push(0); // no target
 
-    let ClientboundGamePacket::DisguisedChat(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(chat_kind(&p.chat_type), 0);
-}
-
-/// The registry id behind a decoded chat-type holder; a direct (inline) one
-/// means the holder bump was missed.
-fn chat_kind(bound: &azalea_protocol::packets::game::c_player_chat::ChatTypeBound) -> u32 {
-    use pomme_registry::{Holder, Registry};
-    match &bound.chat_type {
-        Holder::Reference(kind) => kind.to_u32(),
-        Holder::Direct(_) => panic!("chat type decoded as an inline value"),
-    }
+    assert_eq!(
+        translate_to_payload(765, old, "disguised_chat"),
+        // The chat type as the holder of id 0.
+        [8, 0, 2, b'h', b'i', 1, 8, 0, 1, b'n', 0]
+    );
 }
 
 /// 1.21.5 prepended `globalIndex` to `player_chat`; the shim synthesizes
 /// zero ahead of an otherwise identical body.
 #[test]
 fn translate_player_chat_769() {
-    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(769, player_chat_frame(769, 1))
-    else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.global_index, 0);
-    assert_eq!(p.index, 3);
-    assert_eq!(p.body.content, "hi");
+    assert_eq!(
+        translate_to_payload(769, player_chat_frame(769, 1), "player_chat"),
+        [&[0][..], &player_chat_body(1)].concat()
+    );
 }
 
 /// A 26.2 `container_click` carries hashed stacks; 1.21.4 wants full item
@@ -2327,31 +2127,40 @@ fn translate_container_click_769() {
     assert_eq!(frames, [[old, 1, 2, 0, 5, 0, 0, 1, 0, 5, 2, 4, 0, 0, 0]]);
 }
 
+/// A `level_particles` position, spread, speed and count, which every
+/// version before 26.3 sends alike.
+fn level_particles_fields() -> Vec<u8> {
+    let mut fields = Vec::new();
+    for c in [1.0f64, 65.0, -2.0] {
+        fields.extend_from_slice(&c.to_be_bytes());
+    }
+    for d in [0.5f32, 0.5, 0.5, 0.1] {
+        fields.extend_from_slice(&d.to_be_bytes());
+    }
+    fields.extend_from_slice(&7i32.to_be_bytes()); // count
+    fields
+}
+
 /// 1.21.4 inserted `alwaysShow` after `overrideLimiter`; the shim
 /// synthesizes false for 1.21.3-and-older frames.
 #[test]
 fn translate_level_particles_768() {
+    let mut fields = level_particles_fields();
+    wire::write_varint(&mut fields, 30); // particle (26.2 id space)
+
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(768, Direction::Clientbound, "level_particles"),
     );
     old.push(1); // override limiter
-    for c in [1.0f64, 65.0, -2.0] {
-        old.extend_from_slice(&c.to_be_bytes());
-    }
-    for d in [0.5f32, 0.5, 0.5, 0.1] {
-        old.extend_from_slice(&d.to_be_bytes());
-    }
-    old.extend_from_slice(&7i32.to_be_bytes()); // count
-    wire::write_varint(&mut old, 30); // particle (26.2 id space)
+    old.extend_from_slice(&fields);
 
-    let ClientboundGamePacket::LevelParticles(p) = translate_and_decode(768, old) else {
-        panic!("wrong packet");
-    };
-    assert!(p.override_limiter);
-    assert!(!p.always_show);
-    assert_eq!(p.count, 7);
+    assert_eq!(
+        translate_to_payload(768, old, "level_particles"),
+        // The override limiter, then `alwaysShow`.
+        [&[1, 0][..], &fields].concat()
+    );
 }
 
 /// 1.21.4 appended UPDATE_HAT after UPDATE_LIST_ORDER rather than inserting
@@ -2460,17 +2269,19 @@ fn translate_teleport_entity_767() {
     old.push(0); // x rot
     old.push(1); // on ground
 
-    let ClientboundGamePacket::EntityPositionSync(p) = translate_and_decode(767, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, MinecraftEntityId(9));
     assert_eq!(
-        (p.values.pos.x, p.values.pos.y, p.values.pos.z),
-        (1.0, 70.0, 2.0)
+        translate_and_read(767, old, "entity_position_sync", entity::read),
+        EntityPacket::PositionSync {
+            id: 9,
+            values: entity::PositionMoveRotation {
+                position: DVec3::new(1.0, 70.0, 2.0),
+                delta: DVec3::ZERO,
+                y_rot: 90.0,
+                x_rot: 0.0,
+            },
+            on_ground: true,
+        }
     );
-    assert_eq!(p.values.look_direction.y_rot(), 90.0);
-    assert_eq!(p.values.look_direction.x_rot(), 0.0);
-    assert!(p.on_ground);
 }
 
 /// 767's two-long `set_time` with a negated (frozen) dayTime feeds the
@@ -2567,10 +2378,10 @@ fn translate_set_carried_item_767() {
     );
     old.push(3);
 
-    let ClientboundGamePacket::SetHeldSlot(p) = translate_and_decode(767, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.slot, 3);
+    assert_eq!(
+        translate_and_read(767, old, "set_held_slot", player::read),
+        PlayerPacket::HeldSlot { slot: 3 }
+    );
 }
 
 /// Outbound `player_input` becomes 767's vehicle-steering layout (axis
@@ -2685,24 +2496,29 @@ fn translate_update_attributes_766() {
     old.extend_from_slice(&0.3f64.to_be_bytes());
     wire::write_varint(&mut old, 2);
 
-    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(766, old) else {
-        panic!("wrong packet");
-    };
+    use pomme_registry::Registry;
+
     assert_eq!(
-        p.values[0].modifiers[1].id.to_string(),
-        "minecraft:sprinting"
-    );
-    assert_eq!(p.values.len(), 1);
-    assert_eq!(
-        p.values[0].attribute,
-        pomme_registry::builtin::Attribute::MaxHealth
-    );
-    assert_eq!(p.values[0].base, 20.0);
-    let modifier = &p.values[0].modifiers[0];
-    assert_eq!(modifier.amount, 4.0);
-    assert_eq!(
-        modifier.id.to_string(),
-        format!("minecraft:{}", "ab".repeat(16))
+        translate_and_read(766, old, "update_attributes", player::read),
+        PlayerPacket::Attributes {
+            entity: 9,
+            snapshots: vec![player::AttributeSnapshot {
+                attribute: pomme_registry::builtin::Attribute::MaxHealth.to_u32(),
+                base: 20.0,
+                modifiers: vec![
+                    player::AttributeModifier {
+                        id: format!("minecraft:{}", "ab".repeat(16)),
+                        amount: 4.0,
+                        operation: 0,
+                    },
+                    player::AttributeModifier {
+                        id: "minecraft:sprinting".into(),
+                        amount: 0.3,
+                        operation: 2,
+                    },
+                ],
+            }],
+        }
     );
 }
 
@@ -2720,11 +2536,10 @@ fn translate_projectile_power_766() {
         old.extend_from_slice(&c.to_be_bytes());
     }
 
-    let ClientboundGamePacket::ProjectilePower(p) = translate_and_decode(766, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, MinecraftEntityId(9));
-    assert_eq!(p.acceleration_power, 5.0);
+    assert_eq!(
+        translate_to_payload(766, old, "projectile_power"),
+        [&[9][..], &5.0f64.to_be_bytes()].concat()
+    );
 }
 
 /// Outbound `use_item` drops the rotation floats 1.21 appended.
@@ -2891,17 +2706,19 @@ fn translate_merchant_offers_765() {
     wire::write_varint(&mut old, 30); // villager xp
     old.extend_from_slice(&[1, 1]); // show progress, can restock
 
-    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.container_id, 1);
-    let offer = &p.offers[0];
-    assert_eq!(offer.base_cost_a.count, 3);
-    assert!(offer.cost_b.is_none());
-    assert_eq!(offer.uses, 5);
-    assert_eq!(offer.max_uses, 12);
-    assert_eq!(p.villager_level, 2);
-    assert!(p.can_restock);
+    // Items keep their 765 ids, which the reader remaps.
+    let mut native = vec![1, 1]; // container id, one offer
+    native.extend_from_slice(&[SHIFTED_ITEM, 3, 0]); // costA: 3 of it, no component predicates
+    native.extend_from_slice(&[1, 4, 0, 0]); // result: one, no components
+    native.push(0); // no costB
+    native.push(0); // out of stock
+    for n in [5i32, 12, 2, 0] {
+        native.extend_from_slice(&n.to_be_bytes());
+    }
+    native.extend_from_slice(&0.05f32.to_be_bytes());
+    native.extend_from_slice(&1i32.to_be_bytes());
+    native.extend_from_slice(&[2, 30, 1, 1]);
+    assert_eq!(translate_to_payload(765, old, "merchant_offers"), native);
 }
 
 /// An offer whose second cost 26.2 lacks is left out, not shown cheaper;
@@ -2917,11 +2734,12 @@ fn translate_merchant_offers_777() {
             name,
         )
     };
-    let offer = |old: &mut Vec<u8>, base: u32, second: Option<u32>| {
+    let native_item = |name| registry_id(RegistryTable::native(), ClientRegistry::Item, name);
+    let offer = |old: &mut Vec<u8>, emerald: u32, base: u32, second: Option<u32>| {
         wire::write_varint(old, base);
         old.extend_from_slice(&[2, 0]); // count, no component predicates
         old.push(1); // result: one
-        wire::write_varint(old, wire_item("emerald"));
+        wire::write_varint(old, emerald);
         old.extend_from_slice(&[0, 0]); // no components
         old.push(u8::from(second.is_some()));
         if let Some(second) = second {
@@ -2942,34 +2760,34 @@ fn translate_merchant_offers_777() {
     );
     wire::write_varint(&mut old, 1); // container id
     wire::write_varint(&mut old, 3); // offers
-    offer(&mut old, wire_item("diamond"), None);
+    let emerald = wire_item("emerald");
+    offer(&mut old, emerald, wire_item("diamond"), None);
     offer(
         &mut old,
+        emerald,
         wire_item("diamond"),
         Some(wire_item("poplar_planks")),
     );
-    offer(&mut old, wire_item("bread"), Some(wire_item("diamond")));
-    wire::write_varint(&mut old, 2); // villager level
-    wire::write_varint(&mut old, 30); // villager xp
-    old.extend_from_slice(&[1, 1]); // show progress, can restock
-
-    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
-    use pomme_registry::builtin::ItemKind;
-    let kept: Vec<_> = p
-        .offers
-        .iter()
-        .map(|o| (o.base_cost_a.item, o.cost_b.as_ref().map(|c| c.item)))
-        .collect();
-    assert_eq!(
-        kept,
-        [
-            (ItemKind::Diamond, None),
-            (ItemKind::Bread, Some(ItemKind::Diamond))
-        ]
+    offer(
+        &mut old,
+        emerald,
+        wire_item("bread"),
+        Some(wire_item("diamond")),
     );
-    assert_eq!(p.villager_level, 2);
+    let tail = [2, 30, 1, 1]; // villager level and xp, show progress, can restock
+    old.extend_from_slice(&tail);
+
+    let mut native = vec![1, 2]; // container id, the two offers left
+    let emerald = native_item("emerald");
+    offer(&mut native, emerald, native_item("diamond"), None);
+    offer(
+        &mut native,
+        emerald,
+        native_item("bread"),
+        Some(native_item("diamond")),
+    );
+    native.extend_from_slice(&tail);
+    assert_eq!(translate_to_payload(777, old, "merchant_offers"), native);
 }
 
 /// 1.20.5 widened `update_mob_effect`'s amplifier from a byte to a varint
@@ -2988,12 +2806,17 @@ fn translate_update_mob_effect_765() {
     old.push(0); // flags
     old.push(0); // factor data: absent
 
-    let ClientboundGamePacket::UpdateMobEffect(p) = translate_and_decode(765, old) else {
+    let PlayerPacket::UpdateEffect {
+        entity,
+        amplifier,
+        duration,
+        flags,
+        ..
+    } = translate_and_read(765, old, "update_mob_effect", player::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.entity_id, MinecraftEntityId(7));
-    assert_eq!(p.data.amplifier, 2);
-    assert_eq!(p.data.duration, 600);
+    assert_eq!((entity, amplifier, duration, flags), (7, 2, 600, 0));
 }
 
 /// 1.20.4 `update_attributes` keys attributes by resource location (mapped
@@ -3016,20 +2839,22 @@ fn translate_update_attributes_765() {
     old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
     old.push(0); // operation
 
-    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.values.len(), 1);
+    use pomme_registry::Registry;
+
     assert_eq!(
-        p.values[0].attribute,
-        pomme_registry::builtin::Attribute::MaxHealth
-    );
-    assert_eq!(p.values[0].base, 20.0);
-    let modifier = &p.values[0].modifiers[0];
-    assert_eq!(modifier.amount, 4.0);
-    assert_eq!(
-        modifier.id.to_string(),
-        format!("minecraft:{}", "ab".repeat(16))
+        translate_and_read(765, old, "update_attributes", player::read),
+        PlayerPacket::Attributes {
+            entity: 9,
+            snapshots: vec![player::AttributeSnapshot {
+                attribute: pomme_registry::builtin::Attribute::MaxHealth.to_u32(),
+                base: 20.0,
+                modifiers: vec![player::AttributeModifier {
+                    id: format!("minecraft:{}", "ab".repeat(16)),
+                    amount: 4.0,
+                    operation: 0,
+                }],
+            }],
+        }
     );
 }
 
@@ -3037,6 +2862,8 @@ fn translate_update_attributes_765() {
 /// just before the payload and `alwaysShow` is synthesized.
 #[test]
 fn translate_level_particles_765() {
+    let fields = level_particles_fields();
+
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -3044,20 +2871,13 @@ fn translate_level_particles_765() {
     );
     wire::write_varint(&mut old, 30); // particle (26.2 id space)
     old.push(1); // override limiter
-    for c in [1.0f64, 65.0, -2.0] {
-        old.extend_from_slice(&c.to_be_bytes());
-    }
-    for d in [0.5f32, 0.5, 0.5, 0.1] {
-        old.extend_from_slice(&d.to_be_bytes());
-    }
-    old.extend_from_slice(&7i32.to_be_bytes()); // count
+    old.extend_from_slice(&fields);
 
-    let ClientboundGamePacket::LevelParticles(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert!(p.override_limiter);
-    assert!(!p.always_show);
-    assert_eq!(p.count, 7);
+    assert_eq!(
+        translate_to_payload(765, old, "level_particles"),
+        // The override limiter and `alwaysShow` first, the particle last.
+        [&[1, 0][..], &fields, &[30]].concat()
+    );
 }
 
 /// The serializer-id walker at 765: 1.20.5 inserted `particles` (18),
@@ -3079,6 +2899,26 @@ fn entity_data_entries(
     protocol: i32,
     values: &[u8],
 ) -> Vec<pomme_protocol::entity_data::DataValue> {
+    let payload = translated_entity_data(protocol, values);
+    let (id, entries) =
+        super::entity_data::read_entity_data(&payload, Some(&translation_for(protocol))).unwrap();
+    assert_eq!(id, 9);
+    entries
+}
+
+/// The same translation's entries as their native bytes, which pins the
+/// serializer ids a reader that skips a value never looks at.
+fn entity_data_bytes(protocol: i32, values: &[u8]) -> Vec<u8> {
+    let payload = translated_entity_data(protocol, values);
+    let [9, entries @ .., 0xFF] = &payload[..] else {
+        panic!("payload: {payload:?}");
+    };
+    entries.to_vec()
+}
+
+/// A `set_entity_data` frame for entity 9 carrying `values` (the entry list
+/// without its terminator), translated: the native payload.
+fn translated_entity_data(protocol: i32, values: &[u8]) -> Vec<u8> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -3087,23 +2927,7 @@ fn entity_data_entries(
     wire::write_varint(&mut old, 9); // entity id
     old.extend_from_slice(values);
     old.push(0xFF);
-    let translation = translation_for(protocol);
-    let translated = translation
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let mut r = pomme_protocol::codec::Reader::new(&translated);
-    assert_eq!(
-        r.varint(),
-        Ok(table_id(
-            Phase::Game,
-            Direction::Clientbound,
-            "set_entity_data"
-        ))
-    );
-    let (id, entries) =
-        super::entity_data::read_entity_data(&translated[r.pos()..], Some(&translation)).unwrap();
-    assert_eq!(id, 9);
-    entries
+    translate_to_payload(protocol, old, "set_entity_data")
 }
 
 /// The item of an entry's stack; `None` for an empty one.
@@ -3353,8 +3177,6 @@ fn translate_container_set_slot_777() {
 /// whose dimension type is a resource key string.
 #[test]
 fn translate_config_registry_data_765() {
-    use azalea_buf::AzBuf;
-    use azalea_protocol::packets::config::ClientboundConfigPacket;
     use simdnbt::owned::NbtTag;
 
     let root = dimension_registry_codec(&[
@@ -3367,24 +3189,20 @@ fn translate_config_registry_data_765() {
         &mut old,
         config_id(765, Direction::Clientbound, "registry_data"),
     );
-    NbtTag::Compound(root).azalea_write(&mut old).unwrap();
+    NbtTag::Compound(root).write(&mut old);
 
     let translation = translation_for(765);
     let frames = translation.translate_config_frame(old.into_boxed_slice());
     assert_eq!(frames.len(), 1);
-    let packet: ClientboundConfigPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
-    let ClientboundConfigPacket::RegistryData(p) = packet else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.registry_id.to_string(), "minecraft:dimension_type");
-    let names: Vec<String> = p.entries.iter().map(|(n, _)| n.to_string()).collect();
+    let entries = dimension_type_entries(&frames[0]);
     assert_eq!(
-        names,
+        entries.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
         ["minecraft:custom_overworld", "minecraft:custom_end"]
     );
     // The element alone, not the {name, id, element} wrapper 765 nests it in.
-    let element = p.entries[0].1.as_ref().expect("entry NBT");
+    let element = entries[0].data.as_deref().expect("entry NBT");
+    let element = crate::net::chat::read_nbt_tag(element, &mut 0).unwrap();
+    let element = element.compound().expect("a compound");
     assert_eq!(element.int("height"), Some(384));
     assert_eq!(element.string("name"), None);
 
@@ -3633,19 +3451,9 @@ fn write_named_nbt_d5(out: &mut Vec<u8>) {
     out.push(0);
 }
 
-/// The expected 26.2-side component for a JSON literal, parsed with
-/// azalea's own JSON path.
-fn expect_text(json: &str) -> azalea_chat::FormattedText {
-    use serde::de::Deserialize;
-    azalea_chat::FormattedText::deserialize(
-        &serde_json::from_str::<serde_json::Value>(json).unwrap(),
-    )
-    .unwrap()
-}
-
 /// The 1.20.2 JSON -> NBT component transcode, end to end through
-/// `system_chat` (leading component) — nested styling and a mixed `extra`
-/// array (bare string beside a compound) normalize into azalea's shape.
+/// `system_chat` (leading component): nested styling and a mixed `extra`
+/// array (bare string beside a compound) both come through.
 #[test]
 fn translate_system_chat_764() {
     let json = r#"{"text":"a","color":"red","extra":["b",{"text":"c","bold":true}]}"#;
@@ -3654,11 +3462,13 @@ fn translate_system_chat_764() {
     write_json(&mut old, json);
     old.push(0); // not an action bar
 
-    let ClientboundGamePacket::SystemChat(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    assert!(!p.overlay);
-    assert_eq!(p.content.to_string(), expect_text(json).to_string());
+    let payload = translate_to_payload(764, old, "system_chat");
+    let mut pos = 0;
+    let text = crate::net::chat::read_component(&payload, &mut pos).unwrap();
+    assert_eq!(payload[pos..], [0]);
+    assert_eq!(text.plain_text(), "abc");
+    assert_eq!(text.style.color, Some(0xFF5555));
+    assert_eq!(text.siblings[1].style.bold, Some(true));
 }
 
 /// `tab_list` carries two back-to-back components.
@@ -3713,11 +3523,13 @@ fn translate_combat_kill_764() {
     wire::write_varint(&mut old, 9); // player id
     write_json(&mut old, r#"{"text":"died"}"#);
 
-    let ClientboundGamePacket::PlayerCombatKill(p) = translate_and_decode(764, old) else {
+    let PlayerPacket::CombatKill { player, message } =
+        translate_and_read(764, old, "player_combat_kill", player::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.player_id, MinecraftEntityId(9));
-    assert_eq!(p.message.to_string(), "died");
+    assert_eq!(player, 9);
+    assert_eq!(plain(&message), "died");
 }
 
 /// `boss_event`'s name sits inside the Add op body.
@@ -3829,13 +3641,24 @@ fn translate_player_chat_764() {
     write_json(&mut old, r#"{"text":"n"}"#);
     old.push(0); // no target
 
-    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.global_index, 0);
-    assert_eq!(p.index, 3);
-    assert_eq!(p.body.content, "hi");
-    assert_eq!(p.unsigned_content.as_ref().unwrap().to_string(), "hey");
+    let payload = translate_to_payload(764, old, "player_chat");
+    let mut r = pomme_protocol::codec::Reader::new(&payload);
+    assert_eq!(r.varint(), Ok(0)); // global index
+    r.bytes(16).unwrap(); // sender uuid
+    assert_eq!(r.varint(), Ok(3)); // index
+    assert_eq!(r.bool(), Ok(false)); // no signature
+    assert_eq!(r.utf(256), Ok("hi"));
+    r.bytes(16).unwrap(); // timestamp, salt
+    assert_eq!(r.varint(), Ok(1)); // one last-seen entry
+    assert_eq!(r.varint(), Ok(0)); // carrying a full signature
+    r.bytes(256).unwrap();
+    assert_eq!(r.bool(), Ok(true)); // unsigned content present
+    assert_eq!(plain(r.nbt().unwrap()), "hey");
+    assert_eq!(r.varint(), Ok(0)); // filter: pass-through
+    assert_eq!(r.varint(), Ok(5)); // the holder of chat type 4
+    assert_eq!(plain(r.nbt().unwrap()), "n");
+    assert_eq!(r.bool(), Ok(false)); // no target
+    r.ensure_eof().unwrap();
 }
 
 /// `disguised_chat`: message transcode plus the chat-type holder bump.
@@ -3851,10 +3674,13 @@ fn translate_disguised_chat_764() {
     write_json(&mut old, r#"{"text":"n"}"#);
     old.push(0); // no target
 
-    let ClientboundGamePacket::DisguisedChat(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.message.to_string(), "psst");
+    let payload = translate_to_payload(764, old, "disguised_chat");
+    let mut r = pomme_protocol::codec::Reader::new(&payload);
+    assert_eq!(plain(r.nbt().unwrap()), "psst");
+    assert_eq!(r.varint(), Ok(3)); // the holder of chat type 2
+    assert_eq!(plain(r.nbt().unwrap()), "n");
+    assert_eq!(r.bool(), Ok(false)); // no target
+    r.ensure_eof().unwrap();
 }
 
 /// `player_info_update`: the display name (last action) transcodes after
@@ -3901,11 +3727,15 @@ fn translate_command_suggestions_764() {
     old.push(1); // tooltip present
     write_json(&mut old, r#"{"text":"tip"}"#);
 
-    let ClientboundGamePacket::CommandSuggestions(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, 5);
-    assert_eq!(p.suggestions.list()[0].text(), "/hey");
+    let payload = translate_to_payload(764, old, "command_suggestions");
+    let mut r = pomme_protocol::codec::Reader::new(&payload);
+    assert_eq!(r.varint(), Ok(5)); // transaction id
+    assert_eq!((r.varint(), r.varint()), (Ok(1), Ok(4))); // range
+    assert_eq!(r.varint(), Ok(1)); // one suggestion
+    assert_eq!(r.utf(256), Ok("/hey"));
+    assert_eq!(r.bool(), Ok(true)); // tooltip present
+    assert_eq!(plain(r.nbt().unwrap()), "tip");
+    r.ensure_eof().unwrap();
 }
 
 /// The 1.20.2 `set_score` split: CHANGE gains absent display/numberFormat,
@@ -3994,13 +3824,23 @@ fn translate_resource_pack_764() {
     old.push(1); // prompt present
     write_json(&mut old, r#"{"text":"pls"}"#);
 
-    let ClientboundGamePacket::ResourcePackPush(p) = translate_and_decode(764, old) else {
+    use pomme_protocol::resource_pack::{self, ResourcePackPacket};
+
+    let ResourcePackPacket::Push {
+        id,
+        url,
+        hash,
+        required,
+        prompt,
+    } = translate_and_read(764, old, "resource_pack_push", resource_pack::read)
+    else {
         panic!("wrong packet");
     };
-    assert_eq!(p.id, uuid::Uuid::nil());
-    assert_eq!(p.url, "http");
-    assert!(p.required);
-    assert_eq!(p.prompt.as_ref().unwrap().to_string(), "pls");
+    assert_eq!(
+        (id, url.as_str(), hash.as_str(), required),
+        (0, "http", "ab", true)
+    );
+    assert_eq!(plain(&prompt.unwrap()), "pls");
 }
 
 /// The serverbound `resource_pack` reply loses its UUID at 764 and the
@@ -4030,7 +3870,7 @@ fn translate_resource_pack_response_764() {
 /// serverbound reply strips its UUID.
 #[test]
 fn translate_config_764() {
-    use azalea_protocol::packets::config::ClientboundConfigPacket;
+    use pomme_protocol::resource_pack::{self, ResourcePackPacket};
 
     let t = translation_for(764);
 
@@ -4042,12 +3882,8 @@ fn translate_config_764() {
     write_json(&mut old, r#"{"text":"bye"}"#);
     let frames = t.translate_config_frame(old.into_boxed_slice());
     assert_eq!(frames.len(), 1);
-    let packet: ClientboundConfigPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
-    let ClientboundConfigPacket::Disconnect(p) = packet else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.reason.to_string(), "bye");
+    let reason = read_config_frame(&frames[0], "disconnect", |_, r| Some(r.nbt().map(plain)));
+    assert_eq!(reason, "bye");
 
     let mut old = Vec::new();
     wire::write_varint(
@@ -4058,13 +3894,16 @@ fn translate_config_764() {
     old.extend_from_slice(&[1, b'h']); // hash
     old.extend_from_slice(&[0, 0]); // not required, no prompt
     let frames = t.translate_config_frame(old.into_boxed_slice());
-    let packet: ClientboundConfigPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
-    let ClientboundConfigPacket::ResourcePackPush(p) = packet else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.url, "u");
-    assert!(p.prompt.is_none());
+    assert_eq!(
+        read_config_frame(&frames[0], "resource_pack_push", resource_pack::read),
+        ResourcePackPacket::Push {
+            id: 0,
+            url: "u".into(),
+            hash: "h".into(),
+            required: false,
+            prompt: None,
+        }
+    );
 
     let mut frame = Vec::new();
     wire::write_varint(
@@ -4084,29 +3923,18 @@ fn translate_config_764() {
 /// desync the list, so they transcode in place.
 #[test]
 fn translate_entity_data_764() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(764, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[2, 6, 1]); // index 2, optional_component, present
-    write_json(&mut old, r#"{"text":"Named"}"#);
-    old.extend_from_slice(&[3, 0, 1]); // index 3, byte serializer
-    old.push(0xFF);
+    use pomme_protocol::entity_data::Value;
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    let azalea_entity::EntityDataValue::OptionalFormattedText(name) = &p.packed_items.0[0].value
-    else {
+    let mut values = vec![2, 6, 1]; // index 2, optional_component, present
+    write_json(&mut values, r#"{"text":"Named"}"#);
+    values.extend_from_slice(&[3, 0, 1]); // index 3, byte serializer
+
+    let entries = entity_data_entries(764, &values);
+    let Value::OptionalComponent(Some(name)) = &entries[0].value else {
         panic!("wrong serializer");
     };
-    assert_eq!(name.as_ref().unwrap().to_string(), "Named");
-    assert!(matches!(
-        p.packed_items.0[1].value,
-        azalea_entity::EntityDataValue::Byte(1)
-    ));
+    assert_eq!(plain(name), "Named");
+    assert_eq!(entries[1].value, Value::Byte(1));
 }
 
 /// `update_attributes` names its attribute by registry id, and those shift
@@ -4212,13 +4040,10 @@ fn dimension_registry_codec(dimensions: &[(&str, i32)]) -> simdnbt::owned::NbtCo
 /// The same codec in 1.20.1's form: the empty root name `NbtIo.write` emitted
 /// before 1.20.2 sits between the tag byte and the payload.
 fn write_registry_codec_763(old: &mut Vec<u8>, dimensions: &[(&str, i32)]) {
-    use azalea_buf::AzBuf;
     use simdnbt::owned::NbtTag;
 
     let mut unnamed = Vec::new();
-    NbtTag::Compound(dimension_registry_codec(dimensions))
-        .azalea_write(&mut unnamed)
-        .unwrap();
+    NbtTag::Compound(dimension_registry_codec(dimensions)).write(&mut unnamed);
     old.push(unnamed[0]); // tag type
     old.extend_from_slice(&0u16.to_be_bytes()); // the empty root name
     old.extend_from_slice(&unnamed[1..]);
@@ -4253,8 +4078,6 @@ fn write_login_763(old: &mut Vec<u8>, dimension_type: &str, dimensions: &[(&str,
 /// configuration phase; the captured order then keys the spawn-info rewrite.
 #[test]
 fn translate_login_registries_763() {
-    use azalea_protocol::packets::config::ClientboundConfigPacket;
-
     let mut old = Vec::new();
     write_login_763(
         &mut old,
@@ -4270,15 +4093,9 @@ fn translate_login_registries_763() {
         .split_login_registries(&old)
         .expect("registry codec");
     assert_eq!(frames.len(), 1);
-    let packet: ClientboundConfigPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
-    let ClientboundConfigPacket::RegistryData(p) = packet else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.registry_id.to_string(), "minecraft:dimension_type");
-    let names: Vec<String> = p.entries.iter().map(|(n, _)| n.to_string()).collect();
+    let entries = dimension_type_entries(&frames[0]);
     assert_eq!(
-        names,
+        entries.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
         ["minecraft:custom_overworld", "minecraft:custom_end"]
     );
 
@@ -4571,11 +4388,11 @@ fn translate_tag_query_763() {
     wire::write_varint(&mut old, 7); // transaction id
     write_named_nbt_d5(&mut old);
 
-    let ClientboundGamePacket::TagQuery(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.transaction_id, 7);
-    assert_eq!(p.tag.compound().and_then(|c| c.int("d")), Some(5));
+    assert_eq!(
+        translate_to_payload(763, old, "tag_query"),
+        // The transaction id, then `{d: 5}` without its root name.
+        [7, 10, 3, 0, 1, b'd', 0, 0, 0, 5, 0]
+    );
 }
 
 /// Every element pomme embeds for `minecraft:core` has to survive azalea's
@@ -4732,29 +4549,6 @@ fn translate_passthrough_777() {
 /// `move_entity_rot` moved onGround ahead of the rotation bytes.
 #[test]
 fn translate_move_entity_777() {
-    use azalea_core::delta::PositionDelta8;
-    use azalea_protocol::packets::game::c_move_entity_pos::ClientboundMoveEntityPos;
-    use azalea_protocol::packets::game::c_move_entity_pos_rot::{
-        ClientboundMoveEntityPosRot, CompactLookDirection,
-    };
-    use azalea_protocol::packets::game::c_move_entity_rot::ClientboundMoveEntityRot;
-
-    let entity_id = MinecraftEntityId(7);
-    let delta = PositionDelta8 {
-        xa: 100,
-        ya: -200,
-        za: 300,
-    };
-    let look_direction = CompactLookDirection {
-        y_rot: 10,
-        x_rot: -20,
-    };
-    let native = |packet| azalea_protocol::write::serialize_packet(&packet).unwrap();
-    let translate = |old: Vec<u8>| {
-        translation_for(777)
-            .translate_game_frame(old.into_boxed_slice())
-            .unwrap()
-    };
     let shorts = |out: &mut Vec<u8>, d: [i16; 3]| {
         for c in d {
             out.extend_from_slice(&c.to_be_bytes());
@@ -4767,17 +4561,20 @@ fn translate_move_entity_777() {
         wire::write_varint(&mut old, properties);
         old
     };
+    // 26.2's layout: the entity, the delta, then onGround.
+    let pos = |delta, on_ground| {
+        let mut native = vec![7];
+        shorts(&mut native, delta);
+        native.push(on_ground);
+        native
+    };
 
-    let pos = native(ClientboundGamePacket::MoveEntityPos(
-        ClientboundMoveEntityPos {
-            entity_id,
-            delta,
-            on_ground: true,
-        },
-    ));
     let mut old = head("move_entity_pos", 1);
     shorts(&mut old, [100, -200, 300]);
-    assert_eq!(&translate(old)[..], &pos[..]);
+    assert_eq!(
+        translate_to_payload(777, old, "move_entity_pos"),
+        pos([100, -200, 300], 1)
+    );
 
     // Two steps (properties = 2 << 1 | onGround) summing to the same delta.
     let mut old = head("move_entity_pos", (2 << 1) | 1);
@@ -4785,36 +4582,36 @@ fn translate_move_entity_777() {
         wire::write_varint(&mut old, ticks);
         shorts(&mut old, d);
     }
-    assert_eq!(&translate(old)[..], &pos[..]);
+    assert_eq!(
+        translate_to_payload(777, old, "move_entity_pos"),
+        pos([100, -200, 300], 1)
+    );
 
-    let pos_rot = native(ClientboundGamePacket::MoveEntityPosRot(
-        ClientboundMoveEntityPosRot {
-            entity_id,
-            delta,
-            look_direction,
-            on_ground: false,
-        },
-    ));
+    let rotation = [10, (-20i8) as u8];
     let mut old = head("move_entity_pos_rot", 0);
     shorts(&mut old, [100, -200, 300]);
-    old.extend_from_slice(&[10, (-20i8) as u8]);
-    assert_eq!(&translate(old)[..], &pos_rot[..]);
+    old.extend_from_slice(&rotation);
+    let mut native = vec![7];
+    shorts(&mut native, [100, -200, 300]);
+    native.extend_from_slice(&rotation);
+    native.push(0);
+    assert_eq!(
+        translate_to_payload(777, old, "move_entity_pos_rot"),
+        native
+    );
 
-    let rot = native(ClientboundGamePacket::MoveEntityRot(
-        ClientboundMoveEntityRot {
-            entity_id,
-            look_direction,
-            on_ground: true,
-        },
-    ));
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(777, Direction::Clientbound, "move_entity_rot"),
     );
     wire::write_varint(&mut old, 7);
-    old.extend_from_slice(&[1, 10, (-20i8) as u8]);
-    assert_eq!(&translate(old)[..], &rot[..]);
+    old.push(1);
+    old.extend_from_slice(&rotation);
+    assert_eq!(
+        translate_to_payload(777, old, "move_entity_rot"),
+        [7, rotation[0], rotation[1], 1]
+    );
 
     // A summed displacement past the short range saturates.
     let mut old = head("move_entity_pos", 2 << 1);
@@ -4822,12 +4619,9 @@ fn translate_move_entity_777() {
         wire::write_varint(&mut old, 1);
         shorts(&mut old, [30000, 0, -30000]);
     }
-    let ClientboundGamePacket::MoveEntityPos(p) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
     assert_eq!(
-        (p.delta.xa, p.delta.ya, p.delta.za),
-        (i16::MAX, 0, i16::MIN)
+        translate_to_payload(777, old, "move_entity_pos"),
+        pos([i16::MAX, 0, i16::MIN], 0)
     );
 }
 
@@ -4836,21 +4630,6 @@ fn translate_move_entity_777() {
 /// list ending at the last step) and no delta.
 #[test]
 fn translate_entity_position_sync_777() {
-    use azalea_core::position::Vec3;
-    use azalea_entity::LookDirection;
-    use azalea_protocol::common::movements::PositionMoveRotation;
-    use azalea_protocol::packets::game::c_entity_position_sync::ClientboundEntityPositionSync;
-
-    let packet = ClientboundGamePacket::EntityPositionSync(ClientboundEntityPositionSync {
-        id: MinecraftEntityId(9),
-        values: PositionMoveRotation {
-            pos: Vec3::new(1.0, 65.0, -2.0),
-            delta: Vec3::default(),
-            look_direction: LookDirection::new(90.0, -10.0),
-        },
-        on_ground: true,
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
     let finish = |old: &mut Vec<u8>| {
         write_floats(old, [90.0, -10.0]);
         old.push(1);
@@ -4878,10 +4657,19 @@ fn translate_entity_position_sync_777() {
     wire::write_varint(&mut stepped, 2);
     finish(&mut stepped);
     for old in [linear, stepped] {
-        let translated = translation_for(777)
-            .translate_game_frame(old.into_boxed_slice())
-            .unwrap();
-        assert_eq!(&translated[..], &frame[..]);
+        assert_eq!(
+            translate_and_read(777, old, "entity_position_sync", entity::read),
+            EntityPacket::PositionSync {
+                id: 9,
+                values: entity::PositionMoveRotation {
+                    position: DVec3::new(1.0, 65.0, -2.0),
+                    delta: DVec3::ZERO,
+                    y_rot: 90.0,
+                    x_rot: -10.0,
+                },
+                on_ground: true,
+            }
+        );
     }
 }
 
@@ -4934,74 +4722,30 @@ fn translate_explode_777() {
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// A survival overworld spawn (dimension type 0, seed 42, sea level 63) after
-/// `previous`, as azalea encodes it.
-fn azalea_spawn_info(
-    previous: Option<azalea_core::game_type::GameMode>,
-) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-    use pomme_registry::DataRegistry;
-
-    azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-        dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
-        dimension: "minecraft:overworld".into(),
-        seed: 42,
-        game_type: azalea_core::game_type::GameMode::Survival,
-        previous_game_type: azalea_core::game_type::OptionalGameType(previous),
-        is_debug: false,
-        is_flat: false,
-        last_death_location: None,
-        portal_cooldown: 0,
-        sea_level: 63,
-    }
-}
-
 /// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
 /// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
 /// a fixed distance from the end of `login` and `respawn`.
 #[test]
 fn translate_spawn_info_777() {
-    use azalea_core::game_type::GameMode;
-    use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use azalea_protocol::packets::game::c_respawn::ClientboundRespawn;
-
-    // (previous game type, its 26.2 byte, its 26.3 byte)
-    let cases = [
-        (None, 0xFF, 0),
-        (Some(GameMode::Survival), 0, 1),
-        (Some(GameMode::Creative), 1, 2),
-    ];
-    for (previous, native_byte, wire_byte) in cases {
-        let login = ClientboundGamePacket::Login(ClientboundLogin {
-            player_id: MinecraftEntityId(7),
-            hardcore: false,
-            levels: vec!["minecraft:overworld".into()],
-            max_players: 20,
-            chunk_radius: 12,
-            simulation_distance: 10,
-            reduced_debug_info: false,
-            show_death_screen: true,
-            do_limited_crafting: false,
-            common: azalea_spawn_info(previous),
-            online_mode: false,
-            enforces_secure_chat: true,
-        });
-        let respawn = ClientboundGamePacket::Respawn(ClientboundRespawn {
-            common: azalea_spawn_info(previous),
-            data_to_keep: 3,
-        });
-        // The byte precedes debug/flat/death/portal/sea level and the
-        // packet's own trailer (two bools, or the data-to-keep byte).
-        for (packet, name, from_end) in [(login, "login", 8), (respawn, "respawn", 7)] {
-            let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-            let at = frame.len() - from_end;
-            assert_eq!(frame[at], native_byte, "{name}");
-            let mut old = frame.to_vec();
+    // The byte precedes debug/flat/death/portal/sea level and the packet's
+    // own trailer (two bools, or the data-to-keep byte); the respawn
+    // fixture's death location is 29 bytes longer than none.
+    for (name, fixture, from_end) in [
+        ("login", "login/fresh", 8),
+        ("respawn", "respawn/keep_all", 7 + 29),
+    ] {
+        // (its 26.2 byte, its 26.3 byte): none, survival, creative
+        for (native_byte, wire_byte) in [(0xFF, 0), (0, 1), (1, 2)] {
+            let mut native = fixture_frame(name, fixture);
+            let at = native.len() - from_end;
+            native[at] = native_byte;
+            let mut old = native.clone();
             old[at] = wire_byte;
             old[0] = old_id(777, Direction::Clientbound, name) as u8;
             let translated = translation_for(777)
                 .translate_game_frame(old.into_boxed_slice())
                 .unwrap();
-            assert_eq!(&translated[..], &frame[..], "{name}");
+            assert_eq!(&translated[..], &native[..], "{name}");
         }
     }
 }
@@ -5011,29 +4755,20 @@ fn translate_spawn_info_777() {
 /// `animate` by hand; a `none` animation drops.
 #[test]
 fn translate_animate_777() {
-    use azalea_protocol::packets::game::c_animate::{AnimationAction, ClientboundAnimate};
+    // `ClientboundAnimatePacket`'s 26.2 actions.
+    const SWING_MAIN_HAND: u8 = 0;
+    const WAKE_UP: u8 = 2;
+    const SWING_OFF_HAND: u8 = 3;
+    const CRITICAL_HIT: u8 = 4;
+    const MAGIC_CRITICAL_HIT: u8 = 5;
 
-    let native = |action| {
-        azalea_protocol::write::serialize_packet(&ClientboundGamePacket::Animate(
-            ClientboundAnimate {
-                id: MinecraftEntityId(7),
-                action,
-            },
-        ))
-        .unwrap()
-    };
-    let t = translation_for(777);
-    for (wire, action) in [
-        (0, AnimationAction::WakeUp),
-        (1, AnimationAction::CriticalHit),
-        (2, AnimationAction::MagicCriticalHit),
-    ] {
+    let animate = |old: Vec<u8>| translate_and_read(777, old, "animate", entity::read);
+    for (wire, action) in [(0, WAKE_UP), (1, CRITICAL_HIT), (2, MAGIC_CRITICAL_HIT)] {
         let mut old = Vec::new();
         wire::write_varint(&mut old, old_id(777, Direction::Clientbound, "animate"));
         wire::write_varint(&mut old, 7);
         old.push(wire);
-        let translated = t.translate_game_frame(old.into_boxed_slice()).unwrap();
-        assert_eq!(&translated[..], &native(action)[..]);
+        assert_eq!(animate(old), EntityPacket::Animate { id: 7, action });
     }
     let swing = |hand, kind| {
         let mut old = Vec::new();
@@ -5045,16 +4780,16 @@ fn translate_animate_777() {
         wire::write_varint(&mut old, hand);
         wire::write_varint(&mut old, kind);
         wire::write_varint(&mut old, 6); // duration
-        old.into_boxed_slice()
+        old
     };
-    for (hand, action) in [
-        (0, AnimationAction::SwingMainHand),
-        (1, AnimationAction::SwingOffHand),
-    ] {
-        let translated = t.translate_game_frame(swing(hand, 1)).unwrap();
-        assert_eq!(&translated[..], &native(action)[..]);
+    for (hand, action) in [(0, SWING_MAIN_HAND), (1, SWING_OFF_HAND)] {
+        assert_eq!(
+            animate(swing(hand, 1)),
+            EntityPacket::Animate { id: 7, action }
+        );
     }
-    assert!(t.translate_game_frame(swing(0, 0)).is_none());
+    let none = swing(0, 0).into_boxed_slice();
+    assert!(translation_for(777).translate_game_frame(none).is_none());
 }
 
 /// 26.3's `level_particles` leads with the particle, splits `maxSpeed` per
@@ -5507,15 +5242,6 @@ fn translate_player_chat_777() {
         &longs,
     );
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::PlayerChat(_) = translate_and_decode(
-        777,
-        chat(
-            old_id(777, Direction::Clientbound, "player_chat"),
-            &[2, 5, 1],
-        ),
-    ) else {
-        panic!("wrong packet");
-    };
 }
 
 /// A 26.3 component whose value layout changed (`pot_decorations` became
@@ -5649,10 +5375,6 @@ fn translate_server_data_765() {
         .unwrap();
     let native = table_id(Phase::Game, Direction::Clientbound, "server_data");
     assert_eq!(&translated[..], &frame(native, &[])[..]);
-    let ClientboundGamePacket::ServerData(_) = translate_and_decode(765, frame(old_id, &[1]))
-    else {
-        panic!("wrong packet");
-    };
     let stray = frame(old_id, &[1, 7]).into_boxed_slice();
     assert!(translation_for(765).translate_game_frame(stray).is_none());
 }
@@ -5767,7 +5489,7 @@ fn translate_recipe_display_777() {
         &named(&[slot("tag"), 0]),
     );
     let translated = translation_for(777)
-        .translate_game_frame(old.clone().into_boxed_slice())
+        .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     let expected = ghost(
         table_id(Phase::Game, Direction::Clientbound, "place_ghost_recipe"),
@@ -5775,25 +5497,23 @@ fn translate_recipe_display_777() {
         &named(&[slot("tag")]),
     );
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::PlaceGhostRecipe(_) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
 }
 
 /// The level-load gate's `LEVEL_CHUNKS_LOAD_START` (game event 13, unchanged
 /// in 26.3's `ClientboundGameEventPacket`) reaches the handler on a 777 wire.
 #[test]
 fn translate_game_event_777() {
-    use azalea_protocol::packets::game::c_game_event::EventType;
-
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(777, Direction::Clientbound, "game_event"));
     old.push(13);
     old.extend_from_slice(&0f32.to_be_bytes());
-    let ClientboundGamePacket::GameEvent(p) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.event, EventType::WaitForLevelChunks);
+    assert_eq!(
+        translate_and_read(777, old, "game_event", player::read),
+        PlayerPacket::GameEvent {
+            event: 13,
+            param: 0.0,
+        }
+    );
 }
 
 /// The dialog packets pomme dispatches on, in both phases.
@@ -7599,6 +7319,27 @@ fn translate_sound_772() {
         translation_for(772).remap_to_native(ClientRegistry::SoundEvent, id),
         Some(native_explode)
     );
+}
+
+/// A survival overworld spawn (dimension type 0, seed 42, sea level 63) after
+/// `previous`, as azalea encodes it.
+fn azalea_spawn_info(
+    previous: Option<azalea_core::game_type::GameMode>,
+) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
+    use pomme_registry::DataRegistry;
+
+    azalea_protocol::packets::common::CommonPlayerSpawnInfo {
+        dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
+        dimension: "minecraft:overworld".into(),
+        seed: 42,
+        game_type: azalea_core::game_type::GameMode::Survival,
+        previous_game_type: azalea_core::game_type::OptionalGameType(previous),
+        is_debug: false,
+        is_flat: false,
+        last_death_location: None,
+        portal_cooldown: 0,
+        sea_level: 63,
+    }
 }
 
 /// azalea writes `Relative` as a little-endian bitset where vanilla writes a

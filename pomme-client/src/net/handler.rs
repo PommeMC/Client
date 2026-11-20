@@ -382,10 +382,8 @@ pub(crate) fn handle_raw_for_test(
 }
 
 /// Vanilla 26.2 `ClientboundExplodePacket` starts with the center, radius,
-/// block count and optional player knockback. azalea's typed codec misreads
-/// the particle tail (see
-/// `azalea_compat::azalea_explode_still_misdecodes_native_particles`),
-/// so the knockback prefix is read here and the frame consumed.
+/// block count and optional player knockback: that prefix is read here and
+/// the rest of the frame consumed.
 fn handle_raw_explode(r: &mut Reader, event_tx: &Sender<NetworkEvent>) -> DecodeResult<()> {
     // TODO: vanilla `handleExplosion` also plays the explosion sound and
     // spawns its particles from the center and the payload tail.
