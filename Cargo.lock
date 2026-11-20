@@ -4733,6 +4733,7 @@ dependencies = [
 name = "pomme-item"
 version = "0.1.0"
 dependencies = [
+ "crc32c",
  "pomme-protocol",
  "pomme-registry",
  "pomme-text",

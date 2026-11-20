@@ -42,9 +42,13 @@ import net.minecraft.world.item.Item;
  * identifier order; "server_registries" lists the components and items that
  * applies to, since a server with other entries numbers them differently.
  *
+ * Each value also gets the hash the client sends for it in a click
+ * (HashedPatchMap, HashOps over the component's CODEC), for pomme-item's own
+ * hashes to be checked against; a component with no CODEC has none.
+ *
  * Output: {"version", "values": [hex...], "items": {item: {component: index
- * into values}}, "server_registries": {component: [item...]}}, items in
- * registry order.
+ * into values}}, "hashes": {component: {index into values: hash}},
+ * "server_registries": {component: [item...]}}, items in registry order.
  *
  * Usage: java -cp <server classes>:<bundled libs>:<this> DefaultComponents <out.json>
  */
@@ -72,6 +76,8 @@ public final class DefaultComponents {
 
         Map<String, Integer> valueIndex = new LinkedHashMap<>();
         Map<String, TreeSet<String>> serverRegistries = new TreeMap<>();
+        Map<String, TreeMap<Integer, Integer>> hashes = new TreeMap<>();
+        var hashOps = lookup.createSerializationContext(net.minecraft.util.HashOps.CRC32C_INSTANCE);
         JsonObject items = new JsonObject();
         for (Item item : BuiltInRegistries.ITEM) {
             String itemName = BuiltInRegistries.ITEM.getKey(item).getPath();
@@ -85,7 +91,10 @@ public final class DefaultComponents {
                             serverRegistries.computeIfAbsent(name, k -> new TreeSet<>()).add(itemName);
                             hex = encode(withDataPack, component);
                         }
-                        entries.addProperty(name, valueIndex.computeIfAbsent(hex, k -> valueIndex.size()));
+                        int index = valueIndex.computeIfAbsent(hex, k -> valueIndex.size());
+                        entries.addProperty(name, index);
+                        component.encodeValue(hashOps).ifSuccess(hash -> hashes
+                                .computeIfAbsent(name, k -> new TreeMap<>()).put(index, hash.asInt()));
                     });
             items.add(itemName, entries);
         }
@@ -96,6 +105,13 @@ public final class DefaultComponents {
         valueIndex.keySet().forEach(values::add);
         root.add("values", values);
         root.add("items", items);
+        JsonObject hashed = new JsonObject();
+        hashes.forEach((component, byValue) -> {
+            JsonObject object = new JsonObject();
+            byValue.forEach((index, hash) -> object.addProperty(Integer.toString(index), hash));
+            hashed.add(component, object);
+        });
+        root.add("hashes", hashed);
         JsonObject bound = new JsonObject();
         serverRegistries.forEach((component, names) -> {
             JsonArray array = new JsonArray();

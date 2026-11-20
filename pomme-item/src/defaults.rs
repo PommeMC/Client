@@ -59,6 +59,22 @@ fn unhex(hex: &str) -> Option<Box<[u8]>> {
         .collect()
 }
 
+/// The hash the game gives each item's default components, as the client
+/// would send it in a click.
+#[cfg(test)]
+pub(crate) fn hashes() -> Vec<(ItemKind, DataComponentKind, i32)> {
+    let root: Value = serde_json::from_str(DATA).unwrap();
+    let mut hashes = Vec::new();
+    for (item, components) in root["items"].as_object().unwrap() {
+        for (kind, index) in components.as_object().unwrap() {
+            if let Some(hash) = root["hashes"][kind][index.to_string()].as_i64() {
+                hashes.push((item.parse().unwrap(), kind.parse().unwrap(), hash as i32));
+            }
+        }
+    }
+    hashes
+}
+
 /// Parses the data now rather than on the first lookup, which would stall
 /// whatever frame asked.
 pub fn prewarm() {

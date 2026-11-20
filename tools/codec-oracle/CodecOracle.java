@@ -720,6 +720,10 @@ public final class CodecOracle {
 
     private static <T> void component(String name, net.minecraft.core.component.DataComponentType<T> type, T value) {
         encode("component/" + name, type.streamCodec()::encode, value);
+        // The hash a click sends for the value: HashOps over its CODEC.
+        new net.minecraft.core.component.TypedDataComponent<>(type, value)
+                .encodeValue(registries.createSerializationContext(net.minecraft.util.HashOps.CRC32C_INSTANCE))
+                .ifSuccess(hash -> CASES.put("component_hash/" + name, String.format("%08x", hash.asInt())));
     }
 
     private static <P> void encode(String name, BiConsumer<RegistryFriendlyByteBuf, P> codec, P packet) {

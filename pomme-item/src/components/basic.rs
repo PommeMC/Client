@@ -6,9 +6,10 @@ use pomme_registry::builtin::DataComponentKind;
 
 use super::Component;
 use super::codec::{
-    Nbt, Text, id_enum, registry, string, write_bool, write_f32, write_i32, write_list,
-    write_registry, write_var_i32,
+    Nbt, Text, hash_compound, hash_entry, id_enum, registry, string, write_bool, write_f32,
+    write_i32, write_list, write_registry, write_var_i32,
 };
+use crate::hash::{Hash, Names, Record};
 
 /// Declares a component that is one var-int, a `ByteBufCodecs.VAR_INT`.
 macro_rules! var_int_component {
@@ -29,6 +30,10 @@ macro_rules! var_int_component {
 
             fn write(&self, buf: &mut Vec<u8>) {
                 write_var_i32(buf, self.$field);
+            }
+
+            fn hash(&self, _: &dyn Names) -> Option<Hash> {
+                Some(Hash::int(self.$field))
             }
         }
     };
@@ -63,6 +68,11 @@ impl Component for Unbreakable {
     }
 
     fn write(&self, _: &mut Vec<u8>) {}
+
+    /// `Unit.CODEC`: an empty map.
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some(Record::new().build())
+    }
 }
 
 /// Declares a component that is one colour, a `ByteBufCodecs.INT`.
@@ -85,6 +95,10 @@ macro_rules! color_component {
             fn write(&self, buf: &mut Vec<u8>) {
                 write_i32(buf, self.$field);
             }
+
+            fn hash(&self, _: &dyn Names) -> Option<Hash> {
+                Some(Hash::int(self.$field))
+            }
         }
     };
 }
@@ -103,10 +117,10 @@ color_component!(
 id_enum!(
     /// Vanilla `Rarity`, which colours an item's name.
     Rarity {
-        Common = 0,
-        Uncommon = 1,
-        Rare = 2,
-        Epic = 3,
+        Common = 0, "common";
+        Uncommon = 1, "uncommon";
+        Rare = 2, "rare";
+        Epic = 3, "epic";
     }
 );
 
@@ -120,27 +134,31 @@ impl Component for Rarity {
     fn write(&self, buf: &mut Vec<u8>) {
         self.write_id(buf);
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some((*self).hash_name())
+    }
 }
 
 id_enum!(
     /// Vanilla `DyeColor`.
     DyeColor {
-        White = 0,
-        Orange = 1,
-        Magenta = 2,
-        LightBlue = 3,
-        Yellow = 4,
-        Lime = 5,
-        Pink = 6,
-        Gray = 7,
-        LightGray = 8,
-        Cyan = 9,
-        Purple = 10,
-        Blue = 11,
-        Brown = 12,
-        Green = 13,
-        Red = 14,
-        Black = 15,
+        White = 0, "white";
+        Orange = 1, "orange";
+        Magenta = 2, "magenta";
+        LightBlue = 3, "light_blue";
+        Yellow = 4, "yellow";
+        Lime = 5, "lime";
+        Pink = 6, "pink";
+        Gray = 7, "gray";
+        LightGray = 8, "light_gray";
+        Cyan = 9, "cyan";
+        Purple = 10, "purple";
+        Blue = 11, "blue";
+        Brown = 12, "brown";
+        Green = 13, "green";
+        Red = 14, "red";
+        Black = 15, "black";
     }
 );
 
@@ -160,6 +178,10 @@ impl Component for Dye {
 
     fn write(&self, buf: &mut Vec<u8>) {
         self.color.write_id(buf);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some(self.color.hash_name())
     }
 }
 
@@ -182,6 +204,10 @@ macro_rules! text_component {
 
             fn write(&self, buf: &mut Vec<u8>) {
                 self.name.write(buf);
+            }
+
+            fn hash(&self, _: &dyn Names) -> Option<Hash> {
+                self.name.hash()
             }
         }
     };
@@ -219,6 +245,11 @@ impl Component for Lore {
     fn write(&self, buf: &mut Vec<u8>) {
         write_list(buf, &self.lines, |buf, line| line.write(buf));
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let lines = self.lines.iter().map(Text::hash);
+        Hash::try_list(lines)
+    }
 }
 
 /// Vanilla `CustomData`: a compound the game doesn't interpret.
@@ -237,6 +268,10 @@ impl Component for CustomData {
 
     fn write(&self, buf: &mut Vec<u8>) {
         self.nbt.write(buf);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some(hash_compound(&self.nbt.compound()?, None))
     }
 }
 
@@ -261,6 +296,18 @@ impl Component for TooltipDisplay {
     fn write(&self, buf: &mut Vec<u8>) {
         write_bool(buf, self.hide_tooltip);
         write_list(buf, &self.hidden_components, write_registry);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let hidden = &self.hidden_components;
+        Some(
+            Record::new()
+                .flag("hide_tooltip", self.hide_tooltip, false)
+                .unless("hidden_components", hidden.is_empty(), || {
+                    Hash::list(hidden.iter().map(hash_entry))
+                })
+                .build(),
+        )
     }
 }
 
@@ -292,5 +339,20 @@ impl Component for CustomModelData {
             pomme_protocol::wire::write_utf(buf, v);
         });
         write_list(buf, &self.colors, |buf, v| write_i32(buf, *v));
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let floats = || Hash::list(self.floats.iter().map(|v| Hash::float(*v)));
+        let flags = || Hash::list(self.flags.iter().map(|v| Hash::bool(*v)));
+        let strings = || Hash::list(self.strings.iter().map(|v| Hash::string(v)));
+        let colors = || Hash::list(self.colors.iter().map(|v| Hash::int(*v)));
+        Some(
+            Record::new()
+                .unless("floats", self.floats.is_empty(), floats)
+                .unless("flags", self.flags.is_empty(), flags)
+                .unless("strings", self.strings.is_empty(), strings)
+                .unless("colors", self.colors.is_empty(), colors)
+                .build(),
+        )
     }
 }

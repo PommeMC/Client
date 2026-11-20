@@ -3,15 +3,18 @@
 
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::wire::write_utf;
-use pomme_registry::builtin::{ConsumeEffectKind, DataComponentKind, MobEffect, Potion};
-use pomme_registry::{HolderSet, Identifier};
+use pomme_registry::builtin::{
+    ConsumeEffectKind, DataComponentKind, MobEffect, Potion, SoundEvent,
+};
+use pomme_registry::{Holder, HolderSet, Identifier};
 
 use super::Component;
 use super::codec::{
-    Sound, holder_set, id_enum, identifier, registry, sound, string, write_bool, write_f32,
-    write_holder_set, write_i32, write_identifier, write_list, write_optional, write_registry,
-    write_sound, write_var_i32,
+    Sound, hash_entries, hash_entry, hash_sound, holder_set, id_enum, identifier, registry, sound,
+    string, write_bool, write_f32, write_holder_set, write_i32, write_identifier, write_list,
+    write_optional, write_registry, write_sound, write_var_i32,
 };
+use crate::hash::{Hash, Names, Record};
 
 /// Vanilla `FoodProperties`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +39,16 @@ impl Component for Food {
         write_var_i32(buf, self.nutrition);
         write_f32(buf, self.saturation);
         write_bool(buf, self.can_always_eat);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some(
+            Record::new()
+                .field("nutrition", Hash::int(self.nutrition))
+                .field("saturation", Hash::float(self.saturation))
+                .flag("can_always_eat", self.can_always_eat, false)
+                .build(),
+        )
     }
 }
 
@@ -74,6 +87,22 @@ impl Component for UseEffects {
         write_bool(buf, self.interact_vibrations);
         write_f32(buf, self.speed_multiplier);
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let default = Self::default();
+        let speed = self.speed_multiplier;
+        Some(
+            Record::new()
+                .flag("can_sprint", self.can_sprint, default.can_sprint)
+                .flag(
+                    "interact_vibrations",
+                    self.interact_vibrations,
+                    default.interact_vibrations,
+                )
+                .float("speed_multiplier", speed, default.speed_multiplier)
+                .build(),
+        )
+    }
 }
 
 /// Vanilla `UseCooldown`: how long an item, or its group, can't be used
@@ -97,6 +126,16 @@ impl Component for UseCooldown {
     fn write(&self, buf: &mut Vec<u8>) {
         write_f32(buf, self.seconds);
         write_optional(buf, &self.cooldown_group, write_identifier);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let group = self.cooldown_group.as_ref().map(Hash::identifier);
+        Some(
+            Record::new()
+                .field("seconds", Hash::float(self.seconds))
+                .optional("cooldown_group", group)
+                .build(),
+        )
     }
 }
 
@@ -131,6 +170,25 @@ impl MobEffectDetails {
         write_bool(buf, self.show_icon);
         write_optional(buf, &self.hidden_effect, |buf, hidden| hidden.write(buf));
     }
+
+    /// `Details.MAP_CODEC`; the amplifier is an unsigned byte, and the icon
+    /// flag is always written.
+    fn fields(&self) -> Record {
+        Record::new()
+            .unless("amplifier", self.amplifier == 0, || {
+                Hash::byte(self.amplifier as i8)
+            })
+            .int("duration", self.duration, 0)
+            .flag("ambient", self.ambient, false)
+            .flag("show_particles", self.show_particles, true)
+            .field("show_icon", Hash::bool(self.show_icon))
+            .optional(
+                "hidden_effect",
+                self.hidden_effect
+                    .as_ref()
+                    .map(|hidden| hidden.fields().build()),
+            )
+    }
 }
 
 /// Vanilla `MobEffectInstance`.
@@ -151,6 +209,13 @@ impl MobEffectInstance {
     fn write(&self, buf: &mut Vec<u8>) {
         write_registry(buf, &self.id);
         self.details.write(buf);
+    }
+
+    fn hash(&self) -> Hash {
+        Record::new()
+            .field("id", hash_entry(&self.id))
+            .merge(self.details.fields())
+            .build()
     }
 }
 
@@ -182,23 +247,37 @@ impl Component for PotionContents {
         write_list(buf, &self.custom_effects, |buf, effect| effect.write(buf));
         write_optional(buf, &self.custom_name, |buf, name| write_utf(buf, name));
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let effects = &self.custom_effects;
+        Some(
+            Record::new()
+                .optional("potion", self.potion.as_ref().map(hash_entry))
+                .optional("custom_color", self.custom_color.map(Hash::int))
+                .unless("custom_effects", effects.is_empty(), || {
+                    Hash::list(effects.iter().map(MobEffectInstance::hash))
+                })
+                .optional("custom_name", self.custom_name.as_deref().map(Hash::string))
+                .build(),
+        )
+    }
 }
 
 id_enum!(
     /// Vanilla `ItemUseAnimation`.
     ItemUseAnimation {
-        None = 0,
-        Eat = 1,
-        Drink = 2,
-        Block = 3,
-        Bow = 4,
-        Trident = 5,
-        Crossbow = 6,
-        Spyglass = 7,
-        TootHorn = 8,
-        Brush = 9,
-        Bundle = 10,
-        Spear = 11,
+        None = 0, "none";
+        Eat = 1, "eat";
+        Drink = 2, "drink";
+        Block = 3, "block";
+        Bow = 4, "bow";
+        Trident = 5, "trident";
+        Crossbow = 6, "crossbow";
+        Spyglass = 7, "spyglass";
+        TootHorn = 8, "toot_horn";
+        Brush = 9, "brush";
+        Bundle = 10, "bundle";
+        Spear = 11, "spear";
     }
 );
 
@@ -262,6 +341,38 @@ impl ConsumeEffect {
             }
         }
     }
+
+    /// `ConsumeEffect.CODEC`: the type's own fields beside its name.
+    fn hash(&self) -> Hash {
+        let (kind, fields) = match self {
+            Self::ApplyEffects {
+                effects,
+                probability,
+            } => (
+                ConsumeEffectKind::ApplyEffects,
+                Record::new()
+                    .field(
+                        "effects",
+                        Hash::list(effects.iter().map(MobEffectInstance::hash)),
+                    )
+                    .float("probability", *probability, 1.0),
+            ),
+            Self::RemoveEffects { effects } => (
+                ConsumeEffectKind::RemoveEffects,
+                Record::new().field("effects", hash_entries(effects)),
+            ),
+            Self::ClearAllEffects => (ConsumeEffectKind::ClearAllEffects, Record::new()),
+            Self::TeleportRandomly { diameter } => (
+                ConsumeEffectKind::TeleportRandomly,
+                Record::new().float("diameter", *diameter, 16.0),
+            ),
+            Self::PlaySound { sound } => (
+                ConsumeEffectKind::PlaySound,
+                Record::new().field("sound", hash_sound(sound)),
+            ),
+        };
+        fields.field("type", hash_entry(&kind)).build()
+    }
 }
 
 /// Vanilla `Consumable`: how an item is eaten or drunk and what that does.
@@ -295,5 +406,25 @@ impl Component for Consumable {
         write_list(buf, &self.on_consume_effects, |buf, effect| {
             effect.write(buf);
         });
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let seconds = self.consume_seconds;
+        let effects = &self.on_consume_effects;
+        // `SoundEvents.GENERIC_EAT`.
+        let default_sound = self.sound == Holder::Reference(SoundEvent::EntityGenericEat);
+        Some(
+            Record::new()
+                .float("consume_seconds", seconds, 1.6)
+                .unless("animation", self.animation == ItemUseAnimation::Eat, || {
+                    self.animation.hash_name()
+                })
+                .unless("sound", default_sound, || hash_sound(&self.sound))
+                .flag("has_consume_particles", self.has_consume_particles, true)
+                .unless("on_consume_effects", effects.is_empty(), || {
+                    Hash::list(effects.iter().map(ConsumeEffect::hash))
+                })
+                .build(),
+        )
     }
 }

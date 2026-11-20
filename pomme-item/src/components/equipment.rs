@@ -5,29 +5,30 @@ use std::fmt;
 
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::wire::{write_utf, write_varint};
-use pomme_registry::builtin::{Attribute, DataComponentKind, EntityKind};
+use pomme_registry::builtin::{Attribute, DataComponentKind, EntityKind, SoundEvent};
 use pomme_registry::data::{Enchantment, TrimMaterial, TrimPattern};
 use pomme_registry::{Holder, HolderSet, Identifier};
 
 use super::Component;
 use super::codec::{
-    Sound, Text, holder, holder_set, id_enum, identifier, registry, sound, string, write_bool,
-    write_holder, write_holder_set, write_identifier, write_list, write_optional, write_registry,
-    write_sound, write_var_i32,
+    Sound, Text, hash_data_entry, hash_entries, hash_entry, hash_sound, holder, holder_set,
+    id_enum, identifier, registry, sound, string, write_bool, write_holder, write_holder_set,
+    write_identifier, write_list, write_optional, write_registry, write_sound, write_var_i32,
 };
+use crate::hash::{Hash, Names, Record};
 
 id_enum!(
     /// Vanilla `EquipmentSlot`, in declaration order with each slot's
     /// network id.
     EquipmentSlot {
-        Mainhand = 0,
-        Offhand = 5,
-        Feet = 1,
-        Legs = 2,
-        Chest = 3,
-        Head = 4,
-        Body = 6,
-        Saddle = 7,
+        Mainhand = 0, "mainhand";
+        Offhand = 5, "offhand";
+        Feet = 1, "feet";
+        Legs = 2, "legs";
+        Chest = 3, "chest";
+        Head = 4, "head";
+        Body = 6, "body";
+        Saddle = 7, "saddle";
     }
 );
 
@@ -36,20 +37,6 @@ impl EquipmentSlot {
     /// which is how the equipment packet numbers them.
     pub fn from_byte(ordinal: u8) -> Option<Self> {
         Self::ALL.get(usize::from(ordinal)).copied()
-    }
-
-    /// `EquipmentSlot.getName`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Mainhand => "mainhand",
-            Self::Offhand => "offhand",
-            Self::Feet => "feet",
-            Self::Legs => "legs",
-            Self::Chest => "chest",
-            Self::Head => "head",
-            Self::Body => "body",
-            Self::Saddle => "saddle",
-        }
     }
 }
 
@@ -63,38 +50,19 @@ id_enum!(
     /// Vanilla `EquipmentSlotGroup`: the slots an attribute modifier applies
     /// in.
     EquipmentSlotGroup {
-        Any = 0,
-        Mainhand = 1,
-        Offhand = 2,
-        Hand = 3,
-        Feet = 4,
-        Legs = 5,
-        Chest = 6,
-        Head = 7,
-        Armor = 8,
-        Body = 9,
-        Saddle = 10,
+        Any = 0, "any";
+        Mainhand = 1, "mainhand";
+        Offhand = 2, "offhand";
+        Hand = 3, "hand";
+        Feet = 4, "feet";
+        Legs = 5, "legs";
+        Chest = 6, "chest";
+        Head = 7, "head";
+        Armor = 8, "armor";
+        Body = 9, "body";
+        Saddle = 10, "saddle";
     }
 );
-
-impl EquipmentSlotGroup {
-    /// `EquipmentSlotGroup.getSerializedName`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Any => "any",
-            Self::Mainhand => "mainhand",
-            Self::Offhand => "offhand",
-            Self::Hand => "hand",
-            Self::Feet => "feet",
-            Self::Legs => "legs",
-            Self::Chest => "chest",
-            Self::Head => "head",
-            Self::Armor => "armor",
-            Self::Body => "body",
-            Self::Saddle => "saddle",
-        }
-    }
-}
 
 /// Vanilla `Equippable`: the slot an item is worn in and how it behaves
 /// there.
@@ -149,6 +117,37 @@ impl Component for Equippable {
         }
         write_sound(buf, &self.shearing_sound);
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let sound = |sound: &Sound, default| *sound == Holder::Reference(default);
+        let entities = self.allowed_entities.as_ref().map(hash_entries);
+        Some(
+            Record::new()
+                .field("slot", self.slot.hash_name())
+                .unless(
+                    "equip_sound",
+                    sound(&self.equip_sound, SoundEvent::ItemArmorEquipGeneric),
+                    || hash_sound(&self.equip_sound),
+                )
+                .optional("asset_id", self.asset_id.as_ref().map(Hash::identifier))
+                .optional(
+                    "camera_overlay",
+                    self.camera_overlay.as_ref().map(Hash::identifier),
+                )
+                .optional("allowed_entities", entities)
+                .flag("dispensable", self.dispensable, true)
+                .flag("swappable", self.swappable, true)
+                .flag("damage_on_hurt", self.damage_on_hurt, true)
+                .flag("equip_on_interact", self.equip_on_interact, false)
+                .flag("can_be_sheared", self.can_be_sheared, false)
+                .unless(
+                    "shearing_sound",
+                    sound(&self.shearing_sound, SoundEvent::ItemShearsSnip),
+                    || hash_sound(&self.shearing_sound),
+                )
+                .build(),
+        )
+    }
 }
 
 /// Vanilla `MaterialAssetGroup`: the texture suffix a trim material uses,
@@ -181,6 +180,28 @@ fn trim_material(r: &mut Reader) -> DecodeResult<TrimMaterialHolder> {
             description: Text::read(r)?,
         })
     })
+}
+
+/// `TrimMaterial.CODEC`: a registered material's name, or the one sent in
+/// its place as a record.
+fn hash_trim_material(material: &TrimMaterialHolder, names: &dyn Names) -> Option<Hash> {
+    let direct = match material {
+        Holder::Reference(entry) => return hash_data_entry(entry, names),
+        Holder::Direct(direct) => direct,
+    };
+    let overrides = &direct.assets.overrides;
+    Some(
+        Record::new()
+            .field("asset_name", Hash::string(&direct.assets.base_suffix))
+            .unless("override_armor_assets", overrides.is_empty(), || {
+                let entries = overrides
+                    .iter()
+                    .map(|(asset, suffix)| (Hash::identifier(asset), Hash::string(suffix)));
+                Hash::map(entries.collect())
+            })
+            .field("description", direct.description.hash()?)
+            .build(),
+    )
 }
 
 fn write_trim_material(buf: &mut Vec<u8>, material: &TrimMaterialHolder) {
@@ -235,6 +256,23 @@ impl Component for Trim {
             write_bool(buf, direct.decal);
         });
     }
+
+    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+        let pattern = match &self.pattern {
+            Holder::Reference(entry) => hash_data_entry(entry, names)?,
+            Holder::Direct(direct) => Record::new()
+                .field("asset_id", Hash::identifier(&direct.asset_id))
+                .field("description", direct.description.hash()?)
+                .field("decal", Hash::bool(direct.decal))
+                .build(),
+        };
+        Some(
+            Record::new()
+                .field("material", hash_trim_material(&self.material, names)?)
+                .field("pattern", pattern)
+                .build(),
+        )
+    }
 }
 
 /// Vanilla `ProvidesTrimMaterial`: the material an item trims armour with.
@@ -254,27 +292,20 @@ impl Component for ProvidesTrimMaterial {
     fn write(&self, buf: &mut Vec<u8>) {
         write_trim_material(buf, &self.value);
     }
+
+    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+        hash_trim_material(&self.value, names)
+    }
 }
 
 id_enum!(
     /// Vanilla `AttributeModifier.Operation`.
     AttributeModifierOperation {
-        AddValue = 0,
-        AddMultipliedBase = 1,
-        AddMultipliedTotal = 2,
+        AddValue = 0, "add_value";
+        AddMultipliedBase = 1, "add_multiplied_base";
+        AddMultipliedTotal = 2, "add_multiplied_total";
     }
 );
-
-impl AttributeModifierOperation {
-    /// `Operation.getSerializedName`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::AddValue => "add_value",
-            Self::AddMultipliedBase => "add_multiplied_base",
-            Self::AddMultipliedTotal => "add_multiplied_total",
-        }
-    }
-}
 
 /// Vanilla `AttributeModifier`.
 #[derive(Clone, Debug, PartialEq)]
@@ -352,6 +383,35 @@ impl Component for AttributeModifiers {
             }
         });
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let entries = self.modifiers.iter().map(|entry| {
+            let display = match &entry.display {
+                AttributeModifierDisplay::Default => None,
+                AttributeModifierDisplay::Hidden => {
+                    Some(Record::new().field("type", Hash::string("hidden")))
+                }
+                AttributeModifierDisplay::Override { text } => Some(
+                    Record::new()
+                        .field("type", Hash::string("override"))
+                        .field("value", text.hash()?),
+                ),
+            };
+            Some(
+                Record::new()
+                    .field("type", hash_entry(&entry.kind))
+                    .field("id", Hash::identifier(&entry.modifier.id))
+                    .field("amount", Hash::double(entry.modifier.amount))
+                    .field("operation", entry.modifier.operation.hash_name())
+                    .unless("slot", entry.slot == EquipmentSlotGroup::Any, || {
+                        entry.slot.hash_name()
+                    })
+                    .optional("display", display.map(Record::build))
+                    .build(),
+            )
+        });
+        Hash::try_list(entries)
+    }
 }
 
 /// Declares a component that is `ItemEnchantments`: each enchantment with
@@ -391,6 +451,13 @@ macro_rules! enchantments_component {
                     write_registry(buf, enchantment);
                     write_var_i32(buf, *level);
                 });
+            }
+
+            fn hash(&self, names: &dyn Names) -> Option<Hash> {
+                let levels = self.levels.iter().map(|(enchantment, level)| {
+                    Some((hash_data_entry(enchantment, names)?, Hash::int(*level)))
+                });
+                Some(Hash::map(levels.collect::<Option<_>>()?))
             }
         }
     };

@@ -1,5 +1,5 @@
-//! The bridge to the inventory fork, which still hashes a stack's components
-//! and writes the JSON its tooltip is built from.
+//! The bridge to the inventory fork, which still writes the JSON a stack's
+//! tooltip is built from and hashes the components pomme doesn't yet.
 //!
 //! A stack (`pomme_item`) holds each component as its vanilla bytes, and the
 //! client reads them through pomme's own values (`pomme_item::components`).
@@ -94,16 +94,38 @@ fn fork_patch(patch: &ComponentPatch) -> DataComponentPatch {
         .expect("every component was validated through azalea")
 }
 
+/// The connection's registries, for the entry names a hash holds.
+struct SessionNames<'a>(&'a azalea_core::registry_holder::RegistryHolder);
+
+impl pomme_item::hash::Names for SessionNames<'_> {
+    fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
+        self.0
+            .protocol_id_to_identifier(registry.into(), id)
+            .cloned()
+    }
+}
+
 /// `HashedStack.create`: the stack with each component value replaced by
-/// its hash; `None` when empty.
-// TODO: a component the fork can't hold goes unhashed, so the server
-// resyncs a slot holding one.
+/// its hash; `None` when empty. The hash is pomme's own for a value it
+/// reads, and the fork's for the rest.
+// TODO: a component neither can hash goes unhashed, so the server resyncs
+// a slot holding one.
 pub fn hashed_stack(
     stack: &ItemStack,
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> Option<pomme_protocol::serverbound::HashedStack> {
-    let fork = to_fork(&stack.to_wire()?);
-    let data = fork.as_present()?;
+    let data = stack.as_present()?;
+    let fork = std::cell::OnceCell::new();
+    let fork_hash = |kind| {
+        let fork: &ForkStack = fork.get_or_init(|| {
+            stack
+                .to_wire()
+                .map_or(ForkStack::Empty, |wire| to_fork(&wire))
+        });
+        let value = fork.as_present()?.component_patch.get_kind(kind)?;
+        Some(value.crc_hash(registries).0 as i32)
+    };
+    let names = SessionNames(registries);
     let mut hashed = pomme_protocol::serverbound::HashedStack {
         item: data.kind.to_u32(),
         count: data.count,
@@ -111,11 +133,15 @@ pub fn hashed_stack(
         removed: Vec::new(),
     };
     for (kind, value) in data.component_patch.iter() {
-        match value {
-            Some(value) => hashed
-                .added
-                .push((kind.to_u32(), value.crc_hash(registries).0 as i32)),
-            None => hashed.removed.push(kind.to_u32()),
+        let Some(bytes) = value else {
+            hashed.removed.push(kind.to_u32());
+            continue;
+        };
+        let hash = pomme_item::components::hash_value(kind, bytes, &names)
+            .map(pomme_item::hash::Hash::as_i32)
+            .or_else(|| fork_hash(kind));
+        if let Some(hash) = hash {
+            hashed.added.push((kind.to_u32(), hash));
         }
     }
     Some(hashed)
