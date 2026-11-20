@@ -11,11 +11,11 @@ use pomme_registry::{Holder, HolderSet, Identifier};
 
 use super::Component;
 use super::codec::{
-    Sound, Text, hash_data_entry, hash_entries, hash_entry, hash_sound, holder, holder_set,
-    id_enum, identifier, registry, sound, string, write_bool, write_holder, write_holder_set,
+    Sound, Text, data_entry_value, entries_value, entry_value, holder, holder_set, id_enum,
+    identifier, registry, sound, sound_value, string, write_bool, write_holder, write_holder_set,
     write_identifier, write_list, write_optional, write_registry, write_sound, write_var_i32,
 };
-use crate::hash::{Hash, Names, Record};
+use crate::hash::{Names, Record, Value};
 
 id_enum!(
     /// Vanilla `EquipmentSlot`, in declaration order with each slot's
@@ -118,21 +118,21 @@ impl Component for Equippable {
         write_sound(buf, &self.shearing_sound);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let sound = |sound: &Sound, default| *sound == Holder::Reference(default);
-        let entities = self.allowed_entities.as_ref().map(hash_entries);
+        let entities = self.allowed_entities.as_ref().map(entries_value);
         Some(
             Record::new()
-                .field("slot", self.slot.hash_name())
+                .field("slot", self.slot.name_value())
                 .unless(
                     "equip_sound",
                     sound(&self.equip_sound, SoundEvent::ItemArmorEquipGeneric),
-                    || hash_sound(&self.equip_sound),
+                    || sound_value(&self.equip_sound),
                 )
-                .optional("asset_id", self.asset_id.as_ref().map(Hash::identifier))
+                .optional("asset_id", self.asset_id.as_ref().map(Value::identifier))
                 .optional(
                     "camera_overlay",
-                    self.camera_overlay.as_ref().map(Hash::identifier),
+                    self.camera_overlay.as_ref().map(Value::identifier),
                 )
                 .optional("allowed_entities", entities)
                 .flag("dispensable", self.dispensable, true)
@@ -143,7 +143,7 @@ impl Component for Equippable {
                 .unless(
                     "shearing_sound",
                     sound(&self.shearing_sound, SoundEvent::ItemShearsSnip),
-                    || hash_sound(&self.shearing_sound),
+                    || sound_value(&self.shearing_sound),
                 )
                 .build(),
         )
@@ -184,22 +184,22 @@ fn trim_material(r: &mut Reader) -> DecodeResult<TrimMaterialHolder> {
 
 /// `TrimMaterial.CODEC`: a registered material's name, or the one sent in
 /// its place as a record.
-fn hash_trim_material(material: &TrimMaterialHolder, names: &dyn Names) -> Option<Hash> {
+fn trim_material_value(material: &TrimMaterialHolder, names: &dyn Names) -> Option<Value> {
     let direct = match material {
-        Holder::Reference(entry) => return hash_data_entry(entry, names),
+        Holder::Reference(entry) => return data_entry_value(entry, names),
         Holder::Direct(direct) => direct,
     };
     let overrides = &direct.assets.overrides;
     Some(
         Record::new()
-            .field("asset_name", Hash::string(&direct.assets.base_suffix))
+            .field("asset_name", Value::string(&direct.assets.base_suffix))
             .unless("override_armor_assets", overrides.is_empty(), || {
                 let entries = overrides
                     .iter()
-                    .map(|(asset, suffix)| (Hash::identifier(asset), Hash::string(suffix)));
-                Hash::map(entries.collect())
+                    .map(|(asset, suffix)| (Value::identifier(asset), Value::string(suffix)));
+                Value::Map(entries.collect())
             })
-            .field("description", direct.description.hash()?)
+            .field("description", direct.description.value()?)
             .build(),
     )
 }
@@ -257,18 +257,18 @@ impl Component for Trim {
         });
     }
 
-    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+    fn value(&self, names: &dyn Names) -> Option<Value> {
         let pattern = match &self.pattern {
-            Holder::Reference(entry) => hash_data_entry(entry, names)?,
+            Holder::Reference(entry) => data_entry_value(entry, names)?,
             Holder::Direct(direct) => Record::new()
-                .field("asset_id", Hash::identifier(&direct.asset_id))
-                .field("description", direct.description.hash()?)
-                .field("decal", Hash::bool(direct.decal))
+                .field("asset_id", Value::identifier(&direct.asset_id))
+                .field("description", direct.description.value()?)
+                .field("decal", Value::Bool(direct.decal))
                 .build(),
         };
         Some(
             Record::new()
-                .field("material", hash_trim_material(&self.material, names)?)
+                .field("material", trim_material_value(&self.material, names)?)
                 .field("pattern", pattern)
                 .build(),
         )
@@ -293,8 +293,8 @@ impl Component for ProvidesTrimMaterial {
         write_trim_material(buf, &self.value);
     }
 
-    fn hash(&self, names: &dyn Names) -> Option<Hash> {
-        hash_trim_material(&self.value, names)
+    fn value(&self, names: &dyn Names) -> Option<Value> {
+        trim_material_value(&self.value, names)
     }
 }
 
@@ -384,33 +384,33 @@ impl Component for AttributeModifiers {
         });
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let entries = self.modifiers.iter().map(|entry| {
             let display = match &entry.display {
                 AttributeModifierDisplay::Default => None,
                 AttributeModifierDisplay::Hidden => {
-                    Some(Record::new().field("type", Hash::string("hidden")))
+                    Some(Record::new().field("type", Value::string("hidden")))
                 }
                 AttributeModifierDisplay::Override { text } => Some(
                     Record::new()
-                        .field("type", Hash::string("override"))
-                        .field("value", text.hash()?),
+                        .field("type", Value::string("override"))
+                        .field("value", text.value()?),
                 ),
             };
             Some(
                 Record::new()
-                    .field("type", hash_entry(&entry.kind))
-                    .field("id", Hash::identifier(&entry.modifier.id))
-                    .field("amount", Hash::double(entry.modifier.amount))
-                    .field("operation", entry.modifier.operation.hash_name())
+                    .field("type", entry_value(&entry.kind))
+                    .field("id", Value::identifier(&entry.modifier.id))
+                    .field("amount", Value::Double(entry.modifier.amount))
+                    .field("operation", entry.modifier.operation.name_value())
                     .unless("slot", entry.slot == EquipmentSlotGroup::Any, || {
-                        entry.slot.hash_name()
+                        entry.slot.name_value()
                     })
                     .optional("display", display.map(Record::build))
                     .build(),
             )
         });
-        Hash::try_list(entries)
+        Value::try_list(entries)
     }
 }
 
@@ -453,11 +453,11 @@ macro_rules! enchantments_component {
                 });
             }
 
-            fn hash(&self, names: &dyn Names) -> Option<Hash> {
+            fn value(&self, names: &dyn Names) -> Option<Value> {
                 let levels = self.levels.iter().map(|(enchantment, level)| {
-                    Some((hash_data_entry(enchantment, names)?, Hash::int(*level)))
+                    Some((data_entry_value(enchantment, names)?, Value::Int(*level)))
                 });
-                Some(Hash::map(levels.collect::<Option<_>>()?))
+                Some(Value::Map(levels.collect::<Option<_>>()?))
             }
         }
     };
