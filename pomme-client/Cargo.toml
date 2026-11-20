@@ -75,7 +75,6 @@ hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
 # The login key exchange and the packet stream cipher (`net::crypt`).
 aes = "0.9"
 cfb8 = "0.9"
-rsa_public_encrypt_pkcs1 = "0.4"
 # Pomme's own block state type, under the name the azalea crates find it by.
 pomme-block = { package = "azalea-block", version = "0.16" }
 pomme-item = { path = "../pomme-item" }

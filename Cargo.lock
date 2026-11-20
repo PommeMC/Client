@@ -4668,7 +4668,6 @@ dependencies = [
  "regex",
  "reqwest",
  "rsa",
- "rsa_public_encrypt_pkcs1",
  "scopeguard",
  "self_cell",
  "serde",
