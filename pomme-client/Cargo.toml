@@ -74,7 +74,6 @@ flate2 = "1"
 hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
 azalea-buf = "0.16"
 azalea-crypto = "0.16"
-azalea-auth = "0.16"
 azalea-entity = "0.16"
 azalea-block = "0.16"
 azalea-chat = "0.16"
@@ -139,3 +138,5 @@ pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }
 # server end of the join test. `connecting` and `online-mode` only gate
 # azalea's own connection type.
 azalea-protocol = { version = "0.16", default-features = false }
+# The game profiles in those packets.
+azalea-auth = "0.16"
