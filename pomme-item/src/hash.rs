@@ -215,3 +215,16 @@ pub trait Names {
     /// `enchantment`.
     fn name(&self, registry: &str, id: u32) -> Option<Identifier>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_negative_zero_is_not_the_default_zero() {
+        let field = |value| Record::new().float("speed", value, 0.0).build();
+        let empty = Record::new().build();
+        assert_eq!(field(0.0), empty);
+        assert_ne!(field(-0.0), empty);
+    }
+}

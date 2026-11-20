@@ -422,3 +422,21 @@ impl Text {
         self.nbt.write(buf);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use simdnbt::owned::{NbtCompound, NbtList};
+
+    use super::*;
+
+    #[test]
+    fn a_mixed_lists_wrapped_elements_are_what_they_hold() {
+        let wrapped = NbtCompound::from_values(vec![("".into(), NbtTag::String("x".into()))]);
+        let plain = NbtCompound::from_values(vec![("a".into(), NbtTag::Int(1))]);
+        let list = NbtTag::List(NbtList::Compound(vec![wrapped, plain.clone()]));
+        assert_eq!(
+            tag_value(&list),
+            Value::list([Value::string("x"), compound_value(&plain, None)])
+        );
+    }
+}
