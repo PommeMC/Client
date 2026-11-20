@@ -62,6 +62,32 @@ pub fn decrypt(cipher: &mut Decryptor, bytes: &mut [u8]) {
     cipher.decrypt_blocks_inout(blocks);
 }
 
+/// The server's end of the key exchange, for tests.
+#[cfg(test)]
+pub(super) struct ServerKey {
+    private_key: rsa::RsaPrivateKey,
+    /// DER-encoded, as the hello carries it.
+    pub public_key: Vec<u8>,
+}
+
+#[cfg(test)]
+impl ServerKey {
+    pub fn new() -> Self {
+        use rsa::pkcs8::EncodePublicKey;
+
+        let private_key = rsa::RsaPrivateKey::new(&mut rand::rng(), 1024).unwrap();
+        let public_key = private_key.to_public_key().to_public_key_der().unwrap();
+        Self {
+            public_key: public_key.into_vec(),
+            private_key,
+        }
+    }
+
+    pub fn decrypt(&self, bytes: &[u8]) -> Vec<u8> {
+        self.private_key.decrypt(Pkcs1v15Encrypt, bytes).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,17 +112,15 @@ mod tests {
 
     #[test]
     fn the_server_can_decrypt_the_secret_and_the_challenge() {
-        use rsa::RsaPrivateKey;
-        use rsa::pkcs8::EncodePublicKey;
-
-        let private_key = RsaPrivateKey::new(&mut rand::rng(), 1024).unwrap();
-        let public_key = private_key.to_public_key().to_public_key_der().unwrap();
+        let server = ServerKey::new();
         let challenge = [7, 3, 9, 1];
-        let exchange = key_exchange(public_key.as_bytes(), &challenge).unwrap();
+        let exchange = key_exchange(&server.public_key, &challenge).unwrap();
 
-        let decrypt = |bytes: &[u8]| private_key.decrypt(Pkcs1v15Encrypt, bytes).unwrap();
-        assert_eq!(decrypt(&exchange.encrypted_secret_key), exchange.secret_key);
-        assert_eq!(decrypt(&exchange.encrypted_challenge), challenge);
+        assert_eq!(
+            server.decrypt(&exchange.encrypted_secret_key),
+            exchange.secret_key
+        );
+        assert_eq!(server.decrypt(&exchange.encrypted_challenge), challenge);
     }
 
     const FIRST: [u8; 10] = [117, 151, 183, 45, 229, 232, 43, 181, 121, 16];

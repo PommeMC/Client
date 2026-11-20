@@ -1333,15 +1333,28 @@ mod tests {
         ));
     }
 
-    /// The whole join over an in-memory pipe, against a peer that sends only
-    /// the two frames the client actually requires: login finished, then
-    /// finish configuration. No registry data, no compression, no encryption.
     #[tokio::test]
     async fn joins_an_integrated_server_over_the_pipe() {
+        joins_over_the_pipe(false).await;
+    }
+
+    /// The server asks for encryption without authentication: everything
+    /// after the client's key is encrypted both ways.
+    #[tokio::test]
+    async fn joins_a_server_that_turns_encryption_on() {
+        joins_over_the_pipe(true).await;
+    }
+
+    /// The whole join over an in-memory pipe, against a peer that sends only
+    /// the frames the client actually requires: the hello when `encrypted`,
+    /// login finished, then finish configuration. No registry data and no
+    /// compression.
+    async fn joins_over_the_pipe(encrypted: bool) {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+        use azalea_protocol::packets::login::c_hello::ClientboundHello;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
         use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
         use azalea_protocol::read::deserialize_packet;
@@ -1400,6 +1413,24 @@ mod tests {
             sent(&mut peer).await,
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
+
+        if encrypted {
+            let server = crate::net::crypt::ServerKey::new();
+            let challenge = vec![7, 3, 9, 1];
+            let hello = ClientboundLoginPacket::Hello(ClientboundHello {
+                server_id: String::new(),
+                public_key: server.public_key.clone(),
+                challenge: challenge.clone(),
+                should_authenticate: false,
+            });
+            send(&mut peer, &hello).await;
+
+            let ServerboundLoginPacket::Key(key) = sent(&mut peer).await else {
+                panic!("the client answers the hello with its key");
+            };
+            assert_eq!(server.decrypt(&key.encrypted_challenge), challenge);
+            peer.set_encryption_key(server.decrypt(&key.key_bytes).try_into().unwrap());
+        }
 
         let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
             game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
