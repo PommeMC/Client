@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use glam::DVec3;
 use serde::Deserialize;
 
+use crate::codec::{DecodeResult, Reader};
 use crate::entity::{PositionMoveRotation, Relative};
 
 #[derive(Deserialize)]
@@ -43,6 +44,19 @@ pub fn case(name: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex fixture"))
         .collect()
+}
+
+/// Case `name` decoded whole by `read`, the reader of the module that owns
+/// its packet.
+pub fn decoded<P>(name: &str, read: fn(&str, &mut Reader) -> Option<DecodeResult<P>>) -> P {
+    let packet = name.split('/').next().expect("a packet name");
+    let payload = case(name);
+    let mut r = Reader::new(&payload);
+    let decoded = read(packet, &mut r)
+        .unwrap_or_else(|| panic!("{packet} is not this module's packet"))
+        .unwrap_or_else(|e| panic!("{name}: {}", e.what));
+    r.ensure_eof().expect("the whole payload is read");
+    decoded
 }
 
 /// The id vanilla encoded `entry` of `registry` as, e.g.
