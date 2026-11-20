@@ -665,8 +665,21 @@ impl AudioEngine {
     }
 }
 
-impl Drop for AudioEngine {
-    fn drop(&mut self) {
+impl AudioEngine {
+    /// Starts the engine again from `resources`. The running worker stops
+    /// first: OpenAL's current context belongs to the process, so one made
+    /// current while the old worker still lived would be detached again
+    /// when that worker destroyed its own.
+    pub fn restart(
+        &mut self,
+        resources: &dyn ResourceManager,
+        volumes: [f32; SoundCategory::COUNT],
+    ) {
+        self.shut_down();
+        *self = Self::new(resources, volumes);
+    }
+
+    fn shut_down(&mut self) {
         if let Some(tx) = self.command_tx.take() {
             let _ = tx.send(AudioCommand::Shutdown);
         }
@@ -675,6 +688,12 @@ impl Drop for AudioEngine {
         {
             tracing::warn!("audio worker panicked during shutdown");
         }
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }
 

@@ -2189,7 +2189,8 @@ impl AppCore {
         self.set_resource_theme(self.menu.theme());
         self.reload_resources();
         self.menu.pick_splash();
-        self.audio = crate::audio::AudioEngine::new(&self.resources, self.menu.category_volumes());
+        self.audio
+            .restart(&self.resources, self.menu.category_volumes());
         self.complete_resource_selection();
     }
 
