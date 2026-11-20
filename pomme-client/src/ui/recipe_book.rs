@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use azalea_inventory::components::{
-    self, CustomName, Damage, DataComponentTrait, Dye, DyeColor, DyedColor, Enchantments,
+use pomme_item::components::{
+    self, Component as ItemComponent, CustomName, Damage, Dye, DyeColor, DyedColor, Enchantments,
     PotionContents, ProvidesTrimMaterial, Trim,
 };
 use pomme_item::defaults::ItemKindExt;
@@ -17,7 +17,6 @@ use super::common::{
 use super::text::strip_formatting;
 use super::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 use crate::chat_component::ComponentText;
-use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::recipe::{
     Ingredient, ItemTags, RecipeBookEntry, RecipeBookState, RecipeBookType, RecipeDisplay,
@@ -1276,7 +1275,11 @@ fn direct_trim_material_name(
     material: &Holder<pomme_registry::data::TrimMaterial, components::DirectTrimMaterial>,
 ) -> String {
     match material {
-        Holder::Direct(material) => material.description.to_string(),
+        Holder::Direct(material) => material
+            .description
+            .component()
+            .map(|description| description.plain_text())
+            .unwrap_or_default(),
         Holder::Reference(material) => {
             let Some(key) =
                 pomme_registry::data::TrimMaterialKey::ALL.get(material.protocol_id() as usize)
@@ -1293,13 +1296,10 @@ fn direct_trim_material_name(
 }
 
 fn stack_tooltip_lines(stack: &ResolvedSlotStack) -> Vec<TooltipLine> {
-    let mut lines = match crate::net::item_codec::stack_json(&stack.stack) {
-        Ok(value) => crate::ui::chat::item_tooltip_lines(&value, None, false),
-        Err(_) => vec![TooltipLine::new(
-            super::common::item_display_name(&stack.stack),
-            WHITE,
-        )],
-    };
+    // TODO: the recipe book has no registries in reach, so a component
+    // holding an entry of one a server sends is left out of the tooltip.
+    let value = pomme_item::components::stack_json(&stack.stack, &pomme_item::hash::Unnamed);
+    let mut lines = crate::ui::chat::item_tooltip_lines(&value, None, false);
     if let Some(trim) = &stack.direct_trim {
         let insert_at = lines.len().min(1);
         let upgrade = crate::lang::translate("item.minecraft.smithing_template.upgrade")
@@ -1398,12 +1398,12 @@ fn account_stack_data(data: &ItemStackData, counts: &mut HashMap<u32, u32>) {
 
 fn is_usable_for_crafting(data: &ItemStackData) -> bool {
     let damaged = data
-        .get_component::<Damage>()
+        .component::<Damage>()
         .is_some_and(|damage| damage.amount > 0);
     let enchanted = data
-        .get_component::<Enchantments>()
+        .component::<Enchantments>()
         .is_some_and(|enchantments| !enchantments.levels.is_empty());
-    let named = data.get_component::<CustomName>().is_some();
+    let named = data.component::<CustomName>().is_some();
     !damaged && !enchanted && !named
 }
 
@@ -1421,6 +1421,8 @@ fn ingredient_items<'a>(
     }
 }
 
+// TODO: `Trim` holds an inline material and pattern itself; this goes once
+// the tooltip stops reading the stack through the fork, which can't.
 #[derive(Clone, Debug, PartialEq)]
 struct ResolvedDirectTrim {
     material: Holder<pomme_registry::data::TrimMaterial, components::DirectTrimMaterial>,
@@ -1461,7 +1463,7 @@ fn display_result_stacks(
     slot_stacks(result, book)
 }
 
-fn without_component<T: DataComponentTrait>(mut stack: ItemStackData) -> ItemStackData {
+fn without_component<T: ItemComponent>(mut stack: ItemStackData) -> ItemStackData {
     stack.component_patch.remove(T::KIND);
     stack
 }
@@ -1498,7 +1500,7 @@ fn apply_dye(mut target: ResolvedSlotStack, dye: DyeColor) -> ResolvedSlotStack 
     let mut intensity_total = 0;
     let mut color_count = 0;
 
-    if let Some(existing) = target.stack.get_component::<DyedColor>() {
+    if let Some(existing) = target.stack.component::<DyedColor>() {
         let (red, green, blue) = rgb_channels(existing.rgb);
         intensity_total += red.max(green).max(blue);
         red_total += red;
@@ -1526,7 +1528,7 @@ fn apply_dye(mut target: ResolvedSlotStack, dye: DyeColor) -> ResolvedSlotStack 
     }
 
     target.stack.count = 1;
-    target.stack = target.stack.with_component(DyedColor {
+    target.stack = target.stack.with(&DyedColor {
         rgb: (red << 16) | (green << 8) | blue,
     });
     target
@@ -1537,7 +1539,7 @@ fn apply_trim(
     material: &ResolvedSlotStack,
     pattern: &TrimPatternHolder,
 ) -> Option<ResolvedSlotStack> {
-    let material = material.stack.get_component::<ProvidesTrimMaterial>()?;
+    let material = material.stack.component::<ProvidesTrimMaterial>()?;
     let resolved = ResolvedDirectTrim {
         material: material.value.clone(),
         pattern: pattern.clone(),
@@ -1547,16 +1549,14 @@ fn apply_trim(
         (&resolved.material, &resolved.pattern)
     {
         let trim = Trim {
-            material: *material,
-            pattern: pomme_registry::data::TrimPattern::new_raw(*pattern),
+            material: Holder::Reference(*material),
+            pattern: Holder::Reference(pomme_registry::data::TrimPattern::new_raw(*pattern)),
         };
-        if base.direct_trim.is_none()
-            && base.stack.get_component::<Trim>().as_deref() == Some(&trim)
-        {
+        if base.direct_trim.is_none() && base.stack.component::<Trim>().as_ref() == Some(&trim) {
             return None;
         }
         base.stack.count = 1;
-        base.stack = base.stack.with_component(trim);
+        base.stack = base.stack.with(&trim);
         base.direct_trim = None;
         return Some(base);
     }
@@ -1657,7 +1657,7 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
                         break 'potions;
                     }
                     let mut stack = stack.clone();
-                    stack.stack = stack.stack.with_component(PotionContents {
+                    stack.stack = stack.stack.with(&PotionContents {
                         potion: Some(potion),
                         ..PotionContents::default()
                     });
@@ -1690,7 +1690,7 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
                 let dye = &dyes[index / targets.len()];
                 let dye = dye
                     .stack
-                    .get_component::<Dye>()
+                    .component::<Dye>()
                     .map_or(DyeColor::White, |component| component.color);
                 out.push(apply_dye(target, dye));
             }
@@ -2643,10 +2643,8 @@ mod tests {
 
     #[test]
     fn player_craftability_excludes_armor_offhand_and_damaged_stacks() {
-        use azalea_inventory::components::Damage;
+        use pomme_item::components::Damage;
         use pomme_registry::builtin::ItemKind;
-
-        use crate::net::item_codec::set_fork_component;
 
         let diamond = ItemKind::Diamond.to_u32();
         let mut slots = vec![ItemStack::Empty; 46];
@@ -2655,7 +2653,7 @@ mod tests {
         assert!(!available_items(&slots, RecipeBookScreenSpec::player(0)).contains_key(&diamond));
 
         let mut patch = pomme_item::ComponentPatch::default();
-        set_fork_component(&mut patch, Damage { amount: 1 });
+        patch.write(&Damage { amount: 1 });
         slots[9] = ItemStack::Present(ItemStackData {
             kind: ItemKind::Diamond,
             count: 4,
@@ -2947,25 +2945,16 @@ mod tests {
 
     #[test]
     fn search_matches_vanilla_plain_and_identifier_modes_with_components() {
-        use azalea_chat::FormattedText;
-        use azalea_inventory::components::{CustomName, Lore};
+        use pomme_item::components::{CustomName, Lore, Text};
         use pomme_registry::builtin::ItemKind;
 
-        use crate::net::item_codec::set_fork_component;
-
         let mut patch = pomme_item::ComponentPatch::default();
-        set_fork_component(
-            &mut patch,
-            CustomName {
-                name: FormattedText::from("Fancy Gem"),
-            },
-        );
-        set_fork_component(
-            &mut patch,
-            Lore {
-                lines: vec![FormattedText::from("Secret Recipe")],
-            },
-        );
+        patch.write(&CustomName {
+            name: Text::literal("Fancy Gem"),
+        });
+        patch.write(&Lore {
+            lines: vec![Text::literal("Secret Recipe")],
+        });
         let entry = RecipeBookEntry {
             id: 9,
             display: RecipeDisplay::Shapeless {
@@ -3205,7 +3194,7 @@ mod tests {
             stack.stack.kind == ItemKind::Potion
                 && stack
                     .stack
-                    .get_component::<PotionContents>()
+                    .component::<PotionContents>()
                     .is_some_and(|contents| contents.potion.is_some())
         }));
     }
@@ -3225,7 +3214,7 @@ mod tests {
         let stacks = slot_stacks(&slot, &book);
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].stack.kind, ItemKind::WhiteDye);
-        assert!(stacks[0].stack.get_component::<Dye>().is_some());
+        assert!(stacks[0].stack.component::<Dye>().is_some());
     }
 
     #[test]
@@ -3246,7 +3235,7 @@ mod tests {
         assert!(
             stacks[0]
                 .stack
-                .get_component::<components::MaxDamage>()
+                .component::<components::MaxDamage>()
                 .is_some()
         );
     }
@@ -3265,7 +3254,7 @@ mod tests {
         assert_eq!(stacks[0].stack.kind, ItemKind::LeatherChestplate);
         assert_eq!(stacks[0].stack.count, 1);
         assert_eq!(
-            stacks[0].stack.get_component::<DyedColor>().unwrap().rgb,
+            stacks[0].stack.component::<DyedColor>().unwrap().rgb,
             0xB02E26
         );
     }
@@ -3285,7 +3274,7 @@ mod tests {
         assert!(stacks.iter().all(|stack| {
             stack.stack.kind == ItemKind::IronChestplate
                 && stack.stack.count == 1
-                && stack.stack.get_component::<Trim>().is_some()
+                && stack.stack.component::<Trim>().is_some()
                 && stack.direct_trim.is_none()
         }));
     }
@@ -3308,7 +3297,7 @@ mod tests {
         assert_eq!(stacks.len(), 16);
         let stack = &stacks[0];
         assert_eq!(stack.stack.kind, ItemKind::IronChestplate);
-        assert!(stack.stack.get_component::<Trim>().is_none());
+        assert!(stack.stack.component::<Trim>().is_none());
         assert!(matches!(
             stack.direct_trim.as_ref().map(|trim| &trim.pattern),
             Some(TrimPatternHolder::Direct { asset_id, .. }) if asset_id == "minecraft:test"
@@ -3322,28 +3311,20 @@ mod tests {
 
     #[test]
     fn direct_trim_material_is_preserved_in_resolved_stack_and_tooltip() {
-        use azalea_chat::FormattedText;
-        use azalea_inventory::components::{AssetInfo, DirectTrimMaterial, MaterialAssetGroup};
+        use pomme_item::components::{DirectTrimMaterial, MaterialAssetGroup, Text};
         use pomme_registry::builtin::ItemKind;
-
-        use crate::net::item_codec::set_fork_component;
 
         let mut patch = pomme_item::ComponentPatch::default();
         let direct_material = DirectTrimMaterial {
             assets: MaterialAssetGroup {
-                assert_name: AssetInfo {
-                    suffix: "test".into(),
-                },
-                override_armor_assets: Vec::new(),
+                base_suffix: "test".into(),
+                overrides: Vec::new(),
             },
-            description: FormattedText::from("Test Material"),
+            description: Text::literal("Test Material"),
         };
-        set_fork_component(
-            &mut patch,
-            ProvidesTrimMaterial {
-                value: Holder::Direct(direct_material),
-            },
-        );
+        patch.write(&ProvidesTrimMaterial {
+            value: Holder::Direct(direct_material),
+        });
 
         let book = RecipeBookState::default();
         let slot = SlotDisplay::SmithingTrim {
@@ -3360,7 +3341,10 @@ mod tests {
         let stack = &stacks[0];
         assert!(matches!(
             stack.direct_trim.as_ref().map(|trim| &trim.material),
-            Some(Holder::Direct(material)) if material.description.to_string() == "Test Material"
+            Some(Holder::Direct(material)) if material
+                .description
+                .component()
+                .is_some_and(|text| text.plain_text() == "Test Material")
         ));
         assert!(
             tooltip_text(stack)

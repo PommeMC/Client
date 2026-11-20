@@ -1,7 +1,6 @@
 //! Configuration-phase frames, decoded by pomme, and the registries collected
 //! from them.
 
-use azalea_core::registry_holder::RegistryHolder;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::configuration::{self, ConfigPacket, RegistryData};
 use pomme_protocol::lifecycle::{self, LifecyclePacket};
@@ -10,6 +9,8 @@ use pomme_protocol::tags::{self, Tags};
 use pomme_protocol::{Direction, KnownPack, PacketTable, Phase};
 use pomme_registry::identifier::Identifier;
 use simdnbt::owned::NbtTag;
+
+use crate::net::registry_holder::RegistryHolder;
 
 /// A configuration packet pomme acts on, by the module that reads it.
 #[derive(Debug)]
@@ -105,7 +106,7 @@ impl Registries {
     }
 
     /// Appends one registry. The server omits the data of every entry a pack
-    /// we claimed carries, so those are filled in before azalea drops them.
+    /// we claimed carries, so those are filled in before the holder drops them.
     pub fn append(&mut self, protocol: i32, data: RegistryData) -> Result<(), RegistryError> {
         let registry = Identifier::new(&data.registry);
         let entries: Option<Vec<_>> = data
@@ -119,17 +120,11 @@ impl Registries {
                 Some((Identifier::new(&entry.id), data))
             })
             .collect();
-        // TODO: vanilla takes any tag as an element (26.3's
-        // `block_transformer` entries are lists); azalea's holder only
-        // compounds, so such a registry is left out whole.
         let Some(entries) = entries else {
-            return Err(RegistryError::Unsupported(format!(
-                "an element of {registry} isn't a compound"
-            )));
+            return Err(RegistryError::not_a_compound(&registry));
         };
         let entries = if self.selected_known_packs {
-            super::known_packs::fill_known_entries(protocol, &registry, entries)
-                .map_err(RegistryError::MissingElement)?
+            super::known_packs::fill_known_entries(protocol, &registry, entries)?
         } else {
             entries
         };
@@ -142,13 +137,22 @@ impl Registries {
 /// Why a registry wasn't appended.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum RegistryError {
-    /// azalea's holder can't hold it.
+    /// The holder can't hold it.
     #[error("{0}")]
     Unsupported(String),
     /// A claimed pack lacks an element the server left out; vanilla
     /// disconnects.
     #[error("{0}")]
     MissingElement(String),
+}
+
+impl RegistryError {
+    // TODO: vanilla takes any tag as an element (26.3's `block_transformer`
+    // entries are lists); the holder only compounds, so such a registry
+    // is left out whole.
+    pub fn not_a_compound(registry: &Identifier) -> Self {
+        Self::Unsupported(format!("an element of {registry} isn't a compound"))
+    }
 }
 
 /// A registry element's network NBT, when it is a compound.
@@ -247,6 +251,36 @@ mod tests {
         assert_eq!(ids, ["minecraft:plains", "minecraft:desert"]);
     }
 
+    /// 26.3 has its own core pack, and its `block_transformer` elements are
+    /// lists, which the holder can't take from the pack either.
+    #[test]
+    fn a_translated_version_claims_and_fills_from_its_own_pack() {
+        let core = KnownPack {
+            namespace: "minecraft".into(),
+            id: "core".into(),
+            version: "26.3".into(),
+        };
+        let mut registries = Registries::default();
+        assert!(registries.select_packs(777, &[]).is_empty());
+        assert_eq!(
+            registries.select_packs(777, std::slice::from_ref(&core)),
+            [core]
+        );
+        registries.append(777, biomes()).unwrap();
+        assert!(crate::net::connection::biome_registry(&registries.holder).is_some());
+
+        let mut transformers = biomes();
+        transformers.registry = "minecraft:block_transformer".into();
+        transformers.entries.truncate(1);
+        transformers.entries[0].id = "minecraft:axe".into();
+        transformers.entries[0].data = None;
+        assert!(matches!(
+            registries.append(777, transformers.clone()),
+            Err(RegistryError::Unsupported(_))
+        ));
+        assert_eq!(registries.append_or_skip(777, transformers), Ok(()));
+    }
+
     #[test]
     fn a_registry_with_a_non_compound_element_is_left_out() {
         let mut data = biomes();
@@ -267,7 +301,7 @@ mod tests {
         let mut registries = Registries::default();
         assert!(registries.select_packs(NATIVE.protocol, &[]).is_empty());
         registries.append(NATIVE.protocol, biomes()).unwrap();
-        // azalea drops the entry that came without data.
+        // The holder drops the entry that came without data.
         assert_eq!(crate::net::connection::biome_count(&registries.holder), 1);
     }
 }

@@ -2,7 +2,7 @@ use glam::Vec3;
 
 use super::entity_model::{
     BakedEntityModel, EntityPart, FACE_ALL, FACE_NEG_X, FACE_POS_X, ModelConvention, ModelCube,
-    bake_model, generate_cube_vertices, generate_cube_vertices_faces,
+    bake_model, generate_cube_vertices,
 };
 
 /// Shulker box, closed state. Matches vanilla `ShulkerModel`: a 16x12x16 lid
@@ -38,67 +38,109 @@ pub fn bake_shulker_box_model() -> BakedEntityModel {
     bake_model(vec![lid, base], 64, 64)
 }
 
-/// Standing sign, matching vanilla `block/template_sign_rot_0`: a 16x8x1.33
-/// board (one block wide, centered) raised on a 1.33x9.33x1.33 post. Geometry
-/// and UVs are in block-model units (16 = one block); UVs are in 0-16 space so
-/// the model bakes against a 16x16 reference even though the texture
-/// (`block/<wood>_sign.png`) is 32x32. Face order: -Z, +Z, top, bottom,
-/// -X, +X.
-pub fn bake_sign_model() -> BakedEntityModel {
-    // Face order -Z, +Z, top, bottom, -X, +X; the render-space X flip puts
-    // the model's -X face on the world's +X side, so the side rects are
-    // assigned crosswise.
-    const BOARD_UVS: [[f32; 4]; 6] = [
-        [0.0, 8.0, 12.0, 14.0],  // -Z (back)
-        [0.0, 1.0, 12.0, 7.0],   // +Z (front)
-        [0.0, 0.0, 12.0, 1.0],   // top
-        [0.0, 14.0, 12.0, 15.0], // bottom
-        [12.0, 1.0, 13.0, 7.0],  // -X
-        [12.0, 8.0, 13.0, 14.0], // +X
-    ];
-    // The post's top is hidden under the board, so its top face reuses the
-    // bottom rect rather than claiming texture vanilla never assigns it.
-    const POST_UVS: [[f32; 4]; 6] = [
-        [14.0, 8.0, 15.0, 15.0],  // -Z
-        [14.0, 0.0, 15.0, 7.0],   // +Z
-        [14.0, 15.0, 15.0, 16.0], // top (hidden)
-        [14.0, 15.0, 15.0, 16.0], // bottom
-        [15.0, 0.0, 16.0, 7.0],   // -X
-        [15.0, 8.0, 16.0, 15.0],  // +X
-    ];
-
-    let board = ModelCube {
-        origin: Vec3::new(-8.0, -52.0 / 3.0, -2.0 / 3.0),
-        size: Vec3::new(16.0, 8.0, 4.0 / 3.0),
-        tex_offset: (0, 0),
-        deformation: 0.0,
-        mirror: false,
-    };
-    let post = ModelCube {
-        origin: Vec3::new(-2.0 / 3.0, -28.0 / 3.0, -2.0 / 3.0),
-        size: Vec3::new(4.0 / 3.0, 28.0 / 3.0, 4.0 / 3.0),
-        tex_offset: (0, 0),
-        deformation: 0.0,
-        mirror: false,
-    };
-
+/// A model in the literal space vanilla's `ModelPart`s are written in: one
+/// part per cube, at its `PartPose` offset and Y rotation. The caller's
+/// matrix is the renderer's own, flips included.
+fn bake_literal(
+    parts: &[(&str, Vec3, f32, ModelCube)],
+    tex: (u32, u32),
+    faces: u8,
+) -> BakedEntityModel {
     let mut vertices = Vec::new();
     let mut part_ranges = Vec::new();
-    let mut parts = Vec::new();
-    for (name, cube, uvs) in [("sign", board, &BOARD_UVS), ("stick", post, &POST_UVS)] {
+    let mut baked = Vec::new();
+    for (name, offset, y_rot, cube) in parts {
         let start = vertices.len() as u32;
-        generate_cube_vertices_faces(&cube, uvs, 16, 16, &mut vertices);
+        generate_cube_vertices(cube, tex.0, tex.1, faces, false, &mut vertices);
         part_ranges.push((start, vertices.len() as u32 - start));
-        parts.push(EntityPart {
-            name: name.into(),
-            offset: Vec3::new(0.0, 24.0, 0.0),
-            default_rotation: Vec3::ZERO,
-            // Vertices were emitted above with explicit UVs, so no cubes to bake.
+        baked.push(EntityPart {
+            name: (*name).into(),
+            offset: *offset,
+            default_rotation: Vec3::new(0.0, *y_rot, 0.0),
             cubes: Vec::new(),
             parent: None,
         });
     }
-    BakedEntityModel::new(parts, vertices, part_ranges)
+    BakedEntityModel::new(baked, vertices, part_ranges).with_convention(ModelConvention::BlockYUp)
+}
+
+fn cube(origin: [f32; 3], size: [f32; 3], tex_offset: (i32, i32)) -> ModelCube {
+    ModelCube {
+        origin: origin.into(),
+        size: size.into(),
+        tex_offset,
+        deformation: 0.0,
+        mirror: false,
+    }
+}
+
+/// The 64x32 `entity/signs` textures.
+const SIGN_TEXTURE: (u32, u32) = (64, 32);
+
+/// `StandingSignRenderer.createSignLayer` as it was before 26.2, standing
+/// then wall: the board, and a standing sign's stick.
+pub fn bake_sign_models() -> Vec<BakedEntityModel> {
+    let board = (
+        "sign",
+        Vec3::ZERO,
+        0.0,
+        cube([-12.0, -14.0, -1.0], [24.0, 12.0, 2.0], (0, 0)),
+    );
+    let stick = (
+        "stick",
+        Vec3::ZERO,
+        0.0,
+        cube([-1.0, -2.0, -1.0], [2.0, 14.0, 2.0], (0, 14)),
+    );
+    vec![
+        bake_literal(&[board, stick], SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&[board], SIGN_TEXTURE, FACE_ALL),
+    ]
+}
+
+/// `HangingSignRenderer.createHangingSignLayer` as it was before 26.2:
+/// ceiling, ceiling middle, then wall.
+pub fn bake_hanging_sign_models() -> Vec<BakedEntityModel> {
+    use std::f32::consts::FRAC_PI_4;
+
+    let board = (
+        "board",
+        Vec3::ZERO,
+        0.0,
+        cube([-7.0, 0.0, -1.0], [14.0, 10.0, 2.0], (0, 12)),
+    );
+    let plank = (
+        "plank",
+        Vec3::ZERO,
+        0.0,
+        cube([-8.0, -6.0, -2.0], [16.0, 2.0, 4.0], (0, 0)),
+    );
+    let chain = |name, x: f32, y_rot: f32, u| {
+        (
+            name,
+            Vec3::new(x, -6.0, 0.0),
+            y_rot,
+            cube([-1.5, 0.0, 0.0], [3.0, 6.0, 0.0], (u, 6)),
+        )
+    };
+    let chains = [
+        chain("chainL1", -5.0, -FRAC_PI_4, 0),
+        chain("chainL2", -5.0, FRAC_PI_4, 6),
+        chain("chainR1", 5.0, -FRAC_PI_4, 0),
+        chain("chainR2", 5.0, FRAC_PI_4, 6),
+    ];
+    let v_chains = (
+        "vChains",
+        Vec3::ZERO,
+        0.0,
+        cube([-6.0, -6.0, 0.0], [12.0, 6.0, 0.0], (14, 6)),
+    );
+    let with_chains = |first: &[_]| [first, &chains[..]].concat();
+    vec![
+        bake_literal(&with_chains(&[board]), SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&[board, v_chains], SIGN_TEXTURE, FACE_ALL),
+        bake_literal(&with_chains(&[board, plank]), SIGN_TEXTURE, FACE_ALL),
+    ]
 }
 
 /// One chest layer as parts [bottom, lid, lock], matching vanilla `ChestModel`
@@ -114,53 +156,31 @@ fn bake_chest_layer(
     lock_w: f32,
     faces: u8,
 ) -> BakedEntityModel {
-    let cubes = [
-        (
-            "bottom",
-            Vec3::ZERO,
-            Vec3::new(body_x0, 0.0, 1.0),
-            Vec3::new(body_w, 10.0, 14.0),
-            (0, 19),
-        ),
-        (
-            "lid",
-            Vec3::new(0.0, 9.0, 1.0),
-            Vec3::new(body_x0, 0.0, 0.0),
-            Vec3::new(body_w, 5.0, 14.0),
-            (0, 0),
-        ),
-        (
-            "lock",
-            Vec3::new(0.0, 9.0, 1.0),
-            Vec3::new(lock_x0, -2.0, 14.0),
-            Vec3::new(lock_w, 4.0, 1.0),
-            (0, 0),
-        ),
-    ];
-
-    let mut vertices = Vec::new();
-    let mut part_ranges = Vec::new();
-    let mut parts = Vec::new();
-    for (name, offset, origin, size, tex_offset) in cubes {
-        let start = vertices.len() as u32;
-        let cube = ModelCube {
-            origin,
-            size,
-            tex_offset,
-            deformation: 0.0,
-            mirror: false,
-        };
-        generate_cube_vertices(&cube, 64, 64, faces, false, &mut vertices);
-        part_ranges.push((start, vertices.len() as u32 - start));
-        parts.push(EntityPart {
-            name: name.into(),
-            offset,
-            default_rotation: Vec3::ZERO,
-            cubes: Vec::new(),
-            parent: None,
-        });
-    }
-    BakedEntityModel::new(parts, vertices, part_ranges).with_convention(ModelConvention::BlockYUp)
+    let pivot = Vec3::new(0.0, 9.0, 1.0);
+    bake_literal(
+        &[
+            (
+                "bottom",
+                Vec3::ZERO,
+                0.0,
+                cube([body_x0, 0.0, 1.0], [body_w, 10.0, 14.0], (0, 19)),
+            ),
+            (
+                "lid",
+                pivot,
+                0.0,
+                cube([body_x0, 0.0, 0.0], [body_w, 5.0, 14.0], (0, 0)),
+            ),
+            (
+                "lock",
+                pivot,
+                0.0,
+                cube([lock_x0, -2.0, 14.0], [lock_w, 4.0, 1.0], (0, 0)),
+            ),
+        ],
+        (64, 64),
+        faces,
+    )
 }
 
 /// Chest models in variant order [single, double-left, double-right], from

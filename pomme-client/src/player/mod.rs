@@ -1,4 +1,6 @@
+pub mod click;
 pub mod default_skin;
+pub mod entity_interact;
 pub mod interaction;
 pub mod inventory;
 pub mod item_cooldowns;
@@ -8,7 +10,7 @@ pub mod tab_list;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
-use crate::attribute::AttributeMap;
+use crate::attribute::{AttributeKind, AttributeMap};
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
@@ -36,9 +38,14 @@ pub fn is_survival(game_mode: u8) -> bool {
     game_mode == 0 || game_mode == 2
 }
 
+/// `GameType.CREATIVE`'s id.
+pub const CREATIVE: u8 = 1;
+/// `GameType.SPECTATOR`'s id, the last.
+pub const SPECTATOR: u8 = 3;
+
 /// Matches vanilla GameType.isCreative(): Creative (1).
 pub fn is_creative(game_mode: u8) -> bool {
-    game_mode == 1
+    game_mode == CREATIVE
 }
 
 /// `StringUtil.isValidPlayerName`, which `ExtraCodecs.PLAYER_NAME` enforces
@@ -48,12 +55,15 @@ pub fn valid_player_name(name: &str) -> bool {
 }
 
 /// Spectator (3).
+/// `Permissions.COMMANDS_GAMEMASTER`'s level.
+const GAMEMASTER_PERMISSION_LEVEL: u8 = 2;
+
 pub fn is_spectator(game_mode: u8) -> bool {
-    game_mode == 3
+    game_mode == SPECTATOR
 }
 
 pub(crate) fn is_water_block(
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     block_state_table: BlockStateTable,
 ) -> bool {
     block_state_table.block_state_data(state).fluid().kind == FluidKind::Water
@@ -275,6 +285,15 @@ pub struct LocalPlayer {
     pub jump_trigger_time: u32,
     pub no_jump_delay: u32,
     pub was_jump_pressed: bool,
+    /// Vanilla `autoJumpEnabled`: the Auto-Jump option as of the last
+    /// position sent, and on until the first.
+    pub auto_jump_enabled: bool,
+    /// Vanilla `autoJumpTime`: ticks left of the jump an obstacle started.
+    pub auto_jump_time: u32,
+    /// The last tick jumped for `auto_jump_time` (`ClientInput.makeJump`).
+    pub auto_jumping: bool,
+    /// The Sprint Window option, read as a double tap starts.
+    pub sprint_window: u32,
     /// Vanilla `jumpRidingTicks`: ride-jump charge ticks; negative counts up
     /// through the post-jump refractory window.
     pub jump_riding_ticks: i32,
@@ -334,6 +353,9 @@ pub struct LocalPlayer {
     /// Vanilla Player.sleepCounter: drives the sleep overlay fade.
     pub sleep_counter: u32,
     pub game_mode: u8,
+    /// Vanilla `permissions()` as its level, 0 to 4, which the server sends
+    /// to each new `LocalPlayer`.
+    pub permission_level: u8,
     pub score: i32,
     pub entity_id: i32,
     pub experience_level: i32,
@@ -367,6 +389,33 @@ impl DropThrottle {
 }
 
 impl LocalPlayer {
+    /// Vanilla `LivingEntity.setSprinting`: the flag, and the sprint speed
+    /// modifier taken off and put back on with it. A server's attribute
+    /// update replaces the modifiers, so the two can disagree until the next
+    /// call, as in vanilla.
+    pub fn set_sprinting(&mut self, sprinting: bool) {
+        // `SPEED_MODIFIER_SPRINTING`: 0.3f, widened into the attribute's double.
+        const AMOUNT: f64 = 0.3_f32 as f64;
+        self.sprinting = sprinting;
+        self.attributes.set_modifier(
+            AttributeKind::MovementSpeed,
+            "minecraft:sprinting",
+            sprinting.then_some(AMOUNT),
+        );
+    }
+
+    /// An attribute's value; the player's supplier has every one read here.
+    /// `Player.canUseGameMasterBlocks`.
+    pub fn can_use_game_master_blocks(&self) -> bool {
+        is_creative(self.game_mode) && self.permission_level >= GAMEMASTER_PERMISSION_LEVEL
+    }
+
+    pub fn attribute(&self, attribute: AttributeKind) -> f64 {
+        self.attributes
+            .value(attribute)
+            .expect("the player's supplier has the attribute")
+    }
+
     pub fn new() -> Self {
         Self {
             position: Position::default(),
@@ -401,6 +450,10 @@ impl LocalPlayer {
             jump_trigger_time: 0,
             no_jump_delay: 0,
             was_jump_pressed: false,
+            auto_jump_enabled: true,
+            auto_jump_time: 0,
+            auto_jumping: false,
+            sprint_window: u32::from(crate::app::input::ControlOptions::default().sprint_window),
             jump_riding_ticks: 0,
             jump_riding_scale: 0.0,
             abilities_dirty: false,
@@ -436,6 +489,7 @@ impl LocalPlayer {
             sleeping_pos: None,
             sleep_counter: 0,
             game_mode: 0,
+            permission_level: 0,
             score: 0,
             entity_id: -1,
             experience_level: 0,
@@ -483,6 +537,10 @@ impl LocalPlayer {
         self.jump_trigger_time = 0;
         self.no_jump_delay = 0;
         self.was_jump_pressed = false;
+        self.auto_jump_enabled = true;
+        self.auto_jump_time = 0;
+        self.auto_jumping = false;
+        self.permission_level = 0;
         self.jump_riding_ticks = 0;
         self.jump_riding_scale = 0.0;
         // Vanilla's new `LocalPlayer` starts with `yBodyRot` 0.
@@ -868,6 +926,18 @@ impl LocalPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_master_blocks_need_creative_and_permission_level_two() {
+        let mut player = LocalPlayer::new();
+        player.game_mode = 1;
+        player.permission_level = 1;
+        assert!(!player.can_use_game_master_blocks());
+        player.permission_level = 2;
+        assert!(player.can_use_game_master_blocks());
+        player.game_mode = 0;
+        assert!(!player.can_use_game_master_blocks());
+    }
 
     #[test]
     fn local_player_is_removed_at_vanilla_death_tick() {

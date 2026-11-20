@@ -3,7 +3,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::data::DataLayer;
 use super::engine::LightEngine;

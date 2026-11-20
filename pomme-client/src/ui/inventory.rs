@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use azalea_inventory::operations::ClickOperation;
 use pomme_item::ItemStack;
 
 use super::common::SLOT_STRIDE;
@@ -8,6 +7,7 @@ use super::container::{
     ContainerInput, DragState, Panel, SlotCtx, push_cursor_stack, push_panel_offset,
     resolve_gesture,
 };
+use crate::player::click::ClickOperation;
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::PlayerPreview;

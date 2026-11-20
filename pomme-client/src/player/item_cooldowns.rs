@@ -3,11 +3,9 @@
 
 use std::collections::HashMap;
 
-use azalea_inventory::components::UseCooldown;
 use pomme_item::ItemStackData;
+use pomme_item::components::UseCooldown;
 use pomme_registry::builtin::ItemKind;
-
-use super::interaction::stack_component;
 
 /// A cooldown group's identifier. An item's id is held as the item, so the
 /// common lookup (an item without a `use_cooldown` group) doesn't allocate.
@@ -28,7 +26,10 @@ impl CooldownGroup {
     /// Vanilla `ItemCooldowns.getCooldownGroup`: the `use_cooldown` group,
     /// else the item's id.
     pub fn of(stack: &ItemStackData) -> Self {
-        match stack_component::<UseCooldown>(stack).and_then(|c| c.cooldown_group) {
+        match stack
+            .component::<UseCooldown>()
+            .and_then(|c| c.cooldown_group)
+        {
             Some(group) => Self::parse(group.to_string()),
             None => Self::Item(stack.kind),
         }

@@ -177,6 +177,7 @@ impl GameIds {
             .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v772.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v773.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v777.as_ref().and_then(|v| v.rewrite(id)))
     }
 
@@ -257,6 +258,8 @@ impl GameIds {
                     "accept_teleportation",
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
+                sign_update_id: id(Serverbound, "sign_update"),
+                sign_update_old_id: required_id(table, Phase::Game, Serverbound, "sign_update"),
             }),
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
                 codec,
@@ -267,6 +270,11 @@ impl GameIds {
                 set_equipment_id: id(Clientbound, "set_equipment"),
                 merchant_offers_id: id(Clientbound, "merchant_offers"),
                 set_creative_mode_slot_id: id(Serverbound, "set_creative_mode_slot"),
+            }),
+            v773: (protocol <= 773).then(|| Ids773 {
+                initialize_border_id: id(Clientbound, "initialize_border"),
+                set_border_lerp_size_id: id(Clientbound, "set_border_lerp_size"),
+                set_border_warning_delay_id: id(Clientbound, "set_border_warning_delay"),
             }),
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),

@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{

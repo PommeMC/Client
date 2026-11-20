@@ -59,13 +59,11 @@ void main() {
     }
 
     if (v_mode > 7.5) {
-        // Vignette. Vanilla blends (ZERO, ONE_MINUS_SRC_COLOR): each channel of
-        // dst is scaled by 1 - src, where src = grayscale texture * brightness.
-        // Emitting (0, 0, 0, src) through the premultiplied One /
-        // OneMinusSrcAlpha blend scales dst by the same 1 - src. (dst alpha is
-        // scaled too, unlike vanilla; the swapchain composite ignores alpha.)
-        float src = texture(sampler2D(overlay_tex, overlay_tex_sampler), v_uv).r * v_color.r;
-        out_color = vec4(0.0, 0.0, 0.0, src);
+        // Vignette, drawn through its own (ZERO, ONE_MINUS_SRC_COLOR) blend:
+        // each channel of dst is scaled by 1 - src, where src is the texture
+        // times the colour, which the world border warning tints.
+        vec3 tex = texture(sampler2D(overlay_tex, overlay_tex_sampler), v_uv).rgb;
+        out_color = vec4(tex * v_color.rgb, 1.0);
         return;
     }
 

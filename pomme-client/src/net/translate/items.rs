@@ -101,7 +101,7 @@ pub(super) fn translate_component_patch(
                 continue;
             }
             COMPONENT_PROFILE => {
-                Profile::azalea_read(cur).ok()?;
+                Reader::on_cursor(cur, Profile::read).ok()?;
             }
             _ => return None,
         }

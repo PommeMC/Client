@@ -239,6 +239,7 @@ mod tests {
         let block = SignBlock {
             hanging,
             wall: false,
+            attached: false,
             wood: 0,
             angle: 0.0,
         };

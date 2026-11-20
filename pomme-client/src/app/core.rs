@@ -23,7 +23,6 @@ use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::connection::ConnectionHandle;
-use crate::net::item_codec::Components;
 use crate::net::{DimensionInfo, NetworkEvent};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
@@ -137,6 +136,14 @@ const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs
 /// next.
 const CHUNK_PACKET_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
+/// Whether vanilla makes a new `ClientLevel`: `handleLogin` always does,
+/// `handleRespawn` only when the dimension changes. A server need not remove
+/// the old level's entities itself, and a proxy moving the player between
+/// servers doesn't.
+fn starts_new_level(login: bool, old_dimension: &str, dimension: &str) -> bool {
+    login || old_dimension != dimension
+}
+
 /// Whether the rest of the queue may wait for the next frame: only once the
 /// chunk budget is spent and while this frame owes no tick, so every packet
 /// received before a tick is handled before it runs.
@@ -153,7 +160,7 @@ fn apply_server_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     sync_block_entities(game, pos, state);
     if game.interaction.update_known_server_state(&pos, state) {
@@ -168,7 +175,7 @@ fn set_client_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     sync_block_entities(game, pos, state);
     write_block(game, priority_remesh, pos, state);
@@ -177,7 +184,7 @@ fn set_client_block(
 fn sync_block_entities(
     game: &mut GameState,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     let block_state_data = game.block_registry.block_state_data(state);
     // Vanilla drops a moving block's entity once its cell holds anything else.
@@ -196,7 +203,7 @@ fn write_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     crate::world::light::set_block_and_light(
         &game.chunk_store,
@@ -224,7 +231,7 @@ fn write_block(
 struct ClientPistonLevel<'a> {
     game: &'a mut GameState,
     remesh: &'a mut Vec<(crate::position::ChunkPos, i32)>,
-    destroyed: Vec<(crate::position::BlockPos, azalea_block::BlockState)>,
+    destroyed: Vec<(crate::position::BlockPos, pomme_block::BlockState)>,
 }
 
 impl<'a> ClientPistonLevel<'a> {
@@ -242,11 +249,11 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
         &self.game.block_registry
     }
 
-    fn block(&self, pos: crate::position::BlockPos) -> azalea_block::BlockState {
+    fn block(&self, pos: crate::position::BlockPos) -> pomme_block::BlockState {
         self.game.chunk_store.get_block_state(pos.x, pos.y, pos.z)
     }
 
-    fn set_block(&mut self, pos: crate::position::BlockPos, state: azalea_block::BlockState) {
+    fn set_block(&mut self, pos: crate::position::BlockPos, state: pomme_block::BlockState) {
         set_client_block(self.game, self.remesh, pos, state);
     }
 
@@ -267,7 +274,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
         &mut self.game.block_entity_anim.pistons
     }
 
-    fn destroy_effect(&mut self, pos: crate::position::BlockPos, state: azalea_block::BlockState) {
+    fn destroy_effect(&mut self, pos: crate::position::BlockPos, state: pomme_block::BlockState) {
         self.destroyed.push((pos, state));
     }
 }
@@ -284,11 +291,13 @@ pub(crate) fn tick_moving_pistons(game: &mut GameState) {
         if game.position_set && game.riding_vehicle_id.is_none() {
             // TODO: vanilla's client also moves other entities in the way;
             // the server's position updates do it here.
+            let extra_boxes = game.collidable_player_boxes();
             let world = crate::physics::collision::CollisionWorld::with_block_entities(
                 &game.chunk_store,
                 game.block_registry.block_state_table(),
                 &game.block_entity_anim,
-            );
+            )
+            .with_extra_boxes(&extra_boxes);
             movement::push_by_moving_piston(
                 &mut game.player,
                 world,
@@ -313,7 +322,7 @@ fn enqueue_edits(game: &mut GameState, sections: &[(crate::position::ChunkPos, i
 /// The texture of what `e` holds in its main hand, for its eating crumbs.
 fn mouth_item_texture(e: &crate::entity::LivingEntity) -> Option<String> {
     let pomme_item::ItemStack::Present(held) =
-        e.equipment(azalea_inventory::components::EquipmentSlot::Mainhand)?
+        e.equipment(pomme_item::components::EquipmentSlot::Mainhand)?
     else {
         return None;
     };
@@ -401,7 +410,7 @@ fn block_break_effect(
     audio: &crate::audio::AudioEngine,
     game: &mut GameState,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     let block_state_data = game.block_registry.block_state_data(state);
     if !block_state_data.is_air() {
@@ -514,6 +523,16 @@ impl GameState {
         self.mesh_dispatcher
             .set_biome_climate(Arc::clone(&self.biome_climate));
         self.sync_distant_colors();
+    }
+
+    /// Drops every entity, as a level going away takes its own with it.
+    fn clear_entities(&mut self) {
+        self.entity_store = crate::entity::EntityStore::new();
+        self.item_entity_store = crate::entity::ItemEntityStore::new();
+        self.entity_positions.clear();
+        self.entity_kinds.clear();
+        self.vehicle_passengers.clear();
+        self.silent_entities.clear();
     }
 
     /// Resets the level for a new dimension, with a mesh dispatcher for its
@@ -1589,6 +1608,9 @@ impl AppCore {
     /// `Gui.setScreen` with a new screen: whatever is up goes, running its
     /// `removed()`, so an options screen saves and chat keeps its draft.
     fn replace_screen(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+        // Also when one menu replaces another, which `update_game` doesn't
+        // see as a screen opening.
+        self.input.screen_opened();
         game.close_sign_editor(&connection.packet_tx);
         game.paused = false;
         self.menu
@@ -1629,6 +1651,7 @@ impl AppCore {
         connection
             .packet_tx
             .send(GamePacket::ClientCommand(ClientCommand::PerformRespawn));
+        self.input.reset_toggle_keys();
 
         game.death_confirm = false;
         game.respawn_sent = true;
@@ -2238,6 +2261,11 @@ impl AppCore {
             .then(std::time::Instant::now);
             match event {
                 NetworkEvent::ProtocolSelected { protocol } => game.select_protocol(protocol),
+                NetworkEvent::LoggedIn => {
+                    if let Some(state) = connect_phase.as_deref_mut() {
+                        state.login_finished();
+                    }
+                }
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
@@ -2265,7 +2293,10 @@ impl AppCore {
                     renderer.clear_chunk_meshes();
                     renderer.reset_distant();
                 }
-                NetworkEvent::DimensionName { name } => {
+                NetworkEvent::DimensionName { name, login } => {
+                    if starts_new_level(login, &game.dimension, &name) {
+                        game.clear_entities();
+                    }
                     game.dimension = name;
                 }
                 NetworkEvent::ChunkLoaded {
@@ -2510,6 +2541,9 @@ impl AppCore {
                 NetworkEvent::ItemTags(tags) => {
                     game.recipe_book.set_item_tags(tags);
                 }
+                NetworkEvent::PlaceablePaintings(paintings) => {
+                    game.placeable_paintings = paintings;
+                }
                 NetworkEvent::BlockTags { tags } => {
                     game.block_registry.replace_tags(tags);
                 }
@@ -2587,6 +2621,7 @@ impl AppCore {
                         MenuKind::Crafter3x3 => Some(ContainerScreen::Crafter),
                         _ => None,
                     };
+                    tracing::info!("The server opened menu {container_id}");
                     if let Some(screen) = screen {
                         if game.inventory_open || game.recipe_book_ui.captures_typing() {
                             game.recipe_book_ui
@@ -2653,6 +2688,7 @@ impl AppCore {
                 NetworkEvent::ContainerClosed => {
                     // Vanilla closes whatever menu is open regardless of the
                     // packet's container id, and with it any screen.
+                    tracing::info!("The server closed the open menu");
                     game.close_sign_editor(&connection.packet_tx);
                     game.close_menu();
                     // The server initiated the close; don't echo one back.
@@ -2747,7 +2783,7 @@ impl AppCore {
                     game.server_links = links;
                 }
                 NetworkEvent::OpenSignEditor { pos, is_front_text } => {
-                    if let Some(editor) = game.sign_editor_for(pos.into(), is_front_text) {
+                    if let Some(editor) = game.sign_editor_for(pos, is_front_text) {
                         self.replace_screen(connection, game);
                         game.close_menu();
                         game.sign_editor = Some(editor);
@@ -3025,26 +3061,21 @@ impl AppCore {
                         }
                     }
                     if game.inventory_open || game.creative_inventory_open {
-                        if game.inventory_open && matches!(game_mode, 1 | 3) {
-                            game.recipe_book_ui
-                                .reset_for_closed_screen(&mut game.recipe_book);
-                        }
-                        match game_mode {
-                            1 => {
-                                game.inventory_open = false;
-                                if !game.creative_inventory_open {
-                                    game.open_creative_inventory();
-                                }
+                        // Vanilla's two inventory screens swap on
+                        // `hasInfiniteMaterials` alone, so a spectator keeps
+                        // the survival one.
+                        if game_mode == 1 {
+                            if game.inventory_open {
+                                game.recipe_book_ui
+                                    .reset_for_closed_screen(&mut game.recipe_book);
                             }
-                            3 => {
-                                game.inventory_open = false;
-                                game.close_creative_inventory();
-                                self.apply_cursor_grab(window, Some(game));
+                            game.inventory_open = false;
+                            if !game.creative_inventory_open {
+                                game.open_creative_inventory();
                             }
-                            _ => {
-                                game.inventory_open = true;
-                                game.close_creative_inventory();
-                            }
+                        } else {
+                            game.inventory_open = true;
+                            game.close_creative_inventory();
                         }
                     }
                 }
@@ -3103,6 +3134,25 @@ impl AppCore {
                         Weather::ThunderLevel(level) => game.sky_state.thunder_level = level,
                     }
                 }
+                NetworkEvent::InitializeBorder(init) => game.world_border.initialize(init),
+                NetworkEvent::SetBorderCenter { center_x, center_z } => {
+                    game.world_border.set_center(center_x, center_z);
+                }
+                NetworkEvent::SetBorderLerpSize {
+                    old_size,
+                    new_size,
+                    lerp_ticks,
+                } => {
+                    game.world_border
+                        .lerp_size_between(old_size, new_size, lerp_ticks);
+                }
+                NetworkEvent::SetBorderSize { size } => game.world_border.set_size(size),
+                NetworkEvent::SetBorderWarningDelay { warning_time } => {
+                    game.world_border.set_warning_time(warning_time);
+                }
+                NetworkEvent::SetBorderWarningDistance { warning_blocks } => {
+                    game.world_border.set_warning_blocks(warning_blocks);
+                }
                 NetworkEvent::EntitySpawned {
                     id,
                     uuid,
@@ -3131,12 +3181,11 @@ impl AppCore {
                             uuid,
                         );
                         if entity_type == pomme_registry::builtin::EntityKind::Player {
-                            let textures = game
-                                .tab_list
-                                .players
-                                .get(&uuid)
-                                .and_then(|p| p.textures.clone());
-                            self.queue_player_skin(uuid, textures);
+                            let info = game.tab_list.players.get(&uuid);
+                            if let Some(entity) = game.entity_store.living.get_mut(&id) {
+                                entity.profile_name = info.map(|p| p.name.clone());
+                            }
+                            self.queue_player_skin(uuid, info.and_then(|p| p.textures.clone()));
                         }
                     }
                     if entity_type == pomme_registry::builtin::EntityKind::Item {
@@ -3412,6 +3461,12 @@ impl AppCore {
                 NetworkEvent::SnifferDigging { id } => {
                     super::sniffer::start_digging_sound(&mut self.audio, game, id);
                 }
+                // `LocalPlayer.handleEntityEvent`.
+                NetworkEvent::PermissionLevel { id, level } => {
+                    if id == game.player.entity_id {
+                        game.player.permission_level = level;
+                    }
+                }
                 NetworkEvent::FoxEat { id } => {
                     if let Some(fox) = game.entity_store.living.get(&id)
                         && let Some(texture) = mouth_item_texture(fox)
@@ -3640,12 +3695,7 @@ impl AppCore {
                     tracing::info!("Server re-entered configuration");
                     game.block_registry.clear_tags();
                     self.audio.stop_all_sounds();
-                    game.entity_store = crate::entity::EntityStore::new();
-                    game.item_entity_store = crate::entity::ItemEntityStore::new();
-                    game.entity_positions.clear();
-                    game.entity_kinds.clear();
-                    game.vehicle_passengers.clear();
-                    game.silent_entities.clear();
+                    game.clear_entities();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
                     // `ServerReconfigScreen` replaces any dialog; the server
@@ -3877,19 +3927,13 @@ impl AppCore {
             if Some(id) == vehicle {
                 return false;
             }
-            let pusher_name = match entity.player_uuid {
-                Some(uuid) => match tab_list.players.get(&uuid) {
-                    // `Player.tick` sets `noPhysics` for spectators, so
-                    // `Entity.push` returns before any impulse.
-                    Some(info) if crate::player::is_spectator(info.game_mode) => return false,
-                    Some(info) => info.name.clone(),
-                    // TODO: keep the spawn-time profile name; a player
-                    // dropped from the tab list falls back to no team.
-                    None => return true,
-                },
-                None => entity.uuid.to_string(),
-            };
-            scoreboard.pushable_by(&pusher_name, local_name)
+            // `Player.tick` sets `noPhysics` for spectators, so `Entity.push`
+            // returns before any impulse.
+            let spectator = entity
+                .player_uuid
+                .and_then(|uuid| tab_list.players.get(&uuid))
+                .is_some_and(|info| crate::player::is_spectator(info.game_mode));
+            !spectator && scoreboard.pushable_by(&entity.scoreboard_name(tab_list), local_name)
         };
         // Vanilla `Level.isThundering`.
         game.entity_store.thundering =
@@ -3976,7 +4020,7 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                let extra_boxes = game.collidable_entity_boxes();
+                let extra_boxes = game.collidable_player_boxes();
                 movement::tick_dead(
                     &mut game.player,
                     crate::physics::collision::CollisionWorld::with_block_entities(
@@ -4003,6 +4047,9 @@ impl AppCore {
                 .tick_dead_player_state(hand_stacks[0].as_ref(), !removed_this_tick);
 
             let neutral = InputState::released();
+            // Nothing ticks the jump an obstacle started, so it ends here.
+            game.player.auto_jump_time = 0;
+            game.player.auto_jumping = false;
             Self::send_abilities_packet(connection, game);
             Self::send_input_packet(&neutral, connection, game);
             self.send_sprint_command(connection, game);
@@ -4075,7 +4122,10 @@ impl AppCore {
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
-        let neutral = InputState::released();
+        // A screen takes the keys, not the hotbar selection: a neutral input
+        // on slot 0 would tell the server the held item changed.
+        let mut neutral = InputState::released();
+        neutral.set_selected_slot(self.input.selected_slot());
         let input = if input_live { &self.input } else { &neutral };
 
         // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
@@ -4177,6 +4227,7 @@ impl AppCore {
             registry: game.block_registry.render_view(),
             biome_climate: &game.biome_climate,
         };
+        game.interaction.world_border = game.world_border;
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
             input,
@@ -4196,6 +4247,11 @@ impl AppCore {
             &game.player.effects,
             game.player.eyes_in_water,
             legacy_mining,
+            crate::player::interaction::EntityUse {
+                entities: &game.entity_store,
+                passengers: &game.vehicle_passengers,
+                item_tags: game.recipe_book.item_tags(),
+            },
             &mut effects,
         );
         game.interaction.tick_using_item(
@@ -4216,7 +4272,7 @@ impl AppCore {
         let vehicle = game.riding_vehicle_id.map(|_| movement::Vehicle {
             jumpable: game.riding_jumpable_vehicle(),
         });
-        let extra_boxes = game.collidable_entity_boxes();
+        let extra_boxes = game.collidable_player_boxes();
         movement::tick(
             &mut game.player,
             input,
@@ -4328,8 +4384,9 @@ impl AppCore {
 
         let analog_move = input.analog_movement_axes().unwrap_or(glam::Vec2::ZERO);
 
-        let current =
+        let mut current =
             player_input_state(input, analog_move, input.performing_action(Action::Sprint));
+        current.jump |= game.player.auto_jumping;
 
         if current != game.last_sent_input {
             sender.send(GamePacket::PlayerInput(serverbound_player_input(&current)));
@@ -4464,6 +4521,7 @@ impl AppCore {
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
+        game.player.auto_jump_enabled = self.menu.controls.auto_jump;
     }
 }
 
@@ -4608,14 +4666,13 @@ fn worn_for<'a>(
     inventory: &'a crate::player::inventory::Inventory,
     selected: u8,
     creative: bool,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
 ) -> crate::player::interaction::Worn<'a> {
-    use azalea_core::registry_holder::components::PreventArmorChange;
-    use azalea_inventory::components::{Enchantments, Equippable};
+    use pomme_item::components::{Enchantments, Equippable};
     use pomme_registry::DataRegistry;
 
     let Some(equippable) = stack
-        .and_then(|s| s.get_component::<Equippable>())
+        .and_then(|s| s.component::<Equippable>())
         .filter(|e| e.swappable)
     else {
         return Default::default();
@@ -4623,14 +4680,17 @@ fn worn_for<'a>(
     let worn = inventory.equipped(equippable.slot, selected);
     let locked = !creative
         && worn
-            .and_then(|w| w.get_component::<Enchantments>())
+            .and_then(|w| w.component::<Enchantments>())
             .is_some_and(|e| {
-                e.levels.keys().any(|enchantment| {
+                e.levels.iter().any(|(enchantment, _)| {
+                    // `EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE`.
                     registries
-                        .enchantment
-                        .map
-                        .get_index(enchantment.protocol_id() as usize)
-                        .is_some_and(|(_, data)| data.get::<PreventArmorChange>().is_some())
+                        .entry(
+                            &crate::net::ENCHANTMENT_REGISTRY.into(),
+                            enchantment.protocol_id(),
+                        )
+                        .and_then(|(_, data)| data.compound("effects"))
+                        .is_some_and(|effects| effects.contains("minecraft:prevent_armor_change"))
                 })
             });
     crate::player::interaction::Worn {
@@ -4646,13 +4706,12 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     if player.flying {
         modifier *= 1.1;
     }
-    // Vanilla's speedFactor is MOVEMENT_SPEED / walkingSpeed; with Pomme's
-    // client-side speed model that reduces to sprint ? 1.3 : 1.0.
-    // TODO: drive from the MOVEMENT_SPEED attribute so Speed/Slowness potions
-    // and gear modifiers affect FOV too.
+    if player.walk_speed != 0.0 {
+        let speed_factor =
+            player.attribute(AttributeKind::MovementSpeed) as f32 / player.walk_speed;
+        modifier *= (speed_factor + 1.0) / 2.0;
+    }
     // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
-    let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
-    modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)
 }
 
@@ -4706,6 +4765,60 @@ mod tests {
         assert!(super::defer_packets(spent, 0.9 * TICK_RATE));
         assert!(!super::defer_packets(spent, TICK_RATE));
         assert!(!super::defer_packets(spent * 10, 3.0 * TICK_RATE));
+    }
+
+    #[test]
+    fn the_fov_follows_the_movement_speed_attribute() {
+        let mut player = LocalPlayer::new();
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        player.set_sprinting(true);
+        assert!((super::compute_fov_modifier(&player, 1.0) - 1.15).abs() < 1.0e-6);
+        // A server that raises the walking speed with the attribute's base
+        // leaves the ratio, and the FOV, where it was.
+        player.set_sprinting(false);
+        player.walk_speed = 0.2;
+        player
+            .attributes
+            .apply_snapshot(&crate::attribute::AttributeSnapshot {
+                attribute: AttributeKind::MovementSpeed,
+                base: f64::from(0.2_f32),
+                modifiers: Vec::new(),
+            });
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+        // `walkingSpeed` 0 skips the term rather than dividing by it.
+        player.walk_speed = 0.0;
+        assert_eq!(super::compute_fov_modifier(&player, 1.0), 1.0);
+    }
+
+    #[test]
+    fn a_player_goes_by_the_name_it_spawned_with() {
+        use pomme_registry::builtin::EntityKind;
+
+        let uuid = uuid::Uuid::from_u128(7);
+        let mut npc = crate::entity::LivingEntity::new(
+            EntityKind::Player,
+            Default::default(),
+            Default::default(),
+            uuid,
+        );
+        // Without one it reads the tab list, and its UUID outside it.
+        let listed = tab_list_with(uuid, "Listed", None);
+        assert_eq!(npc.scoreboard_name(&listed), "Listed");
+        assert_eq!(npc.scoreboard_name(&TabList::new()), uuid.to_string());
+        // The name outlives the entry, and a rename in the list.
+        npc.profile_name = Some("Npc".into());
+        assert_eq!(npc.scoreboard_name(&TabList::new()), "Npc");
+        assert_eq!(npc.scoreboard_name(&listed), "Npc");
+    }
+
+    #[test]
+    fn a_login_or_another_dimension_starts_a_new_level() {
+        let (overworld, nether) = ("minecraft:overworld", "minecraft:the_nether");
+        // A proxy moving the player to another server logs them in again.
+        assert!(super::starts_new_level(true, overworld, overworld));
+        assert!(super::starts_new_level(false, overworld, nether));
+        // A respawn after dying keeps the level and what is in it.
+        assert!(!super::starts_new_level(false, overworld, overworld));
     }
 
     #[test]

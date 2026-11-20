@@ -1,14 +1,16 @@
-//! Keeps a release build current: before the menu, a newer `client-v*`
-//! release replaces this build's files where they are, and the client
+//! Keeps a published build current: before the menu, a newer build on its
+//! channel replaces this build's files where they are, and the client
 //! relaunches into it.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use pomme_install::client::Channel;
 use pomme_install::{Progress, client};
 
-/// The release this binary was built as (`release-client.yml` sets it); dev
-/// and local builds have none and never update.
+/// The build this binary was published as (`release-client.yml` sets it);
+/// dev and local builds have none and never update.
 const RELEASE: Option<&str> = option_env!("POMME_RELEASE");
 /// Where a new release unpacks before its files move into place.
 const STAGING: &str = ".pomme-update";
@@ -18,41 +20,49 @@ const REPLACED: &str = "old";
 /// Offline, the check gives up this soon rather than hold the menu back.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// This build's `x.y.z` for display, or "dev" for one that isn't a release.
+/// This build's version for display, or "dev" for one that wasn't published.
 pub fn version() -> &'static str {
-    RELEASE.and_then(client::release_version).unwrap_or("dev")
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        RELEASE
+            .and_then(client::Build::parse)
+            .map_or_else(|| "dev".to_owned(), |build| build.to_string())
+    })
 }
 
-/// Whether this launch checks for a newer release. Not when the old launcher
-/// started it: that keeps its own copies under `launcher/clients`.
+/// Whether this launch checks for a newer build: only a published one's.
 pub fn enabled(args: &crate::LaunchArgs) -> bool {
+    RELEASE.is_some() && cfg!(not(mobile)) && wanted(args)
+}
+
+/// Whether `args` leave the update on. Not when the old launcher started the
+/// client: that keeps its own copies under `launcher/clients`.
+fn wanted(args: &crate::LaunchArgs) -> bool {
     #[cfg(feature = "test-harness")]
     if args.harness_script.is_some() {
         return false;
     }
     // A `--chunk-bench` run measures the binary it was started with.
-    RELEASE.is_some()
-        && cfg!(not(mobile))
-        && args.launch_token.is_none()
-        && args.chunk_bench.is_none()
+    !args.no_update && args.launch_token.is_none() && args.chunk_bench.is_none()
 }
 
-/// Installs a newer release over this one, returning the binary to relaunch,
-/// or `None` when this build is current.
+/// Installs `channel`'s newest build over this one if it is newer, returning
+/// the binary to relaunch, or `None` when this build is current.
 pub async fn run(
+    channel: Channel,
     on_progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<Option<PathBuf>, String> {
     let Some(ours) = RELEASE else {
         return Ok(None);
     };
     let http = crate::net::http::client();
-    let release = tokio::time::timeout(CHECK_TIMEOUT, client::latest_release(http))
+    let release = tokio::time::timeout(CHECK_TIMEOUT, client::latest_release(http, channel))
         .await
         .map_err(|_| "timed out".to_owned())??;
-    if !client::is_newer(ours, &release.tag_name) {
+    if !client::is_newer(ours, release.id()) {
         return Ok(None);
     }
-    tracing::info!("Updating from {ours} to {}", release.tag_name);
+    tracing::info!("Updating from {ours} to {}", release.id());
     if let Some(appimage) = appimage() {
         let file = client::download(http, &release, client::APPIMAGE, on_progress).await?;
         replace_appimage(&file, &appimage).await?;
@@ -165,6 +175,15 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn a_launch_can_turn_the_update_off() {
+        let wanted = |words| wanted(&crate::LaunchArgs::from_words(words).unwrap());
+        assert!(wanted(""));
+        assert!(!wanted("--no-update"));
+        assert!(!wanted("--launch-token abc"));
+        assert!(!wanted("--chunk-bench 16"));
+    }
 
     fn release_zip(files: &[(&str, &str)]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

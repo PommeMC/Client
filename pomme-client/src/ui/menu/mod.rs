@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use pomme_install::client::Channel;
 use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
-use crate::app::input::{Action, KeyBindings};
+use crate::app::input::{Action, ControlOptions, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
@@ -85,6 +86,8 @@ struct Settings {
     vignette: bool,
     #[serde(default = "default_true")]
     entity_shadows: bool,
+    #[serde(default)]
+    nightly_builds: bool,
     #[serde(default = "default_true")]
     show_autosave_indicator: bool,
     #[serde(default = "default_true")]
@@ -148,6 +151,8 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default)]
+    controls: ControlOptions,
     #[serde(default)]
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
@@ -336,6 +341,7 @@ impl Default for Settings {
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
+            nightly_builds: false,
             vsync: true,
             max_framerate: 120,
             inactivity_fps_limit: InactivityFpsLimit::default(),
@@ -366,6 +372,7 @@ impl Default for Settings {
             display_mode: 0,
             theme: PanoramaTheme::Java.to_u8(),
             chat: ChatOptions::default(),
+            controls: ControlOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
             last_server: String::new(),
@@ -612,6 +619,88 @@ const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
+/// What vanilla `DisconnectedScreen` is built with: its title, the reason,
+/// and its button's text and target, which don't always agree (a lost
+/// singleplayer connection says "Back to Server List" and opens the title
+/// screen).
+// TODO: with multiplayer disabled (`allowsMultiplayer`) the button is
+// `gui.toTitle` and opens the title screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disconnection {
+    title: &'static str,
+    reason: String,
+    button: &'static str,
+    back: DisconnectBack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisconnectBack {
+    Title,
+    ServerList,
+    WorldList,
+}
+
+impl DisconnectBack {
+    fn screen(self) -> Screen {
+        match self {
+            Self::Title => Screen::Main,
+            Self::ServerList => Screen::ServerList,
+            Self::WorldList => Screen::WorldList,
+        }
+    }
+}
+
+/// `gui.toMenu`, `DisconnectedScreen`'s default button.
+const TO_SERVER_LIST: &str = "Back to Server List";
+
+impl Disconnection {
+    /// `ConnectScreen` and the login listener: `connect.failed`, back to the
+    /// screen the connection started from.
+    // TODO: a quick play connection's `quickplay.error.title`, back to the
+    // title screen.
+    pub fn connect_failed(reason: String, singleplayer: bool) -> Self {
+        Self::server("Failed to connect to the server", reason, singleplayer)
+    }
+
+    /// `ClientCommonPacketListenerImpl.createDisconnectScreen`:
+    /// `disconnect.lost`, back to the server list when there was a server
+    /// entry, else the title screen.
+    pub fn lost(reason: String, singleplayer: bool) -> Self {
+        Self::server("Connection Lost", reason, singleplayer)
+    }
+
+    fn server(title: &'static str, reason: String, singleplayer: bool) -> Self {
+        Self {
+            title,
+            reason,
+            button: TO_SERVER_LIST,
+            back: if singleplayer {
+                DisconnectBack::Title
+            } else {
+                DisconnectBack::ServerList
+            },
+        }
+    }
+
+    /// A world that couldn't be opened, `gui.toWorld` back to the world
+    /// list: `QuickPlay.joinSingleplayerWorld`'s screen for a quick play
+    /// launch, else titled `selectWorld.access_failure`.
+    // TODO: vanilla shows a world picked from the list failing as a toast
+    // of that title over the world list, not a screen.
+    pub fn world(reason: String, quick_play: bool) -> Self {
+        Self {
+            title: if quick_play {
+                "Failed to Quick Play"
+            } else {
+                "Failed to access world"
+            },
+            reason,
+            button: "Back to World List",
+            back: DisconnectBack::WorldList,
+        }
+    }
+}
+
 enum Screen {
     Main,
     Account,
@@ -625,10 +714,15 @@ enum Screen {
     DirectConnect,
     AddServer,
     EditServer(usize),
-    Disconnected(String),
+    Disconnected(Disconnection),
     Options,
     OptionsOnline,
     OptionsVideo,
+    /// Pomme's own settings and their category screens (Pomme-only).
+    OptionsPomme,
+    OptionsPommePerformance,
+    OptionsPommeShaders,
+    OptionsPommeUpdates,
     OptionsSkinCustomization,
     OptionsMusicSounds,
     OptionsControls,
@@ -654,6 +748,10 @@ impl Screen {
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
+            Self::OptionsPomme => Self::OptionsPomme,
+            Self::OptionsPommePerformance => Self::OptionsPommePerformance,
+            Self::OptionsPommeShaders => Self::OptionsPommeShaders,
+            Self::OptionsPommeUpdates => Self::OptionsPommeUpdates,
             Self::OptionsSkinCustomization => Self::OptionsSkinCustomization,
             Self::OptionsMusicSounds => Self::OptionsMusicSounds,
             Self::OptionsControls => Self::OptionsControls,
@@ -677,7 +775,7 @@ impl Screen {
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
             Self::EditServer(i) => Self::EditServer(*i),
-            Self::Disconnected(s) => Self::Disconnected(s.clone()),
+            Self::Disconnected(d) => Self::Disconnected(d.clone()),
         }
     }
 }
@@ -850,6 +948,8 @@ pub struct MainMenu {
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
+    /// Whether updates follow master's nightly builds (Pomme-only).
+    nightly_builds: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub inactivity_fps_limit: InactivityFpsLimit,
@@ -885,6 +985,7 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
+    pub controls: ControlOptions,
     pub force_unicode_font: bool,
     pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
@@ -1026,6 +1127,7 @@ impl MainMenu {
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
+            nightly_builds: settings.nightly_builds,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             inactivity_fps_limit: settings.inactivity_fps_limit,
@@ -1060,6 +1162,7 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
+            controls: settings.controls.sanitized(),
             force_unicode_font: settings.force_unicode_font,
             japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
@@ -1288,6 +1391,7 @@ impl MainMenu {
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
+                nightly_builds: self.nightly_builds,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 inactivity_fps_limit: self.inactivity_fps_limit,
@@ -1318,6 +1422,7 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                controls: self.controls,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
                 last_server: self.last_mp_ip.clone(),
@@ -1399,6 +1504,15 @@ impl MainMenu {
         self.save_settings(key_bindings);
     }
 
+    /// The builds this client updates to at its next start.
+    pub fn update_channel(&self) -> Channel {
+        if self.nightly_builds {
+            Channel::Nightly
+        } else {
+            Channel::Stable
+        }
+    }
+
     pub fn open_options(&mut self, key_bindings: &KeyBindings) {
         // Stale after a disconnect; the in-game path re-sets it every frame.
         self.server_render_distance = 0;
@@ -1422,6 +1536,10 @@ impl MainMenu {
             Screen::Options
                 | Screen::OptionsOnline
                 | Screen::OptionsVideo
+                | Screen::OptionsPomme
+                | Screen::OptionsPommePerformance
+                | Screen::OptionsPommeShaders
+                | Screen::OptionsPommeUpdates
                 | Screen::OptionsSkinCustomization
                 | Screen::OptionsMusicSounds
                 | Screen::OptionsControls
@@ -1588,8 +1706,8 @@ impl MainMenu {
         self.set_screen(screen, key_bindings);
     }
 
-    pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
-        self.set_screen(Screen::Disconnected(reason), key_bindings);
+    pub fn show_disconnect(&mut self, disconnection: Disconnection, key_bindings: &KeyBindings) {
+        self.set_screen(Screen::Disconnected(disconnection), key_bindings);
     }
 
     /// Resolves a world for launch, since the world list and the saves
@@ -1711,6 +1829,30 @@ impl MainMenu {
             Screen::OptionsVideo => {
                 self.build_options_video(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::OptionsPomme => {
+                self.build_options_pomme(screen_w, screen_h, input, &text_width_fn, key_bindings)
+            }
+            Screen::OptionsPommePerformance => self.build_options_pomme_performance(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeShaders => self.build_options_pomme_shaders(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
+            Screen::OptionsPommeUpdates => self.build_options_pomme_updates(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
             Screen::OptionsSkinCustomization => {
                 self.build_options_skin(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }

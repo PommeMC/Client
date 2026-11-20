@@ -60,8 +60,9 @@
 //!   leave the ingredient lists they appear in
 //! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
 //!   which pomme never sends (it only steers the server's new destroy-progress
-//!   level events, 2019/2020, which drop client-side); `sign_update` reordered
-//!   its slot field (pomme never sends it)
+//!   level events, 2019/2020, which drop client-side)
+//! - `sign_update` moved the text side from before the four lines to after
+//!   them, as a `SignTextSlot` (0 back, 1 front) where it was a boolean
 //! - `accept_teleportation` appends the accepted pose, and 26.3's
 //!   `handleMovePlayer` no longer follows it with a `move_player_pos_rot` (a
 //!   second position packet in one tick disconnects): the accept is held and
@@ -117,6 +118,9 @@
 //!   `mount_screen_open` with identical fields; the id match aliases the pair
 //! - `EntityDataSerializers` lacks 1.21.11's `zombie_nautilus_variant` (28) and
 //!   trailing `humanoid_arm`, so the serializer remap differs
+//! - the world border counts its lerp in milliseconds and its warning time in
+//!   seconds, where 1.21.11 made both game ticks: `initialize_border`,
+//!   `set_border_lerp_size` and `set_border_warning_delay` are rewritten
 //!
 //! 1.21.8 -> 26.2 wire changes (all of 1.21.10's plus 1.21.9's, which the id
 //! remap and the rewrites below absorb):
@@ -377,9 +381,8 @@
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
-use azalea_buf::AzBuf;
-use azalea_inventory::components::Profile;
 use glam::DVec3;
+use pomme_item::components::{Component as _, Profile};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::serverbound::{GamePacket, HashedStack};
@@ -500,6 +503,8 @@ struct GameIds {
     /// The item-carrying packets, for wire versions with a ported item
     /// grammar.
     items: Option<ItemIds>,
+    /// The rewrites 1.21.11 introduced, for wire versions below it.
+    v773: Option<Ids773>,
     /// The rewrites 1.21.9 introduced, for wire versions at or below it.
     v772: Option<Ids772>,
     /// The rewrites 1.21.6 introduced, for wire versions below it.
@@ -673,6 +678,14 @@ struct Ids770 {
     chunks_biomes_id: u32,
 }
 
+/// Native-space dispatch ids for the frame rewrites protocols at or below
+/// 773 need: 1.21.11 moved the world border's times to game ticks.
+struct Ids773 {
+    initialize_border_id: u32,
+    set_border_lerp_size_id: u32,
+    set_border_warning_delay_id: u32,
+}
+
 /// Native-space dispatch ids for the frame rewrites only protocols at or
 /// below 772 need (the layouts 1.21.9 changed). Its presence also flags the
 /// pre-1.21.9 entity-data serializer set and `profile` component layout.
@@ -716,6 +729,8 @@ struct Ids777 {
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
     move_player_pos_rot_id: u32,
+    sign_update_id: u32,
+    sign_update_old_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus
@@ -885,6 +900,8 @@ use v769::*;
 
 mod v772;
 use v772::*;
+
+mod v773;
 
 mod v777;
 use v777::*;

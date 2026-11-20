@@ -1,0 +1,145 @@
+# In the creative screen a carried bundle picks up the stack it is clicked
+# on, its tooltip then shows what it holds, and it moves between slots on the
+# inventory tab.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/item replace entity @s hotbar.0 with minecraft:bundle"
+
+[[step]]
+chat = "/item replace entity @s hotbar.1 with minecraft:dirt 16"
+
+[[step]]
+expect = { slot = 37, item = "dirt", count = 16 }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative" }
+
+# Pick the bundle up, click the dirt with it, and put it back.
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hover = { slot = 37 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+expect = { slot = 37, item = "air" }
+
+[[step]]
+expect = { slot = 36, item = "bundle", components = ["bundle_contents"] }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "bundle_tooltip"
+
+# The inventory tab numbers its slots as the inventory itself does: the
+# bundle moves from the hotbar to the first inventory slot there.
+[[step]]
+hover = { tab = "inventory" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "creative", tab = "inventory" }
+
+[[step]]
+hover = { slot = 36 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hover = { slot = 9 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+[[step]]
+expect = { slot = 9, item = "bundle", components = ["bundle_contents"] }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "inventory_tab_tooltip"
+
+# Back to the first tab, which the screen would otherwise reopen on.
+[[step]]
+hover = { tab = "building_blocks" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "creative", tab = "building_blocks" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear @s"

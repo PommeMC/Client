@@ -1,8 +1,9 @@
 # Distant Terrain keeps every chunk seen and draws them past the loaded
 # ones: a tower is kept as soon as its chunk is lit, still shows on the
 # horizon when left 200 blocks behind at Render Distance 2, comes back
-# after leaving the view, and goes with the option. Pomme-only (the vanilla
-# harness has no Distant Terrain), so it fails there by design.
+# after leaving the view, and goes with the option. Pomme-only.
+
+pomme_only = true
 
 [[step]]
 wait_ms = 2000

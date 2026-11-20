@@ -1,12 +1,24 @@
 name: Release client
 
+# The week, in UTC: a nightly of master every day for clients that opt in; on
+# Thursday the last nightly's commit becomes the week's release candidate, a
+# draft no client sees; on Sunday the candidate is published, after daily
+# clients have run its code for a few days. CONTRIBUTING.md has how to hold
+# one back.
 on:
   push:
     tags: ["client-v*"]
   schedule:
-    - cron: "7 18 * * 0" # Sundays 18:07 UTC (weekly pre-alpha snapshot of master)
+    - cron: "7 3 * * *" # nightly
+    - cron: "7 4 * * 4" # candidate, an hour after Thursday's nightly
+    - cron: "7 18 * * 0" # publish
   workflow_dispatch:
     inputs:
+      channel:
+        description: "release: cut and publish now. nightly: replace the rolling nightly. candidate: cut a draft from the last nightly. publish: publish the waiting draft"
+        type: choice
+        options: [release, nightly, candidate, publish]
+        default: release
       version:
         description: "Version core, e.g. 0.2.0 (blank = bump patch from latest)"
         required: false
@@ -23,6 +35,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MC_VERSION: "26.2"
+  # The schedules above, which tell their runs apart.
+  NIGHTLY_CRON: "7 3 * * *"
+  CANDIDATE_CRON: "7 4 * * 4"
+  PUBLISH_CRON: "7 18 * * 0"
 
 permissions:
   contents: write
@@ -40,42 +56,84 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      channel: ${{ steps.channel.outputs.channel }}
+      # The commit to build: a candidate's is the last nightly's.
+      sha: ${{ steps.check.outputs.sha }}
+      # The draft release `publish` puts out, if one is waiting.
+      candidate: ${{ steps.check.outputs.candidate }}
+      # The build's id, which the client is built with: the release's tag, or
+      # for a nightly `nightly-<last release>.<run>+<minecraft>`.
       tag: ${{ steps.rel.outputs.tag }}
+      # The git tag it is published under: `nightly` for every nightly.
+      release_tag: ${{ steps.rel.outputs.release_tag }}
       prev: ${{ steps.rel.outputs.prev }}
       version: ${{ steps.rel.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Check for new commits since last release
+      - name: Pick the channel
+        id: channel
+        shell: bash
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          REQUESTED: ${{ inputs.channel }}
+        run: |
+          case "$SCHEDULE" in
+            "$NIGHTLY_CRON") channel=nightly ;;
+            "$CANDIDATE_CRON") channel=candidate ;;
+            "$PUBLISH_CRON") channel=publish ;;
+            *) channel=${REQUESTED:-release} ;;
+          esac
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Check for new commits since the last build
         id: check
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           release() { echo "should_release=true" >> "$GITHUB_OUTPUT"; exit 0; }
           skip() { echo "should_release=false" >> "$GITHUB_OUTPUT"; echo "$1"; exit 0; }
 
-          # Only the weekly cron is gated; a tag push or manual dispatch is a
+          git fetch --tags --force
+          if [ "$CHANNEL" = "publish" ]; then
+            candidate=$(gh release list --limit 30 --json tagName,isDraft \
+              --jq '[.[] | select(.isDraft and (.tagName | startswith("client-v")))][0].tagName // ""')
+            echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+            skip "${candidate:-No candidate} is waiting; publishing builds nothing."
+          fi
+          nightly=$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)
+          sha=$GITHUB_SHA
+          if [ "$CHANNEL" = "candidate" ]; then
+            sha=$nightly
+            [ -n "$sha" ] || skip "No nightly to cut a candidate from."
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+          # Only the crons are gated; a tag push or manual dispatch is a
           # deliberate act and always releases, and a pull request only builds.
           if [ "${{ github.event_name }}" != "schedule" ]; then
             release
           fi
 
-          git fetch --tags --force
           last_tag=$(git tag --list 'client-v*' --sort=-v:refname | head -n1)
-          if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..HEAD")" ]; then
-            skip "No new commits on master since ${last_tag}."
+          if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..${sha}")" ]; then
+            skip "No new commits since ${last_tag}."
+          fi
+          if [ "$CHANNEL" = "nightly" ] && [ "$nightly" = "$GITHUB_SHA" ]; then
+            skip "No new commits on master since the last nightly."
           fi
 
           # Merges are gated on CI, but master can still go red when two PRs pass
-          # separately and then conflict, and this release is announced to
-          # Discord. A run still in progress reports null and also skips.
+          # separately and then conflict, and clients update to this build on
+          # their own. A run still in progress reports null and also skips.
           ci=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=1" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=1" \
             --jq '.workflow_runs[0].conclusion // "none"')
           if [ "$ci" != "success" ]; then
-            skip "CI for ${GITHUB_SHA} is '${ci}', not success."
+            skip "CI for ${sha} is '${ci}', not success."
           fi
 
           release
@@ -84,31 +142,52 @@ jobs:
       - name: Resolve release tag
         id: rel
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           git fetch --tags --force
-          tags=$(git tag --list 'client-v*')
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${{ github.ref_name }}"
+          latest=$(git tag --list 'client-v*' \
+            | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+            | sort -V | tail -n1)
+          if [ "$CHANNEL" = "nightly" ]; then
+            # The run number only goes up, so each nightly is newer than the
+            # one before, and both sit between this release and the next. It
+            # starts over if this file is renamed or recreated, which strands
+            # nightly clients until the next release.
+            version=${latest:-0.0.0}
+            tag="nightly-${version}.${GITHUB_RUN_NUMBER}+${MC_VERSION}"
+            release_tag=nightly
           else
-            core="${{ inputs.version }}"
-            if [ -z "$core" ]; then
-              latest=$(echo "$tags" \
-                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
-                | sort -V | tail -n1)
-              if [ -z "$latest" ]; then
-                core="0.1.0"
-              else
-                IFS=. read -r ma mi pa <<< "$latest"
-                core="$ma.$mi.$((pa + 1))"
+            if [ "${{ github.event_name }}" = "push" ]; then
+              tag="${{ github.ref_name }}"
+            else
+              core="${{ inputs.version }}"
+              if [ -z "$core" ]; then
+                if [ -z "$latest" ]; then
+                  core="0.1.0"
+                else
+                  IFS=. read -r ma mi pa <<< "$latest"
+                  core="$ma.$mi.$((pa + 1))"
+                fi
               fi
+              tag="client-v${core}+${MC_VERSION}"
             fi
-            tag="client-v${core}+${MC_VERSION}"
+            release_tag=$tag
+            version=${tag#client-v}
+            version=${version%%+*}
           fi
-          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          version=${tag#client-v}
-          echo "version=${version%%+*}" >> "$GITHUB_OUTPUT"
-          echo "prev=$prev" >> "$GITHUB_OUTPUT"
+          # The notes run from the last release that went out, not a tag left
+          # by a candidate that was held back.
+          published=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName')
+          prev=$(grep '^client-v' <<< "$published" | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          {
+            echo "tag=$tag"
+            echo "release_tag=$release_tag"
+            echo "version=$version"
+            echo "prev=$prev"
+          } >> "$GITHUB_OUTPUT"
 
   build-client:
     needs: check
@@ -136,6 +215,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.check.outputs.sha }}
           submodules: true
 
       - uses: ./.github/actions/setup-rust
@@ -245,16 +325,66 @@ jobs:
           cd dist
           sha256sum * > sha256sums.txt
 
+      # The nightly tag moves to this commit, so the last nightly goes first;
+      # clients that look in between find no nightly and stay as they are.
+      # Only a missing one is skipped: a delete that fails would leave the tag
+      # on the old commit under the new files.
+      - name: Remove the last nightly
+        if: needs.check.outputs.channel == 'nightly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view nightly > /dev/null 2>&1; then
+            gh release delete nightly --cleanup-tag --yes
+          fi
+
+      # A draft holds no tag, and the nightlies until Sunday must count from
+      # this release to stay newer than it, so its tag goes on now, unless a
+      # failed run already put it there. One made with this token starts no
+      # run of its own.
+      - name: Tag the candidate
+        if: needs.check.outputs.channel == 'candidate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.release_tag }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          if [ "$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" != "$SHA" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}"
+          fi
+
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.check.outputs.tag }}
-          prerelease: false
-          make_latest: true
+          tag_name: ${{ needs.check.outputs.release_tag }}
+          name: ${{ needs.check.outputs.tag }}
+          # A nightly's and a candidate's tag go on the commit that was built;
+          # a release cut by hand stays on master's tip.
+          target_commitish: ${{ needs.check.outputs.channel != 'release' && needs.check.outputs.sha || '' }}
+          draft: ${{ needs.check.outputs.channel == 'candidate' }}
+          prerelease: ${{ needs.check.outputs.channel == 'nightly' }}
+          make_latest: ${{ needs.check.outputs.channel == 'release' }}
           previous_tag: ${{ needs.check.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ needs.check.outputs.prev != '' }}
           body: |
+            ${{ needs.check.outputs.channel == 'nightly' && 'A nightly build of master, less tested than a release. A client follows these with Options, Pomme Settings, Updates, Client Updates set to Daily. If one will not start, reinstall the latest release, start it once with --no-update and set Client Updates back to Weekly.' || '' }}
+
             These builds aren't signed yet, so the first launch needs one extra step:
             - **macOS:** open `Pomme.app` with right-click → Open, or allow it under System Settings → Privacy & Security.
             - **Windows:** on the SmartScreen prompt, choose More info → Run anyway.
             - **Linux:** `chmod +x pomme-client-linux-x64-gnu.AppImage`, then run it.
+
+  publish-candidate:
+    needs: check
+    if: >-
+      needs.check.outputs.channel == 'publish' && needs.check.outputs.candidate != ''
+      && !inputs.dry_run
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE: ${{ needs.check.outputs.candidate }}
+        run: gh release edit "$CANDIDATE" --draft=false --latest

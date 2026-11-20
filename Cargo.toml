@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "pomme-android",
+    "pomme-relay",
     "pomme-ios",
     "pomme-auth",
     "pomme-install",
@@ -57,8 +58,9 @@ tracing-subscriber = "0.3"
 # (azalea-rs/azalea#332) from git, since that branch was deleted.
 # azalea-block is replaced by the pomme-block shim (pomme owns block data),
 # azalea-registry by pomme-registry under that name (its `azalea-compat`
-# crate), and azalea-inventory by the pomme-inventory fork; the second patch
-# table substitutes them under the azalea git workspace's own path
+# crate), and azalea-inventory by the pomme-inventory fork, which only
+# azalea-entity and the test-only azalea-protocol still need; the second
+# patch table substitutes them under the azalea git workspace's own path
 # dependencies too.
 [patch.crates-io]
 azalea-buf = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }

@@ -339,6 +339,28 @@ mod tests {
         assert_eq!(encode_recipe_book_seen_recipe(300), [0x2f, 0xac, 0x02]);
     }
 
+    /// The vectors vanilla's encoder wrote into the entity fixtures
+    /// (`CodecOracle.entities`) come out of `write_lp_vec3` as the same bytes.
+    #[test]
+    fn lp_vec3_writes_what_vanilla_writes() {
+        use crate::vanilla_fixtures::case;
+
+        // After the entity id.
+        let motion = case("set_entity_motion/fast");
+        assert_eq!(lp_vec3(DVec3::new(6.0, -1.0, 0.0)), motion[1..]);
+        // After the entity id, uuid, two-byte entity type and position;
+        // before the three rotations and the one-byte data.
+        let add = case("add_entity/zombie");
+        let movement = 1 + 16 + 2 + 3 * 8..add.len() - 4;
+        assert_eq!(lp_vec3(DVec3::new(0.5, 0.25, -0.75)), add[movement]);
+    }
+
+    fn lp_vec3(v: DVec3) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_lp_vec3(&mut buf, v);
+        buf
+    }
+
     #[test]
     fn lp_vec3_round_trip() {
         for v in [
@@ -347,8 +369,7 @@ mod tests {
             DVec3::new(1.5, -2.0, 3.25),
             DVec3::new(100.0, -250.5, 0.125),
         ] {
-            let mut buf = Vec::new();
-            write_lp_vec3(&mut buf, v);
+            let buf = lp_vec3(v);
             let mut pos = 0;
             let read = read_lp_vec3(&buf, &mut pos).unwrap();
             assert_eq!(pos, buf.len());

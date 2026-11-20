@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use azalea_block::BlockState;
 use parking_lot::RwLock;
+use pomme_block::BlockState;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::section::{BitStorage, PalettedContainer, Section, Strategy, ceil_log2};
 use thiserror::Error;

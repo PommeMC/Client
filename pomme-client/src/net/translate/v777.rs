@@ -309,6 +309,22 @@ pub(super) fn translate_player_action_777(old_id: u32, payload: &[u8]) -> Vec<Ve
     vec![out]
 }
 
+/// Rewrites `sign_update` for 26.3, which writes the text side after the
+/// lines as a `SignTextSlot` (`ServerboundSignUpdatePacket.STREAM_CODEC`):
+/// back is 0 and front 1, the byte the boolean before the lines was.
+pub(super) fn translate_sign_update_777(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    const POS: usize = 8;
+    let Some((&front, lines)) = payload.get(POS..).and_then(|rest| rest.split_first()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&payload[..POS]);
+    out.extend_from_slice(lines);
+    out.push(front);
+    vec![out]
+}
+
 /// Rewrites `player_chat` from 26.3, whose `PARTIALLY_FILTERED` mask moved
 /// to `ByteBufCodecs.BIT_SET` (`FilterMask`); everything around it copies
 /// verbatim.

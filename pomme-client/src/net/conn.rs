@@ -7,10 +7,10 @@
 
 use std::io::{self, Cursor};
 
-use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, SimplexStream, WriteHalf};
 use tokio::net::TcpStream;
 
+use super::crypt::{self, Decryptor, Encryptor};
 use super::frame::{self, FrameError};
 use super::stream::{NetReader, NetWriter};
 
@@ -26,13 +26,13 @@ pub struct RawReader {
     /// (the loops read inside `select!`) leaves `buffer` as it was.
     chunk: Box<[u8]>,
     compression_threshold: Option<u32>,
-    dec_cipher: Option<Aes128CfbDec>,
+    dec_cipher: Option<Decryptor>,
 }
 
 pub struct RawWriter {
     stream: NetWriter,
     compression_threshold: Option<u32>,
-    enc_cipher: Option<Aes128CfbEnc>,
+    enc_cipher: Option<Encryptor>,
 }
 
 /// Held as two fields rather than behind accessors so the game loop can read
@@ -61,7 +61,7 @@ impl RawReader {
             }
             let received = &mut self.chunk[..read];
             if let Some(cipher) = &mut self.dec_cipher {
-                azalea_crypto::decrypt_packet(cipher, received);
+                crypt::decrypt(cipher, received);
             }
             self.buffer.get_mut().extend_from_slice(received);
         }
@@ -96,7 +96,7 @@ impl RawWriter {
     pub async fn write(&mut self, packet: &[u8]) -> io::Result<()> {
         let mut wire = frame::pack(packet, self.compression_threshold).map_err(io::Error::other)?;
         if let Some(cipher) = &mut self.enc_cipher {
-            azalea_crypto::encrypt_packet(cipher, &mut wire);
+            crypt::encrypt(cipher, &mut wire);
         }
         self.stream.write_all(&wire).await
     }
@@ -175,7 +175,7 @@ impl Conn {
     /// Arms both directions. The caller must have flushed the key packet first:
     /// it is the last plaintext frame.
     pub fn set_encryption_key(&mut self, key: [u8; 16]) {
-        let (enc_cipher, dec_cipher) = azalea_crypto::create_cipher(&key);
+        let (enc_cipher, dec_cipher) = crypt::ciphers(&key);
         self.reader.dec_cipher = Some(dec_cipher);
         self.writer.enc_cipher = Some(enc_cipher);
     }

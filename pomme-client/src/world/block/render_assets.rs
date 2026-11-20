@@ -3,17 +3,15 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use azalea_block::BlockState;
-use azalea_inventory::components::{
-    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
-};
+use pomme_block::BlockState;
 use pomme_item::ItemStackData;
-use pomme_item::components::ChargedProjectiles;
+use pomme_item::components::{
+    BlockItemStateProperties, ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion,
+    MapColor, PotionContents,
+};
 use pomme_registry::Registry as AzaleaRegistry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
-
-use crate::net::item_codec::Components;
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
@@ -271,8 +269,9 @@ impl BlockRenderAssets {
         self.item_models.get(name)
     }
 
-    /// The model `name` draws with for this stack: its loaded variant
-    /// (vanilla `Charge` select property) if it bakes one, else `name`.
+    /// The model `name` draws with for this stack: the variant its loaded
+    /// projectile or its `block_state` component selects (vanilla `Charge`
+    /// and `ItemBlockState`) if it bakes one, else `name`.
     pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
         let charge = stack
             .component::<ChargedProjectiles>()
@@ -281,9 +280,18 @@ impl BlockRenderAssets {
                 let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
                 if rocket { "rocket" } else { "arrow" }
             });
+        let block_state = stack.component::<BlockItemStateProperties>();
+        let state_keys = block_state.iter().flat_map(|state| {
+            state
+                .properties
+                .iter()
+                .map(|(property, value)| model::block_state_model_key(name, property, value))
+        });
         charge
             .map(|charge| model::charge_model_key(name, charge))
-            .filter(|key| {
+            .into_iter()
+            .chain(state_keys)
+            .find(|key| {
                 self.item_models.contains_key(key) || self.flat_item_texture_keys.contains_key(key)
             })
             .unwrap_or_else(|| name.to_string())
@@ -464,6 +472,12 @@ impl<'a> BlockRenderView<'a> {
             .get(self.block_state_table.block_state_data(state).id)
     }
 
+    /// Whether the state's assets give it geometry to mesh.
+    pub(crate) fn has_block_model(self, state: BlockState) -> bool {
+        self.get_baked_model(state, None).is_some()
+            || self.get_multipart_quads(state, None).is_some()
+    }
+
     /// The state's variant model as vanilla `ModelBlockRenderer` picks it for
     /// the block at `pos`, or the first of a weighted list without one.
     pub(crate) fn get_baked_model(
@@ -551,23 +565,23 @@ fn evaluate_item_tint(
         // Vanilla preserves the configured default alpha for dye/firework, but
         // opacifies component colors.
         model::ItemTintSource::Dye { default } => stack
-            .and_then(|stack| stack.get_component::<DyedColor>())
+            .and_then(|stack| stack.component::<DyedColor>())
             .map(|color| opaque_rgb(color.rgb as u32))
             .unwrap_or(default),
         model::ItemTintSource::Firework { default } => stack
-            .and_then(|stack| stack.get_component::<FireworkExplosion>())
+            .and_then(|stack| stack.component::<FireworkExplosion>())
             .and_then(|explosion| average_rgb(&explosion.colors))
             .unwrap_or(default),
         model::ItemTintSource::Potion { default } => stack
-            .and_then(|stack| stack.get_component::<PotionContents>())
+            .and_then(|stack| stack.component::<PotionContents>())
             .map(|contents| potion_contents_color(&contents, default))
             .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::MapColor { default } => stack
-            .and_then(|stack| stack.get_component::<MapColor>())
+            .and_then(|stack| stack.component::<MapColor>())
             .map(|color| opaque_rgb(color.color as u32))
             .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::CustomModelData { index, default } => stack
-            .and_then(|stack| stack.get_component::<CustomModelData>())
+            .and_then(|stack| stack.component::<CustomModelData>())
             .and_then(|data| data.colors.get(index).copied())
             .map(|color| opaque_rgb(color as u32))
             .unwrap_or_else(|| opaque_rgb(default)),
@@ -738,14 +752,14 @@ mod load_progress_tests {
 
 #[cfg(test)]
 mod tint_tests {
-    use azalea_inventory::components::CustomModelData;
     use pomme_item::ItemStack;
+    use pomme_item::components::CustomModelData;
 
     use super::*;
 
     #[test]
     fn custom_model_data_tint_uses_requested_color_index_and_default() {
-        let stack = ItemStack::from(ItemKind::Stone).with_component(CustomModelData {
+        let stack = ItemStack::from(ItemKind::Stone).with(&CustomModelData {
             floats: vec![],
             flags: vec![],
             strings: vec![],

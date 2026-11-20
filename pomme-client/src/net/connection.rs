@@ -200,6 +200,7 @@ pub async fn connect_to_server(
     if !no_config {
         send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
     }
+    send_ordered(&event_tx, NetworkEvent::LoggedIn);
 
     let joined = if no_config {
         tracing::info!("Skipping configuration phase");
@@ -261,7 +262,7 @@ struct Joined {
 
 /// What a configuration phase leaves the session with.
 struct Configured {
-    registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
+    registries: std::sync::Arc<crate::net::registry_holder::RegistryHolder>,
     dialogs: std::sync::Arc<DialogRegistry>,
 }
 
@@ -448,7 +449,7 @@ async fn handle_encryption(
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
 ) -> Result<(), ConnectionError> {
-    let e = azalea_crypto::encrypt(&hello.public_key, &hello.challenge)
+    let e = super::crypt::key_exchange(&hello.public_key, &hello.challenge)
         .map_err(ConnectionError::Encryption)?;
 
     if hello.should_authenticate {
@@ -469,7 +470,7 @@ async fn handle_encryption(
     }
 
     let key = ServerboundLogin::Key {
-        key: e.encrypted_public_key,
+        key: e.encrypted_secret_key,
         encrypted_challenge: e.encrypted_challenge,
     };
     send_login(conn, key).await?;
@@ -635,22 +636,20 @@ async fn config_sequence(
 
 /// The synced biome registry, in protocol-id order.
 pub(crate) fn biome_registry(
-    holder: &azalea_core::registry_holder::RegistryHolder,
-) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
-    holder
-        .extra
-        .get(&pomme_registry::identifier::Identifier::new(
-            "minecraft:worldgen/biome",
-        ))
+    holder: &crate::net::registry_holder::RegistryHolder,
+) -> Option<&crate::net::registry_holder::Registry> {
+    holder.get(&pomme_registry::identifier::Identifier::new(
+        "minecraft:worldgen/biome",
+    ))
 }
 
 /// How many biomes chunk sections can name.
-pub(crate) fn biome_count(holder: &azalea_core::registry_holder::RegistryHolder) -> usize {
+pub(crate) fn biome_count(holder: &crate::net::registry_holder::RegistryHolder) -> usize {
     biome_registry(holder).map_or(0, |registry| registry.map.len())
 }
 
 fn extract_biome_climate(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
 ) -> std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate> {
     use crate::renderer::chunk::mesher::{BiomeClimate, GrassColorModifier, int_to_rgb};
 
@@ -731,11 +730,10 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
 }
 
 pub(super) fn chat_types_from_registry_holder(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
 ) -> super::chat::ChatTypeRegistry {
     let key: pomme_registry::identifier::Identifier = "minecraft:chat_type".into();
     let entries = holder
-        .extra
         .get(&key)
         .map(|registry| registry.map.values().cloned().collect())
         .unwrap_or_default();
@@ -750,11 +748,10 @@ fn dialog_registry_key() -> pomme_registry::identifier::Identifier {
 }
 
 fn dialog_registry(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
     tags: std::collections::HashMap<String, Vec<usize>>,
 ) -> DialogRegistry {
     let entries = holder
-        .extra
         .get(&dialog_registry_key())
         .map(|registry| {
             registry
@@ -786,12 +783,21 @@ fn registry_tags(
     )
 }
 
-/// Forwards the item and `minecraft:block` tags of an `update_tags` packet.
+/// Forwards the item and `minecraft:block` tags of an `update_tags` packet,
+/// and the placeable paintings.
 fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &Tags) {
     send_ordered(
         event_tx,
         NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
     );
+    if let Some(paintings) = tags.get(super::PAINTING_VARIANT_REGISTRY) {
+        let placeable = paintings
+            .iter()
+            .find(|(name, _)| name.as_str() == "minecraft:placeable")
+            .map(|(_, elements)| elements.clone())
+            .unwrap_or_default();
+        send_ordered(event_tx, NetworkEvent::PlaceablePaintings(placeable));
+    }
     let Some(tags) = tags.get("minecraft:block") else {
         return;
     };
@@ -1228,8 +1234,10 @@ mod tests {
     fn filled_biome_entries_carry_their_climate() {
         use pomme_registry::identifier::Identifier;
 
-        let holder = crate::net::known_packs::filled_holder("worldgen/biome");
-        let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
+        let holder = crate::net::known_packs::filled_holder(NATIVE.protocol, "worldgen/biome")
+            .expect("biomes fill");
+        let plains_id = biome_registry(&holder)
+            .expect("biomes")
             .map
             .get_index_of(&Identifier::new("minecraft:plains"))
             .expect("plains biome") as u32;
@@ -1325,15 +1333,28 @@ mod tests {
         ));
     }
 
-    /// The whole join over an in-memory pipe, against a peer that sends only
-    /// the two frames the client actually requires: login finished, then
-    /// finish configuration. No registry data, no compression, no encryption.
     #[tokio::test]
     async fn joins_an_integrated_server_over_the_pipe() {
+        joins_over_the_pipe(false).await;
+    }
+
+    /// The server asks for encryption without authentication: everything
+    /// after the client's key is encrypted both ways.
+    #[tokio::test]
+    async fn joins_a_server_that_turns_encryption_on() {
+        joins_over_the_pipe(true).await;
+    }
+
+    /// The whole join over an in-memory pipe, against a peer that sends only
+    /// the frames the client actually requires: the hello when `encrypted`,
+    /// login finished, then finish configuration. No registry data and no
+    /// compression.
+    async fn joins_over_the_pipe(encrypted: bool) {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+        use azalea_protocol::packets::login::c_hello::ClientboundHello;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
         use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
         use azalea_protocol::read::deserialize_packet;
@@ -1393,6 +1414,24 @@ mod tests {
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
 
+        if encrypted {
+            let server = crate::net::crypt::ServerKey::new();
+            let challenge = vec![7, 3, 9, 1];
+            let hello = ClientboundLoginPacket::Hello(ClientboundHello {
+                server_id: String::new(),
+                public_key: server.public_key.clone(),
+                challenge: challenge.clone(),
+                should_authenticate: false,
+            });
+            send(&mut peer, &hello).await;
+
+            let ServerboundLoginPacket::Key(key) = sent(&mut peer).await else {
+                panic!("the client answers the hello with its key");
+            };
+            assert_eq!(server.decrypt(&key.encrypted_challenge), challenge);
+            peer.set_encryption_key(server.decrypt(&key.key_bytes).try_into().unwrap());
+        }
+
         let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
             game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
             session_id: Uuid::nil(),
@@ -1420,16 +1459,18 @@ mod tests {
             ServerboundConfigPacket::FinishConfiguration(_)
         ));
 
-        // Protocol selection precedes configuration; the remaining events
-        // arrive as soon as configuration ends, before any game packet.
+        // Protocol selection and the end of login precede configuration; the
+        // remaining events arrive as soon as configuration ends, before any
+        // game packet.
         let events: Vec<_> = std::iter::from_fn(|| event_rx.recv().ok())
-            .take(3)
+            .take(4)
             .collect();
         assert!(
             matches!(events[0], NetworkEvent::ProtocolSelected { protocol } if protocol == NATIVE.protocol)
         );
-        assert!(matches!(events[1], NetworkEvent::BiomeColors { .. }));
-        assert!(matches!(events[2], NetworkEvent::Connected));
+        assert!(matches!(events[1], NetworkEvent::LoggedIn));
+        assert!(matches!(events[2], NetworkEvent::BiomeColors { .. }));
+        assert!(matches!(events[3], NetworkEvent::Connected));
 
         client.abort();
     }

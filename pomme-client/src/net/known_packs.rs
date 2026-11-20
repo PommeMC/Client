@@ -1,11 +1,13 @@
 //! Answering `select_known_packs` and filling in the registry entries the
 //! server then sends without data, from pomme-protocol's `KnownPackTable`.
-//! The fill has to happen before azalea's registry holder, which drops a
+//! The fill has to happen before the registry holder, which drops a
 //! data-less entry and shifts every later entry's protocol id.
 
 use pomme_protocol::{KnownPack, KnownPackTable};
 use pomme_registry::identifier::Identifier;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+
+use super::config_wire::RegistryError;
 
 /// Vanilla `KnownPacksManager.trySelectingPacks`: the offered packs this
 /// client has for wire `protocol`, in the order the server sent them.
@@ -23,11 +25,11 @@ pub fn select_packs(protocol: i32, offered: &[KnownPack]) -> Vec<KnownPack> {
 /// Fills every entry the server sent without data from the embedded pack, as
 /// vanilla's `NetworkRegistryLoadTask` does, and errors like vanilla
 /// `RegistryLoadTask` when the pack lacks one.
-pub fn fill_known_entries(
+pub(super) fn fill_known_entries(
     protocol: i32,
     registry: &Identifier,
     entries: Vec<(Identifier, Option<NbtCompound>)>,
-) -> Result<Vec<(Identifier, Option<NbtCompound>)>, String> {
+) -> Result<Vec<(Identifier, Option<NbtCompound>)>, RegistryError> {
     let table = KnownPackTable::for_protocol(protocol);
     let registry_name = registry.to_string();
     entries
@@ -39,8 +41,13 @@ pub fn fill_known_entries(
             let element = table
                 .and_then(|t| t.element(&registry_name, &id.to_string()))
                 .ok_or_else(|| {
-                    format!("Failed to find resource {registry}/{id} for element {id}")
+                    RegistryError::MissingElement(format!(
+                        "Failed to find resource {registry}/{id} for element {id}"
+                    ))
                 })?;
+            if !element.is_object() {
+                return Err(RegistryError::not_a_compound(registry));
+            }
             Ok((id, Some(json_to_compound(element))))
         })
         .collect()
@@ -81,13 +88,15 @@ fn json_to_nbt(value: &serde_json::Value) -> Option<NbtTag> {
     })
 }
 
-/// A registry holder fed `registry` as a server sends it for a pack we
-/// claimed (every id, no data) and filled from the embedded table.
+/// A registry holder fed `registry` as a `protocol` server sends it for a
+/// pack we claimed (every id, no data) and filled from the embedded table.
 #[cfg(test)]
-pub fn filled_holder(registry: &str) -> azalea_core::registry_holder::RegistryHolder {
+pub(super) fn filled_holder(
+    protocol: i32,
+    registry: &str,
+) -> Result<crate::net::registry_holder::RegistryHolder, RegistryError> {
     let registry_id = Identifier::new(format!("minecraft:{registry}"));
-    let native = pomme_protocol::version::NATIVE.protocol;
-    let sent = KnownPackTable::for_protocol(native)
+    let sent = KnownPackTable::for_protocol(protocol)
         .expect("embedded table")
         .registries()
         .find(|(r, _)| *r == registry)
@@ -95,11 +104,10 @@ pub fn filled_holder(registry: &str) -> azalea_core::registry_holder::RegistryHo
         .1
         .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
         .collect();
-    let filled = fill_known_entries(native, &registry_id, sent)
-        .unwrap_or_else(|e| panic!("{registry}: {e}"));
-    let mut holder = azalea_core::registry_holder::RegistryHolder::default();
+    let filled = fill_known_entries(protocol, &registry_id, sent)?;
+    let mut holder = crate::net::registry_holder::RegistryHolder::default();
     holder.append(registry_id, filled);
-    holder
+    Ok(holder)
 }
 
 #[cfg(test)]

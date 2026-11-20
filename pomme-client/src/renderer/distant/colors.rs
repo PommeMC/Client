@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::gpu::TINT_BIOMES;
 use super::models::{Metadata, ModelFactory, Models, pack_tint};

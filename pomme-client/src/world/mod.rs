@@ -1,6 +1,7 @@
 pub mod block;
 pub mod block_entity;
 pub mod block_entity_anim;
+pub mod border;
 pub mod chunk;
 pub mod clock;
 pub mod environment;

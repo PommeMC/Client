@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use glam::{Mat4, Vec3};
 use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
@@ -40,6 +41,14 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
         _ => None,
     }
+}
+
+/// Whether the block-entity pipeline draws a block of `kind`. A sign is its
+/// to draw only without a block model (assets from before 26.2): the old
+/// sign textures alone don't say so, as a resource pack can carry them onto
+/// newer assets.
+pub fn drawn_by_pipeline(kind: BlockEntityKind, has_block_model: bool) -> bool {
+    !(has_block_model && matches!(kind, BlockEntityKind::Sign | BlockEntityKind::HangingSign))
 }
 
 /// The block entity a block gets the moment it's placed, before (or without)
@@ -240,8 +249,8 @@ const DYE_TEXT_COLORS: [u32; 16] = [
 
 const BLACK_DYE: usize = 15;
 
-/// Sign `WoodType` names, in the order the block-entity pipeline's
-/// `SIGN_TEXTURES` lists them.
+/// Sign `WoodType` names, in the order the block-entity pipeline lists
+/// its textures.
 pub(crate) const SIGN_WOOD_NAMES: [&str; 12] = [
     "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
     "bamboo", "crimson", "warped",
@@ -253,6 +262,9 @@ pub struct SignBlock {
     pub hanging: bool,
     /// `WallSignBlock` or `WallHangingSignBlock`.
     pub wall: bool,
+    /// A ceiling hanging sign's `attached`: hung by one chain pair from the
+    /// middle (`HangingSignBlock.Attachment.CEILING_MIDDLE`).
+    pub attached: bool,
     /// Index into [`SIGN_WOOD_NAMES`] (`SignBlock.getWoodType`).
     pub wood: usize,
     /// The yaw its text faces, in degrees: a wall sign's `facing.toYRot()`,
@@ -284,9 +296,44 @@ impl SignBlock {
         Some(Self {
             hanging,
             wall,
+            attached: props.get("attached") == Some("true"),
             wood,
             angle,
         })
+    }
+
+    /// `StandingSignRenderer.baseTransformation` and
+    /// `HangingSignRenderer.baseTransformation`, block-local.
+    pub fn base_transformation(self) -> Mat4 {
+        let yaw = Mat4::from_rotation_y((-self.angle).to_radians());
+        if self.hanging {
+            Mat4::from_translation(Vec3::new(0.5, 0.9375, 0.5))
+                * yaw
+                * Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0))
+        } else if self.wall {
+            Mat4::from_translation(Vec3::splat(0.5))
+                * yaw
+                * Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375))
+        } else {
+            Mat4::from_translation(Vec3::splat(0.5)) * yaw
+        }
+    }
+
+    /// The renderers' `bodyTransformation`, from before 26.2 gave signs
+    /// block models: where the sign model goes.
+    pub fn body_transformation(self) -> Mat4 {
+        let scale = if self.hanging { 1.0 } else { 0.6666667 };
+        self.base_transformation() * Mat4::from_scale(Vec3::new(scale, -scale, -scale))
+    }
+
+    /// Which of the old renderers' models it is: `[standing, wall]`, or a
+    /// hanging sign's `[ceiling, ceiling middle, wall]`.
+    pub fn model_index(self) -> u32 {
+        match (self.hanging, self.wall) {
+            (true, true) => 2,
+            (true, false) => u32::from(self.attached),
+            (false, wall) => u32::from(wall),
+        }
     }
 
     /// `SignBlockEntity.getMaxTextLineWidth`.
@@ -513,6 +560,7 @@ mod tests {
             SignBlock {
                 hanging: false,
                 wall: false,
+                attached: false,
                 wood: 5,
                 angle: 90.0,
             }
@@ -530,6 +578,59 @@ mod tests {
         assert_eq!(hanging.max_text_line_width(), 60.0);
         assert_eq!(hanging.text_line_height(), 9.0);
         assert!(SignBlock::of("oak_planks", &props(Vec::new())).is_none());
+    }
+
+    #[test]
+    fn a_sign_with_a_block_model_is_left_to_the_mesher() {
+        for kind in [BlockEntityKind::Sign, BlockEntityKind::HangingSign] {
+            assert!(drawn_by_pipeline(kind, false));
+            assert!(!drawn_by_pipeline(kind, true));
+        }
+        assert!(drawn_by_pipeline(BlockEntityKind::Chest, true));
+    }
+
+    #[test]
+    fn a_sign_picks_its_old_model_and_where_it_goes() {
+        let sign = |name, pairs| {
+            SignBlock::of(name, &crate::world::block::PropMap::from_pairs(pairs)).unwrap()
+        };
+        let models = [
+            ("oak_sign", vec![("rotation", "0")], 0),
+            ("oak_wall_sign", vec![("facing", "south")], 1),
+            (
+                "oak_hanging_sign",
+                vec![("rotation", "0"), ("attached", "false")],
+                0,
+            ),
+            (
+                "oak_hanging_sign",
+                vec![("rotation", "0"), ("attached", "true")],
+                1,
+            ),
+            ("oak_wall_hanging_sign", vec![("facing", "south")], 2),
+        ];
+        for (name, properties, model) in models {
+            assert_eq!(sign(name, properties).model_index(), model, "{name}");
+        }
+
+        // The model's origin, and a point one model unit up, which the
+        // renderers' flip sends down.
+        let at = |block: SignBlock, y: f32| {
+            block
+                .body_transformation()
+                .transform_point3(Vec3::new(0.0, y, 0.0))
+        };
+        let standing = sign("oak_sign", vec![("rotation", "0")]);
+        assert_eq!(at(standing, 0.0), Vec3::splat(0.5));
+        assert!((at(standing, 1.0).y - (0.5 - 0.6666667)).abs() < 1.0e-6);
+        // Facing south, a wall sign sits back against the block behind it.
+        let wall = sign("oak_wall_sign", vec![("facing", "south")]);
+        assert_eq!(at(wall, 0.0), Vec3::new(0.5, 0.1875, 0.0625));
+        let hanging = sign(
+            "oak_hanging_sign",
+            vec![("rotation", "0"), ("attached", "false")],
+        );
+        assert_eq!(at(hanging, 0.0), Vec3::new(0.5, 0.625, 0.5));
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
 mod block_wire;
+mod border_wire;
 pub(crate) mod capture;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
@@ -14,6 +15,7 @@ mod config_wire;
 pub mod conn;
 pub mod connection;
 mod container_wire;
+mod crypt;
 mod dialog;
 mod entity_data;
 mod entity_wire;
@@ -28,6 +30,7 @@ mod lifecycle_wire;
 mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
+pub mod registry_holder;
 pub mod resolve;
 mod resource_pack_wire;
 mod scoreboard_wire;
@@ -42,10 +45,10 @@ mod wire_corpus;
 
 use std::sync::Arc;
 
-use azalea_block::BlockState;
-use azalea_inventory::components::EquipmentSlot;
 use glam::DVec3;
+use pomme_block::BlockState;
 use pomme_item::ItemStack;
+use pomme_item::components::EquipmentSlot;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
@@ -133,17 +136,25 @@ pub struct DimensionInfo {
     pub environment: Box<crate::world::environment::Environment>,
 }
 
+/// The painting variants' registry, which also names its tags.
+pub(crate) const PAINTING_VARIANT_REGISTRY: &str = "minecraft:painting_variant";
+pub(crate) const ENCHANTMENT_REGISTRY: &str = "minecraft:enchantment";
+
 pub enum NetworkEvent {
     /// Ordered before login/configuration events on both transports.
     ProtocolSelected {
         protocol: i32,
     },
+    /// Login is done: configuration starts, or play where there is none.
+    LoggedIn,
     Connected,
-    Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    Registries(Arc<crate::net::registry_holder::RegistryHolder>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
     ItemTags(crate::recipe::ItemTags),
+    /// The painting variants `#minecraft:placeable` lists, by registry id.
+    PlaceablePaintings(Vec<i32>),
     BlockTags {
         tags: Vec<(String, Vec<i32>)>,
     },
@@ -256,7 +267,7 @@ pub enum NetworkEvent {
         title: String,
     },
     OpenSignEditor {
-        pos: azalea_core::position::BlockPos,
+        pos: crate::position::BlockPos,
         is_front_text: bool,
     },
     ContainerClosed,
@@ -427,6 +438,27 @@ pub enum NetworkEvent {
         clocks: Vec<(String, pomme_protocol::lifecycle::ClockState)>,
     },
     WeatherUpdate(Weather),
+    InitializeBorder(crate::world::border::WorldBorderInit),
+    SetBorderCenter {
+        center_x: f64,
+        center_z: f64,
+    },
+    /// The border's size moves from `old_size` to `new_size` over
+    /// `lerp_ticks` game ticks.
+    SetBorderLerpSize {
+        old_size: f64,
+        new_size: f64,
+        lerp_ticks: i64,
+    },
+    SetBorderSize {
+        size: f64,
+    },
+    SetBorderWarningDelay {
+        warning_time: i32,
+    },
+    SetBorderWarningDistance {
+        warning_blocks: i32,
+    },
     GameModeChanged {
         game_mode: u8,
         /// `Some` = authoritative previous mode from login/respawn (which may
@@ -436,6 +468,8 @@ pub enum NetworkEvent {
     },
     DimensionName {
         name: String,
+        /// From a login rather than a respawn.
+        login: bool,
     },
     PlayerAbilitiesChanged {
         flying: bool,
@@ -593,6 +627,11 @@ pub enum NetworkEvent {
     /// Entity event 45: a fox eats the food in its mouth.
     FoxEat {
         id: i32,
+    },
+    /// Entity events 24 to 28: a player's permission level, 0 to 4.
+    PermissionLevel {
+        id: i32,
+        level: u8,
     },
     /// Entity event 64: an armadillo peeks out of its shell.
     ArmadilloPeek {

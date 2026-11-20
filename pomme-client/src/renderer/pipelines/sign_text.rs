@@ -109,26 +109,13 @@ fn text_transformation(block: SignBlock, front: bool) -> Mat4 {
     } else {
         Mat4::from_rotation_y(180f32.to_radians())
     };
-    let yaw = Mat4::from_rotation_y((-block.angle).to_radians());
-    let (base, offset, scale) = if block.hanging {
-        (
-            Mat4::from_translation(Vec3::new(0.5, 0.9375, 0.5))
-                * yaw
-                * Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0)),
-            Vec3::new(0.0, -0.32, 0.073),
-            0.0140625,
-        )
+    let (offset, scale) = if block.hanging {
+        (Vec3::new(0.0, -0.32, 0.073), 0.0140625)
     } else {
-        let wall = if block.wall {
-            Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375))
-        } else {
-            Mat4::IDENTITY
-        };
-        (
-            Mat4::from_translation(Vec3::splat(0.5)) * yaw * wall,
-            Vec3::new(0.0, 0.33333334, 0.046666667),
-            0.010416667,
-        )
+        (Vec3::new(0.0, 0.33333334, 0.046666667), 0.010416667)
     };
-    base * flip * Mat4::from_translation(offset) * Mat4::from_scale(Vec3::new(scale, -scale, scale))
+    block.base_transformation()
+        * flip
+        * Mat4::from_translation(offset)
+        * Mat4::from_scale(Vec3::new(scale, -scale, scale))
 }

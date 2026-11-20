@@ -1,15 +1,12 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
-use azalea_buf::AzBuf;
-use azalea_inventory::components::{
-    BlocksAttacks, Consumable, DataComponentTrait, Equippable, Food, ItemUseAnimation,
-    KineticWeapon, MinimumAttackCharge, UseEffects,
-};
 use glam::{DVec3, Vec3};
+use pomme_block::BlockState;
 use pomme_item::ItemStackData;
-use pomme_item::components::ChargedProjectiles;
+use pomme_item::components::{
+    BlocksAttacks, ChargedProjectiles, Consumable, EquipmentSlot, Equippable, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseEffects,
+};
 pub use pomme_protocol::serverbound::InteractionHand;
 use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
@@ -22,14 +19,15 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
-use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
+use crate::player::entity_interact::{self, Clicker, Taken, Target};
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::ItemCooldowns;
 use crate::position::BlockPos;
+use crate::recipe::ItemTags;
 use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
@@ -75,6 +73,15 @@ pub struct EntityHitResult {
 pub enum HitResult {
     Block(BlockHitResult),
     Entity(EntityHitResult),
+}
+
+/// What a right click on an entity reads beyond the player's own state.
+#[derive(Clone, Copy)]
+pub struct EntityUse<'a> {
+    pub entities: &'a EntityStore,
+    /// Every vehicle's passengers.
+    pub passengers: &'a HashMap<i32, Vec<i32>>,
+    pub item_tags: &'a ItemTags,
 }
 
 /// Vanilla `InteractionHand.values()`, the order `startUseItem` tries them.
@@ -140,13 +147,8 @@ fn block_use(hand: InteractionHand, stack: &ItemStackData) -> Option<ActiveUse> 
     if swappable(stack).is_some() {
         return None;
     }
-    stack_component::<BlocksAttacks>(stack)?;
-    Some(ActiveUse::new(
-        hand,
-        stack,
-        ItemUseAnimation::BlockKind,
-        72000,
-    ))
+    stack.component::<BlocksAttacks>()?;
+    Some(ActiveUse::new(hand, stack, ItemUseAnimation::Block, 72000))
 }
 
 impl ActiveUse {
@@ -163,7 +165,7 @@ impl ActiveUse {
             anim,
             bundle: None,
             consume: None,
-            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            use_effects: stack.component::<UseEffects>().unwrap_or_default(),
             duration,
             remaining: duration,
         }
@@ -182,6 +184,9 @@ struct ConsumeEffects {
 
 pub struct InteractionState {
     pub target: Option<HitResult>,
+    /// The level's border, which `MultiPlayerGameMode` keeps breaking and
+    /// using blocks inside of.
+    pub world_border: crate::world::border::WorldBorder,
     seq: u32,
     carried_slot: u8,
     last_teleport_seq: u32,
@@ -214,6 +219,7 @@ impl InteractionState {
     pub fn new() -> Self {
         Self {
             target: None,
+            world_border: Default::default(),
             seq: 0,
             // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
             // a fresh inventory selects, so a join sends nothing until it
@@ -488,6 +494,7 @@ impl InteractionState {
         mob_effects: &ActiveMobEffects,
         eyes_in_water: bool,
         legacy_mining: LegacyMiningEnchantments,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
@@ -553,6 +560,7 @@ impl InteractionState {
                 food,
                 creative,
                 input.performing_action(input::Action::Sneak),
+                entity_use,
                 effects,
                 &mut dirty_chunks,
             );
@@ -666,7 +674,7 @@ impl InteractionState {
         attributes: &AttributeMap,
     ) -> bool {
         let required = held
-            .and_then(stack_component::<MinimumAttackCharge>)
+            .and_then(ItemStackData::component::<MinimumAttackCharge>)
             .map_or(0.0, |c| c.value);
         required > 0.0
             && (self.attack_strength_ticker as f32 / attack_strength_delay(attributes)) < required
@@ -829,6 +837,7 @@ impl InteractionState {
         food: u32,
         creative: bool,
         sneaking: bool,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
@@ -843,12 +852,11 @@ impl InteractionState {
         let suppress_block_use = sneaking && hands.iter().any(|h| h.stack.is_some());
         for (hand, held) in HANDS.into_iter().zip(hands) {
             let result = match self.target {
-                // One interact packet; the server does the rest (trading,
-                // feeding, leads, the villager head-shake).
-                // TODO: succeeding unconditionally is an approximation;
-                // vanilla falls through to `useItem` when the client-side
-                // `interactOn` returns PASS (e.g. eating while the crosshair
-                // rests on a passive mob).
+                // Vanilla `MultiPlayerGameMode.interact`: the packet goes
+                // out whatever the entity answers, and an entity that passes
+                // leaves the click to `useItem` (a shield raised at a zombie).
+                // TODO: the world border and a spectator's pass aren't
+                // checked.
                 Some(HitResult::Entity(hit)) => {
                     sender.send_raw(wire::encode_interact(
                         hit.entity_id,
@@ -856,7 +864,40 @@ impl InteractionState {
                         hit.location - hit.entity_pos,
                         sneaking,
                     ));
-                    UseResult::Success { swing: true }
+                    let golden_dandelion = |h: &HandItem| {
+                        h.stack
+                            .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
+                    };
+                    let taken = entity_use
+                        .entities
+                        .living
+                        .get(&hit.entity_id)
+                        .and_then(|entity| {
+                            entity_interact::interact_on(
+                                Target {
+                                    entity,
+                                    passengers: entity_use
+                                        .passengers
+                                        .get(&hit.entity_id)
+                                        .map_or(0, Vec::len),
+                                },
+                                Clicker {
+                                    held: held.stack,
+                                    hand,
+                                    item_tags: entity_use.item_tags,
+                                    sneaking,
+                                    holding_golden_dandelion: hands.iter().any(golden_dandelion),
+                                    position: player_pos,
+                                    thundering: entity_use.entities.thundering,
+                                },
+                            )
+                        });
+                    match taken {
+                        Some(taken) => UseResult::Success {
+                            swing: taken == Taken::Swing,
+                        },
+                        None => UseResult::Pass,
+                    }
                 }
                 Some(HitResult::Block(hit)) => self.use_item_on(
                     block_registry,
@@ -912,6 +953,9 @@ impl InteractionState {
         look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> UseResult {
+        if !self.world_border.contains_block(hit.block_pos) {
+            return UseResult::Fail;
+        }
         self.seq += 1;
         sender.send(GamePacket::UseItemOn {
             hand,
@@ -1003,7 +1047,7 @@ impl InteractionState {
             return UseResult::Success { swing: true };
         }
 
-        let Some(consumable) = stack_component::<Consumable>(stack) else {
+        let Some(consumable) = stack.component::<Consumable>() else {
             if let Some(block) = block_use(hand, stack) {
                 self.using_item = Some(block);
             }
@@ -1012,7 +1056,7 @@ impl InteractionState {
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
         // invulnerable) always can. Non-food consumables have no gate.
-        if let Some(f) = stack_component::<Food>(stack)
+        if let Some(f) = stack.component::<Food>()
             && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
         {
             return UseResult::Fail;
@@ -1020,7 +1064,7 @@ impl InteractionState {
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
         let consume = ConsumeEffects {
-            sound: SoundRef::resolve(&consumable.sound),
+            sound: SoundRef::of_item(&consumable.sound),
             drink: consumable.animation == ItemUseAnimation::Drink,
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
@@ -1277,7 +1321,7 @@ impl InteractionState {
                 curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
                 duration: active.duration as f32,
             })),
-            ItemUseAnimation::BlockKind => Some(UseAnim::Block),
+            ItemUseAnimation::Block => Some(UseAnim::Block),
             _ => None,
         }
     }
@@ -1362,6 +1406,9 @@ impl InteractionState {
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
+        if !self.world_border.contains_block(hit.block_pos) {
+            return;
+        }
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
 
         let block_state_data = block_registry.block_state_data(state);
@@ -1670,8 +1717,7 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
     if let Some(equippable) = swappable(stack) {
         return equip_swap_result(&equippable, stack, worn);
     }
-    if stack_component::<BlocksAttacks>(stack).is_some()
-        || stack_component::<KineticWeapon>(stack).is_some()
+    if stack.component::<BlocksAttacks>().is_some() || stack.component::<KineticWeapon>().is_some()
     {
         return UseResult::Success { swing: false };
     }
@@ -1690,22 +1736,25 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
 
 /// The stack's `equippable`, if it swaps into its slot on use.
 fn swappable(stack: &ItemStackData) -> Option<Equippable> {
-    stack_component::<Equippable>(stack).filter(|e| e.swappable)
+    stack.component::<Equippable>().filter(|e| e.swappable)
 }
 
-/// Vanilla `Equippable.canBeEquippedBy` for a player.
+/// Vanilla `Equippable.canBeEquippedBy`.
 // TODO: a tag is read as the game's data pack has it, not as the server
-// synced it, and one the data pack lacks is taken to include the player.
-pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
-    const PLAYER: EntityKind = EntityKind::Player;
+// synced it, and one the data pack lacks is taken to include the entity.
+pub(crate) fn can_be_equipped_by(equippable: &Equippable, kind: EntityKind) -> bool {
     match &equippable.allowed_entities {
         None => true,
-        Some(HolderSet::Direct { contents }) => contents.contains(&PLAYER),
+        Some(HolderSet::Direct { contents }) => contents.contains(&kind),
         Some(HolderSet::Named { key, .. }) => Some(key)
             .filter(|key| key.namespace() == pomme_registry::identifier::DEFAULT_NAMESPACE)
             .and_then(|key| pomme_registry::tags::entities::named(key.path()))
-            .is_none_or(|tag| tag.contains(&PLAYER)),
+            .is_none_or(|tag| tag.contains(&kind)),
     }
+}
+
+pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
+    can_be_equipped_by(equippable, EntityKind::Player)
 }
 
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
@@ -1950,12 +1999,6 @@ pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
             .is_some_and(|c| !c.items.is_empty())
 }
 
-/// The stack's component override if the server set one, else the item's
-/// default.
-pub(crate) fn stack_component<T: DataComponentTrait + AzBuf>(stack: &ItemStackData) -> Option<T> {
-    stack.get_component::<T>().map(Cow::into_owned)
-}
-
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
 /// burst of item crumbs plus the consume sound. The sound plays locally here
 /// and again from the server's broadcast, doubling up for the eater exactly
@@ -2111,29 +2154,47 @@ pub fn raycast(
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
 /// each entity's bounding box and keeps the nearest hit. A box containing the
-/// ray origin counts as distance zero.
+/// ray origin counts as distance zero, and the last such box wins; a box hit
+/// after one of those replaces it, as vanilla's loop does. Vanilla walks the
+/// entities in the order they entered their section; ascending id stands in
+/// for that, so equally near entities don't resolve at random.
+// TODO: vanilla skips the player's own vehicle unless the ray starts inside
+// a box.
 fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
-    let mut nearest_dist_sq = f64::MAX;
-    let mut nearest = None;
-    for (&entity_id, entity) in &entities.living {
-        let dims = living_entity_dimensions(entity);
-        let aabb = dims.make_bounding_box(entity.position.into());
-
-        let (location, dist_sq) = if aabb.contains(from) {
-            (from, 0.0)
-        } else if let Some(clip) = aabb.clip(from, to) {
-            (clip, clip.distance_squared(from))
-        } else {
-            continue;
-        };
-
-        if dist_sq < nearest_dist_sq {
-            nearest_dist_sq = dist_sq;
-            nearest = Some(EntityHitResult {
+    let mut touched: Vec<_> = entities
+        .living
+        .iter()
+        .filter_map(|(&entity_id, entity)| {
+            let entity_pos: DVec3 = entity.position.into();
+            let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
+            let (location, dist_sq) = if aabb.contains(from) {
+                // `SulfurCube.canBePickedFromInside`: not around its block.
+                let swallowed = entity.entity_type == EntityKind::SulfurCube
+                    && entity.equipment(EquipmentSlot::Body).is_some();
+                if swallowed {
+                    return None;
+                }
+                (from, 0.0)
+            } else {
+                let clip = aabb.clip(from, to)?;
+                (clip, clip.distance_squared(from))
+            };
+            let hit = EntityHitResult {
                 entity_id,
                 location,
-                entity_pos: entity.position.into(),
-            });
+                entity_pos,
+            };
+            Some((hit, dist_sq))
+        })
+        .collect();
+    touched.sort_unstable_by_key(|(hit, _)| hit.entity_id);
+
+    let mut nearest_dist_sq = f64::MAX;
+    let mut nearest = None;
+    for (hit, dist_sq) in touched {
+        if dist_sq == 0.0 || dist_sq < nearest_dist_sq || nearest_dist_sq == 0.0 {
+            nearest_dist_sq = dist_sq;
+            nearest = Some(hit);
         }
     }
     nearest
@@ -2574,7 +2635,7 @@ mod tests {
     fn a_shield_is_held_up_and_nothing_else_is() {
         let shield = ItemStackData::new(ItemKind::Shield, 1);
         let use_ = block_use(InteractionHand::OffHand, &shield).expect("a shield blocks");
-        assert_eq!(use_.anim, ItemUseAnimation::BlockKind);
+        assert_eq!(use_.anim, ItemUseAnimation::Block);
         assert_eq!(
             (use_.duration, use_.hand),
             (72000, InteractionHand::OffHand)
@@ -2767,6 +2828,42 @@ mod tests {
             };
             assert_eq!(bytes, wire::encode_attack(7));
         }
+    }
+
+    #[test]
+    fn equally_near_entities_resolve_to_the_lower_id() {
+        let mut entities = EntityStore::new();
+        for id in [9, 3, 12, 5] {
+            entities.spawn_living(
+                id,
+                EntityKind::Husk,
+                Position::new(0.0, 0.0, 3.0),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            );
+        }
+        let hit = nearest_entity_hit(
+            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::new(0.0, 1.0, 6.0),
+            &entities,
+        );
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
+
+        // From inside their boxes the last one wins.
+        let inside = DVec3::new(0.0, 0.2, 3.0);
+        let pick = |entities: &EntityStore| {
+            nearest_entity_hit(inside, inside + DVec3::Z, entities).map(|hit| hit.entity_id)
+        };
+        assert_eq!(pick(&entities), Some(12));
+
+        // A sulfur cube holding a block can't be picked from inside it.
+        entities.living.get_mut(&12).unwrap().entity_type = EntityKind::SulfurCube;
+        assert_eq!(pick(&entities), Some(12));
+        entities.living.get_mut(&12).unwrap().equipment.insert(
+            EquipmentSlot::Body,
+            pomme_item::ItemStack::Present(ItemStackData::new(ItemKind::Tnt, 1)),
+        );
+        assert_eq!(pick(&entities), Some(9));
     }
 
     #[test]

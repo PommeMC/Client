@@ -11,7 +11,6 @@ use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, gesture_result, push_cursor_stack,
     push_panel,
 };
-use crate::net::item_codec::Components;
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
@@ -81,7 +80,7 @@ pub fn update_rename(
 
     let mut name = state.field.value().to_string();
     if data
-        .get_component::<azalea_inventory::components::CustomName>()
+        .component::<pomme_item::components::CustomName>()
         .is_none()
         && name == super::common::item_display_name(data)
     {

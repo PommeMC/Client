@@ -3,9 +3,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_inventory::components::EquipmentSlot;
 use glam::FloatExt as _;
-use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
+use pomme_item::components::EquipmentSlot;
+use pomme_protocol::serverbound::{ContainerClick, GamePacket};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 
 use crate::app::core::{AppCore, PlayerInputState};
@@ -27,7 +27,7 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{
     HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
 };
-use crate::player::menu_click::ContainerKind;
+use crate::player::menu_click::{BundleClick, ContainerKind};
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
@@ -231,6 +231,9 @@ pub struct GameState {
     pub respawn_sent: bool,
     pub inventory_open: bool,
     pub creative_inventory_open: bool,
+    /// The creative screen opened and has yet to hear of the inventory:
+    /// vanilla's `addSlotListener` in its `init`.
+    creative_listener_added: bool,
     pub creative_state: crate::ui::creative_inventory::CreativeState,
     /// The inventory menu's (container 0) latest server state id, echoed in
     /// container clicks; an open container keeps its own.
@@ -243,7 +246,7 @@ pub struct GameState {
     /// detect the close transition and send a container-close packet.
     pub container_was_open: Option<i32>,
     /// Active survival click-drag (button + slots covered), if any.
-    pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
+    pub inv_drag: Option<(crate::player::click::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
     /// The container screen's hand cursor is up.
@@ -257,12 +260,14 @@ pub struct GameState {
     /// `BundleMouseActions`' `ScrollWheelHandler` accumulators (x, y).
     pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
-    pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    pub registries: Arc<crate::net::registry_holder::RegistryHolder>,
     /// Session metadata and state bindings to the app-owned block definitions.
     pub(crate) block_registry: BlockRegistry,
     /// Per-session recipe book, recipe container, ghost placement, and item
     /// tags.
     pub recipe_book: crate::recipe::RecipeBookState,
+    /// The painting variants `#minecraft:placeable` lists, by registry id.
+    pub placeable_paintings: Vec<i32>,
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
@@ -313,6 +318,7 @@ pub struct GameState {
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
+    pub world_border: crate::world::border::WorldBorder,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
@@ -384,6 +390,9 @@ pub struct GameState {
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
     pub last_skin_options: crate::ui::menu::SkinOptions,
+    /// Whether this connection has sent `ClientInformation` in the game
+    /// phase: vanilla's `remoteClientInformation`, null until it has.
+    client_information_sent: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -566,6 +575,7 @@ impl GameState {
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
             last_skin_options: skin_options,
+            client_information_sent: false,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -604,6 +614,7 @@ impl GameState {
             respawn_sent: false,
             inventory_open: false,
             creative_inventory_open: false,
+            creative_listener_added: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
             inventory_state_id: 0,
             cursor_item: pomme_item::ItemStack::Empty,
@@ -615,9 +626,10 @@ impl GameState {
             bundle_selection: None,
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
-            registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            registries: Arc::new(crate::net::registry_holder::RegistryHolder::default()),
             block_registry,
             recipe_book: crate::recipe::RecipeBookState::default(),
+            placeable_paintings: Vec::new(),
             recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState::new(),
             chat: {
                 let mut chat = ChatState::new();
@@ -652,6 +664,7 @@ impl GameState {
             rider_yaw_turn: 0.0,
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
+            world_border: crate::world::border::WorldBorder::default(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
@@ -865,12 +878,31 @@ impl GameState {
             .collect()
     }
 
+    /// What the player collides with besides blocks
+    /// (`Entity.collectAllColliders`): the entities in the way, and the
+    /// world border when close to it.
+    // TODO: vanilla tests the box stretched along the move, which only
+    // differs for a player moving more than 0.4 of a block a tick.
+    pub fn collidable_player_boxes(&self) -> Vec<crate::physics::aabb::Aabb> {
+        let mut boxes = self.collidable_entity_boxes();
+        if !crate::player::is_spectator(self.player.game_mode) {
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*self.player.position, &self.player.bounding_box())
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
+    }
+
     /// What the boat the player steers collides with
     /// (`AbstractBoat.canVehicleCollide`): other boats and pushable mobs, but
     /// not its own passengers.
     pub fn boat_colliders(&self, boat_id: i32) -> Vec<crate::physics::aabb::Aabb> {
         let passengers = self.vehicle_passengers.get(&boat_id);
-        self.entity_store
+        let mut boxes: Vec<crate::physics::aabb::Aabb> = self
+            .entity_store
             .living
             .iter()
             .filter(|&(&id, e)| {
@@ -885,7 +917,17 @@ impl GameState {
                     EntityDimensions::of(e.entity_type).make_bounding_box(*e.position)
                 }
             })
-            .collect()
+            .collect();
+        if let Some(boat) = self.entity_store.living.get(&boat_id) {
+            let bounding_box = crate::entity::boat::boat_aabb(boat);
+            boxes.extend(
+                self.world_border
+                    .collision_boxes(*boat.position, &bounding_box)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        boxes
     }
 
     /// Vanilla `LivingEntity.isPushable`: alive and not a spectator; armor
@@ -1084,7 +1126,7 @@ impl GameState {
     pub fn open_menu_id(&self) -> Option<i32> {
         if let Some(c) = &self.open_container {
             Some(c.id)
-        } else if self.inventory_open {
+        } else if self.inventory_open || self.creative_inventory_open {
             Some(0)
         } else {
             None
@@ -1149,6 +1191,7 @@ impl GameState {
 
     pub fn open_creative_inventory(&mut self) {
         self.creative_inventory_open = true;
+        self.creative_listener_added = true;
         self.creative_state.reopen();
     }
 
@@ -1164,6 +1207,14 @@ impl GameState {
     pub fn close_creative_inventory(&mut self) {
         self.creative_inventory_open = false;
         self.creative_state.reset_interaction();
+        self.reset_bundle_hover();
+    }
+
+    /// Forgets the hovered bundle and its selection, as a closing screen does.
+    fn reset_bundle_hover(&mut self) {
+        self.bundle_selection = None;
+        self.bundle_hovered = None;
+        self.bundle_scroll = (0.0, 0.0);
     }
 
     /// Close whichever container menu is open. Clears the carried stack
@@ -1176,9 +1227,7 @@ impl GameState {
         self.cursor_item = pomme_item::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
-        self.bundle_selection = None;
-        self.bundle_hovered = None;
-        self.bundle_scroll = (0.0, 0.0);
+        self.reset_bundle_hover();
         self.recipe_book_ui
             .reset_for_closed_screen(&mut self.recipe_book);
     }
@@ -1193,6 +1242,40 @@ impl GameState {
                         ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
                     )
             )
+    }
+
+    /// The entry selected in the bundle at `slot` of `menu`.
+    fn selected_bundle_item(&self, menu: i32, slot: u16) -> i32 {
+        self.bundle_selection
+            .filter(|(m, s, _)| *m == menu && *s == slot)
+            .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i)
+    }
+
+    /// What a click in `menu` reads of the hovered bundle's selection.
+    fn bundle_click(&self, menu: i32) -> BundleClick {
+        BundleClick {
+            selection: self
+                .bundle_selection
+                .filter(|(m, _, _)| *m == menu)
+                .map(|(_, slot, selected)| (slot, selected)),
+            sound: None,
+        }
+    }
+
+    /// A click's side of [`Self::bundle_click`]: the selection it reset and
+    /// the sound it made.
+    fn finish_bundle_click(
+        &mut self,
+        menu: i32,
+        bundle: BundleClick,
+        audio: &crate::audio::AudioEngine,
+    ) {
+        if bundle.selection.is_none() && self.bundle_selection.is_some_and(|(m, _, _)| m == menu) {
+            self.bundle_selection = None;
+        }
+        if let Some(sound) = bundle.sound {
+            sound.play(audio, self.player.position);
+        }
     }
 
     /// A server update replaced the stack in `slot` of `menu` (every slot when
@@ -1417,16 +1500,15 @@ impl GameState {
             }
             _ if bindings.matches(Action::DebugSpectate, &input) => {
                 // Sent unconditionally; the server refuses without permission.
-                use azalea_core::game_type::GameMode;
-                let target = if self.player.game_mode != 3 {
-                    GameMode::Spectator
+                let target = if self.player.game_mode != crate::player::SPECTATOR {
+                    crate::player::SPECTATOR
                 } else {
                     self.previous_game_mode
-                        .and_then(GameMode::from_id)
-                        .unwrap_or(GameMode::Creative)
+                        .filter(|mode| *mode <= crate::player::SPECTATOR)
+                        .unwrap_or(crate::player::CREATIVE)
                 };
                 connection.packet_tx.send(GamePacket::ChangeGameMode {
-                    mode: u32::from(target.to_id()),
+                    mode: u32::from(target),
                 });
                 true
             }
@@ -1500,12 +1582,11 @@ impl GameState {
             return;
         };
         if modifier && let Some(switcher) = self.game_mode_switcher.take() {
-            use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
-                && let Some(mode) = GameMode::from_id(switcher.selected)
+                && switcher.selected <= crate::player::SPECTATOR
             {
                 connection.packet_tx.send(GamePacket::ChangeGameMode {
-                    mode: u32::from(mode.to_id()),
+                    mode: u32::from(switcher.selected),
                 });
             }
             self.f3_chord_consumed = false;
@@ -1533,6 +1614,20 @@ impl GameState {
         ]);
     }
 
+    /// Vanilla `broadcastClientInformation`'s test on saving the options:
+    /// what `ClientInformation` carries differs from the last one sent, or
+    /// none has gone out in the game phase yet.
+    fn client_information_outdated(
+        &self,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+        skin_options: crate::ui::menu::SkinOptions,
+    ) -> bool {
+        !self.client_information_sent
+            || self.last_render_distance != render_distance
+            || self.client_options_changed(chat_options, skin_options)
+    }
+
     /// Whether the chat or skin options `ClientInformation` carries differ
     /// from the last ones sent.
     fn client_options_changed(
@@ -1558,6 +1653,7 @@ impl GameState {
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
         self.last_skin_options = skin_options;
+        self.client_information_sent = true;
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
         }
@@ -1752,7 +1848,7 @@ impl GameState {
     pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
         let mut batch = std::mem::take(&mut self.pending_upload);
-        for mesh in self.mesh_dispatcher.drain_results() {
+        for mesh in self.mesh_dispatcher.drain_results(batch.len()) {
             // Stale meshes count too: worker time spent is worker time spent.
             if let Some(bench) = &mut self.chunk_load_bench {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
@@ -2363,21 +2459,97 @@ fn scroll_wheel(accumulated: &mut (f32, f32), (x, y): (f32, f32)) -> i32 {
 }
 
 /// Vanilla `BundleMouseActions.toggleSelectedBundleItem`: the stack's
-/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes.
+/// selection follows `Mutable.toggleSelectedItem`, and the packet always goes,
+/// naming the slot `packet_offset` on from `slot` (see [`bundle_slot_hover`]).
 fn toggle_bundle_selection(
     game: &mut GameState,
     sender: &crate::net::sender::PacketSender,
     menu: i32,
     slot: u16,
+    packet_offset: u16,
     selected: i32,
 ) {
-    let current = game
-        .bundle_selection
-        .filter(|(m, s, _)| *m == menu && *s == slot)
-        .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
+    let current = game.selected_bundle_item(menu, slot);
     game.bundle_selection =
         (selected >= 0 && selected != current).then_some((menu, slot, selected));
-    send_bundle_selection(sender, slot, selected);
+    send_bundle_selection(sender, slot + packet_offset, selected);
+}
+
+fn is_bundle_slot(game: &GameState, slot: u16) -> bool {
+    game.menu_slots()
+        .get(usize::from(slot))
+        .and_then(pomme_item::ItemStack::as_present)
+        .is_some_and(crate::ui::bundle::is_bundle)
+}
+
+/// Vanilla `BundleItem.getNumberOfItemsToShow` for the stack in `slot`.
+fn shown_bundle_items(game: &GameState, slot: u16) -> usize {
+    game.menu_slots()
+        .get(usize::from(slot))
+        .and_then(pomme_item::ItemStack::as_present)
+        .and_then(crate::ui::bundle::contents)
+        .map_or(0, |contents| {
+            crate::ui::bundle::shown_count(contents.items.len())
+        })
+}
+
+/// Vanilla `BundleMouseActions` for the slot under the cursor, after the
+/// frame's clicks: leaving a bundle unselects it (`onStopHovering`), the wheel
+/// steps through its contents, and its tooltip stands in for the plain one.
+/// Returns whether it drew that tooltip. `packet_offset` is what the open
+/// screen's own slot numbering adds to `hovered` in the selection packet;
+/// `tab_names` adds the creative screen's tab lines to the tooltip; the last
+/// argument is the cursor, the screen size and the GUI scale.
+#[allow(clippy::too_many_arguments)]
+fn bundle_slot_hover(
+    elements: &mut Vec<MenuElement>,
+    game: &mut GameState,
+    sender: &crate::net::sender::PacketSender,
+    menu_id: i32,
+    hovered: Option<u16>,
+    packet_offset: u16,
+    tab_names: bool,
+    scroll: (f32, f32),
+    (cursor, sw, sh, gs): ((f32, f32), f32, f32, f32),
+) -> bool {
+    use crate::ui::bundle::{self, NO_SELECTION};
+    if let Some((menu, slot, _)) = game.bundle_hovered
+        && menu == menu_id
+        && Some(slot) != hovered
+        && is_bundle_slot(game, slot)
+    {
+        toggle_bundle_selection(game, sender, menu_id, slot, packet_offset, NO_SELECTION);
+    }
+    game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
+
+    let Some((_, slot, true)) = game.bundle_hovered else {
+        return false;
+    };
+    let data = game.menu_slots()[usize::from(slot)]
+        .as_present()
+        .cloned()
+        .expect("a bundle slot holds a stack");
+    let shown = shown_bundle_items(game, slot);
+    // `BundleMouseActions.onMouseScrolled`.
+    // TODO: vanilla steps once per wheel event, scaled by
+    // `mouseWheelSensitivity`; the input layer sums a frame's events.
+    if shown > 0 && scroll != (0.0, 0.0) {
+        let current = game.selected_bundle_item(menu_id, slot);
+        let wheel = scroll_wheel(&mut game.bundle_scroll, scroll);
+        let next = bundle::next_selection(wheel, current, shown);
+        if wheel != 0 && next != current {
+            toggle_bundle_selection(game, sender, menu_id, slot, packet_offset, next);
+        }
+    }
+    let selected = game.selected_bundle_item(menu_id, slot);
+    bundle::push_selected_icon(elements, &data, selected);
+    let footer = if tab_names {
+        game.creative_state.tab_name_lines(&data)
+    } else {
+        Vec::new()
+    };
+    bundle::push_tooltip(elements, &data, selected, footer, (cursor, sw, sh, gs));
+    true
 }
 
 fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
@@ -2401,7 +2573,17 @@ pub(crate) fn set_creative_slot(
     }
     // Optimistic local update; the server echoes via ContainerSetSlot.
     game.player.inventory.set_slot(slot_num as usize, item);
+    game.player.inventory.mark_slot_told(slot_num as usize);
     true
+}
+
+/// Vanilla `inventoryMenu.broadcastChanges` under the creative screen's
+/// listener: every slot that changed since a creative screen was last told of
+/// it goes to the server, lowest first.
+fn broadcast_creative_slots(game: &mut GameState, connection: &ConnectionHandle) {
+    for (slot, item) in game.player.inventory.take_changed_slots() {
+        send_creative_slot(game, connection, slot, item);
+    }
 }
 
 /// Vanilla `MultiPlayerGameMode.handleCreativeModeItemDrop`: the creative
@@ -2443,13 +2625,11 @@ pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
-    ops: Vec<azalea_inventory::operations::ClickOperation>,
+    ops: Vec<crate::player::click::ClickOperation>,
 ) {
-    use azalea_inventory::operations::{
-        ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
-    };
     use pomme_item::ItemStack;
 
+    use crate::player::click::{ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus};
     use crate::player::menu_click;
 
     let (container_id, state_id) = match &game.open_container {
@@ -2473,7 +2653,7 @@ pub(crate) fn send_container_clicks(
                 status,
             }) => match status {
                 QuickCraftStatus::Start => {
-                    drag_kind = qc_kind.clone();
+                    drag_kind = *qc_kind;
                     drag_slots.clear();
                     (Vec::new(), game.cursor_item.clone())
                 }
@@ -2498,14 +2678,7 @@ pub(crate) fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
-                let mut bundle = menu_click::BundleClick {
-                    selection: game
-                        .bundle_selection
-                        .filter(|(menu, _, _)| *menu == container_id)
-                        .map(|(_, slot, selected)| (slot, selected)),
-                    sound: None,
-                };
-                let had_selection = bundle.selection.is_some();
+                let mut bundle = game.bundle_click(container_id);
                 let changed = menu_click::apply_click(
                     kind,
                     game.menu_slots(),
@@ -2514,12 +2687,7 @@ pub(crate) fn send_container_clicks(
                     crate::player::is_creative(game.player.game_mode),
                     &mut bundle,
                 );
-                if had_selection && bundle.selection.is_none() {
-                    game.bundle_selection = None;
-                }
-                if let Some(sound) = bundle.sound {
-                    sound.play(audio, game.player.position);
-                }
+                game.finish_bundle_click(container_id, bundle, audio);
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
                     game.set_menu_slot(*s as usize, item.clone());
@@ -2542,27 +2710,13 @@ pub(crate) fn send_container_clicks(
                 state_id: state_id as i32,
                 slot: op.slot_num().map(|s| s as i16).unwrap_or(-999),
                 button: op.button_num() as i8,
-                input: container_input(op.click_type()),
-                changed_slots: changed
+                input: op.input(),
+                changed_slots: menu_click::in_sent_order(changed)
                     .iter()
                     .map(|(s, item)| (*s as i16, hashed(item)))
                     .collect(),
                 carried: hashed(&carried),
             }));
-    }
-}
-
-/// The wire's `ContainerInput` for a click.
-fn container_input(click: azalea_inventory::operations::ClickType) -> ContainerInput {
-    use azalea_inventory::operations::ClickType;
-    match click {
-        ClickType::Pickup => ContainerInput::Pickup,
-        ClickType::QuickMove => ContainerInput::QuickMove,
-        ClickType::Swap => ContainerInput::Swap,
-        ClickType::Clone => ContainerInput::Clone,
-        ClickType::Throw => ContainerInput::Throw,
-        ClickType::QuickCraft => ContainerInput::QuickCraft,
-        ClickType::PickupAll => ContainerInput::PickupAll,
     }
 }
 
@@ -2574,10 +2728,9 @@ fn crafter_slot_clicked(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
-    op: &azalea_inventory::operations::ClickOperation,
+    op: &crate::player::click::ClickOperation,
 ) {
-    use azalea_inventory::operations::{ClickOperation, PickupClick};
-
+    use crate::player::click::{ClickOperation, PickupClick};
     use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
 
     let Some(c) = &mut game.open_container else {
@@ -2710,7 +2863,9 @@ fn block_outline(
     }
     let pos = hit.block_pos;
     let block_state_data = block_state_data_at(game, pos);
-    // TODO: also skip blocks outside the world border once it's tracked.
+    if !game.world_border.contains_block(pos) {
+        return None;
+    }
     if block_state_data.is_air() {
         return None;
     }
@@ -3102,6 +3257,8 @@ pub fn update_game(
     // Sky time ticks unconditionally so it keeps flowing in menus.
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
     while core.time_tick_accumulator >= TICK_RATE {
+        // `ClientLevel.tick` moves the border before the time.
+        game.world_border.tick();
         game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
         game.clocks.tick(game.sky_state.game_time);
         game.sync_day_time();
@@ -3252,7 +3409,15 @@ pub fn update_game(
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
-    core.input.menu_capture = game.paused || game.gui_open() || game.death_screen_open;
+    let screen_open = game.paused || game.gui_open() || game.death_screen_open;
+    if screen_open && !core.input.menu_capture {
+        core.input.screen_opened();
+    }
+    core.input.menu_capture = screen_open;
+    core.input.controls = core.menu.controls;
+    core.input
+        .set_screen_open(screen_open || core.input.text_capture);
+    game.player.sprint_window = u32::from(core.menu.controls.sprint_window);
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
@@ -3475,6 +3640,9 @@ pub fn update_game(
             .player
             .prev_portal_effect_intensity
             .lerp(game.player.portal_effect_intensity, partial_tick);
+        let border_warning = game
+            .world_border
+            .warning_strength(game.player.position.x, game.player.position.z);
         hud::build_camera_overlays(
             &mut elements,
             sw,
@@ -3482,6 +3650,7 @@ pub fn update_game(
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
             portal_intensity,
+            border_warning,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
@@ -4440,16 +4609,10 @@ pub fn update_game(
         screen_pointer = pointer;
 
         let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
-        let is_bundle_slot = |game: &GameState, slot: u16| {
-            game.menu_slots()
-                .get(usize::from(slot))
-                .and_then(pomme_item::ItemStack::as_present)
-                .is_some_and(crate::ui::bundle::is_bundle)
-        };
         // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
         // bundle unselects it before the click goes out.
         for op in &ops {
-            use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+            use crate::player::click::{ClickOperation, QuickMoveClick};
             let slot = match op {
                 ClickOperation::QuickMove(
                     QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot },
@@ -4463,65 +4626,26 @@ pub fn update_game(
                     &connection.packet_tx,
                     menu_id,
                     slot,
+                    0,
                     crate::ui::bundle::NO_SELECTION,
                 );
             }
         }
         send_container_clicks(game, connection, &core.audio, ops);
 
-        // Vanilla `extractContents`: after the clicks, leaving a slot that
-        // holds a bundle unselects it (`onStopHovering`).
-        if let Some((menu, slot, _)) = game.bundle_hovered
-            && menu == menu_id
-            && Some(slot) != hovered
-            && is_bundle_slot(game, slot)
-        {
-            toggle_bundle_selection(
-                game,
-                &connection.packet_tx,
-                menu_id,
-                slot,
-                crate::ui::bundle::NO_SELECTION,
-            );
-        }
-        game.bundle_hovered = hovered.map(|slot| (menu_id, slot, is_bundle_slot(game, slot)));
-
-        if let Some((_, slot, true)) = game.bundle_hovered {
-            let data = game.menu_slots()[usize::from(slot)]
-                .as_present()
-                .cloned()
-                .expect("a bundle slot holds a stack");
-            let shown = crate::ui::bundle::contents(&data)
-                .map_or(0, |c| crate::ui::bundle::shown_count(c.items.len()));
-            let current = game
-                .bundle_selection
-                .filter(|(m, s, _)| *m == menu_id && *s == slot)
-                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
-            // `BundleMouseActions.onMouseScrolled`.
-            // TODO: vanilla steps once per wheel event, scaled by
-            // `mouseWheelSensitivity`; the input layer sums a frame's events.
-            if shown > 0 && menu_scroll != (0.0, 0.0) {
-                let wheel = scroll_wheel(&mut game.bundle_scroll, menu_scroll);
-                let next = crate::ui::bundle::next_selection(wheel, current, shown);
-                if wheel != 0 && next != current {
-                    toggle_bundle_selection(game, &connection.packet_tx, menu_id, slot, next);
-                }
-            }
-            let selected = game
-                .bundle_selection
-                .filter(|(m, s, _)| *m == menu_id && *s == slot)
-                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, i)| i);
-            crate::ui::bundle::push_selected_icon(&mut elements, &data, selected);
-            crate::ui::bundle::push_tooltip(
-                &mut elements,
-                &data,
-                selected,
-                core.input.cursor_pos(),
-                sw,
-                sh,
-                gs,
-            );
-        } else if let Some(slot) = hovered
+        let bundle_tooltip = bundle_slot_hover(
+            &mut elements,
+            game,
+            &connection.packet_tx,
+            menu_id,
+            hovered,
+            0,
+            false,
+            menu_scroll,
+            (core.input.cursor_pos(), sw, sh, gs),
+        );
+        if !bundle_tooltip
+            && let Some(slot) = hovered
             && game.cursor_item.is_empty()
             && let Some(stack) = game
                 .menu_slots()
@@ -4550,9 +4674,11 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    // TODO: vanilla's creative screen inherits `BundleMouseActions` (scroll
-    // selection, the bundle tooltip); only survival containers have them here.
     if game.creative_inventory_open && !dialog_open {
+        // Vanilla `addSlotListener` broadcasts as the screen opens.
+        if std::mem::take(&mut game.creative_listener_added) {
+            broadcast_creative_slots(game, connection);
+        }
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         let middle_clicked = core
@@ -4564,7 +4690,18 @@ pub fn update_game(
                     && core.input.input_just_pressed(key)
             });
         let right_clicked = core.input.right_just_pressed();
-        let scroll_delta = core.input.consume_menu_scroll();
+        let scroll = core.input.consume_menu_scroll_xy();
+        // `AbstractContainerScreen.mouseScrolled`: a hovered bundle with
+        // items to show takes the wheel before the item list does.
+        let bundle_scrolls = game
+            .bundle_hovered
+            .is_some_and(|(_, slot, _)| shown_bundle_items(game, slot) > 0);
+        let (scroll_delta, bundle_scroll) = if bundle_scrolls {
+            (0.0, scroll)
+        } else {
+            (scroll.1, (0.0, 0.0))
+        };
+        let mut bundle = game.bundle_click(0);
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
         // Vanilla's focused search box takes every key, the drop key included.
@@ -4573,6 +4710,14 @@ pub fn update_game(
         let (effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
             gfx.renderer.menu_spans_width(spans, s)
         });
+        let operator_tab =
+            core.menu.controls.operator_items_tab && game.player.can_use_game_master_blocks();
+        game.creative_state.set_operator_tab(operator_tab.then(|| {
+            crate::ui::creative_inventory::operator_stacks(
+                &game.registries,
+                &game.placeable_paintings,
+            )
+        }));
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -4598,7 +4743,9 @@ pub fn update_game(
             core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
             effects,
+            &mut bundle,
         );
+        game.finish_bundle_click(0, bundle, &core.audio);
         if let Some(lines) = effect_tooltip {
             crate::ui::common::push_tooltip_lines(&mut elements, cursor, sw, sh, gs, lines);
         }
@@ -4613,29 +4760,44 @@ pub fn update_game(
         match action {
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
                 set_creative_slot(game, connection, slot_num, item);
+                broadcast_creative_slots(game, connection);
             }
             crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
                 for (slot_num, item) in items {
                     set_creative_slot(game, connection, slot_num, item);
                 }
+                broadcast_creative_slots(game, connection);
             }
+            // The swing of `player.drop` goes first, then the dropped stack,
+            // then the slot it left.
             // TODO: vanilla's client `LivingEntity.drop` also starts the local
             // arm swing; only the packet is sent here, as for the world drop.
             crate::ui::creative_inventory::CreativeAction::DropItem(item) => {
-                drop_creative_item(game, connection, item);
                 send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
+                drop_creative_item(game, connection, item);
             }
             crate::ui::creative_inventory::CreativeAction::DropSlot {
                 slot,
                 dropped,
                 remaining,
             } => {
-                set_creative_slot(game, connection, slot, remaining);
-                drop_creative_item(game, connection, dropped);
                 send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
+                drop_creative_item(game, connection, dropped);
+                set_creative_slot(game, connection, slot, remaining);
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
+        bundle_slot_hover(
+            &mut elements,
+            game,
+            &connection.packet_tx,
+            0,
+            game.creative_state.hovered_slot,
+            game.creative_state.bundle_packet_offset(),
+            true,
+            bundle_scroll,
+            (cursor, sw, sh, gs),
+        );
         core.input.clear_just_pressed_actions();
     }
 
@@ -4668,7 +4830,11 @@ pub fn update_game(
         if changed {
             game.apply_sign_edit();
         }
-        if done || !game.sign_edit_valid() {
+        let invalid = !game.sign_edit_valid();
+        if invalid && !done {
+            tracing::info!("Closing the sign editor: its sign is gone or out of reach");
+        }
+        if done || invalid {
             game.close_sign_editor(&connection.packet_tx);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -4803,7 +4969,7 @@ pub fn update_game(
                 let is_sleeping = e.sleeping_pos.is_some();
                 let (radius, strength) = crate::entity::shadow::of_living(e);
 
-                let name = || scoreboard_name(&game.tab_list, e.uuid, e.player_uuid);
+                let name = || e.scoreboard_name(&game.tab_list);
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
                     outline_color: outline(
@@ -5132,6 +5298,10 @@ pub fn update_game(
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
                 }
+                let has_block_model = game.block_registry.render_view().has_block_model(state);
+                if !crate::world::block_entity::drawn_by_pipeline(be.kind, has_block_model) {
+                    return None;
+                }
                 let props = block_state_data.properties();
                 let variant = block_entity::variant_for_block(be.kind, id, props);
                 let yaw = block_entity::yaw_for_block(be.kind, props);
@@ -5169,6 +5339,8 @@ pub fn update_game(
                         variant,
                         lid_open,
                         light,
+                        placement: crate::world::block_entity::SignBlock::of(id, props)
+                            .map(|sign| (sign.model_index(), sign.body_transformation())),
                     },
                 ))
             })
@@ -5228,7 +5400,7 @@ pub fn update_game(
             if entity.player_uuid == Some(core.user.uuid) {
                 continue;
             }
-            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            let name = entity.scoreboard_name(&game.tab_list);
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {
@@ -5377,6 +5549,7 @@ pub fn update_game(
         &nameplate_renders,
         &sign_renders,
         &weather_columns,
+        &game.world_border.render_state(sky_partial_tick(core)),
         if no_ambience {
             crate::renderer::CloudMode::Off
         } else {
@@ -5409,6 +5582,7 @@ pub fn update_game(
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
     {
+        tracing::info!("Closed menu {prev}");
         connection
             .packet_tx
             .send(GamePacket::ContainerClose { container_id: prev });
@@ -5484,11 +5658,10 @@ pub fn update_game(
         PauseAction::None => {}
     }
 
-    // Vanilla `Options.broadcastOptions`, which sends only what changed.
+    // Vanilla `Options.broadcastOptions`.
     let (chat_options, skin_options) = (core.menu.chat_options, core.menu.skin_options());
     if core.menu.take_options_saved()
-        && (core.menu.render_distance != game.last_render_distance
-            || game.client_options_changed(chat_options, skin_options))
+        && game.client_information_outdated(core.menu.render_distance, chat_options, skin_options)
     {
         game.sync_client_information(
             connection,

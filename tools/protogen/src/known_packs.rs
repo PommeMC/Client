@@ -14,39 +14,41 @@ const CORE_PACK: &str = "core";
 const VANILLA_NAMESPACE: &str = "minecraft";
 
 /// The registries `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` lists, by the
-/// directory they load from (`registry path`, so `worldgen/biome` nests).
-/// Order follows the vanilla list.
-const SYNCHRONIZED_REGISTRIES: [&str; 29] = [
-    "worldgen/biome",
-    "chat_type",
-    "trim_pattern",
-    "trim_material",
-    "wolf_variant",
-    "wolf_sound_variant",
-    "pig_variant",
-    "pig_sound_variant",
-    "frog_variant",
-    "cat_variant",
-    "cat_sound_variant",
-    "cow_sound_variant",
-    "cow_variant",
-    "chicken_sound_variant",
-    "chicken_variant",
-    "zombie_nautilus_variant",
-    "painting_variant",
-    "sulfur_cube_archetype",
-    "dimension_type",
-    "damage_type",
-    "banner_pattern",
-    "enchantment",
-    "jukebox_song",
-    "instrument",
-    "test_environment",
-    "test_instance",
-    "dialog",
-    "world_clock",
-    "timeline",
-];
+/// directory they load from (the path `Registries` creates their key with,
+/// so `worldgen/biome` nests), in the list's order.
+fn synchronized_registries(decompiled: &Path) -> Result<Vec<String>, Error> {
+    let read = |file: &str| {
+        let path = decompiled.join(file);
+        std::fs::read_to_string(&path).map_err(|e| format!("{path:?}: {e}"))
+    };
+    let loader = read("net/minecraft/resources/RegistryDataLoader.java")?;
+    let keys = read("net/minecraft/core/registries/Registries.java")?;
+    let list = loader
+        .lines()
+        .find(|line| line.contains(" SYNCHRONIZED_REGISTRIES = "))
+        .ok_or("RegistryDataLoader has no SYNCHRONIZED_REGISTRIES")?;
+    registry_paths(list, &keys)
+}
+
+/// The path of every key `list` passes a `RegistryData` (`(Registries.<KEY>,`),
+/// from the `<KEY> = Registries.createRegistryKey("<path>")` lines of `keys`.
+fn registry_paths(list: &str, keys: &str) -> Result<Vec<String>, Error> {
+    const KEY: &str = "(Registries.";
+    list.match_indices(KEY)
+        .map(|(at, _)| {
+            let name = &list[at + KEY.len()..];
+            let name = &name[..name
+                .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .unwrap_or(name.len())];
+            let declared = format!(" {name} = Registries.createRegistryKey(\"");
+            let path = keys
+                .split_once(&declared)
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .ok_or_else(|| format!("Registries declares no key for {name}"))?;
+            Ok(path.0.to_owned())
+        })
+        .collect()
+}
 
 /// `Biome.NETWORK_CODEC` reads only the climate settings, the syncable
 /// attributes and the special effects; the worldgen and spawner halves of the
@@ -63,7 +65,9 @@ const BIOME_NETWORK_FIELDS: [&str; 6] = [
 ];
 
 pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error> {
-    let protocol = resolve_protocol_number(&root.join("decompiled"), None)?;
+    let decompiled = root.join("decompiled");
+    let protocol = resolve_protocol_number(&decompiled, None)?;
+    let synchronized = synchronized_registries(&decompiled)?;
     let data_root = root.join("extracted/data").join(VANILLA_NAMESPACE);
     if !data_root.is_dir() {
         return Err(format!("{data_root:?}: no extracted data directory").into());
@@ -88,7 +92,7 @@ pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error>
             }
             for namespace in std::fs::read_dir(&pack_data)? {
                 let namespace = namespace?;
-                for registry in SYNCHRONIZED_REGISTRIES {
+                for registry in &synchronized {
                     if namespace.path().join(registry).is_dir() {
                         return Err(format!(
                             "{pack} carries {}:{registry} elements; claiming it needs per-pack tables",
@@ -103,7 +107,7 @@ pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error>
     }
 
     let mut registries = serde_json::Map::new();
-    for registry in SYNCHRONIZED_REGISTRIES {
+    for registry in &synchronized {
         let dir = data_root.join(registry);
         if !dir.is_dir() {
             eprintln!("warning: {registry} absent from this version's data, skipping");
@@ -149,4 +153,37 @@ pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error>
     std::fs::write(out_path, text)?;
     println!("wrote {out_path}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registry_paths;
+
+    const KEYS: &str = r#"
+    public static final ResourceKey<Registry<Biome>> BIOME = Registries.createRegistryKey("worldgen/biome");
+    public static final ResourceKey<Registry<ChatType>> CHAT_TYPE = Registries.createRegistryKey("chat_type");
+    public static final ResourceKey<Registry<ChatType>> CHAT_TYPE_2 = Registries.createRegistryKey("other");
+"#;
+
+    #[test]
+    fn paths_follow_the_lists_order_and_whole_key_names() {
+        let list = "List.of(new RegistryData<ChatType>(Registries.CHAT_TYPE, ChatType.DIRECT_CODEC), \
+                    new RegistryData<Biome>(Registries.BIOME, Biome.NETWORK_CODEC));";
+        assert_eq!(
+            registry_paths(list, KEYS).unwrap(),
+            ["chat_type", "worldgen/biome"]
+        );
+    }
+
+    #[test]
+    fn only_a_registry_datas_key_counts() {
+        let list = "new RegistryData<ChatType>(Registries.CHAT_TYPE, \
+                    BuiltInRegistries.BIOME.byNameCodec())";
+        assert_eq!(registry_paths(list, KEYS).unwrap(), ["chat_type"]);
+    }
+
+    #[test]
+    fn a_key_registries_doesnt_declare_is_an_error() {
+        assert!(registry_paths("(Registries.MISSING, X.CODEC)", KEYS).is_err());
+    }
 }

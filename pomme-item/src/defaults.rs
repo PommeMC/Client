@@ -59,6 +59,22 @@ fn unhex(hex: &str) -> Option<Box<[u8]>> {
         .collect()
 }
 
+/// The hash the game gives each item's default components, as the client
+/// would send it in a click.
+#[cfg(test)]
+pub(crate) fn hashes() -> Vec<(ItemKind, DataComponentKind, i32)> {
+    let root: Value = serde_json::from_str(DATA).unwrap();
+    let mut hashes = Vec::new();
+    for (item, components) in root["items"].as_object().unwrap() {
+        for (kind, index) in components.as_object().unwrap() {
+            if let Some(hash) = root["hashes"][kind][index.to_string()].as_i64() {
+                hashes.push((item.parse().unwrap(), kind.parse().unwrap(), hash as i32));
+            }
+        }
+    }
+    hashes
+}
+
 /// Parses the data now rather than on the first lookup, which would stall
 /// whatever frame asked.
 pub fn prewarm() {
@@ -77,6 +93,11 @@ pub fn get(item: ItemKind, kind: DataComponentKind) -> Option<&'static [u8]> {
     Some(&defaults[at].1)
 }
 
+/// `item`'s default `T`, if it has one.
+pub fn component<T: Component>(item: ItemKind) -> Option<T> {
+    T::from_bytes(get(item, T::KIND)?)
+}
+
 /// What an item's defaults say about it, as methods of the item.
 pub trait ItemKindExt {
     /// `Item.getDefaultMaxStackSize`: one for an item without the component.
@@ -85,9 +106,7 @@ pub trait ItemKindExt {
 
 impl ItemKindExt for ItemKind {
     fn max_stack_size(&self) -> i32 {
-        get(*self, MaxStackSize::KIND)
-            .and_then(MaxStackSize::from_bytes)
-            .map_or(1, |size| size.count)
+        component::<MaxStackSize>(*self).map_or(1, |size| size.count)
     }
 }
 

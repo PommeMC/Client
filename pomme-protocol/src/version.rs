@@ -66,7 +66,7 @@ pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
         packets: include_str!("data/protocol-26.3.json"),
         registries: include_str!("data/registries-26.3.json"),
         entity_serializers: include_str!("data/entity-serializers-26.3.json"),
-        known_packs: None,
+        known_packs: Some(include_str!("data/known-packs-26.3.json")),
     },
     EmbeddedVersion {
         version: NATIVE,

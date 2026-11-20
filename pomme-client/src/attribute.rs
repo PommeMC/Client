@@ -321,6 +321,23 @@ impl AttributeMap {
             .apply_snapshot(snapshot);
     }
 
+    /// Vanilla `AttributeInstance.removeModifier` then, for `Some`,
+    /// `addTransientModifier` of an `ADD_MULTIPLIED_TOTAL` one, on an
+    /// attribute the supplier has.
+    pub fn set_modifier(&mut self, attribute: AttributeKind, id: &str, amount: Option<f64>) {
+        let Some(instance) = self.instances.get_mut(&attribute) else {
+            return;
+        };
+        instance.modifiers.remove(id);
+        if let Some(amount) = amount {
+            instance.add_or_update_modifier(AttributeModifier {
+                id: id.to_owned(),
+                amount,
+                operation: AttributeModifierOperation::MultipliedTotal,
+            });
+        }
+    }
+
     /// Vanilla respawn `assignBaseValues`: keep base values, drop modifiers.
     pub fn clear_modifiers(&mut self) {
         for instance in self.instances.values_mut() {

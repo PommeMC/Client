@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
 use glam::{DVec3, dvec3};
+use pomme_block::BlockState;
 
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, CollisionContext, LocalBox};

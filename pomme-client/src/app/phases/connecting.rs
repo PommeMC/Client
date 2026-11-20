@@ -82,8 +82,14 @@ pub fn update_connecting(
     }
 
     let status_text = match connect_phase {
-        ConnectionPhase::StartingWorld | ConnectionPhase::Loading => "Loading terrain...",
-        ConnectionPhase::Connecting => "Connecting to the server...",
+        // A world keeps one status until its terrain appears.
+        ConnectionPhase::StartingWorld
+        | ConnectionPhase::Configuring { world: true }
+        | ConnectionPhase::Loading => "Loading terrain...",
+        // TODO: vanilla's `connect.joining` "Joining world..." once logged in.
+        ConnectionPhase::Connecting | ConnectionPhase::Configuring { world: false } => {
+            "Connecting to the server..."
+        }
     };
 
     if game.dialog_open() {

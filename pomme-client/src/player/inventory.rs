@@ -1,4 +1,4 @@
-use azalea_inventory::components::EquipmentSlot;
+use pomme_item::components::EquipmentSlot;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
@@ -35,12 +35,36 @@ pub fn menu_slot_for_inventory_index(index: u32) -> Option<usize> {
 
 pub struct Inventory {
     slots: Vec<ItemStack>,
+    /// Vanilla `AbstractContainerMenu.lastSlots` of the inventory menu: each
+    /// slot as its listener, the creative screen, was last told of it.
+    last_slots: Vec<ItemStack>,
 }
 
 impl Inventory {
     pub fn new() -> Self {
         Self {
             slots: vec![ItemStack::Empty; PLAYER_SLOTS],
+            last_slots: vec![ItemStack::Empty; PLAYER_SLOTS],
+        }
+    }
+
+    /// Vanilla `broadcastChanges` for the slot listener: the slots that
+    /// differ from what it was last told, in order, which it now knows.
+    pub fn take_changed_slots(&mut self) -> Vec<(u16, ItemStack)> {
+        let mut changed = Vec::new();
+        for (index, (slot, last)) in self.slots.iter().zip(&mut self.last_slots).enumerate() {
+            if slot != last {
+                last.clone_from(slot);
+                changed.push((index as u16, slot.clone()));
+            }
+        }
+        changed
+    }
+
+    /// The listener has been told of `index` as it now is.
+    pub fn mark_slot_told(&mut self, index: usize) {
+        if let (Some(slot), Some(last)) = (self.slots.get(index), self.last_slots.get_mut(index)) {
+            last.clone_from(slot);
         }
     }
 
@@ -159,6 +183,27 @@ pub fn item_resource_name(kind: ItemKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_listener_hears_of_each_changed_slot_once() {
+        let mut inventory = Inventory::new();
+        assert!(inventory.take_changed_slots().is_empty());
+
+        let dirt = ItemStack::new(pomme_registry::builtin::ItemKind::Dirt, 3);
+        inventory.set_slot(40, dirt.clone());
+        inventory.set_slot(36, dirt.clone());
+        // Lowest slot first, then nothing until one changes again.
+        assert_eq!(
+            inventory.take_changed_slots(),
+            [(36, dirt.clone()), (40, dirt.clone())]
+        );
+        assert!(inventory.take_changed_slots().is_empty());
+
+        // A slot it was told of some other way isn't sent again.
+        inventory.set_slot(37, dirt);
+        inventory.mark_slot_told(37);
+        assert!(inventory.take_changed_slots().is_empty());
+    }
 
     #[test]
     fn inventory_indices_map_to_inventory_menu_slots() {

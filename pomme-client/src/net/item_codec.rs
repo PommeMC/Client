@@ -1,53 +1,12 @@
-//! Typed access to an item stack's components, and the bridge to the
-//! inventory fork that still supplies most of them.
-//!
-//! A stack (`pomme_item`) holds each component as its vanilla bytes. A value
-//! pomme reads itself comes straight out of them
-//! (`pomme_item::components`). The rest are the fork's structs: most share
-//! vanilla's layout and decode as they are, the ones whose fork layout
-//! diverges are transcoded first, and a few the fork can't hold are left
-//! unread. Component hashes and the tooltip JSON still come from the fork
-//! too. Each of those goes as pomme ports it.
+//! What the client makes of a stack beyond reading it: the hashes a click
+//! sends in its components' place and the JSON its tooltip is built from,
+//! both from pomme's own component forms (`pomme_item::components`).
 
-use std::borrow::Cow;
-use std::io::Cursor;
 use std::sync::OnceLock;
 
-use azalea_buf::AzBuf;
-use azalea_inventory::components::{DataComponentTrait, DataComponentUnion};
-use azalea_inventory::{
-    DataComponentPatch, ItemStack as ForkStack, ItemStackData as ForkStackData,
-};
 use pomme_item::{ItemStack, ItemStackData};
-use pomme_protocol::codec::{DecodeResult, Reader};
-use pomme_protocol::item::{self, ComponentPatch, ItemCodec, Shape};
-use pomme_protocol::wire::write_varint;
-use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase};
+use pomme_protocol::{Direction, PacketTable, Phase};
 use pomme_registry::Registry;
-use pomme_registry::builtin::{DataComponentKind, ItemKind};
-
-use crate::chat_component::Component;
-
-/// Components the fork can't hold faithfully; they're left unread rather
-/// than misdecoded.
-pub(super) const DROPPED: &[&str] = &[
-    // BlockPredicate lacks `DataComponentMatchers`; value matchers inverted.
-    "can_place_on",
-    "can_break",
-    // Vanilla sends these persistent-only components as NBT.
-    "intangible_projectile",
-    "recipes",
-    "lock",
-    // Holder vs plain registry id.
-    "banner_patterns",
-    // The occupant's entity type is missing.
-    "bees",
-    // Same bytes, wrong registry (entity type for block-entity type).
-    "block_entity_data",
-    // Sparse vanilla ids, ordinal azalea ids.
-    "tropical_fish/pattern",
-    "rabbit/variant",
-];
 
 /// The native clientbound packets the item-gated raw handlers own.
 #[derive(Clone, Copy)]
@@ -72,135 +31,34 @@ pub(super) fn item_packet_ids() -> ItemPacketIds {
     })
 }
 
-/// A text an azalea component holds as pomme's own component, by way of
-/// the JSON form both read and write. Text that form can't carry comes
-/// through as its plain string.
-pub fn text_component(text: &azalea_chat::FormattedText) -> Component {
-    serde_json::to_value(text)
-        .ok()
-        .and_then(|json| Component::from_value(&json).ok())
-        .unwrap_or_else(|| Component::text(text.to_string()))
+/// The stack as the JSON a hover event shows an item with, which item
+/// tooltips are built from.
+pub fn stack_json(
+    stack: &ItemStackData,
+    registries: &crate::net::registry_holder::RegistryHolder,
+) -> serde_json::Value {
+    pomme_item::components::stack_json(stack, &SessionNames(registries))
 }
 
-/// A stack's components as the inventory fork's values; the ones pomme reads
-/// itself come off the stack directly (`ItemStackData::component`).
-pub trait Components {
-    /// `DataComponentHolder.get`: what the patch sets, else the item's
-    /// default, and nothing when the patch removes it.
-    fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>>;
+/// The connection's registries, for the entry names a hash holds.
+struct SessionNames<'a>(&'a crate::net::registry_holder::RegistryHolder);
 
-    /// The stack with the fork value `component` set, or removed for `None`.
-    fn with_component<T: DataComponentTrait + AzBuf>(self, component: impl Into<Option<T>>)
-    -> Self;
-}
-
-impl Components for ItemStackData {
-    fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>> {
-        if self.component_patch.removes(T::KIND) {
-            return None;
-        }
-        // A patched value the fork can't hold leaves the default showing.
-        patched(&self.component_patch)
-            .or_else(|| default_component(self.kind))
-            .map(Cow::Owned)
+impl pomme_item::hash::Names for SessionNames<'_> {
+    fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
+        self.0.name(&registry.into(), id).cloned()
     }
-
-    fn with_component<T: DataComponentTrait + AzBuf>(
-        mut self,
-        component: impl Into<Option<T>>,
-    ) -> Self {
-        set_fork_component(&mut self.component_patch, component);
-        self
-    }
-}
-
-impl Components for ItemStack {
-    fn get_component<T: DataComponentTrait + AzBuf>(&self) -> Option<Cow<'static, T>> {
-        self.as_present()?.get_component()
-    }
-
-    fn with_component<T: DataComponentTrait + AzBuf>(
-        self,
-        component: impl Into<Option<T>>,
-    ) -> Self {
-        match self {
-            Self::Present(data) => Self::Present(data.with_component(component)),
-            Self::Empty => Self::Empty,
-        }
-    }
-}
-
-/// A component's vanilla bytes as the fork's value; `None` for one the fork
-/// can't hold.
-fn fork_value<T: AzBuf>(kind: DataComponentKind, value: &[u8]) -> Option<T> {
-    let bytes = azalea_component(kind.to_u32(), value)?;
-    T::azalea_read(&mut Cursor::new(&bytes[..])).ok()
-}
-
-/// The fork value `item` has for `T` by default.
-pub fn default_component<T: DataComponentTrait + AzBuf>(item: ItemKind) -> Option<T> {
-    fork_value(T::KIND, pomme_item::defaults::get(item, T::KIND)?)
-}
-
-/// The fork value a patch sets `T` to, whatever the item's default.
-pub fn patched<T: DataComponentTrait + AzBuf>(patch: &pomme_item::ComponentPatch) -> Option<T> {
-    fork_value(T::KIND, patch.get(T::KIND)?)
-}
-
-/// Sets the fork value `component` in `patch`, or removes it for `None`.
-pub fn set_fork_component<T: DataComponentTrait + AzBuf>(
-    patch: &mut pomme_item::ComponentPatch,
-    component: impl Into<Option<T>>,
-) {
-    match component.into().as_ref().and_then(fork_bytes) {
-        Some(bytes) => patch.set(T::KIND, bytes),
-        None => patch.remove(T::KIND),
-    }
-}
-
-/// A fork value as a patch holds it: its vanilla bytes.
-fn fork_bytes<T: DataComponentTrait + AzBuf>(value: &T) -> Option<Box<[u8]>> {
-    let mut bytes = Vec::new();
-    value.azalea_write(&mut bytes).ok()?;
-    vanilla_component(T::KIND, &bytes).map(Vec::into_boxed_slice)
-}
-
-/// The stack's JSON form, which item tooltips are built from.
-// TODO: serialized by the fork, so a component it can't hold is missing.
-pub fn stack_json(stack: &ItemStackData) -> serde_json::Result<serde_json::Value> {
-    serde_json::to_value(to_fork(&stack.to_wire()))
-}
-
-/// The stack as the fork's value, which hashes and serializes its
-/// components; an item the fork doesn't know is empty.
-pub(super) fn to_fork(stack: &item::ItemStack) -> ForkStack {
-    let Some(kind) = ItemKind::from_u32(stack.item) else {
-        return ForkStack::Empty;
-    };
-    ForkStack::Present(ForkStackData {
-        kind,
-        count: stack.count,
-        component_patch: fork_patch(&stack.patch),
-    })
-}
-
-/// A decoded patch as the fork's value.
-fn fork_patch(patch: &ComponentPatch) -> DataComponentPatch {
-    let bytes = azalea_patch_bytes(patch);
-    DataComponentPatch::azalea_read(&mut Cursor::new(&bytes[..]))
-        .expect("every component was validated through azalea")
 }
 
 /// `HashedStack.create`: the stack with each component value replaced by
-/// its hash; `None` when empty.
-// TODO: a component the fork can't hold goes unhashed, so the server
-// resyncs a slot holding one.
+/// the hash of its `CODEC` form; `None` when empty.
+// TODO: a value with no form yet goes unhashed, so the server resyncs a slot
+// holding one.
 pub fn hashed_stack(
     stack: &ItemStack,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
 ) -> Option<pomme_protocol::serverbound::HashedStack> {
-    let fork = to_fork(&stack.to_wire()?);
-    let data = fork.as_present()?;
+    let data = stack.as_present()?;
+    let names = SessionNames(registries);
     let mut hashed = pomme_protocol::serverbound::HashedStack {
         item: data.kind.to_u32(),
         count: data.count,
@@ -208,304 +66,30 @@ pub fn hashed_stack(
         removed: Vec::new(),
     };
     for (kind, value) in data.component_patch.iter() {
-        match value {
-            Some(value) => hashed
-                .added
-                .push((kind.to_u32(), value.crc_hash(registries).0 as i32)),
-            None => hashed.removed.push(kind.to_u32()),
+        let Some(bytes) = value else {
+            hashed.removed.push(kind.to_u32());
+            continue;
+        };
+        if let Some(value) = pomme_item::components::value_of(kind, bytes, &names) {
+            hashed.added.push((kind.to_u32(), value.hash().as_i32()));
         }
     }
     Some(hashed)
 }
 
-fn component_name(id: u32) -> Option<&'static str> {
-    ItemCodec::native()
-        .registries()
-        .name_of(ClientRegistry::DataComponentType, id)
-}
-
-/// A patch re-encoded in azalea's layout, keeping only the components azalea
-/// reads back to exactly their span.
-fn azalea_patch_bytes(patch: &ComponentPatch) -> Vec<u8> {
-    let kept: Vec<(u32, Vec<u8>)> = patch
-        .added
-        .iter()
-        .filter_map(|(id, value)| {
-            let bytes = azalea_component(*id, value);
-            if bytes.is_none() {
-                tracing::debug!("dropping {:?} component", component_name(*id));
-            }
-            Some((*id, bytes?))
-        })
-        .collect();
-    let mut out = Vec::new();
-    write_varint(&mut out, kept.len() as u32);
-    write_varint(&mut out, patch.removed.len() as u32);
-    for (id, bytes) in &kept {
-        write_varint(&mut out, *id);
-        out.extend_from_slice(bytes);
-    }
-    for id in &patch.removed {
-        write_varint(&mut out, *id);
-    }
-    out
-}
-
-/// One vanilla component value in azalea's layout, when azalea reads it
-/// back to exactly that span.
-fn azalea_component(id: u32, value: &[u8]) -> Option<Vec<u8>> {
-    if DROPPED.contains(&component_name(id)?) {
-        return None;
-    }
-    transcode_to_azalea(id, value)
-}
-
-/// [`azalea_component`] without the drop list.
-pub(super) fn transcode_to_azalea(id: u32, value: &[u8]) -> Option<Vec<u8>> {
-    let name = component_name(id)?;
-    let kind = DataComponentKind::from_u32(id)?;
-    let mut r = Reader::new(value);
-    let bytes = match name {
-        "use_remainder" | "sulfur_cube_content" => azalea_template(&mut r).ok()?,
-        "charged_projectiles" | "bundle_contents" => {
-            let mut out = Vec::new();
-            let n = r.len(usize::MAX).ok()?;
-            write_varint(&mut out, n as u32);
-            for _ in 0..n {
-                out.extend(azalea_template(&mut r).ok()?);
-            }
-            out
-        }
-        "container" => {
-            let mut out = Vec::new();
-            let n = r.len(256).ok()?;
-            write_varint(&mut out, n as u32);
-            for _ in 0..n {
-                if r.bool().ok()? {
-                    out.extend(azalea_template(&mut r).ok()?);
-                } else {
-                    // azalea's empty stack: a zero count.
-                    out.push(0);
-                }
-            }
-            out
-        }
-        "equippable" => transcode_equippable(&mut r, true).ok()??,
-        "consumable" => transcode_consumable(&mut r, true).ok()??,
-        "death_protection" => transcode_effects(&mut r, true).ok()??,
-        "trim" => transcode_trim(&mut r, true).ok()??,
-        _ => r.bytes(value.len()).ok()?.to_vec(),
-    };
-    r.ensure_eof().ok()?;
-    let mut cur = Cursor::new(&bytes[..]);
-    let mut union = DataComponentUnion::azalea_read_as(kind, &mut cur).ok()?;
-    // SAFETY: `union` was just read as `kind`.
-    unsafe { union.drop_as(kind) };
-    (cur.position() as usize == bytes.len()).then_some(bytes)
-}
-
-/// A vanilla `ItemStackTemplate` (item, count, patch) as azalea's stack
-/// (count, item, patch).
-fn azalea_template(r: &mut Reader) -> DecodeResult<Vec<u8>> {
-    let template = ItemCodec::native().read_template(r)?;
-    let mut out = Vec::new();
-    write_varint(&mut out, template.count as u32);
-    write_varint(&mut out, template.item);
-    out.extend(azalea_patch_bytes(&template.patch));
-    Ok(out)
-}
-
-/// One fork component value in vanilla's layout; `None` for one that has
-/// no vanilla form here (the stack-holding ones, which pomme reads itself).
-fn vanilla_component(kind: DataComponentKind, azalea: &[u8]) -> Option<Vec<u8>> {
-    let mut r = Reader::new(azalea);
-    match kind {
-        DataComponentKind::UseRemainder
-        | DataComponentKind::SulfurCubeContent
-        | DataComponentKind::ChargedProjectiles
-        | DataComponentKind::BundleContents
-        | DataComponentKind::Container => None,
-        DataComponentKind::Equippable => transcode_equippable(&mut r, false).ok()?,
-        DataComponentKind::Consumable => transcode_consumable(&mut r, false).ok()?,
-        DataComponentKind::DeathProtection => transcode_effects(&mut r, false).ok()?,
-        DataComponentKind::Trim => transcode_trim(&mut r, false).ok()?,
-        _ => Some(azalea.to_vec()),
-    }
-}
-
-// The transcoders below rewrite one component between vanilla's layout and
-// azalea's: `to_azalea` picks the direction. `Ok(None)` means the value has
-// no representation on the other side.
-
-/// A vanilla `ByteBufCodecs.holder` (id + 1, or 0 and an inline value) where
-/// azalea stores a plain registry id; an inline value has no azalea form.
-fn transcode_holder_id(
-    r: &mut Reader,
-    out: &mut Vec<u8>,
-    to_azalea: bool,
-) -> DecodeResult<Option<()>> {
-    let id = r.varint()?;
-    let id = if to_azalea {
-        let Some(id) = id.checked_sub(1) else {
-            return Ok(None);
-        };
-        id
-    } else {
-        id + 1
-    };
-    write_varint(out, id);
-    Ok(Some(()))
-}
-
-/// Vanilla `EquipmentSlot.id` against azalea's ordinals.
-const EQUIPMENT_SLOT_IDS: [u32; 8] = [0, 5, 1, 2, 3, 4, 6, 7];
-
-/// Equippable.java:48: the slot id and both sounds diverge.
-fn transcode_equippable(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8>>> {
-    let mut out = Vec::new();
-    let slot = r.varint()?;
-    let slot = if to_azalea {
-        // ByIdMap.OutOfBoundsStrategy.ZERO
-        Some(
-            EQUIPMENT_SLOT_IDS
-                .iter()
-                .position(|&id| id == slot)
-                .unwrap_or(0),
-        )
-    } else {
-        EQUIPMENT_SLOT_IDS.get(slot as usize).map(|&id| id as usize)
-    };
-    let Some(slot) = slot else { return Ok(None) };
-    write_varint(&mut out, slot as u32);
-    if transcode_holder_id(r, &mut out, to_azalea)?.is_none() {
-        return Ok(None);
-    }
-    // asset id, camera overlay, allowed entities, then five flags.
-    let start = r.pos();
-    for _ in 0..2 {
-        if r.bool()? {
-            r.identifier()?;
-        }
-    }
-    if r.bool()? {
-        ItemCodec::native().skip(r, &Shape::HolderSet)?;
-    }
-    r.bytes(5)?;
-    out.extend_from_slice(r.since(start));
-    if transcode_holder_id(r, &mut out, to_azalea)?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(out))
-}
-
-/// Vanilla `ItemUseAnimation` ids past azalea's last variant (bundle, spear).
-const AZALEA_USE_ANIMATIONS: u32 = 10;
-
-/// Consumable.java:49: its own sound is a holder on both sides; the
-/// animation and the effects' sounds diverge.
-fn transcode_consumable(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8>>> {
-    let start = r.pos();
-    r.f32()?;
-    if r.varint()? >= AZALEA_USE_ANIMATIONS {
-        return Ok(None);
-    }
-    ItemCodec::native().skip(r, &item::SOUND)?;
-    r.bool()?;
-    let mut out = r.since(start).to_vec();
-    let Some(effects) = transcode_effects(r, to_azalea)? else {
-        return Ok(None);
-    };
-    out.extend(effects);
-    Ok(Some(out))
-}
-
-/// A list of `ConsumeEffect`s; only `play_sound`'s sound diverges.
-fn transcode_effects(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8>>> {
-    let codec = ItemCodec::native();
-    let registries = codec.registries();
-    let mut out = Vec::new();
-    let n = r.len(usize::MAX)?;
-    write_varint(&mut out, n as u32);
-    for _ in 0..n {
-        let start = r.pos();
-        let kind = r.varint()?;
-        match registries.name_of(ClientRegistry::ConsumeEffectType, kind) {
-            Some("apply_effects") => {
-                for _ in 0..r.len(usize::MAX)? {
-                    codec.skip(r, &item::MOB_EFFECT_INSTANCE)?;
-                }
-                r.f32()?;
-            }
-            Some("remove_effects") => codec.skip(r, &Shape::HolderSet)?,
-            Some("clear_all_effects") => {}
-            Some("teleport_randomly") => {
-                r.f32()?;
-            }
-            Some("play_sound") => {
-                out.extend_from_slice(r.since(start));
-                if transcode_holder_id(r, &mut out, to_azalea)?.is_none() {
-                    return Ok(None);
-                }
-                continue;
-            }
-            _ => return Ok(None),
-        }
-        out.extend_from_slice(r.since(start));
-    }
-    Ok(Some(out))
-}
-
-/// ArmorTrim.java:38: material and pattern are holders in vanilla, plain
-/// registry ids in azalea.
-fn transcode_trim(r: &mut Reader, to_azalea: bool) -> DecodeResult<Option<Vec<u8>>> {
-    let mut out = Vec::new();
-    for _ in 0..2 {
-        if transcode_holder_id(r, &mut out, to_azalea)?.is_none() {
-            return Ok(None);
-        }
-    }
-    Ok(Some(out))
-}
-
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{Damage, Equippable, MaxDamage, Trim};
-    use pomme_item::components::BundleContents;
+    use pomme_item::components::{
+        BundleContents, Component as _, Damage, EquipmentSlot, Equippable, MaxDamage, Trim,
+    };
+    use pomme_protocol::ClientRegistry;
+    use pomme_protocol::codec::Reader;
+    use pomme_protocol::item::ItemCodec;
+    use pomme_protocol::wire::write_varint;
+    use pomme_registry::Holder;
+    use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
     use super::*;
-    use crate::chat_component::ComponentText;
-
-    #[test]
-    fn an_azalea_text_keeps_its_content_style_and_children() {
-        use azalea_chat::FormattedText;
-        use serde::Deserialize;
-
-        use crate::chat_component::Content;
-
-        let styled = FormattedText::deserialize(&serde_json::json!({
-            "text": "Fancy ",
-            "color": "gold",
-            "italic": true,
-            "extra": [{"translate": "item.minecraft.diamond", "bold": true}]
-        }))
-        .unwrap();
-        let component = text_component(&styled);
-        assert_eq!(component.content, Content::Text("Fancy ".into()));
-        assert_eq!(component.style.color, Some(0xffaa00));
-        assert_eq!(component.style.italic, Some(true));
-        let [child] = component.siblings.as_slice() else {
-            panic!("one child, got {:?}", component.siblings);
-        };
-        assert!(
-            matches!(&child.content, Content::Translate { key, .. } if key == "item.minecraft.diamond")
-        );
-        assert_eq!(child.style.bold, Some(true));
-
-        assert_eq!(
-            text_component(&FormattedText::from("plain")).plain_text(),
-            "plain"
-        );
-    }
 
     fn component(name: &str) -> u32 {
         ItemCodec::native()
@@ -549,9 +133,9 @@ mod tests {
         assert_eq!(bundle.component::<BundleContents>(), None);
 
         let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        assert!(pickaxe.get_component::<MaxDamage>().is_some());
-        let unbreakable = pickaxe.with_component::<MaxDamage>(None);
-        assert!(unbreakable.get_component::<MaxDamage>().is_none());
+        assert!(pickaxe.component::<MaxDamage>().is_some());
+        let unbreakable = pickaxe.without::<MaxDamage>();
+        assert!(unbreakable.component::<MaxDamage>().is_none());
     }
 
     #[test]
@@ -593,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn equippable_slot_ids_and_sounds_round_trip() {
+    fn an_equippable_reads_its_slot_by_id_and_its_sounds_as_holders() {
         let mut value = Vec::new();
         var(&mut value, 5); // vanilla offhand id
         var(&mut value, 12); // sound holder: id 11
@@ -601,28 +185,33 @@ mod tests {
         value.extend([1, 1, 1, 0, 0]);
         var(&mut value, 13); // shearing sound holder: id 12
         let stack = decode(&stack_with(ItemKind::Elytra, "equippable", &value));
-        let equippable = stack.get_component::<Equippable>().unwrap();
-        assert_eq!(
-            equippable.slot,
-            azalea_inventory::components::EquipmentSlot::Offhand
-        );
-        assert_eq!(equippable.equip_sound.to_u32(), 11);
-
-        assert_eq!(&*fork_bytes(&*equippable).unwrap(), &value[..]);
+        let equippable = stack.component::<Equippable>().unwrap();
+        assert_eq!(equippable.slot, EquipmentSlot::Offhand);
+        assert!(matches!(equippable.equip_sound, Holder::Reference(sound) if sound.to_u32() == 11));
+        assert_eq!(*equippable.to_bytes(), value[..]);
     }
 
     #[test]
-    fn trim_references_transcode_and_inline_values_drop() {
+    fn a_trim_reads_registry_entries_and_inline_values() {
         let stack = decode(&stack_with(ItemKind::DiamondChestplate, "trim", &[3, 2]));
-        let trim = stack.get_component::<Trim>().unwrap();
-        assert_eq!((trim.material.to_u32(), trim.pattern.to_u32()), (2, 1));
-        assert_eq!(&*fork_bytes(&*trim).unwrap(), &[3, 2]);
+        let trim = stack.component::<Trim>().unwrap();
+        assert!(matches!(trim.material, Holder::Reference(material) if material.to_u32() == 2));
+        assert!(matches!(trim.pattern, Holder::Reference(pattern) if pattern.to_u32() == 1));
+        assert_eq!(*trim.to_bytes(), [3, 2]);
 
         // An inline pattern: asset id, an NBT text description, decal flag.
         let mut inline = vec![3, 0];
-        inline.extend([1, b'x', 8, 0, 1, b'y', 0]);
+        inline.push(11);
+        inline.extend(b"minecraft:x");
+        inline.extend([8, 0, 1, b'y', 0]);
         let stack = decode(&stack_with(ItemKind::DiamondChestplate, "trim", &inline));
-        assert!(stack.get_component::<Trim>().is_none());
+        let trim = stack.component::<Trim>().unwrap();
+        let Holder::Direct(pattern) = &trim.pattern else {
+            panic!("an inline pattern, got {:?}", trim.pattern);
+        };
+        assert_eq!(pattern.asset_id.to_string(), "minecraft:x");
+        assert!(!pattern.decal);
+        assert_eq!(*trim.to_bytes(), inline[..]);
     }
 
     #[test]
@@ -638,7 +227,7 @@ mod tests {
         var(&mut bytes, 7);
         let stack = decode(&bytes);
         let data = stack.as_present().unwrap();
-        assert_eq!(data.get_component::<Damage>().unwrap().amount, 7);
+        assert_eq!(data.component::<Damage>().unwrap().amount, 7);
         assert_eq!(
             data.component_patch.get(DataComponentKind::CanBreak),
             Some(&[0][..])

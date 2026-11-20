@@ -95,16 +95,11 @@ impl SoundRef {
         Self::event(id.strip_prefix("minecraft:").unwrap_or(id))
     }
 
-    /// An item component's sound, which items still carry as azalea's holder.
-    pub fn resolve(
-        holder: &pomme_registry::Holder<
-            pomme_registry::builtin::SoundEvent,
-            azalea_core::sound::CustomSound,
-        >,
-    ) -> Self {
-        match holder {
+    /// An item component's sound.
+    pub fn of_item(sound: &pomme_item::components::Sound) -> Self {
+        match sound {
             pomme_registry::Holder::Reference(event) => Self::from_id(event.to_str()),
-            pomme_registry::Holder::Direct(custom) => Self::from_id(&custom.sound_id.to_string()),
+            pomme_registry::Holder::Direct(custom) => Self::from_id(&custom.location.to_string()),
         }
     }
 

@@ -10,8 +10,8 @@ use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{CollisionContext, collision_shape};
 use crate::physics::collision::{CollisionWorld, no_collision, resolve_collision};
 use crate::physics::movement::{
-    DEG_TO_RAD, check_supporting_block, collided_axes, entity_block_speed_factor, mth_cos, mth_sin,
-    on_pos_of,
+    Bouncer, DEG_TO_RAD, block_bounce, check_supporting_block, collided_axes,
+    entity_block_speed_factor, mth_cos, mth_sin, on_pos_of, restitute_after_collisions,
 };
 use crate::player::{is_water_block, water_contact};
 use crate::position::BlockPos;
@@ -90,6 +90,11 @@ impl BoatSim {
     /// Vanilla `getBubbleAngle`.
     pub fn bubble_angle(&self, partial_tick: f32) -> f32 {
         self.bubble_angle_o + (self.bubble_angle - self.bubble_angle_o) * partial_tick
+    }
+
+    /// Vanilla `AbstractBoat.interact`'s `outOfControlTicks < 60`: boardable.
+    pub fn in_control(&self) -> bool {
+        self.out_of_control_ticks < 60.0
     }
 
     /// Vanilla `isUnderWater`.
@@ -541,8 +546,24 @@ fn move_boat(boat: &mut LivingEntity, world: CollisionWorld<'_>, tags: &BlockTag
     let effect_pos = on_pos_of(position, sim.supporting_block, world, tags, 0.2);
     let moved_vertically = delta.y.abs() > 0.0;
     if moved_vertically && vertical_collision || x_collision || z_collision {
+        // `getBlockBounciness`: 0.8 of the block's for an entity not living.
+        let landing = below.then(|| {
+            block_bounce(world.block_data(effect_pos), tags).map(|bounce| f64::from(bounce * 0.8))
+        });
+        // A boat has no bounce of its own, no air drag and no sneaking.
+        let bouncer = Bouncer {
+            bounciness: 0.0,
+            gravity: if boat.boat_sim.no_gravity {
+                0.0
+            } else {
+                BOAT_GRAVITY
+            },
+            air_drag: 1.0,
+            suppressing: false,
+        };
         let collided = [x_collision, vertical_collision, z_collision];
-        restitute_after_collisions(boat, world, tags, effect_pos, collided, movement);
+        boat.velocity =
+            restitute_after_collisions(boat.velocity, collided, movement, landing, bouncer);
     }
     let speed_factor = f64::from(entity_block_speed_factor(
         position,
@@ -552,50 +573,6 @@ fn move_boat(boat: &mut LivingEntity, world: CollisionWorld<'_>, tags: &BlockTag
     ));
     boat.velocity.x *= speed_factor;
     boat.velocity.z *= speed_factor;
-}
-
-/// Vanilla `Entity.restituteMovementAfterCollisions`: a boat (not living,
-/// no bounce of its own) stops on the axes it hit, and only bounces off a
-/// bouncy block it lands on, at 0.8 of its restitution.
-fn restitute_after_collisions(
-    boat: &mut LivingEntity,
-    world: CollisionWorld<'_>,
-    tags: &BlockTags,
-    effect_pos: BlockPos,
-    [x_collision, vertical_collision, z_collision]: [bool; 3],
-    movement: DVec3,
-) {
-    let current = boat.velocity;
-    if x_collision {
-        boat.velocity.x = 0.0;
-    }
-    if z_collision {
-        boat.velocity.z = 0.0;
-    }
-    if !vertical_collision {
-        return;
-    }
-    let gravity = if boat.boat_sim.no_gravity {
-        0.0
-    } else {
-        BOAT_GRAVITY
-    };
-    let effect = world.block_data(effect_pos);
-    let restitution = if current.y < 0.0
-        && -current.y > gravity
-        && !tags.contains("minecraft:suppresses_bounce", effect.id())
-    {
-        f64::from(effect.movement_bounce_restitution() * 0.8)
-    } else {
-        0.0
-    };
-    // A boat's air drag is 1, so the drag term drops out.
-    let gravity_compensation = if restitution > 0.0 {
-        movement.y / current.y * gravity
-    } else {
-        0.0
-    };
-    boat.velocity.y = (gravity_compensation - current.y) * restitution;
 }
 
 #[cfg(test)]

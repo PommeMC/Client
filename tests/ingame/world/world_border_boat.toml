@@ -1,0 +1,91 @@
+# A boat paddled into the world border stops against it, as the player does.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/tp @s 300.5 -60 300.5 -90 0"
+
+[[step]]
+expect = { player = { position = [300.5, -60.0, 300.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [312, -61, 300] }
+
+[[step]]
+chat = "/fill 296 -63 298 318 -61 302 minecraft:water"
+
+[[step]]
+expect = { block = "water", at = [312, -61, 300] }
+
+[[step]]
+chat = "/worldborder center 300.0 300.0"
+
+[[step]]
+chat = "/worldborder set 25"
+
+[[step]]
+chat = "/summon minecraft:oak_boat 300.5 -60 300.5 {Rotation:[-90f,0f]}"
+
+# In place before riding: once ridden, the client moves the boat.
+[[step]]
+expect = { entity = "oak_boat", at = [300.5, -60.48, 300.5], y_rot = -90.0 }
+
+[[step]]
+chat = "/ride @s mount @e[type=oak_boat,limit=1]"
+
+[[step]]
+expect = { riding = true }
+
+[[step]]
+wait_ms = 1500
+
+# The boat is 1.375 wide, so its middle stops 0.6875 short of the wall at
+# 313, the edge of the block the border at 312.5 runs through.
+[[step]]
+key_down = { action = "key.forward" }
+
+[[step]]
+wait_ms = 4000
+
+[[step]]
+key_up = { action = "key.forward" }
+
+[[step]]
+expect = { entity = "oak_boat", at = [312.3125, -60.48, 300.5], y_rot = -90.0 }
+timeout_ms = 5000
+
+[[step]]
+screenshot = "boat_at_the_wall"
+
+[[step]]
+key_down = { action = "key.sneak" }
+
+[[step]]
+expect = { riding = false }
+
+[[step]]
+key_up = { action = "key.sneak" }
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+# The world is shared, so the border and the ground go back.
+[[step]]
+chat = "/worldborder set 59999968"
+
+[[step]]
+chat = "/worldborder center 0 0"
+
+[[step]]
+chat = "/fill 296 -63 298 318 -61 302 minecraft:grass_block"
+
+[[step]]
+chat = "/fill 296 -63 298 318 -62 302 minecraft:dirt"
+
+[[step]]
+wait_ms = 500

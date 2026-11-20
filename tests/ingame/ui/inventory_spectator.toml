@@ -1,0 +1,35 @@
+# An open creative screen becomes the survival inventory when the player
+# turns spectator, rather than closing.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+open_inventory = true
+
+[[step]]
+wait_ms = 500
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "after_spectator"
+
+[[step]]
+expect = { menu = "inventory" }
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/gamemode survival"

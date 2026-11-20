@@ -134,16 +134,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_claims_core_and_the_feature_packs() {
+    fn every_embedded_table_claims_its_own_versions_core() {
+        let mut tables = 0;
+        for version in EMBEDDED.iter().map(|e| e.version) {
+            let Some(table) = KnownPackTable::for_protocol(version.protocol) else {
+                continue;
+            };
+            tables += 1;
+            assert_eq!(
+                table.packs().first(),
+                Some(&KnownPack {
+                    namespace: "minecraft".to_owned(),
+                    id: "core".to_owned(),
+                    version: version.name.to_owned(),
+                })
+            );
+        }
+        // 26.3 and the native 26.2.
+        assert_eq!(tables, 2);
+    }
+
+    /// 26.3 synchronizes three registries 26.2 doesn't
+    /// (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`).
+    #[test]
+    fn a_table_carries_the_registries_its_version_synchronizes() {
+        let added = [
+            ("minecraft:decorated_pot_pattern", "minecraft:angler"),
+            ("minecraft:block_transformer", "minecraft:axe"),
+            (
+                "minecraft:worldgen/block_state_provider",
+                "minecraft:flower_plain",
+            ),
+        ];
+        let newer = KnownPackTable::for_protocol(777).expect("26.3 table");
+        for (registry, id) in added {
+            assert!(newer.element(registry, id).is_some(), "{registry}/{id}");
+            assert!(KnownPackTable::native().element(registry, id).is_none());
+        }
+    }
+
+    #[test]
+    fn native_claims_the_feature_packs() {
         let table = KnownPackTable::native();
-        assert_eq!(
-            table.packs().first(),
-            Some(&KnownPack {
-                namespace: "minecraft".to_owned(),
-                id: "core".to_owned(),
-                version: NATIVE.name.to_owned(),
-            })
-        );
         // The packs under `data/minecraft/datapacks/`, which vanilla's trusted
         // repository also knows.
         for id in [

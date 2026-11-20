@@ -4,16 +4,14 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
-use azalea_inventory::operations::{
-    ClickOperation, PickupAllClick, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
-};
-use pomme_item::components::BundleContents;
+use pomme_item::components::{BundleContents, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
-use crate::net::item_codec::Components;
+use crate::player::click::{
+    ClickOperation, PickupAllClick, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
+};
 use crate::player::inventory::{
     ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START, CRAFT_INPUT_START, CRAFT_OUTPUT, MAIN_START, OFFHAND,
 };
@@ -21,6 +19,9 @@ use crate::recipe::RecipeBookState;
 
 /// A menu's slots, in menu order.
 type Menu = Vec<ItemStack>;
+
+/// The crafting table's grid slots.
+const TABLE_GRID: std::ops::Range<usize> = 1..10;
 
 const BREWING_INPUT: &str = "minecraft:brewing_input";
 const BREWING_REAGENT: &str = "minecraft:brewing_reagent";
@@ -199,14 +200,20 @@ impl ContainerKind<'_> {
         self.inv_start() + 36
     }
 
-    /// The result slot whose clicks we can't predict, if this menu has one:
-    /// crafting results need recipe logic, the anvil result costs XP and
-    /// materials. Vanilla excludes the crafting result from double-click
-    /// gathering (`canTakeItemForPickAll`) but not the anvil result; we skip
-    /// that one too since its take costs aren't modeled here. The crafter's
-    /// result (`NonInteractiveResultSlot`) ignores every click, so nothing
-    /// changes there either. The furnace result slot is neither: taking from
-    /// it is a plain pickup.
+    /// Vanilla `canTakeItemForPickAll` (`InventoryMenu`, `CraftingMenu`): a
+    /// crafting result is never gathered, so a double click on it is two
+    /// plain clicks.
+    pub fn can_take_for_pick_all(self, slot: u16) -> bool {
+        !(matches!(self, Self::Player | Self::CraftingTable) && slot == 0)
+    }
+
+    /// The result slot a double click never gathers from, if this menu has
+    /// one. Vanilla excludes the crafting result (`canTakeItemForPickAll`)
+    /// but not the anvil result; we skip that one too since its take costs
+    /// (XP and materials) aren't modeled here, which leaves its clicks
+    /// unpredicted. The crafter's result (`NonInteractiveResultSlot`) ignores
+    /// every click, so nothing changes there either. The furnace result slot
+    /// is none of these: taking from it is a plain pickup.
     fn crafting_result_slot(self) -> Option<usize> {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
@@ -220,6 +227,21 @@ impl ContainerKind<'_> {
             | Self::Dispenser
             | Self::BrewingStand(_) => None,
         }
+    }
+
+    /// The grid a `ResultSlot` crafts from, in the menus whose slot 0 is one.
+    fn crafting_grid(self) -> Option<std::ops::Range<usize>> {
+        match self {
+            Self::Player => Some(CRAFT_INPUT_START..ARMOR_START),
+            Self::CraftingTable => Some(TABLE_GRID),
+            _ => None,
+        }
+    }
+
+    /// Whether slot `s` is a `ResultSlot`, which gives up its whole stack
+    /// whatever amount is asked for (`ResultContainer.removeItem`).
+    fn is_crafted_result(self, s: usize) -> bool {
+        s == CRAFT_OUTPUT && self.crafting_grid().is_some()
     }
 
     /// Menu slot holding hotbar index `i` (0-8), the SWAP click target.
@@ -324,10 +346,7 @@ pub struct BundleClick {
 pub fn drops_item(slots: &[ItemStack], cursor: &ItemStack, op: &ClickOperation) -> bool {
     match op {
         ClickOperation::Pickup(
-            PickupClick::Left { slot: None }
-            | PickupClick::Right { slot: None }
-            | PickupClick::LeftOutside
-            | PickupClick::RightOutside,
+            PickupClick::Left { slot: None } | PickupClick::Right { slot: None },
         ) => cursor.is_present(),
         ClickOperation::Throw(ThrowClick::Single { slot } | ThrowClick::All { slot }) => {
             cursor.is_empty()
@@ -350,11 +369,10 @@ pub fn apply_click(
     creative: bool,
     bundle: &mut BundleClick,
 ) -> Vec<(u16, ItemStack)> {
-    // Crafting-result clicks need recipe logic; leave them to the server.
-    if op
-        .slot_num()
-        .is_some_and(|s| Some(s as usize) == kind.crafting_result_slot())
-    {
+    let clicked = op.slot_num().map(usize::from);
+    let grid = kind.crafting_grid();
+    // The anvil's result costs XP and materials; leave it to the server.
+    if grid.is_none() && clicked.is_some() && clicked == kind.crafting_result_slot() {
         return Vec::new();
     }
     // Vanilla routes a player-slot shift-click by whether the item is
@@ -370,6 +388,14 @@ pub fn apply_click(
     }
     let mut menu = kind.build_menu(slots);
     apply_op(kind, &mut menu, cursor, op, creative, bundle);
+    // Every way a click takes from a `ResultSlot` ends in its `onTake`.
+    let count = |slots: &[ItemStack]| slots.get(CRAFT_OUTPUT).map_or(0, ItemStack::count);
+    if let Some(grid) = grid
+        && clicked == Some(CRAFT_OUTPUT)
+        && count(&menu) < count(slots)
+    {
+        take_crafted_result(&mut menu, grid);
+    }
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
@@ -383,6 +409,46 @@ pub fn apply_click(
         changed.push((i as u16, after.clone()));
     }
     changed
+}
+
+/// A click's changed slots in the order vanilla writes them: it puts them in
+/// an `Int2ObjectOpenHashMap` by ascending slot, and the packet goes out in
+/// that map's iteration order, slot 0 first and then its table from the end.
+pub fn in_sent_order(mut changed: Vec<(u16, ItemStack)>) -> Vec<(u16, ItemStack)> {
+    type Table = Vec<Option<(u16, ItemStack)>>;
+    /// `HashCommon.mix`, then fastutil's linear probe.
+    fn place(table: &mut Table, entry: (u16, ItemStack)) {
+        let mask = table.len() - 1;
+        let hash = u32::from(entry.0).wrapping_mul(0x9E37_79B9);
+        let mut at = (hash ^ (hash >> 16)) as usize & mask;
+        while table[at].is_some() {
+            at = (at + 1) & mask;
+        }
+        table[at] = Some(entry);
+    }
+
+    changed.sort_by_key(|(slot, _)| *slot);
+    let mut zero = None;
+    // The default map: a table of 32, three quarters full at most.
+    let mut table: Table = vec![None; 32];
+    for (held, entry) in changed.into_iter().enumerate() {
+        if entry.0 == 0 {
+            zero = Some(entry);
+        } else {
+            place(&mut table, entry);
+        }
+        if held >= table.len() * 3 / 4 {
+            // `rehash(arraySize(size + 1, 0.75))`, old entries from the end.
+            let len = ((held + 2) * 4).div_ceil(3).next_power_of_two();
+            let old = std::mem::replace(&mut table, vec![None; len]);
+            for entry in old.into_iter().rev().flatten() {
+                place(&mut table, entry);
+            }
+        }
+    }
+    zero.into_iter()
+        .chain(table.into_iter().rev().flatten())
+        .collect()
 }
 
 /// Distribute the carried stack across the dragged slots (left = even split,
@@ -408,11 +474,9 @@ pub fn drag_distribution(
     if n == 0 {
         return (Vec::new(), cursor.clone());
     }
-    let max = carried.kind.max_stack_size();
     let place = match kind {
         QuickCraftKind::Left => carried.count / n,
         QuickCraftKind::Right => 1,
-        QuickCraftKind::Middle => max,
     };
     let mut remaining = carried.count;
     let mut changed = Vec::new();
@@ -463,10 +527,10 @@ fn apply_op(
             PickupClick::Right { slot: Some(s) } => {
                 pickup_click(kind, menu, cursor, *s as usize, false, bundle)
             }
-            PickupClick::Left { slot: None } | PickupClick::LeftOutside => {
+            PickupClick::Left { slot: None } => {
                 *cursor = ItemStack::Empty; // drop whole
             }
-            PickupClick::Right { slot: None } | PickupClick::RightOutside => shrink(cursor, 1),
+            PickupClick::Right { slot: None } => shrink(cursor, 1),
         },
         ClickOperation::QuickMove(q) => {
             let s = match q {
@@ -474,7 +538,7 @@ fn apply_op(
             };
             quick_move(kind, menu, s);
         }
-        ClickOperation::PickupAll(PickupAllClick { slot, .. }) => {
+        ClickOperation::PickupAll(PickupAllClick { slot }) => {
             pickup_all(kind, menu, cursor, *slot as usize)
         }
         ClickOperation::Swap(s) => {
@@ -491,12 +555,14 @@ fn apply_op(
                 return;
             }
             match t {
-                ThrowClick::Single { slot } => {
+                ThrowClick::Single { slot } if !kind.is_crafted_result(*slot as usize) => {
                     let mut item = take_slot(menu, *slot as usize);
                     shrink(&mut item, 1);
                     put_slot(menu, *slot as usize, item);
                 }
-                ThrowClick::All { slot } => put_slot(menu, *slot as usize, ItemStack::Empty),
+                ThrowClick::Single { slot } | ThrowClick::All { slot } => {
+                    put_slot(menu, *slot as usize, ItemStack::Empty);
+                }
             }
         }
         ClickOperation::Clone(c) => {
@@ -576,7 +642,8 @@ fn pickup_click(
         }
     } else if carried.is_empty() {
         let total = slot_item.count();
-        let amount = if primary { total } else { (total + 1) / 2 };
+        let whole = primary || kind.is_crafted_result(s);
+        let amount = if whole { total } else { (total + 1) / 2 };
         carried = slot_item.split(amount as u32);
     } else if carried.as_present().is_some_and(|c| kind.may_place(s, c)) {
         if same_item(&carried, &slot_item) {
@@ -590,8 +657,15 @@ fn pickup_click(
             std::mem::swap(&mut carried, &mut slot_item);
         }
     } else if same_item(&carried, &slot_item) {
-        // Slot won't accept a placement but holds the same item: pull it into hand.
-        merge_into(&mut carried, &mut slot_item);
+        // Slot won't accept a placement but holds the same item: pull it
+        // into hand, all of it or none (`Slot.tryRemove` without
+        // `allowModification`).
+        let room = carried
+            .as_present()
+            .map_or(0, |c| c.kind.max_stack_size() - c.count);
+        if room >= slot_item.count() {
+            merge_into(&mut carried, &mut slot_item);
+        }
     }
     put_slot(menu, s, slot_item);
     *cursor = carried;
@@ -714,6 +788,40 @@ fn try_transfer(
     try_insert(contents, &mut taken)
 }
 
+/// Vanilla `Item.getCraftingRemainder`: what `Items` gives `craftRemainder`.
+fn crafting_remainder(item: ItemKind) -> Option<ItemKind> {
+    match item {
+        ItemKind::WaterBucket | ItemKind::LavaBucket | ItemKind::MilkBucket => {
+            Some(ItemKind::Bucket)
+        }
+        ItemKind::DragonBreath | ItemKind::HoneyBottle => Some(ItemKind::GlassBottle),
+        _ => None,
+    }
+}
+
+/// Vanilla `ResultSlot.onTake` as the client runs it: each grid slot gives
+/// up one item and takes its remainder (`defaultCraftingReminder`). The
+/// result itself stays as the click left it until the server sends the next.
+// TODO: a remainder whose slot still holds another item goes to
+// `Inventory.add`, else is dropped; neither is predicted.
+fn take_crafted_result(menu: &mut Menu, grid: std::ops::Range<usize>) {
+    for s in grid {
+        let Some(input) = menu.get(s).and_then(ItemStack::as_present) else {
+            continue;
+        };
+        let remainder = crafting_remainder(input.kind).map(|kind| ItemStack::new(kind, 1));
+        shrink_slot(menu, s, 1);
+        let (Some(mut remainder), Some(slot)) = (remainder, menu.get_mut(s)) else {
+            continue;
+        };
+        if slot.is_empty() {
+            *slot = remainder;
+        } else if same_item(slot, &remainder) {
+            merge_into(slot, &mut remainder);
+        }
+    }
+}
+
 /// Move up to `amount` of `carried` into `slot` (empty or same item), capped to
 /// the item's max stack and the slot's own limit, like vanilla
 /// `Slot::safeInsert`.
@@ -749,8 +857,8 @@ fn safe_insert(
 /// Vanilla `Player.getEquipmentSlotForItem`: the slot the player wears
 /// `item` in, if it is something they can wear.
 fn worn_slot(item: &ItemStackData) -> Option<EquipmentSlot> {
-    item.get_component::<Equippable>()
-        .filter(|equippable| crate::player::interaction::player_can_equip(equippable))
+    item.component::<Equippable>()
+        .filter(crate::player::interaction::player_can_equip)
         .map(|equippable| equippable.slot)
 }
 
@@ -789,13 +897,12 @@ fn player_quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
 /// from its end, the grid to its start, and an inventory slot to the grid,
 /// else across between the main rows and the hotbar.
 fn crafting_quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
-    const GRID: std::ops::Range<usize> = 1..10;
     const INVENTORY: std::ops::Range<usize> = 10..46;
     const HOTBAR_START: usize = 37;
     match s {
         0 => move_item_stack_to(kind, menu, s, INVENTORY, true),
         _ if !INVENTORY.contains(&s) => move_item_stack_to(kind, menu, s, INVENTORY, false),
-        _ if move_item_stack_to(kind, menu, s, GRID, false) => true,
+        _ if move_item_stack_to(kind, menu, s, TABLE_GRID, false) => true,
         _ if s < HOTBAR_START => move_item_stack_to(kind, menu, s, HOTBAR_START..46, false),
         _ => move_item_stack_to(kind, menu, s, INVENTORY.start..HOTBAR_START, false),
     };
@@ -1089,7 +1196,7 @@ mod drop_tests {
         let stone = ItemStack::new(ItemKind::Stone, 5);
         let slots = [stone.clone(), ItemStack::Empty];
         let throw = |slot| ClickOperation::Throw(ThrowClick::Single { slot });
-        let outside = ClickOperation::Pickup(PickupClick::LeftOutside);
+        let outside = ClickOperation::Pickup(PickupClick::Left { slot: None });
 
         assert!(drops_item(&slots, &ItemStack::Empty, &throw(0)));
         assert!(drops_item(
@@ -1105,7 +1212,7 @@ mod drop_tests {
         assert!(drops_item(
             &slots,
             &stone,
-            &ClickOperation::Pickup(PickupClick::RightOutside)
+            &ClickOperation::Pickup(PickupClick::Right { slot: None })
         ));
         assert!(!drops_item(&slots, &ItemStack::Empty, &outside));
 
@@ -1266,7 +1373,115 @@ mod quick_move_tests {
         slot: u16,
     ) -> Vec<(u16, ItemStack)> {
         let op = ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) });
+        click(kind, slots, cursor, op)
+    }
+
+    fn click(
+        kind: ContainerKind,
+        slots: &[ItemStack],
+        cursor: &mut ItemStack,
+        op: ClickOperation,
+    ) -> Vec<(u16, ItemStack)> {
         apply_click(kind, slots, cursor, &op, false, &mut BundleClick::default())
+    }
+
+    /// Planks crafted from the logs in the player's own grid.
+    fn crafted(logs: i32) -> Vec<ItemStack> {
+        let mut slots = vec![ItemStack::Empty; ContainerKind::Player.slot_count()];
+        slots[0] = ItemStack::new(ItemKind::OakPlanks, 4);
+        slots[1] = ItemStack::new(ItemKind::OakLog, logs);
+        slots
+    }
+
+    #[test]
+    fn taking_a_crafted_result_uses_up_the_grid() {
+        let kind = ContainerKind::Player;
+        let logs = |count| ItemStack::new(ItemKind::OakLog, count);
+        let planks = |count| ItemStack::new(ItemKind::OakPlanks, count);
+
+        let mut cursor = ItemStack::Empty;
+        let changed = left_click(kind, &crafted(3), &mut cursor, 0);
+        assert_eq!(changed, vec![(0, ItemStack::Empty), (1, logs(2))]);
+        assert_eq!(cursor, planks(4));
+
+        // The next result stacks onto the carried one, and the last log goes.
+        let changed = left_click(kind, &crafted(1), &mut cursor, 0);
+        assert_eq!(changed, vec![(0, ItemStack::Empty), (1, ItemStack::Empty)]);
+        assert_eq!(cursor, planks(8));
+
+        // One that would not all fit is not taken.
+        let mut cursor = planks(61);
+        assert!(left_click(kind, &crafted(3), &mut cursor, 0).is_empty());
+        assert_eq!(cursor, planks(61));
+
+        // A right click and a single throw take the whole result too.
+        let mut cursor = ItemStack::Empty;
+        let right = ClickOperation::Pickup(PickupClick::Right { slot: Some(0) });
+        let changed = click(kind, &crafted(3), &mut cursor, right);
+        assert_eq!(changed, vec![(0, ItemStack::Empty), (1, logs(2))]);
+        assert_eq!(cursor, planks(4));
+        let mut cursor = ItemStack::Empty;
+        let throw = ClickOperation::Throw(ThrowClick::Single { slot: 0 });
+        let changed = click(kind, &crafted(3), &mut cursor, throw);
+        assert_eq!(changed, vec![(0, ItemStack::Empty), (1, logs(2))]);
+
+        // A shift-click sends it to the end of the inventory.
+        let mut cursor = ItemStack::Empty;
+        let shift = ClickOperation::QuickMove(QuickMoveClick::Left { slot: 0 });
+        let changed = click(kind, &crafted(3), &mut cursor, shift);
+        assert_eq!(
+            changed,
+            vec![(0, ItemStack::Empty), (1, logs(2)), (44, planks(4))]
+        );
+    }
+
+    /// Each case is what fastutil 8.5.18's map gives for the same slots.
+    #[test]
+    fn changed_slots_go_out_in_the_hash_maps_order() {
+        let sent = |slots: &[u16]| -> Vec<u16> {
+            let changed = slots.iter().map(|slot| (*slot, ItemStack::Empty)).collect();
+            in_sent_order(changed)
+                .into_iter()
+                .map(|(slot, _)| slot)
+                .collect()
+        };
+        assert_eq!(sent(&[6, 39]), [39, 6]);
+        assert_eq!(sent(&[44, 1, 0]), [0, 1, 44]);
+        assert_eq!(
+            sent(&[1, 2, 3, 4, 9, 10, 36, 45]),
+            [2, 4, 9, 10, 1, 3, 36, 45]
+        );
+        // Enough slots that the table grows.
+        let all: Vec<u16> = (0..46).collect();
+        assert_eq!(
+            sent(&all),
+            [
+                0, 33, 29, 25, 37, 4, 12, 13, 8, 9, 30, 28, 24, 26, 18, 16, 17, 19, 23, 20, 22, 21,
+                35, 39, 2, 27, 6, 15, 14, 31, 11, 10, 32, 1, 3, 34, 7, 38, 36, 5, 45, 44, 42, 41,
+                40, 43
+            ]
+        );
+    }
+
+    #[test]
+    fn a_crafted_result_leaves_its_inputs_remainders() {
+        let kind = ContainerKind::CraftingTable;
+        let mut slots = vec![ItemStack::Empty; kind.slot_count()];
+        slots[0] = ItemStack::new(ItemKind::Cake, 1);
+        slots[1] = ItemStack::new(ItemKind::MilkBucket, 1);
+        slots[5] = ItemStack::new(ItemKind::HoneyBottle, 2);
+        slots[9] = ItemStack::new(ItemKind::Wheat, 1);
+        let mut cursor = ItemStack::Empty;
+        let changed = left_click(kind, &slots, &mut cursor, 0);
+        assert_eq!(
+            changed,
+            vec![
+                (0, ItemStack::Empty),
+                (1, ItemStack::new(ItemKind::Bucket, 1)),
+                (5, ItemStack::new(ItemKind::HoneyBottle, 1)),
+                (9, ItemStack::Empty),
+            ]
+        );
     }
 
     #[test]
@@ -1495,7 +1710,7 @@ mod quick_move_tests {
         let hotbar = kind.hotbar_menu_slot(0);
         let mut slots = vec![ItemStack::Empty; kind.slot_count()];
         slots[usize::from(hotbar)] = ItemStack::new(ItemKind::GlassBottle, 5);
-        let op = ClickOperation::Swap(azalea_inventory::operations::SwapClick {
+        let op = ClickOperation::Swap(crate::player::click::SwapClick {
             source_slot: 0,
             target_slot: 0,
         });

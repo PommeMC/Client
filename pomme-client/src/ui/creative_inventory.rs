@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
+use pomme_item::components::{BlockItemStateProperties, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
-use pomme_registry::builtin::ItemKind;
+use pomme_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,
@@ -15,7 +15,9 @@ use super::creative_tab_data::{
     FUNCTIONAL_BLOCKS_ITEMS, INGREDIENTS_ITEMS, NATURAL_BLOCKS_ITEMS, OP_BLOCKS_ITEMS,
     REDSTONE_BLOCKS_ITEMS, SPAWN_EGGS_ITEMS, TOOLS_AND_UTILITIES_ITEMS,
 };
+use crate::player::click::{ClickOperation, PickupClick};
 use crate::player::inventory::{Inventory, item_resource_name};
+use crate::player::menu_click::{self, BundleClick, ContainerKind};
 use crate::renderer::PlayerPreview;
 use crate::renderer::pipelines::entity_renderer::armor_render_infos;
 use crate::renderer::pipelines::menu_overlay::{
@@ -79,7 +81,6 @@ pub enum CreativeTab {
     FoodAndDrinks,
     Ingredients,
     SpawnEggs,
-    #[allow(dead_code)]
     OpBlocks,
     SurvivalInventory,
 }
@@ -211,7 +212,7 @@ impl CreativeTab {
     /// The tab whose [`Self::id`] is `id`.
     #[cfg(feature = "test-harness")]
     pub fn from_id(id: &str) -> Option<Self> {
-        TABS.into_iter().find(|tab| tab.id() == id)
+        shown_tabs(true).find(|tab| tab.id() == id)
     }
 
     /// The vanilla `creative_mode_tab` registry id.
@@ -279,8 +280,19 @@ const TABS: [CreativeTab; 12] = [
     CreativeTab::SurvivalInventory,
 ];
 
+/// The tabs on show, the operator one only with `operator_tab`.
+fn shown_tabs(operator_tab: bool) -> impl Iterator<Item = CreativeTab> {
+    TABS.into_iter()
+        .chain(operator_tab.then_some(CreativeTab::OpBlocks))
+}
+
 pub struct CreativeState {
     pub tab: CreativeTab,
+    /// Vanilla `hasPermissions`: the Operator Items Tab option on for a
+    /// player who can use game master blocks, which shows that tab.
+    operator_tab: bool,
+    /// That tab's stacks after its plain items (see [`operator_stacks`]).
+    operator_stacks: Vec<ItemStack>,
     pub scroll: f32,
     pub search: crate::ui::text_edit::TextFieldState,
     /// Client-side carried stack (the item riding the cursor). Creative-only.
@@ -290,6 +302,9 @@ pub struct CreativeState {
     /// Last left-click (slot, time) for double-click detection.
     last_left_click: Option<(u16, Instant)>,
     scroll_dragging: bool,
+    /// The real inventory slot under the cursor this frame, whose bundle the
+    /// caller's `BundleMouseActions` reads.
+    pub hovered_slot: Option<u16>,
 }
 
 struct DragState {
@@ -301,6 +316,8 @@ impl CreativeState {
     pub fn new() -> Self {
         Self {
             tab: CreativeTab::BuildingBlocks,
+            operator_tab: false,
+            operator_stacks: Vec::new(),
             scroll: 0.0,
             // Vanilla search box: 50 chars.
             search: crate::ui::text_edit::TextFieldState::new(50),
@@ -308,6 +325,7 @@ impl CreativeState {
             drag: None,
             last_left_click: None,
             scroll_dragging: false,
+            hovered_slot: None,
         }
     }
 
@@ -326,10 +344,38 @@ impl CreativeState {
         self.sync_search_focus();
     }
 
+    /// Shows the operator tab with `stacks` after its plain items, or hides
+    /// it. Vanilla `tryRefreshInvalidatedTabs`: a selected tab that stops
+    /// displaying gives way to the default one.
+    pub fn set_operator_tab(&mut self, stacks: Option<Vec<ItemStack>>) {
+        self.operator_tab = stacks.is_some();
+        self.operator_stacks = stacks.unwrap_or_default();
+        if !self.operator_tab && self.tab == CreativeTab::OpBlocks {
+            self.select_tab(CreativeTab::BuildingBlocks);
+        }
+    }
+
+    fn tabs(&self) -> impl Iterator<Item = CreativeTab> + use<> {
+        shown_tabs(self.operator_tab)
+    }
+
     /// Vanilla `init` re-selects the remembered tab, so the screen reopens on
     /// it with the search and scroll cleared.
     pub fn reopen(&mut self) {
         self.select_tab(self.tab);
+    }
+
+    /// The tab lines a real slot's tooltip gives `data` after its name, for
+    /// the caller's bundle tooltip.
+    pub fn tab_name_lines(&self, data: &ItemStackData) -> Vec<TooltipLine> {
+        tab_name_lines(data, self.operator_tab)
+    }
+
+    /// What `ItemPickerMenu`'s slot numbering adds to a real slot in the
+    /// bundle selection packet: the item tabs put their hotbar after the 45
+    /// catalog slots, the inventory tab numbers as the inventory menu does.
+    pub fn bundle_packet_offset(&self) -> u16 {
+        if self.tab.is_inventory_tab() { 0 } else { 9 }
     }
 
     /// Discards the carried stack and any pending drag/double-click state.
@@ -339,6 +385,7 @@ impl CreativeState {
         self.cursor_item = ItemStack::Empty;
         self.drag = None;
         self.last_left_click = None;
+        self.hovered_slot = None;
     }
 }
 
@@ -468,7 +515,7 @@ pub fn build_creative_inventory(
     drop: Option<bool>,
     can_drop: bool,
     inventory: &Inventory,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     gs: f32,
     advanced_tooltips: bool,
     left_held: bool,
@@ -476,6 +523,7 @@ pub fn build_creative_inventory(
     shift: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
     mut effects: Vec<MenuElement>,
+    bundle: &mut BundleClick,
 ) -> CreativeAction {
     // Vanilla creative keyPressed: T on a non-search tab jumps to the search
     // tab without typing the character (`ignoreTextInput`).
@@ -519,7 +567,7 @@ pub fn build_creative_inventory(
 
     let mut action = CreativeAction::None;
 
-    let tab_hit = tab_hit_test(ox, oy, scale, cursor, clicked);
+    let tab_hit = tab_hit_test(state, ox, oy, scale, cursor, clicked);
     if let Some(new_tab) = tab_hit
         && new_tab != state.tab
     {
@@ -551,6 +599,7 @@ pub fn build_creative_inventory(
         clicked,
         right_clicked,
         carrying: state.cursor_item.is_present(),
+        operator_tab: state.operator_tab,
     };
 
     let drag_preview: Option<DragPreview> = match (&state.drag, &state.cursor_item) {
@@ -673,6 +722,11 @@ pub fn build_creative_inventory(
         hit
     };
 
+    state.hovered_slot = real_hit
+        .as_ref()
+        .map(|hit| hit.slot)
+        .filter(|&slot| slot != SLOT_TRASH);
+
     // Real-slot clicks and click-drag distribution.
     if let Some(drag) = &mut state.drag {
         let held = match drag.button {
@@ -690,6 +744,11 @@ pub fn build_creative_inventory(
             {
                 drag.slots.push(hit.slot);
             }
+        } else if let &[slot] = drag.slots.as_slice() {
+            // Vanilla `quickCraftToSlots`: a drag over one slot is a click.
+            let button = drag.button;
+            state.drag = None;
+            action = click_slot(state, inventory, slot, button, bundle);
         } else {
             // Released: commit the split and keep the remainder on the cursor.
             if let Some(preview) = &drag_preview {
@@ -707,7 +766,8 @@ pub fn build_creative_inventory(
     } else if let Some(hit) = &real_hit
         && let Some(kind) = hit.click
     {
-        let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
+        let double = matches!(kind, ClickKind::Left)
+            && super::container::double_click(&mut state.last_left_click, hit.slot);
         if hit.slot == SLOT_TRASH && shift {
             // Vanilla `slotClicked`: a quick-move on the destroy slot empties
             // every `inventoryMenu` slot and keeps the carried stack.
@@ -723,25 +783,18 @@ pub fn build_creative_inventory(
             if !items.is_empty() {
                 action = CreativeAction::SetSlots(items);
             }
-            state.last_left_click = None;
-        } else {
-            if matches!(kind, ClickKind::Left) {
-                state.last_left_click = Some((hit.slot, Instant::now()));
-            }
-            if let ItemStack::Present(carried) = &state.cursor_item {
-                // Carrying: start a drag on an eligible slot, else swap immediately.
-                if drag_slot_eligible(carried, inventory, hit.slot) {
-                    state.drag = Some(DragState {
-                        button: kind,
-                        slots: vec![hit.slot],
-                    });
-                } else {
-                    action = apply_slot_action(state, inventory, hit.slot, kind);
-                }
+        } else if let ItemStack::Present(carried) = &state.cursor_item {
+            // Carrying: start a drag on an eligible slot, else click at once.
+            if drag_slot_eligible(carried, inventory, hit.slot) {
+                state.drag = Some(DragState {
+                    button: kind,
+                    slots: vec![hit.slot],
+                });
             } else {
-                // Empty cursor: pick up / take half immediately.
-                action = apply_slot_action(state, inventory, hit.slot, kind);
+                action = click_slot(state, inventory, hit.slot, kind, bundle);
             }
+        } else {
+            action = click_slot(state, inventory, hit.slot, kind, bundle);
         }
     }
 
@@ -812,7 +865,7 @@ pub fn build_creative_inventory(
         }
     }
 
-    push_tab_tooltip(elements, ox, oy, scale, &tt);
+    push_tab_tooltip(elements, state, ox, oy, scale, &tt);
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if (clicked || right_clicked)
@@ -895,13 +948,24 @@ pub fn slot_center(
         }
         HoverTarget::Trash if state.tab.is_inventory_tab() => (INV_TRASH_X, INV_TRASH_Y),
         HoverTarget::Trash => return Err("the trash slot is on the inventory tab".into()),
-        _ if state.tab.is_inventory_tab() => {
-            return Err("hover only knows the item tabs' layout".into());
+        // The inventory tab lays out every slot of the inventory menu but the
+        // crafting ones.
+        HoverTarget::Hotbar(slot @ 5..=8) if state.tab.is_inventory_tab() => {
+            inventory_tab_armor_xy(usize::from(slot - SLOT_ARMOR_BASE))
+        }
+        HoverTarget::Hotbar(slot @ 9..=35) if state.tab.is_inventory_tab() => {
+            inventory_tab_main_xy(usize::from(slot - SLOT_MAIN_BASE))
+        }
+        HoverTarget::Hotbar(SLOT_OFFHAND) if state.tab.is_inventory_tab() => {
+            (INV_OFFHAND_X, INV_OFFHAND_Y)
+        }
+        HoverTarget::Catalog(_) if state.tab.is_inventory_tab() => {
+            return Err("the inventory tab has no catalog".into());
         }
         HoverTarget::Hotbar(slot @ 36..=44) => {
             (GRID_ORIGIN_X + f32::from(slot - 36) * SLOT_STRIDE, HOTBAR_Y)
         }
-        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't a hotbar slot")),
+        HoverTarget::Hotbar(slot) => return Err(format!("slot {slot} isn't on this tab")),
         HoverTarget::Catalog(cell) if cell < GRID_COLS * GRID_ROWS => (
             GRID_ORIGIN_X + (cell % GRID_COLS) as f32 * SLOT_STRIDE,
             GRID_ORIGIN_Y + (cell / GRID_COLS) as f32 * SLOT_STRIDE,
@@ -944,7 +1008,7 @@ fn draw_tabs(
     let tab_w = TAB_W * scale;
     let tab_h = TAB_H * scale;
     let icon_size = TAB_ICON_SIZE * scale;
-    for &tab in TABS.iter() {
+    for tab in state.tabs() {
         let selected = state.tab == tab;
         if selected != selected_pass {
             continue;
@@ -979,6 +1043,7 @@ fn draw_tabs(
 }
 
 fn tab_hit_test(
+    state: &CreativeState,
     ox: f32,
     oy: f32,
     scale: f32,
@@ -988,7 +1053,8 @@ fn tab_hit_test(
     if !clicked {
         return None;
     }
-    TABS.into_iter()
+    state
+        .tabs()
         .find(|&tab| hit_test(cursor, tab_hit_rect(tab, ox, oy, scale)))
 }
 
@@ -1016,7 +1082,7 @@ fn item_or_empty(slots: &[ItemStack], idx: usize) -> ItemStack {
 }
 
 struct TooltipCtx<'a> {
-    registries: &'a azalea_core::registry_holder::RegistryHolder,
+    registries: &'a crate::net::registry_holder::RegistryHolder,
     cursor: (f32, f32),
     screen_w: f32,
     screen_h: f32,
@@ -1025,6 +1091,7 @@ struct TooltipCtx<'a> {
     clicked: bool,
     right_clicked: bool,
     carrying: bool,
+    operator_tab: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1048,13 +1115,15 @@ struct DragPreview {
 
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
 
-fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
-    static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
+/// The titles of the shown tabs holding `kind`.
+fn tabs_containing(kind: ItemKind, operator_tab: bool) -> &'static [&'static str] {
+    type Index = HashMap<ItemKind, Vec<&'static str>>;
+    static INDEX: [OnceLock<Index>; 2] = [OnceLock::new(), OnceLock::new()];
     static EMPTY: &[&str] = &[];
-    INDEX
+    INDEX[usize::from(operator_tab)]
         .get_or_init(|| {
-            let mut map: HashMap<ItemKind, Vec<&'static str>> = HashMap::new();
-            for tab in TABS.iter() {
+            let mut map = Index::new();
+            for tab in shown_tabs(operator_tab) {
                 let meta = tab.meta();
                 if let ItemSource::Static(list) = meta.items {
                     for &k in list {
@@ -1071,23 +1140,32 @@ fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
 
 /// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the stack's
 /// tooltip, with the tabs holding it after its name unless `tab_names` is
-/// off (a catalog slot in a category tab). The tabs hold default stacks, so
-/// one with components set is in none of them.
+/// off (a catalog slot in a category tab).
 // TODO: the search tab's matching item tags, which follow the name there.
 fn build_item_tooltip_lines(
     data: &ItemStackData,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     advanced: bool,
     tab_names: bool,
+    operator_tab: bool,
 ) -> Vec<TooltipLine> {
     let mut lines = super::chat::stack_tooltip_lines(data, registries, advanced);
-    if tab_names && data.component_patch.iter().next().is_none() && !lines.is_empty() {
-        let tabs = tabs_containing(data.kind)
-            .iter()
-            .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
-        lines.splice(1..1, tabs);
+    if tab_names && !lines.is_empty() {
+        lines.splice(1..1, tab_name_lines(data, operator_tab));
     }
     lines
+}
+
+/// The shown tabs holding `data`, a line each. The tabs hold default stacks,
+/// so one with components set is in none of them.
+fn tab_name_lines(data: &ItemStackData, operator_tab: bool) -> Vec<TooltipLine> {
+    if data.component_patch.iter().next().is_some() {
+        return Vec::new();
+    }
+    tabs_containing(data.kind, operator_tab)
+        .iter()
+        .map(|&title| TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR))
+        .collect()
 }
 
 fn push_item_tooltip(
@@ -1103,7 +1181,13 @@ fn push_item_tooltip(
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
             y: tt.cursor.1,
-            lines: build_item_tooltip_lines(data, tt.registries, tt.advanced, tab_names),
+            lines: build_item_tooltip_lines(
+                data,
+                tt.registries,
+                tt.advanced,
+                tab_names,
+                tt.operator_tab,
+            ),
             scale: FONT_SIZE * tt.gs,
             screen_w: tt.screen_w,
             screen_h: tt.screen_h,
@@ -1113,6 +1197,7 @@ fn push_item_tooltip(
 
 fn push_tab_tooltip(
     elements: &mut Vec<MenuElement>,
+    state: &CreativeState,
     ox: f32,
     oy: f32,
     scale: f32,
@@ -1123,7 +1208,7 @@ fn push_tab_tooltip(
     }
     let inset_w = 21.0 * scale;
     let inset_h = 27.0 * scale;
-    for &tab in TABS.iter() {
+    for tab in state.tabs() {
         let meta = tab.meta();
         let x = tab_x(meta.col, scale, ox);
         let hit_y_off = match meta.row {
@@ -1162,7 +1247,12 @@ fn slot_with_tooltip(
 ) -> Option<SlotHit> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
-        push_item_tooltip(elements, item, tt, true);
+        // A bundle in a real slot gets its own tooltip, from the caller.
+        let bundle =
+            slot_num.is_some() && item.as_present().is_some_and(crate::ui::bundle::is_bundle);
+        if !bundle {
+            push_item_tooltip(elements, item, tt, true);
+        }
         if let Some(slot) = slot_num {
             let click = if tt.clicked {
                 Some(ClickKind::Left)
@@ -1177,38 +1267,32 @@ fn slot_with_tooltip(
     None
 }
 
-/// A single (non-drag) click on a real player-inventory slot. With an empty
-/// cursor it picks up the slot (left = whole, right = half); while carrying it
-/// swaps — reachable only for a different item, since empty/same-item slots go
-/// through the drag path — unless the slot rejects the item (armor).
-fn apply_slot_action(
+/// Vanilla `slotClicked` on a real slot: `inventoryMenu.clicked` with a
+/// pickup, bundles and all, whose changed slots `broadcastChanges` sends.
+fn click_slot(
     state: &mut CreativeState,
     inventory: &Inventory,
-    slot_num: u16,
+    slot: u16,
     kind: ClickKind,
+    bundle: &mut BundleClick,
 ) -> CreativeAction {
-    let slot_item = inventory.slot(slot_num as usize).clone();
-    match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
-        ItemStack::Empty => match (&slot_item, kind) {
-            (ItemStack::Empty, _) => CreativeAction::None,
-            (ItemStack::Present(_), ClickKind::Left) => {
-                state.cursor_item = slot_item;
-                CreativeAction::SetSlot(slot_num, ItemStack::Empty)
-            }
-            (ItemStack::Present(data), ClickKind::Right) => {
-                let take = (data.count + 1) / 2;
-                state.cursor_item = stack_with_count(data, take);
-                CreativeAction::SetSlot(slot_num, stack_with_count(data, data.count - take))
-            }
-        },
-        ItemStack::Present(carried) => {
-            if !may_place(slot_num, &carried) {
-                state.cursor_item = ItemStack::Present(carried);
-                return CreativeAction::None;
-            }
-            state.cursor_item = slot_item;
-            CreativeAction::SetSlot(slot_num, ItemStack::Present(carried))
-        }
+    let slot = Some(slot);
+    let op = ClickOperation::Pickup(match kind {
+        ClickKind::Left => PickupClick::Left { slot },
+        ClickKind::Right => PickupClick::Right { slot },
+    });
+    let changed = menu_click::apply_click(
+        ContainerKind::Player,
+        inventory.slots(),
+        &mut state.cursor_item,
+        &op,
+        true,
+        bundle,
+    );
+    if changed.is_empty() {
+        CreativeAction::None
+    } else {
+        CreativeAction::SetSlots(changed)
     }
 }
 
@@ -1221,12 +1305,6 @@ fn stack_with_count(item: &ItemStackData, count: i32) -> ItemStack {
     } else {
         ItemStack::Empty
     }
-}
-
-const DOUBLE_CLICK_MS: u128 = 250;
-
-fn is_double_click(state: &CreativeState, slot: u16) -> bool {
-    matches!(state.last_left_click, Some((s, t)) if s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS)
 }
 
 /// Double-click gather: fill the carried stack to its max by pulling matching
@@ -1277,8 +1355,7 @@ fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
         8 => EquipmentSlot::Feet,
         _ => return true,
     };
-    crate::net::item_codec::default_component::<Equippable>(item.kind)
-        .is_some_and(|e| e.slot == required)
+    pomme_item::defaults::component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
 }
 
 /// A drag can cover a slot only if the item may go there and the slot is empty
@@ -1371,6 +1448,23 @@ fn slot_display(preview: &HashMap<u16, ItemStack>, slot_num: u16, actual: ItemSt
     preview.get(&slot_num).cloned().unwrap_or(actual)
 }
 
+/// Where the inventory tab puts armour slot `index`, head first: two columns
+/// either side of the player, two rows each.
+fn inventory_tab_armor_xy(index: usize) -> (f32, f32) {
+    (
+        INV_ARMOR_X + (index / 2) as f32 * INV_ARMOR_COL_STRIDE,
+        INV_ARMOR_Y + (index % 2) as f32 * INV_ARMOR_ROW_STRIDE,
+    )
+}
+
+/// Where the inventory tab puts main inventory slot `index`, row by row.
+fn inventory_tab_main_xy(index: usize) -> (f32, f32) {
+    (
+        GRID_ORIGIN_X + (index % GRID_COLS) as f32 * SLOT_STRIDE,
+        INV_MAIN_Y + (index / GRID_COLS) as f32 * SLOT_STRIDE,
+    )
+}
+
 fn draw_inventory_layout(
     elements: &mut Vec<MenuElement>,
     ox: f32,
@@ -1385,15 +1479,8 @@ fn draw_inventory_layout(
 
     let armor = inventory.armor_slots();
     for i in 0..4 {
-        let col = (i / 2) as f32;
-        let row = (i % 2) as f32;
-        let (x, y) = slot_xy(
-            ox,
-            oy,
-            scale,
-            INV_ARMOR_X + col * INV_ARMOR_COL_STRIDE,
-            INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
-        );
+        let (sx, sy) = inventory_tab_armor_xy(i);
+        let (x, y) = slot_xy(ox, oy, scale, sx, sy);
         let slot_num = SLOT_ARMOR_BASE + i as u16;
         let item = slot_display(preview, slot_num, item_or_empty(armor, i));
         clicked_slot = clicked_slot.or(slot_with_tooltip(
@@ -1427,13 +1514,8 @@ fn draw_inventory_layout(
     for row in 0..3usize {
         for col in 0..GRID_COLS {
             let idx = row * GRID_COLS + col;
-            let (x, y) = slot_xy(
-                ox,
-                oy,
-                scale,
-                GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
-                INV_MAIN_Y + row as f32 * SLOT_STRIDE,
-            );
+            let (sx, sy) = inventory_tab_main_xy(idx);
+            let (x, y) = slot_xy(ox, oy, scale, sx, sy);
             let slot_num = SLOT_MAIN_BASE + idx as u16;
             let item = slot_display(preview, slot_num, item_or_empty(main, idx));
             clicked_slot = clicked_slot.or(slot_with_tooltip(
@@ -1566,36 +1648,115 @@ fn draw_scrollbar(
 
 fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
     match state.tab.meta().items {
-        ItemSource::Static(list) => list.iter().map(|&kind| stack_of(kind)).collect(),
+        ItemSource::Static(list) => {
+            let extra: &[ItemStack] = if state.tab == CreativeTab::OpBlocks {
+                &state.operator_stacks
+            } else {
+                &[]
+            };
+            list.iter()
+                .map(|&kind| stack_of(kind))
+                .chain(extra.iter().cloned())
+                .collect()
+        }
         ItemSource::Search => {
             let raw = state.search.value().to_lowercase();
             let needle = raw.strip_prefix('#').unwrap_or(&raw);
-            search_items_cached()
+            let matches = |kind: ItemKind| {
+                needle.is_empty() || item_resource_name(kind).to_lowercase().contains(needle)
+            };
+            search_items_cached(state.operator_tab)
                 .iter()
-                .filter(|kind| {
-                    needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(needle)
-                })
                 .map(|&kind| stack_of(kind))
+                .chain(state.operator_stacks.iter().cloned())
+                .filter(|stack| matches(stack.kind()))
                 .collect()
         }
         ItemSource::Empty => Vec::new(),
     }
 }
 
+/// `CreativeModeTabs`' operator tab after its plain items: a test block per
+/// mode, a light per level from the brightest, and a painting of each variant
+/// `#minecraft:placeable` leaves out, smallest first.
+pub fn operator_stacks(
+    registries: &crate::net::registry_holder::RegistryHolder,
+    placeable_paintings: &[i32],
+) -> Vec<ItemStack> {
+    let with_state = |kind, property: &str, value: String| {
+        let mut stack = stack_data(kind);
+        stack.component_patch.write(&BlockItemStateProperties {
+            properties: vec![(property.to_owned(), value)],
+        });
+        ItemStack::Present(stack)
+    };
+    let test_blocks = ["start", "log", "fail", "accept"]
+        .into_iter()
+        .map(|mode| with_state(ItemKind::TestBlock, "mode", mode.to_owned()));
+    let lights = (0..=15)
+        .rev()
+        .map(|level| with_state(ItemKind::Light, "level", level.to_string()));
+
+    let sizes: Vec<(i32, i32)> = registries
+        .get(&crate::net::PAINTING_VARIANT_REGISTRY.into())
+        .into_iter()
+        .flat_map(|registry| registry.map.values())
+        .map(|variant| {
+            (
+                variant.int("width").unwrap_or(1),
+                variant.int("height").unwrap_or(1),
+            )
+        })
+        .collect();
+    let paintings = preset_paintings(&sizes, placeable_paintings)
+        .into_iter()
+        .map(|id| {
+            let mut stack = stack_data(ItemKind::Painting);
+            // A `Holder` naming a registered variant: its id plus one.
+            let mut variant = Vec::new();
+            pomme_protocol::wire::write_varint(&mut variant, id + 1);
+            stack
+                .component_patch
+                .set(DataComponentKind::PaintingVariant, variant);
+            ItemStack::Present(stack)
+        });
+
+    test_blocks.chain(lights).chain(paintings).collect()
+}
+
+/// The ids of the painting variants sized `sizes` (width, height) that
+/// `placeable` leaves out, in `PAINTING_COMPARATOR`'s order: by area, then by
+/// width.
+fn preset_paintings(sizes: &[(i32, i32)], placeable: &[i32]) -> Vec<u32> {
+    let mut ids: Vec<u32> = (0..sizes.len() as u32)
+        .filter(|&id| !placeable.contains(&(id as i32)))
+        .collect();
+    ids.sort_by_key(|&id| {
+        let (width, height) = sizes[id as usize];
+        (width * height, width)
+    });
+    ids
+}
+
 fn stack_of(kind: ItemKind) -> ItemStack {
-    ItemStack::Present(ItemStackData {
+    ItemStack::Present(stack_data(kind))
+}
+
+fn stack_data(kind: ItemKind) -> ItemStackData {
+    ItemStackData {
         kind,
         count: 1,
         component_patch: Default::default(),
-    })
+    }
 }
 
-fn search_items_cached() -> &'static [ItemKind] {
-    static CACHE: OnceLock<Vec<ItemKind>> = OnceLock::new();
-    CACHE.get_or_init(|| {
+/// The search tab's items: every shown tab's, in tab order.
+fn search_items_cached(operator_tab: bool) -> &'static [ItemKind] {
+    static CACHE: [OnceLock<Vec<ItemKind>>; 2] = [OnceLock::new(), OnceLock::new()];
+    CACHE[usize::from(operator_tab)].get_or_init(|| {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for tab in TABS.iter() {
+        for tab in shown_tabs(operator_tab) {
             if let ItemSource::Static(list) = tab.meta().items {
                 for &kind in list {
                     if seen.insert(kind) {
@@ -1611,6 +1772,84 @@ fn search_items_cached() -> &'static [ItemKind] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_operator_tab_shows_only_when_allowed_and_joins_the_search() {
+        let mut state = CreativeState::new();
+        let command_block = OP_BLOCKS_ITEMS[0];
+        assert!(!state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
+        assert!(!search_items_cached(state.operator_tab).contains(&command_block));
+
+        state.set_operator_tab(Some(Vec::new()));
+        assert!(state.tabs().any(|tab| tab == CreativeTab::OpBlocks));
+        assert_eq!(
+            search_items_cached(state.operator_tab).last(),
+            OP_BLOCKS_ITEMS.last()
+        );
+        assert_eq!(tabs_containing(command_block, true), ["Operator Utilities"]);
+        assert!(tabs_containing(command_block, false).is_empty());
+    }
+
+    #[test]
+    fn the_operator_tab_adds_a_test_block_per_mode_and_a_light_per_level() {
+        let stacks = operator_stacks(&Default::default(), &[]);
+        let states: Vec<(ItemKind, String, String)> = stacks
+            .iter()
+            .map(|stack| {
+                let ItemStack::Present(data) = stack else {
+                    panic!("an empty stack");
+                };
+                let state = data.component::<BlockItemStateProperties>().unwrap();
+                let [(property, value)] = state.properties.try_into().unwrap();
+                (data.kind, property, value)
+            })
+            .collect();
+        assert_eq!(states.len(), 20);
+        let modes: Vec<&str> = states[..4].iter().map(|s| s.2.as_str()).collect();
+        assert_eq!(modes, ["start", "log", "fail", "accept"]);
+        assert!(
+            states[..4]
+                .iter()
+                .all(|s| s.0 == ItemKind::TestBlock && s.1 == "mode")
+        );
+        assert_eq!(states[4], (ItemKind::Light, "level".into(), "15".into()));
+        assert_eq!(states[19], (ItemKind::Light, "level".into(), "0".into()));
+
+        let mut state = CreativeState::new();
+        state.set_operator_tab(Some(stacks));
+        state.select_tab(CreativeTab::OpBlocks);
+        assert_eq!(visible_items(&state).len(), OP_BLOCKS_ITEMS.len() + 20);
+        state.select_tab(CreativeTab::Search);
+        state.search.set_value("light", 100.0, &|_| 0.0);
+        let lights = visible_items(&state)
+            .iter()
+            .filter(|stack| stack.kind() == ItemKind::Light)
+            .count();
+        assert_eq!(lights, 16);
+    }
+
+    #[test]
+    fn preset_paintings_skip_the_placeable_and_sort_by_area_then_width() {
+        // Ids 0 and 3 are placeable; of the rest, 4 is smallest, then the
+        // narrower of the two with area 4, then registry order.
+        let sizes = [(1, 1), (4, 1), (2, 2), (1, 2), (1, 1), (2, 2)];
+        assert_eq!(preset_paintings(&sizes, &[0, 3]), [4, 2, 5, 1]);
+    }
+
+    #[test]
+    fn losing_the_operator_tab_while_on_it_selects_the_default_tab() {
+        let mut state = CreativeState::new();
+        state.set_operator_tab(Some(Vec::new()));
+        state.select_tab(CreativeTab::OpBlocks);
+        state.scroll = 0.5;
+
+        state.set_operator_tab(Some(Vec::new()));
+        assert!(state.tab == CreativeTab::OpBlocks);
+
+        state.set_operator_tab(None);
+        assert!(state.tab == CreativeTab::BuildingBlocks);
+        assert_eq!(state.scroll, 0.0);
+    }
 
     #[test]
     fn wheel_moves_a_row_per_line_and_clamps() {
@@ -1673,8 +1912,17 @@ mod tests {
     const OUTSIDE: (f32, f32) = (-50.0, -50.0);
 
     fn run(state: &mut CreativeState, inventory: &Inventory, frame: Frame) -> CreativeAction {
+        run_into(&mut Vec::new(), state, inventory, frame)
+    }
+
+    fn run_into(
+        elements: &mut Vec<MenuElement>,
+        state: &mut CreativeState,
+        inventory: &Inventory,
+        frame: Frame,
+    ) -> CreativeAction {
         build_creative_inventory(
-            &mut Vec::new(),
+            elements,
             state,
             SCREEN.0,
             SCREEN.1,
@@ -1698,6 +1946,7 @@ mod tests {
             frame.shift,
             &|_, _| 0.0,
             Vec::new(),
+            &mut BundleClick::default(),
         )
     }
 
@@ -1758,6 +2007,96 @@ mod tests {
 
         run(&mut state, &Inventory::new(), click(false));
         assert!(state.cursor_item.is_empty());
+    }
+
+    #[test]
+    fn a_carried_bundle_takes_the_clicked_stack_and_a_carried_stack_goes_into_a_bundle() {
+        let bundle_of = |stack: &ItemStack| {
+            stack
+                .as_present()
+                .and_then(crate::ui::bundle::contents)
+                .map_or(0, |contents| {
+                    contents.items.iter().map(ItemStack::count).sum()
+                })
+        };
+        let left_click = |slot| Frame {
+            cursor: centre(HoverTarget::Hotbar(slot)),
+            clicked: true,
+            ..Default::default()
+        };
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Dirt, 16));
+        inventory.set_slot(37, ItemStack::new(ItemKind::Bundle, 1));
+
+        // Holding the bundle, a click on the dirt puts it in the bundle.
+        let mut state = CreativeState::new();
+        state.cursor_item = ItemStack::new(ItemKind::Bundle, 1);
+        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(36)) else {
+            panic!("expected the dirt's slot to change");
+        };
+        assert_eq!(slots, [(36, ItemStack::Empty)]);
+        assert_eq!(bundle_of(&state.cursor_item), 16);
+
+        // Holding the dirt, a click on the bundle does the same from the
+        // other side.
+        let mut state = CreativeState::new();
+        state.cursor_item = ItemStack::new(ItemKind::Dirt, 16);
+        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(37)) else {
+            panic!("expected the bundle's slot to change");
+        };
+        assert!(state.cursor_item.is_empty());
+        assert!(matches!(slots.as_slice(), [(37, bundle)] if bundle_of(bundle) == 16));
+    }
+
+    #[test]
+    fn the_bundle_selection_packet_numbers_slots_as_the_open_tab_does() {
+        let mut state = CreativeState::new();
+        // An item tab's hotbar follows its 45 catalog slots: slot 36 is 45.
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::Search);
+        assert_eq!(state.bundle_packet_offset(), 9);
+        state.select_tab(CreativeTab::SurvivalInventory);
+        assert_eq!(state.bundle_packet_offset(), 0);
+    }
+
+    #[test]
+    fn only_a_default_stack_names_the_tabs_that_hold_it() {
+        let state = CreativeState::new();
+        let ItemStack::Present(empty) = ItemStack::new(ItemKind::Bundle, 1) else {
+            panic!("a bundle");
+        };
+        let lines = state.tab_name_lines(&empty);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].text, "Tools & Utilities");
+
+        let mut filled = empty.clone();
+        filled
+            .component_patch
+            .set(DataComponentKind::BundleContents, vec![0]);
+        assert!(state.tab_name_lines(&filled).is_empty());
+    }
+
+    #[test]
+    fn a_real_slot_reports_its_hover_and_leaves_a_bundle_tooltip_to_the_caller() {
+        let mut inventory = Inventory::new();
+        inventory.set_slot(36, ItemStack::new(ItemKind::Dirt, 16));
+        inventory.set_slot(37, ItemStack::new(ItemKind::Bundle, 1));
+        let tooltips = |slot| {
+            let mut state = CreativeState::new();
+            let mut elements = Vec::new();
+            let hover = Frame {
+                cursor: centre(HoverTarget::Hotbar(slot)),
+                ..Default::default()
+            };
+            run_into(&mut elements, &mut state, &inventory, hover);
+            assert_eq!(state.hovered_slot, Some(slot));
+            elements
+                .iter()
+                .filter(|e| matches!(e, MenuElement::TooltipLines { .. }))
+                .count()
+        };
+        assert_eq!(tooltips(36), 1);
+        assert_eq!(tooltips(37), 0);
     }
 
     #[test]

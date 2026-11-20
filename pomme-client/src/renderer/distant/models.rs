@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::bakery::{Bakery, FaceTexture, MODEL_TEXTURE_SIZE, TEXELS};
 use crate::renderer::chunk::atlas::AtlasUVMap;

@@ -420,9 +420,58 @@ pub(super) fn translate_update_attributes_uuid(
     Some(out)
 }
 
-/// One pre-1.21 attribute modifier: the 16-byte UUID id becomes a hex
-/// resource location; the amount and operation (a 0-2 byte at 765, so its
-/// own varint encoding) copy verbatim.
+/// Vanilla `AttributeModifierIdFix.ID_MAP`: the `minecraft:` id 1.21 gave
+/// each modifier the game itself adds, by the UUID it had before. The client
+/// adds and removes some of them too (sprinting), and has to meet the
+/// server's copy under the same id.
+#[rustfmt::skip]
+const LEGACY_MODIFIER_IDS: [(u128, &str); 40] = [
+    (0x736565d2e1a7403da3f81aeb3e302542, "creative_mode_block_range"),
+    (0x98491ef697b14584ae8271a8cc85cf73, "creative_mode_entity_range"),
+    (0x91aeaa56376b4498935b2f7f68070635, "effect.speed"),
+    (0x7107de5e7ce84030940e514c1f160890, "effect.slowness"),
+    (0xaf8b6e3f33284c0aaa365ba2bb9dbef3, "effect.haste"),
+    (0x55fced67e92a486e9800b47f202c4386, "effect.mining_fatigue"),
+    (0x648d70646a604f598abec2c23a6dd7a9, "effect.strength"),
+    (0xc0105bf3aef846b09ebc92943757ccbe, "effect.jump_boost"),
+    (0x22653b89116e49dc9b6b9971489b5be5, "effect.weakness"),
+    (0x5d6f0ba2118646acb896c61c5cee99cc, "effect.health_boost"),
+    (0xeae29cf0701e4ed6883a96f798f3dab5, "effect.absorption"),
+    (0x03c3c89d70374b42869fb146bcb64d2e, "effect.luck"),
+    (0xcc5af1422bd24215b6362605aed11727, "effect.unluck"),
+    (0x6555be7463b341f1a24577833b3c2562, "evil"),
+    (0x1eaf83ff72074596b37ad7a07b3ec4ce, "powder_snow"),
+    (0x662a6b8dda3e4c1c881396ea6097278d, "sprinting"),
+    (0x020e0dfb87ae46539556831010e291a0, "attacking"),
+    (0x766bfa6411f311ea8d71362b9e155667, "baby"),
+    (0x7e0292f2943448d5a29f9583af7df27f, "covered"),
+    (0x9e36292401de4ddda2b2d0f7a405a174, "suffocating"),
+    (0x5cd17e52a79a43d3a52990fde04b181e, "drinking"),
+    (0xb9766b5995664402bc1f2ee2a276d836, "baby"),
+    (0x49455a497ec545bab8863b90b23a1718, "attacking"),
+    (0x845db27cc624495f8c9f6020a9a58b6b, "armor.boots"),
+    (0xd8499b040e664726ab2964469d734e0d, "armor.leggings"),
+    (0x9f3d476dc1184544836564846904b48e, "armor.chestplate"),
+    (0x2ad3f246fee14e67b88669fd380bb150, "armor.helmet"),
+    (0xc1c727718b8eba4aace081a93c8928b2, "armor.body"),
+    (0xb572ecd2ac0c4071abde9594af072a37, "enchantment.fire_protection"),
+    (0x40a9968f5c664e2fb7f42ec2f4b3e450, "enchantment.blast_protection"),
+    (0x07a65791f64d4e7986c7f83932f007ec, "enchantment.respiration"),
+    (0x60b1b7dbfffd4ad0817cd6c6a93d8a45, "enchantment.aqua_affinity"),
+    (0x11dc269a447646c0aff39e17d7eb6801, "enchantment.depth_strider"),
+    (0x87f46a96686f4796b03522e16ee9e038, "enchantment.soul_speed"),
+    (0xb9716dbd50df4080850e70347d24e687, "enchantment.soul_speed"),
+    (0x92437d00c3a74f2e8f6c1f21585d5dd0, "enchantment.swift_sneak"),
+    (0x5d3d087bdebe4037b53ed84f3ff51f17, "enchantment.sweeping_edge"),
+    (0x3ceb37c0db6246b5bd02785457b01d96, "enchantment.efficiency"),
+    (0xcb3f55d3645c4f38a4979c13a33db5cf, "base_attack_damage"),
+    (0xfa233e1c41804865b01bbcce9785aca3, "base_attack_speed"),
+];
+
+/// One pre-1.21 attribute modifier: the 16-byte UUID id becomes the id 1.21
+/// gave it ([`LEGACY_MODIFIER_IDS`]), or a hex resource location; the amount
+/// and operation (a 0-2 byte at 765, so its own varint encoding) copy
+/// verbatim.
 pub(super) fn translate_modifier_uuid(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -430,11 +479,14 @@ pub(super) fn translate_modifier_uuid(
 ) -> Option<()> {
     let uuid_at = cur.position() as usize;
     advance(cur, 16)?;
-    let name: String = payload[uuid_at..uuid_at + 16]
+    let uuid = u128::from_be_bytes(payload[uuid_at..uuid_at + 16].try_into().ok()?);
+    let rl = match LEGACY_MODIFIER_IDS
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let rl = format!("minecraft:{name}");
+        .find(|(legacy, _)| *legacy == uuid)
+    {
+        Some((_, id)) => format!("minecraft:{id}"),
+        None => format!("minecraft:{uuid:032x}"),
+    };
     wire::write_varint(out, rl.len() as u32);
     out.extend_from_slice(rl.as_bytes());
     let tail_at = cur.position() as usize;

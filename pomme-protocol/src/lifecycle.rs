@@ -180,13 +180,6 @@ fn spawn_info(r: &mut Reader) -> DecodeResult<SpawnInfo> {
 mod tests {
     use super::*;
 
-    fn decode(name: &str, bytes: &[u8]) -> LifecyclePacket {
-        let mut r = Reader::new(bytes);
-        let packet = read(name, &mut r).expect("a lifecycle packet").unwrap();
-        r.ensure_eof().unwrap();
-        packet
-    }
-
     #[test]
     fn other_packets_are_not_read() {
         assert!(read("block_update", &mut Reader::new(&[])).is_none());
@@ -196,12 +189,9 @@ mod tests {
     /// built (`CodecOracle.lifecycle`) to exactly its values.
     #[test]
     fn matches_vanilla_encoder() {
-        use crate::vanilla_fixtures::{case, registry_id};
+        use crate::vanilla_fixtures::{case, decoded, registry_id};
 
-        let vanilla = |name: &str| {
-            let packet = name.split('/').next().unwrap();
-            decode(packet, &case(name))
-        };
+        let vanilla = |name| decoded(name, read);
         let spawn = SpawnInfo {
             dimension_type: registry_id("dimension_type", "minecraft:overworld"),
             dimension: "minecraft:overworld".into(),
