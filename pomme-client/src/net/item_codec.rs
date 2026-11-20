@@ -1,5 +1,5 @@
 //! The bridge to the inventory fork, which still writes the JSON a stack's
-//! tooltip is built from and hashes the components pomme doesn't yet.
+//! tooltip is built from.
 //!
 //! A stack (`pomme_item`) holds each component as its vanilla bytes, and the
 //! client reads them through pomme's own values (`pomme_item::components`).
@@ -106,25 +106,14 @@ impl pomme_item::hash::Names for SessionNames<'_> {
 }
 
 /// `HashedStack.create`: the stack with each component value replaced by
-/// its hash; `None` when empty. The hash is pomme's own for a value it
-/// reads, and the fork's for the rest.
-// TODO: a component neither can hash goes unhashed, so the server resyncs
-// a slot holding one.
+/// the hash of its `CODEC` form; `None` when empty.
+// TODO: a value with no form yet goes unhashed, so the server resyncs a slot
+// holding one.
 pub fn hashed_stack(
     stack: &ItemStack,
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> Option<pomme_protocol::serverbound::HashedStack> {
     let data = stack.as_present()?;
-    let fork = std::cell::OnceCell::new();
-    let fork_hash = |kind| {
-        let fork: &ForkStack = fork.get_or_init(|| {
-            stack
-                .to_wire()
-                .map_or(ForkStack::Empty, |wire| to_fork(&wire))
-        });
-        let value = fork.as_present()?.component_patch.get_kind(kind)?;
-        Some(value.crc_hash(registries).0 as i32)
-    };
     let names = SessionNames(registries);
     let mut hashed = pomme_protocol::serverbound::HashedStack {
         item: data.kind.to_u32(),
@@ -137,11 +126,8 @@ pub fn hashed_stack(
             hashed.removed.push(kind.to_u32());
             continue;
         };
-        let hash = pomme_item::components::hash_value(kind, bytes, &names)
-            .map(pomme_item::hash::Hash::as_i32)
-            .or_else(|| fork_hash(kind));
-        if let Some(hash) = hash {
-            hashed.added.push((kind.to_u32(), hash));
+        if let Some(value) = pomme_item::components::value_of(kind, bytes, &names) {
+            hashed.added.push((kind.to_u32(), value.hash().as_i32()));
         }
     }
     Some(hashed)

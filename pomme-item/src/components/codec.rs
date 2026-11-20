@@ -10,7 +10,7 @@ use pomme_registry::{DataRegistry, Holder, HolderSet, Identifier, Registry};
 use pomme_text::Component as TextComponent;
 use simdnbt::owned::NbtTag;
 
-use crate::hash::{Hash, Names, Record};
+use crate::hash::{Names, Record, Value};
 
 /// An enum sent by an `idMapper` over `ByIdMap.continuous(.., ZERO)`: its
 /// variants with their ids and serialized names, an id out of range reading
@@ -46,8 +46,8 @@ macro_rules! id_enum {
                 }
             }
 
-            pub(crate) fn hash_name(self) -> $crate::hash::Hash {
-                $crate::hash::Hash::string(self.name())
+            pub(crate) fn name_value(self) -> $crate::hash::Value {
+                $crate::hash::Value::string(self.name())
             }
 
             pub(crate) fn read_id(
@@ -157,34 +157,34 @@ pub(crate) fn write_holder<R: Registry, D>(
 }
 
 /// A built-in registry's entry in a `CODEC`: its name.
-pub(crate) fn hash_entry<R: Copy + Into<Identifier>>(entry: &R) -> Hash {
-    Hash::identifier(&(*entry).into())
+pub(crate) fn entry_value<R: Copy + Into<Identifier>>(entry: &R) -> Value {
+    Value::identifier(&(*entry).into())
 }
 
 /// An entry of a registry the server sends, by the name `names` has for it.
-pub(crate) fn hash_data_entry<R: DataRegistry>(entry: &R, names: &dyn Names) -> Option<Hash> {
+pub(crate) fn data_entry_value<R: DataRegistry>(entry: &R, names: &dyn Names) -> Option<Value> {
     let name = names.name(R::NAME, entry.protocol_id())?;
-    Some(Hash::identifier(&name))
+    Some(Value::identifier(&name))
 }
 
 /// `RegistryCodecs.homogeneousList`: a tag as `#name`, one entry as itself,
 /// and any other number as a list.
-pub(crate) fn hash_holder_set<R>(
+pub(crate) fn holder_set_value<R>(
     set: &HolderSet<R, Identifier>,
-    entry: impl Fn(&R) -> Option<Hash>,
-) -> Option<Hash> {
+    entry: impl Fn(&R) -> Option<Value>,
+) -> Option<Value> {
     match set {
-        HolderSet::Named { key, .. } => Some(Hash::string(&format!("#{key}"))),
+        HolderSet::Named { key, .. } => Some(Value::string(&format!("#{key}"))),
         HolderSet::Direct { contents } => match contents.as_slice() {
             [only] => entry(only),
-            entries => Hash::try_list(entries.iter().map(&entry)),
+            entries => Value::try_list(entries.iter().map(&entry)),
         },
     }
 }
 
-/// `hash_holder_set` over a built-in registry.
-pub(crate) fn hash_entries<R: Copy + Into<Identifier>>(set: &HolderSet<R, Identifier>) -> Hash {
-    hash_holder_set(set, |entry| Some(hash_entry(entry))).expect("built-in entries have names")
+/// `holder_set_value` over a built-in registry.
+pub(crate) fn entries_value<R: Copy + Into<Identifier>>(set: &HolderSet<R, Identifier>) -> Value {
+    holder_set_value(set, |entry| Some(entry_value(entry))).expect("built-in entries have names")
 }
 
 /// `ByteBufCodecs.holderSet`: zero and a tag's name, else a count plus one
@@ -249,44 +249,103 @@ pub(crate) fn write_sound(buf: &mut Vec<u8>, sound: &Sound) {
 
 /// `SoundEvent.CODEC`: a registered sound's name, or the one sent in its
 /// place as a record.
-pub(crate) fn hash_sound(sound: &Sound) -> Hash {
+pub(crate) fn sound_value(sound: &Sound) -> Value {
     match sound {
-        Holder::Reference(entry) => hash_entry(entry),
+        Holder::Reference(entry) => entry_value(entry),
         Holder::Direct(custom) => Record::new()
-            .field("sound_id", Hash::identifier(&custom.location))
-            .optional("range", custom.fixed_range.map(Hash::float))
+            .field("sound_id", Value::identifier(&custom.location))
+            .optional("range", custom.fixed_range.map(Value::Float))
             .build(),
     }
 }
 
+/// `ListTag.tryUnwrap`: a list of mixed types holds each element that is
+/// not a compound inside one, under an empty name.
+fn unwrapped(element: &NbtTag) -> &NbtTag {
+    if let NbtTag::Compound(compound) = element
+        && compound.len() == 1
+        && let Some(inner) = compound.get("")
+    {
+        return inner;
+    }
+    element
+}
+
 /// `NbtOps.convertTo`: a tag as the value of the same shape.
-pub(crate) fn hash_tag(tag: &NbtTag) -> Hash {
+pub(crate) fn tag_value(tag: &NbtTag) -> Value {
     match tag {
-        NbtTag::Byte(v) => Hash::byte(*v),
-        NbtTag::Short(v) => Hash::short(*v),
-        NbtTag::Int(v) => Hash::int(*v),
-        NbtTag::Long(v) => Hash::long(*v),
-        NbtTag::Float(v) => Hash::float(*v),
-        NbtTag::Double(v) => Hash::double(*v),
-        NbtTag::ByteArray(v) => Hash::byte_list(v),
-        NbtTag::String(v) => Hash::string(&v.to_str()),
-        NbtTag::List(list) => Hash::list(list.as_nbt_tags().iter().map(hash_tag)),
-        NbtTag::Compound(compound) => hash_compound(compound, None),
-        NbtTag::IntArray(v) => Hash::int_list(v.iter().copied()),
-        NbtTag::LongArray(v) => Hash::long_list(v.iter().copied()),
+        NbtTag::Byte(v) => Value::Byte(*v),
+        NbtTag::Short(v) => Value::Short(*v),
+        NbtTag::Int(v) => Value::Int(*v),
+        NbtTag::Long(v) => Value::Long(*v),
+        NbtTag::Float(v) => Value::Float(*v),
+        NbtTag::Double(v) => Value::Double(*v),
+        NbtTag::ByteArray(v) => Value::byte_list(v),
+        NbtTag::String(v) => Value::string(&v.to_str()),
+        NbtTag::List(list) => Value::list(
+            list.as_nbt_tags()
+                .iter()
+                .map(|tag| tag_value(unwrapped(tag))),
+        ),
+        NbtTag::Compound(compound) => compound_value(compound, None),
+        NbtTag::IntArray(v) => Value::int_list(v.iter().copied()),
+        NbtTag::LongArray(v) => Value::long_list(v.iter().copied()),
     }
 }
 
 /// A compound as a map, with one more entry when `extra` names it.
-pub(crate) fn hash_compound(
+pub(crate) fn compound_value(
     compound: &simdnbt::owned::NbtCompound,
-    extra: Option<(&str, Hash)>,
-) -> Hash {
+    extra: Option<(&str, Value)>,
+) -> Value {
     let entries = compound
         .iter()
-        .map(|(key, value)| (Hash::string(&key.to_str()), hash_tag(value)));
-    let extra = extra.map(|(key, value)| (Hash::string(key), value));
-    Hash::map(entries.chain(extra).collect())
+        .map(|(key, value)| (Value::string(&key.to_str()), tag_value(value)));
+    let extra = extra.map(|(key, value)| (Value::string(key), value));
+    Value::Map(entries.chain(extra).collect())
+}
+
+/// A text component's `CODEC` form from the NBT the same codec wrote. The
+/// shapes are the same but for a style's flags, which NBT holds as bytes.
+// TODO: a hover showing an item with components of its own has no form
+// here, their flags being bytes too; nor is a flag among a translation's
+// arguments told from a byte.
+pub(crate) fn text_value(tag: &NbtTag) -> Option<Value> {
+    let compound = match tag {
+        NbtTag::Compound(compound) => compound,
+        NbtTag::List(list) => return texts_value(&list.as_nbt_tags()),
+        other => return Some(tag_value(other)),
+    };
+    fields_value(compound, |key, value| match (key, value) {
+        (
+            "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated" | "interpret",
+            NbtTag::Byte(flag),
+        ) => Some(Value::Bool(*flag != 0)),
+        ("extra" | "with", NbtTag::List(list)) => texts_value(&list.as_nbt_tags()),
+        ("separator", text) => text_value(text),
+        ("hover_event", NbtTag::Compound(hover)) if hover.contains("components") => None,
+        ("hover_event", NbtTag::Compound(hover)) => fields_value(hover, |key, value| match key {
+            "value" | "name" => text_value(value),
+            _ => Some(tag_value(value)),
+        }),
+        (_, other) => Some(tag_value(other)),
+    })
+}
+
+/// A compound as a map, each entry's value by its name.
+fn fields_value(
+    compound: &simdnbt::owned::NbtCompound,
+    value: impl Fn(&str, &NbtTag) -> Option<Value>,
+) -> Option<Value> {
+    let entries = compound.iter().map(|(key, tag)| {
+        let key = key.to_str();
+        Some((Value::string(&key), value(&key, tag)?))
+    });
+    Some(Value::Map(entries.collect::<Option<_>>()?))
+}
+
+fn texts_value(texts: &[NbtTag]) -> Option<Value> {
+    Value::try_list(texts.iter().map(|text| text_value(unwrapped(text))))
 }
 
 /// `ByteBufCodecs.COMPOUND_TAG` and `TAG`: NBT kept as its bytes, so it goes
@@ -348,14 +407,9 @@ impl Text {
         TextComponent::from_nbt_tag(&self.nbt.tag()?).ok()
     }
 
-    /// `ComponentSerialization.CODEC`'s hash.
-    // TODO: only plain text, which the codec writes as a string; a styled
-    // one is a map whose booleans NBT holds as bytes.
-    pub(crate) fn hash(&self) -> Option<Hash> {
-        match self.nbt.tag()? {
-            NbtTag::String(text) => Some(Hash::string(&text.to_str())),
-            _ => None,
-        }
+    /// `ComponentSerialization.CODEC`'s form.
+    pub(crate) fn value(&self) -> Option<Value> {
+        text_value(&self.nbt.tag()?)
     }
 
     pub(crate) fn read(r: &mut Reader) -> DecodeResult<Self> {

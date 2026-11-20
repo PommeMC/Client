@@ -147,7 +147,8 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT,
                 net.minecraft.core.registries.BuiltInRegistries.POTION,
                 net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT,
-                net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE));
+                net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.CONSUME_EFFECT_TYPE));
 
         lifecycle(dimensionTypes, clocks);
         status();
@@ -156,6 +157,7 @@ public final class CodecOracle {
         sections();
         border();
         components(enchantments);
+        hashedComponents();
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
@@ -716,6 +718,130 @@ public final class CodecOracle {
                                 new net.minecraft.world.item.component.ItemAttributeModifiers.Display.OverrideText(
                                         Component.literal("Sturdy")))
                         .build());
+    }
+
+    /** Values of the components pomme only hashes, none of them an item's default. */
+    private static void hashedComponents() {
+        Identifier custom = Identifier.withDefaultNamespace("custom");
+        component("item_model", net.minecraft.core.component.DataComponents.ITEM_MODEL, custom);
+        component("tooltip_style", net.minecraft.core.component.DataComponents.TOOLTIP_STYLE, custom);
+        component("note_block_sound", net.minecraft.core.component.DataComponents.NOTE_BLOCK_SOUND, custom);
+        component("repair_cost", net.minecraft.core.component.DataComponents.REPAIR_COST, 3);
+        component("map_id", net.minecraft.core.component.DataComponents.MAP_ID,
+                new net.minecraft.world.level.saveddata.maps.MapId(7));
+        component("ominous_bottle_amplifier", net.minecraft.core.component.DataComponents.OMINOUS_BOTTLE_AMPLIFIER,
+                new net.minecraft.world.item.component.OminousBottleAmplifier(2));
+        component("enchantable", net.minecraft.core.component.DataComponents.ENCHANTABLE,
+                new net.minecraft.world.item.enchantment.Enchantable(15));
+        component("enchantment_glint_override",
+                net.minecraft.core.component.DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
+        component("potion_duration_scale", net.minecraft.core.component.DataComponents.POTION_DURATION_SCALE, 0.5f);
+        component("base_color", net.minecraft.core.component.DataComponents.BASE_COLOR,
+                net.minecraft.world.item.DyeColor.RED);
+        component("break_sound", net.minecraft.core.component.DataComponents.BREAK_SOUND,
+                Holder.direct(net.minecraft.sounds.SoundEvent.createFixedRangeEvent(custom, 8.0f)));
+        component("weapon", net.minecraft.core.component.DataComponents.WEAPON,
+                new net.minecraft.world.item.component.Weapon(2, 1.5f));
+        component("attack_range", net.minecraft.core.component.DataComponents.ATTACK_RANGE,
+                new net.minecraft.world.item.component.AttackRange(1.0f, 4.0f, 2.0f, 6.0f, 0.5f, 0.75f));
+        component("piercing_weapon", net.minecraft.core.component.DataComponents.PIERCING_WEAPON,
+                new net.minecraft.world.item.component.PiercingWeapon(false, true,
+                        java.util.Optional.of(net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC), java.util.Optional.empty()));
+        component("swing_animation", net.minecraft.core.component.DataComponents.SWING_ANIMATION,
+                new net.minecraft.world.item.component.SwingAnimation(
+                        net.minecraft.world.item.SwingAnimationType.STAB, 10));
+        component("repairable", net.minecraft.core.component.DataComponents.REPAIRABLE,
+                new net.minecraft.world.item.enchantment.Repairable(net.minecraft.core.HolderSet.direct(
+                        net.minecraft.world.item.Items.DIAMOND.builtInRegistryHolder(),
+                        net.minecraft.world.item.Items.STICK.builtInRegistryHolder())));
+        var sword = new net.minecraft.world.item.ItemStackTemplate(net.minecraft.world.item.Items.DIAMOND_SWORD,
+                net.minecraft.core.component.DataComponentPatch.builder()
+                        .set(net.minecraft.core.component.DataComponents.DAMAGE, 5)
+                        .remove(net.minecraft.core.component.DataComponents.REPAIR_COST)
+                        .build());
+        component("use_remainder", net.minecraft.core.component.DataComponents.USE_REMAINDER,
+                new net.minecraft.world.item.component.UseRemainder(
+                        sword));
+        component("death_protection", net.minecraft.core.component.DataComponents.DEATH_PROTECTION,
+                new net.minecraft.world.item.component.DeathProtection(List.of(
+                        new net.minecraft.world.item.consume_effects.TeleportRandomlyConsumeEffect(8.0f),
+                        net.minecraft.world.item.consume_effects.ClearAllStatusEffectsConsumeEffect.INSTANCE)));
+        component("suspicious_stew_effects", net.minecraft.core.component.DataComponents.SUSPICIOUS_STEW_EFFECTS,
+                new net.minecraft.world.item.component.SuspiciousStewEffects(List.of(
+                        new net.minecraft.world.item.component.SuspiciousStewEffects.Entry(
+                                net.minecraft.world.effect.MobEffects.BLINDNESS, 160),
+                        new net.minecraft.world.item.component.SuspiciousStewEffects.Entry(
+                                net.minecraft.world.effect.MobEffects.SATURATION, 7))));
+        component("writable_book_content", net.minecraft.core.component.DataComponents.WRITABLE_BOOK_CONTENT,
+                new net.minecraft.world.item.component.WritableBookContent(List.of(
+                        net.minecraft.server.network.Filterable.passThrough("one"),
+                        new net.minecraft.server.network.Filterable<>("two", java.util.Optional.of("2")))));
+        component("written_book_content", net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT,
+                new net.minecraft.world.item.component.WrittenBookContent(
+                        net.minecraft.server.network.Filterable.passThrough("Title"), "Author", 2,
+                        List.of(net.minecraft.server.network.Filterable.passThrough(
+                                Component.literal("page").withStyle(ChatFormatting.BOLD))), true));
+        component("fireworks", net.minecraft.core.component.DataComponents.FIREWORKS,
+                new net.minecraft.world.item.component.Fireworks(2, List.of(
+                        new net.minecraft.world.item.component.FireworkExplosion(
+                                net.minecraft.world.item.component.FireworkExplosion.Shape.BURST,
+                                it.unimi.dsi.fastutil.ints.IntList.of(5), it.unimi.dsi.fastutil.ints.IntList.of(),
+                                false, true))));
+        try {
+            // Slots with a gap, which only the private constructor makes without a bound item.
+            var constructor = net.minecraft.world.item.component.ItemContainerContents.class
+                    .getDeclaredConstructor(List.class);
+            constructor.setAccessible(true);
+            component("container", net.minecraft.core.component.DataComponents.CONTAINER,
+                    constructor.newInstance(List.of(java.util.Optional.empty(), java.util.Optional.of(sword),
+                            java.util.Optional.of(new net.minecraft.world.item.ItemStackTemplate(
+                                    net.minecraft.world.item.Items.DIRT, 3)))));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+        component("bundle_of_components", net.minecraft.core.component.DataComponents.BUNDLE_CONTENTS,
+                new net.minecraft.world.item.component.BundleContents(List.of(
+                        sword)));
+        component("lodestone_tracker", net.minecraft.core.component.DataComponents.LODESTONE_TRACKER,
+                new net.minecraft.world.item.component.LodestoneTracker(java.util.Optional.of(
+                        net.minecraft.core.GlobalPos.of(net.minecraft.world.level.Level.NETHER,
+                                new net.minecraft.core.BlockPos(-3, 70, 12))), false));
+        component("fox_variant", net.minecraft.core.component.DataComponents.FOX_VARIANT,
+                net.minecraft.world.entity.animal.fox.Fox.Variant.SNOW);
+        component("rabbit_variant", net.minecraft.core.component.DataComponents.RABBIT_VARIANT,
+                net.minecraft.world.entity.animal.rabbit.Rabbit.Variant.EVIL);
+        component("tropical_fish_pattern", net.minecraft.core.component.DataComponents.TROPICAL_FISH_PATTERN,
+                net.minecraft.world.entity.animal.fish.TropicalFish.Pattern.CLAYFISH);
+        component("horse_variant", net.minecraft.core.component.DataComponents.HORSE_VARIANT,
+                net.minecraft.world.entity.animal.equine.Variant.DARK_BROWN);
+        component("axolotl_variant", net.minecraft.core.component.DataComponents.AXOLOTL_VARIANT,
+                net.minecraft.world.entity.animal.axolotl.Axolotl.Variant.BLUE);
+        component("salmon_size", net.minecraft.core.component.DataComponents.SALMON_SIZE,
+                net.minecraft.world.entity.animal.fish.Salmon.Variant.LARGE);
+        component("parrot_variant", net.minecraft.core.component.DataComponents.PARROT_VARIANT,
+                net.minecraft.world.entity.animal.parrot.Parrot.Variant.YELLOW_BLUE);
+        component("llama_variant", net.minecraft.core.component.DataComponents.LLAMA_VARIANT,
+                net.minecraft.world.entity.animal.equine.Llama.Variant.GRAY);
+        component("mooshroom_variant", net.minecraft.core.component.DataComponents.MOOSHROOM_VARIANT,
+                net.minecraft.world.entity.animal.cow.MushroomCow.Variant.BROWN);
+        net.minecraft.nbt.CompoundTag data = new net.minecraft.nbt.CompoundTag();
+        data.putBoolean("NoAI", true);
+        data.putLong("Seed", 9L);
+        component("entity_data", net.minecraft.core.component.DataComponents.ENTITY_DATA,
+                net.minecraft.world.item.component.TypedEntityData.of(
+                        net.minecraft.world.entity.EntityTypes.PIG, data));
+        component("bucket_entity_data", net.minecraft.core.component.DataComponents.BUCKET_ENTITY_DATA,
+                net.minecraft.world.item.component.CustomData.of(data));
+        component("container_loot", net.minecraft.core.component.DataComponents.CONTAINER_LOOT,
+                new net.minecraft.world.item.component.SeededContainerLoot(
+                        net.minecraft.resources.ResourceKey.create(
+                                net.minecraft.core.registries.Registries.LOOT_TABLE, custom), 11L));
+        component("item_name", net.minecraft.core.component.DataComponents.ITEM_NAME,
+                Component.literal("a").withStyle(style -> style.withBold(true).withItalic(false)
+                                .withHoverEvent(new net.minecraft.network.chat.HoverEvent.ShowText(
+                                        Component.literal("tip").withStyle(ChatFormatting.UNDERLINE))))
+                        .append(Component.translatable("b.key", "x", Component.literal("y").withStyle(
+                                ChatFormatting.OBFUSCATED))));
     }
 
     private static <T> void component(String name, net.minecraft.core.component.DataComponentType<T> type, T value) {

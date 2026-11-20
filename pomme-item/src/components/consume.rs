@@ -10,11 +10,11 @@ use pomme_registry::{Holder, HolderSet, Identifier};
 
 use super::Component;
 use super::codec::{
-    Sound, hash_entries, hash_entry, hash_sound, holder_set, id_enum, identifier, registry, sound,
-    string, write_bool, write_f32, write_holder_set, write_i32, write_identifier, write_list,
-    write_optional, write_registry, write_sound, write_var_i32,
+    Sound, entries_value, entry_value, holder_set, id_enum, identifier, registry, sound,
+    sound_value, string, write_bool, write_f32, write_holder_set, write_i32, write_identifier,
+    write_list, write_optional, write_registry, write_sound, write_var_i32,
 };
-use crate::hash::{Hash, Names, Record};
+use crate::hash::{Names, Record, Value};
 
 /// Vanilla `FoodProperties`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,11 +41,11 @@ impl Component for Food {
         write_bool(buf, self.can_always_eat);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         Some(
             Record::new()
-                .field("nutrition", Hash::int(self.nutrition))
-                .field("saturation", Hash::float(self.saturation))
+                .field("nutrition", Value::Int(self.nutrition))
+                .field("saturation", Value::Float(self.saturation))
                 .flag("can_always_eat", self.can_always_eat, false)
                 .build(),
         )
@@ -88,7 +88,7 @@ impl Component for UseEffects {
         write_f32(buf, self.speed_multiplier);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let default = Self::default();
         let speed = self.speed_multiplier;
         Some(
@@ -128,11 +128,11 @@ impl Component for UseCooldown {
         write_optional(buf, &self.cooldown_group, write_identifier);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        let group = self.cooldown_group.as_ref().map(Hash::identifier);
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        let group = self.cooldown_group.as_ref().map(Value::identifier);
         Some(
             Record::new()
-                .field("seconds", Hash::float(self.seconds))
+                .field("seconds", Value::Float(self.seconds))
                 .optional("cooldown_group", group)
                 .build(),
         )
@@ -176,12 +176,12 @@ impl MobEffectDetails {
     fn fields(&self) -> Record {
         Record::new()
             .unless("amplifier", self.amplifier == 0, || {
-                Hash::byte(self.amplifier as i8)
+                Value::Byte(self.amplifier as i8)
             })
             .int("duration", self.duration, 0)
             .flag("ambient", self.ambient, false)
             .flag("show_particles", self.show_particles, true)
-            .field("show_icon", Hash::bool(self.show_icon))
+            .field("show_icon", Value::Bool(self.show_icon))
             .optional(
                 "hidden_effect",
                 self.hidden_effect
@@ -211,9 +211,9 @@ impl MobEffectInstance {
         self.details.write(buf);
     }
 
-    fn hash(&self) -> Hash {
+    fn value(&self) -> Value {
         Record::new()
-            .field("id", hash_entry(&self.id))
+            .field("id", entry_value(&self.id))
             .merge(self.details.fields())
             .build()
     }
@@ -248,16 +248,19 @@ impl Component for PotionContents {
         write_optional(buf, &self.custom_name, |buf, name| write_utf(buf, name));
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let effects = &self.custom_effects;
         Some(
             Record::new()
-                .optional("potion", self.potion.as_ref().map(hash_entry))
-                .optional("custom_color", self.custom_color.map(Hash::int))
+                .optional("potion", self.potion.as_ref().map(entry_value))
+                .optional("custom_color", self.custom_color.map(Value::Int))
                 .unless("custom_effects", effects.is_empty(), || {
-                    Hash::list(effects.iter().map(MobEffectInstance::hash))
+                    Value::list(effects.iter().map(MobEffectInstance::value))
                 })
-                .optional("custom_name", self.custom_name.as_deref().map(Hash::string))
+                .optional(
+                    "custom_name",
+                    self.custom_name.as_deref().map(Value::string),
+                )
                 .build(),
         )
     }
@@ -301,7 +304,7 @@ pub enum ConsumeEffect {
 }
 
 impl ConsumeEffect {
-    fn read(r: &mut Reader) -> DecodeResult<Self> {
+    pub(super) fn read(r: &mut Reader) -> DecodeResult<Self> {
         Ok(match registry(r)? {
             ConsumeEffectKind::ApplyEffects => Self::ApplyEffects {
                 effects: r.list(usize::MAX, MobEffectInstance::read)?,
@@ -343,7 +346,7 @@ impl ConsumeEffect {
     }
 
     /// `ConsumeEffect.CODEC`: the type's own fields beside its name.
-    fn hash(&self) -> Hash {
+    pub(super) fn value(&self) -> Value {
         let (kind, fields) = match self {
             Self::ApplyEffects {
                 effects,
@@ -353,13 +356,13 @@ impl ConsumeEffect {
                 Record::new()
                     .field(
                         "effects",
-                        Hash::list(effects.iter().map(MobEffectInstance::hash)),
+                        Value::list(effects.iter().map(MobEffectInstance::value)),
                     )
                     .float("probability", *probability, 1.0),
             ),
             Self::RemoveEffects { effects } => (
                 ConsumeEffectKind::RemoveEffects,
-                Record::new().field("effects", hash_entries(effects)),
+                Record::new().field("effects", entries_value(effects)),
             ),
             Self::ClearAllEffects => (ConsumeEffectKind::ClearAllEffects, Record::new()),
             Self::TeleportRandomly { diameter } => (
@@ -368,10 +371,10 @@ impl ConsumeEffect {
             ),
             Self::PlaySound { sound } => (
                 ConsumeEffectKind::PlaySound,
-                Record::new().field("sound", hash_sound(sound)),
+                Record::new().field("sound", sound_value(sound)),
             ),
         };
-        fields.field("type", hash_entry(&kind)).build()
+        fields.field("type", entry_value(&kind)).build()
     }
 }
 
@@ -408,7 +411,7 @@ impl Component for Consumable {
         });
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let seconds = self.consume_seconds;
         let effects = &self.on_consume_effects;
         // `SoundEvents.GENERIC_EAT`.
@@ -417,12 +420,12 @@ impl Component for Consumable {
             Record::new()
                 .float("consume_seconds", seconds, 1.6)
                 .unless("animation", self.animation == ItemUseAnimation::Eat, || {
-                    self.animation.hash_name()
+                    self.animation.name_value()
                 })
-                .unless("sound", default_sound, || hash_sound(&self.sound))
+                .unless("sound", default_sound, || sound_value(&self.sound))
                 .flag("has_consume_particles", self.has_consume_particles, true)
                 .unless("on_consume_effects", effects.is_empty(), || {
-                    Hash::list(effects.iter().map(ConsumeEffect::hash))
+                    Value::list(effects.iter().map(ConsumeEffect::value))
                 })
                 .build(),
         )

@@ -6,10 +6,10 @@ use pomme_registry::builtin::DataComponentKind;
 
 use super::Component;
 use super::codec::{
-    Nbt, Text, hash_compound, hash_entry, id_enum, registry, string, write_bool, write_f32,
+    Nbt, Text, compound_value, entry_value, id_enum, registry, string, write_bool, write_f32,
     write_i32, write_list, write_registry, write_var_i32,
 };
-use crate::hash::{Hash, Names, Record};
+use crate::hash::{Names, Record, Value};
 
 /// Declares a component that is one var-int, a `ByteBufCodecs.VAR_INT`.
 macro_rules! var_int_component {
@@ -32,8 +32,8 @@ macro_rules! var_int_component {
                 write_var_i32(buf, self.$field);
             }
 
-            fn hash(&self, _: &dyn Names) -> Option<Hash> {
-                Some(Hash::int(self.$field))
+            fn value(&self, _: &dyn Names) -> Option<Value> {
+                Some(Value::Int(self.$field))
             }
         }
     };
@@ -70,7 +70,7 @@ impl Component for Unbreakable {
     fn write(&self, _: &mut Vec<u8>) {}
 
     /// `Unit.CODEC`: an empty map.
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         Some(Record::new().build())
     }
 }
@@ -96,8 +96,8 @@ macro_rules! color_component {
                 write_i32(buf, self.$field);
             }
 
-            fn hash(&self, _: &dyn Names) -> Option<Hash> {
-                Some(Hash::int(self.$field))
+            fn value(&self, _: &dyn Names) -> Option<Value> {
+                Some(Value::Int(self.$field))
             }
         }
     };
@@ -135,8 +135,8 @@ impl Component for Rarity {
         self.write_id(buf);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        Some((*self).hash_name())
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        Some((*self).name_value())
     }
 }
 
@@ -180,8 +180,8 @@ impl Component for Dye {
         self.color.write_id(buf);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        Some(self.color.hash_name())
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        Some(self.color.name_value())
     }
 }
 
@@ -206,8 +206,8 @@ macro_rules! text_component {
                 self.name.write(buf);
             }
 
-            fn hash(&self, _: &dyn Names) -> Option<Hash> {
-                self.name.hash()
+            fn value(&self, _: &dyn Names) -> Option<Value> {
+                self.name.value()
             }
         }
     };
@@ -246,9 +246,9 @@ impl Component for Lore {
         write_list(buf, &self.lines, |buf, line| line.write(buf));
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        let lines = self.lines.iter().map(Text::hash);
-        Hash::try_list(lines)
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        let lines = self.lines.iter().map(Text::value);
+        Value::try_list(lines)
     }
 }
 
@@ -270,8 +270,8 @@ impl Component for CustomData {
         self.nbt.write(buf);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        Some(hash_compound(&self.nbt.compound()?, None))
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        Some(compound_value(&self.nbt.compound()?, None))
     }
 }
 
@@ -298,13 +298,13 @@ impl Component for TooltipDisplay {
         write_list(buf, &self.hidden_components, write_registry);
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+    fn value(&self, _: &dyn Names) -> Option<Value> {
         let hidden = &self.hidden_components;
         Some(
             Record::new()
                 .flag("hide_tooltip", self.hide_tooltip, false)
                 .unless("hidden_components", hidden.is_empty(), || {
-                    Hash::list(hidden.iter().map(hash_entry))
+                    Value::list(hidden.iter().map(entry_value))
                 })
                 .build(),
         )
@@ -341,11 +341,11 @@ impl Component for CustomModelData {
         write_list(buf, &self.colors, |buf, v| write_i32(buf, *v));
     }
 
-    fn hash(&self, _: &dyn Names) -> Option<Hash> {
-        let floats = || Hash::list(self.floats.iter().map(|v| Hash::float(*v)));
-        let flags = || Hash::list(self.flags.iter().map(|v| Hash::bool(*v)));
-        let strings = || Hash::list(self.strings.iter().map(|v| Hash::string(v)));
-        let colors = || Hash::list(self.colors.iter().map(|v| Hash::int(*v)));
+    fn value(&self, _: &dyn Names) -> Option<Value> {
+        let floats = || Value::list(self.floats.iter().map(|v| Value::Float(*v)));
+        let flags = || Value::list(self.flags.iter().map(|v| Value::Bool(*v)));
+        let strings = || Value::list(self.strings.iter().map(|v| Value::string(v)));
+        let colors = || Value::list(self.colors.iter().map(|v| Value::Int(*v)));
         Some(
             Record::new()
                 .unless("floats", self.floats.is_empty(), floats)

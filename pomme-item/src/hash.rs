@@ -1,7 +1,10 @@
-//! Vanilla `HashOps`: the hash a value's `CODEC` form comes to, which is how
-//! a click tells the server what the client thinks each stack holds
-//! (`HashedPatchMap`). Each builder here is the `HashOps` method it names,
-//! over `Hashing.crc32c()`, whose hasher takes numbers little-endian.
+//! A value's `CODEC` form and its hash.
+//!
+//! [`Value`] is what a vanilla `CODEC` writes through any `DynamicOps`: the
+//! saved-data shape of a component, with registry entries as names. Its
+//! [`Value::hash`] is `HashOps`' over `Hashing.crc32c()`, whose hasher takes
+//! numbers little-endian, which is how a click tells the server what the
+//! client thinks each stack holds (`HashedPatchMap`).
 
 use pomme_registry::Identifier;
 
@@ -42,93 +45,113 @@ impl Hash {
     pub fn as_i32(self) -> i32 {
         self.0 as i32
     }
+}
 
-    pub fn empty() -> Self {
-        Self(crc32c::crc32c(&[TAG_EMPTY]))
-    }
+/// What a `CODEC` writes, each variant the `DynamicOps` method that makes
+/// it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Empty,
+    Bool(bool),
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    String(String),
+    List(Vec<Value>),
+    Map(Vec<(Value, Value)>),
+    ByteList(Vec<u8>),
+    IntList(Vec<i32>),
+    LongList(Vec<i64>),
+}
 
-    pub fn bool(value: bool) -> Self {
-        Self::of(TAG_BOOLEAN, &[u8::from(value)])
-    }
-
-    pub fn byte(value: i8) -> Self {
-        Self::of(TAG_BYTE, &value.to_le_bytes())
-    }
-
-    pub fn short(value: i16) -> Self {
-        Self::of(TAG_SHORT, &value.to_le_bytes())
-    }
-
-    pub fn int(value: i32) -> Self {
-        Self::of(TAG_INT, &value.to_le_bytes())
-    }
-
-    pub fn long(value: i64) -> Self {
-        Self::of(TAG_LONG, &value.to_le_bytes())
-    }
-
-    pub fn float(value: f32) -> Self {
-        Self::of(TAG_FLOAT, &value.to_le_bytes())
-    }
-
-    pub fn double(value: f64) -> Self {
-        Self::of(TAG_DOUBLE, &value.to_le_bytes())
-    }
-
-    /// `createString`: the length in UTF-16 units, then each unit.
+impl Value {
     pub fn string(value: &str) -> Self {
-        let units: Vec<u16> = value.encode_utf16().collect();
-        let mut payload = (units.len() as i32).to_le_bytes().to_vec();
-        payload.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
-        Self::of(TAG_STRING, &payload)
+        Self::String(value.to_owned())
     }
 
     /// `Identifier.CODEC`: its string.
     pub fn identifier(id: &Identifier) -> Self {
-        Self::string(&id.to_string())
+        Self::String(id.to_string())
     }
 
     pub fn list(values: impl IntoIterator<Item = Self>) -> Self {
-        let payload: Vec<u8> = values.into_iter().flat_map(|v| v.0.to_le_bytes()).collect();
-        Self::between(TAG_LIST_START, &payload, TAG_LIST_END)
+        Self::List(values.into_iter().collect())
     }
 
-    /// A list whose values may have no hash, which leaves it without one.
+    /// A list whose values may have no form, which leaves it without one.
     pub fn try_list(values: impl IntoIterator<Item = Option<Self>>) -> Option<Self> {
-        let values: Option<Vec<_>> = values.into_iter().collect();
-        values.map(Self::list)
-    }
-
-    /// `createMap`: the entries ordered by key hash, then value hash.
-    pub fn map(mut entries: Vec<(Self, Self)>) -> Self {
-        entries.sort();
-        let payload: Vec<u8> = entries
-            .iter()
-            .flat_map(|(key, value)| [key.0.to_le_bytes(), value.0.to_le_bytes()])
-            .flatten()
-            .collect();
-        Self::between(TAG_MAP_START, &payload, TAG_MAP_END)
+        values.into_iter().collect::<Option<_>>().map(Self::List)
     }
 
     pub fn byte_list(values: &[u8]) -> Self {
-        Self::between(TAG_BYTE_ARRAY_START, values, TAG_BYTE_ARRAY_END)
+        Self::ByteList(values.to_vec())
     }
 
     pub fn int_list(values: impl IntoIterator<Item = i32>) -> Self {
-        let payload: Vec<u8> = values.into_iter().flat_map(i32::to_le_bytes).collect();
-        Self::between(TAG_INT_ARRAY_START, &payload, TAG_INT_ARRAY_END)
+        Self::IntList(values.into_iter().collect())
     }
 
     pub fn long_list(values: impl IntoIterator<Item = i64>) -> Self {
-        let payload: Vec<u8> = values.into_iter().flat_map(i64::to_le_bytes).collect();
-        Self::between(TAG_LONG_ARRAY_START, &payload, TAG_LONG_ARRAY_END)
+        Self::LongList(values.into_iter().collect())
+    }
+
+    /// `HashOps`: each variant as the method that hashes it.
+    pub fn hash(&self) -> Hash {
+        fn bytes(hashes: impl Iterator<Item = Hash>) -> Vec<u8> {
+            hashes.flat_map(|hash| hash.0.to_le_bytes()).collect()
+        }
+        match self {
+            Self::Empty => Hash(crc32c::crc32c(&[TAG_EMPTY])),
+            Self::Bool(value) => Hash::of(TAG_BOOLEAN, &[u8::from(*value)]),
+            Self::Byte(value) => Hash::of(TAG_BYTE, &value.to_le_bytes()),
+            Self::Short(value) => Hash::of(TAG_SHORT, &value.to_le_bytes()),
+            Self::Int(value) => Hash::of(TAG_INT, &value.to_le_bytes()),
+            Self::Long(value) => Hash::of(TAG_LONG, &value.to_le_bytes()),
+            Self::Float(value) => Hash::of(TAG_FLOAT, &value.to_le_bytes()),
+            Self::Double(value) => Hash::of(TAG_DOUBLE, &value.to_le_bytes()),
+            // `createString`: the length in UTF-16 units, then each unit.
+            Self::String(value) => {
+                let units: Vec<u16> = value.encode_utf16().collect();
+                let mut payload = (units.len() as i32).to_le_bytes().to_vec();
+                payload.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
+                Hash::of(TAG_STRING, &payload)
+            }
+            Self::List(values) => {
+                let payload = bytes(values.iter().map(Self::hash));
+                Hash::between(TAG_LIST_START, &payload, TAG_LIST_END)
+            }
+            // `createMap`: the entries ordered by key hash, then value hash.
+            Self::Map(entries) => {
+                let mut hashes: Vec<_> = entries
+                    .iter()
+                    .map(|(key, value)| (key.hash(), value.hash()))
+                    .collect();
+                hashes.sort();
+                let payload = bytes(hashes.into_iter().flat_map(|(key, value)| [key, value]));
+                Hash::between(TAG_MAP_START, &payload, TAG_MAP_END)
+            }
+            Self::ByteList(values) => {
+                Hash::between(TAG_BYTE_ARRAY_START, values, TAG_BYTE_ARRAY_END)
+            }
+            Self::IntList(values) => {
+                let payload: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                Hash::between(TAG_INT_ARRAY_START, &payload, TAG_INT_ARRAY_END)
+            }
+            Self::LongList(values) => {
+                let payload: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                Hash::between(TAG_LONG_ARRAY_START, &payload, TAG_LONG_ARRAY_END)
+            }
+        }
     }
 }
 
 /// A `RecordCodecBuilder`'s map, a field at a time.
 #[derive(Default)]
 pub struct Record {
-    entries: Vec<(Hash, Hash)>,
+    entries: Vec<(Value, Value)>,
 }
 
 impl Record {
@@ -137,13 +160,13 @@ impl Record {
     }
 
     /// `fieldOf`.
-    pub fn field(mut self, name: &str, value: Hash) -> Self {
-        self.entries.push((Hash::string(name), value));
+    pub fn field(mut self, name: &str, value: Value) -> Self {
+        self.entries.push((Value::string(name), value));
         self
     }
 
     /// `optionalFieldOf` without a default: left out when there is none.
-    pub fn optional(self, name: &str, value: Option<Hash>) -> Self {
+    pub fn optional(self, name: &str, value: Option<Value>) -> Self {
         match value {
             Some(value) => self.field(name, value),
             None => self,
@@ -151,7 +174,7 @@ impl Record {
     }
 
     /// `optionalFieldOf` with a default: left out when the value is it.
-    pub fn unless(self, name: &str, is_default: bool, value: impl FnOnce() -> Hash) -> Self {
+    pub fn unless(self, name: &str, is_default: bool, value: impl FnOnce() -> Value) -> Self {
         if is_default {
             self
         } else {
@@ -160,15 +183,15 @@ impl Record {
     }
 
     pub fn flag(self, name: &str, value: bool, default: bool) -> Self {
-        self.unless(name, value == default, || Hash::bool(value))
+        self.unless(name, value == default, || Value::Bool(value))
     }
 
     pub fn int(self, name: &str, value: i32, default: i32) -> Self {
-        self.unless(name, value == default, || Hash::int(value))
+        self.unless(name, value == default, || Value::Int(value))
     }
 
     pub fn float(self, name: &str, value: f32, default: f32) -> Self {
-        self.unless(name, value == default, || Hash::float(value))
+        self.unless(name, value == default, || Value::Float(value))
     }
 
     /// A `MapCodec`'s fields, which sit beside this record's own.
@@ -177,8 +200,8 @@ impl Record {
         self
     }
 
-    pub fn build(self) -> Hash {
-        Hash::map(self.entries)
+    pub fn build(self) -> Value {
+        Value::Map(self.entries)
     }
 }
 
