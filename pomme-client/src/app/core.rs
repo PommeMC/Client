@@ -4685,10 +4685,10 @@ fn worn_for<'a>(
                 e.levels.iter().any(|(enchantment, _)| {
                     // `EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE`.
                     registries
-                        .get(&crate::net::ENCHANTMENT_REGISTRY.into())
-                        .and_then(|registry| {
-                            registry.map.get_index(enchantment.protocol_id() as usize)
-                        })
+                        .entry(
+                            &crate::net::ENCHANTMENT_REGISTRY.into(),
+                            enchantment.protocol_id(),
+                        )
                         .and_then(|(_, data)| data.compound("effects"))
                         .is_some_and(|effects| effects.contains("minecraft:prevent_armor_change"))
                 })

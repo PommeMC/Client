@@ -78,10 +78,10 @@ pub(super) fn variant_index(
     // Position == protocol id only holds while every entry carries NBT
     // (the holder takes NBT-less ones out). Entries the server skips for a
     // pack pomme claimed are filled in first (`net::known_packs`).
-    let Some((ident, nbt)) = registry_holder
-        .get(&pomme_registry::identifier::Identifier::new(registry))
-        .and_then(|r| r.map.get_index(protocol_id as usize))
-    else {
+    let Some((ident, nbt)) = registry_holder.entry(
+        &pomme_registry::identifier::Identifier::new(registry),
+        protocol_id,
+    ) else {
         return fallback;
     };
     if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str())

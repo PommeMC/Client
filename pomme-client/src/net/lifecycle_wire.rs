@@ -208,10 +208,10 @@ fn spawn_events(
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
-    match registry_holder
-        .get(&super::environment_wire::DIMENSION_TYPE_REGISTRY.into())
-        .and_then(|registry| registry.map.get_index(spawn.dimension_type as usize))
-    {
+    match registry_holder.entry(
+        &super::environment_wire::DIMENSION_TYPE_REGISTRY.into(),
+        spawn.dimension_type,
+    ) {
         Some((_, dim)) => {
             send_ordered(
                 event_tx,

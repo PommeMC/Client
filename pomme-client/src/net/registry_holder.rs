@@ -45,9 +45,13 @@ impl RegistryHolder {
         self.registries.get_mut(id)
     }
 
-    /// The name of the entry numbered `protocol_id` in the registry `id`.
+    /// The entry numbered `protocol_id` in the registry `id`.
+    pub fn entry(&self, id: &Identifier, protocol_id: u32) -> Option<(&Identifier, &NbtCompound)> {
+        self.get(id)?.map.get_index(protocol_id as usize)
+    }
+
     pub fn name(&self, id: &Identifier, protocol_id: u32) -> Option<&Identifier> {
-        let (name, _) = self.get(id)?.map.get_index(protocol_id as usize)?;
+        let (name, _) = self.entry(id, protocol_id)?;
         Some(name)
     }
 }
