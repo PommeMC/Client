@@ -105,11 +105,8 @@ pub async fn connect(
     // A name that doesn't resolve is refused as one with no address the relay
     // may reach is, so the answer doesn't say which names exist behind it.
     let found = in_time("resolve", &host, lookup).await;
-    let allowed = found
-        .iter()
-        .flat_map(|found| found.iter())
-        .filter(|ip| reachable(&state.config, *ip));
-    let addresses: Vec<SocketAddr> = dialed(allowed)
+    let resolved = found.iter().flat_map(|found| found.iter());
+    let addresses: Vec<SocketAddr> = dialed(resolved, |ip| reachable(&state.config, ip))
         .map(|ip| SocketAddr::new(ip, port))
         .collect();
     if addresses.is_empty() {
@@ -181,28 +178,36 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
     served.unwrap_or((host, port))
 }
 
-/// The addresses to dial of those a name has: some of each family, so its
-/// IPv6 ones don't crowd out the rest on a relay with no IPv6 route.
-fn dialed(addresses: impl Iterator<Item = IpAddr>) -> impl Iterator<Item = IpAddr> {
-    let (v4, v6): (Vec<_>, Vec<_>) = addresses.partition(IpAddr::is_ipv4);
-    [v4, v6]
-        .into_iter()
-        .flat_map(|family| family.into_iter().take(DIALED_PER_FAMILY))
+/// The addresses to dial of those a name has: the first `reachable` ones of
+/// each family, so its IPv6 ones don't crowd out the rest on a relay with no
+/// IPv6 route. A family with enough isn't checked further, however many
+/// addresses the name has.
+fn dialed(
+    addresses: impl Iterator<Item = IpAddr>,
+    reachable: impl Fn(IpAddr) -> bool,
+) -> impl Iterator<Item = IpAddr> {
+    let mut found = [0; 2];
+    addresses.filter(move |ip| {
+        let found = &mut found[usize::from(ip.is_ipv6())];
+        let dial = *found < DIALED_PER_FAMILY && reachable(*ip);
+        *found += usize::from(dial);
+        dial
+    })
 }
 
 /// Whether the relay may dial `ip`: not a `--block-address`, and unless
 /// private servers are allowed, public and not the relay's own machine. Each
 /// holds for `ip` as written and for the IPv4 address it may carry.
 fn reachable(config: &Config, ip: IpAddr) -> bool {
-    let forms = [ip, unwrapped(ip)];
+    let carried = Some(unwrapped(ip)).filter(|carried| *carried != ip);
+    let mut forms = [Some(ip), carried].into_iter().flatten();
     let blocked = |ip| {
         config
             .block_addresses
             .iter()
             .any(|network| network.contains(ip))
     };
-    !forms.into_iter().any(blocked)
-        && (config.allow_private_servers || (public(ip) && !forms.into_iter().any(own)))
+    !forms.clone().any(blocked) && (config.allow_private_servers || (public(ip) && !forms.any(own)))
 }
 
 /// A `--block-address`: one address, or every address under a prefix.
@@ -529,9 +534,17 @@ pub mod tests {
         let addresses =
             |family: &'static str| (1..=5).map(move |n| format!("{family}{n}").parse().unwrap());
         let v6_first = addresses("2001:db8::").chain(addresses("203.0.113."));
-        let dialed: Vec<String> = dialed(v6_first).map(|ip| ip.to_string()).collect();
-        let expected = ["203.0.113.1", "203.0.113.2", "2001:db8::1", "2001:db8::2"];
+        let checked = std::cell::Cell::new(0);
+        let reachable = |ip: IpAddr| {
+            checked.set(checked.get() + 1);
+            ip.to_string() != "2001:db8::1"
+        };
+        let dialed: Vec<String> = dialed(v6_first, reachable)
+            .map(|ip| ip.to_string())
+            .collect();
+        let expected = ["2001:db8::2", "2001:db8::3", "203.0.113.1", "203.0.113.2"];
         assert_eq!(dialed, expected);
+        assert_eq!(checked.get(), expected.len() + 1);
     }
 
     #[test]

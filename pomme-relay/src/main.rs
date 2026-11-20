@@ -274,7 +274,7 @@ mod tests {
         let state = state(true);
         let limits = Arc::clone(&state.limits);
         let (mut page, _tcp) = connected(state).await;
-        page.send(Message::binary(vec![0xff; JUNK])).await.unwrap();
+        page.send(Message::text("x".repeat(JUNK))).await.unwrap();
         while let Some(Ok(_)) = soon(page.next()).await {}
         assert_eq!(limits.spent(LOCAL), JUNK + connect::MESSAGE_COST);
     }

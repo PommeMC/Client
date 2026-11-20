@@ -96,14 +96,16 @@ pub const MAX_BODY: usize = 256 * 1024;
 /// How long a request has to send its body.
 const BODY_WAIT: Duration = Duration::from_secs(10);
 
-/// Gives up on a host that won't answer, or a download that stalls, rather
-/// than holding the relay's connections open. A redirect isn't followed: its
-/// target was never checked against [`ALLOWED_HOSTS`].
+/// Gives up on a host that won't answer, a download that stalls, or one the
+/// page takes more than ten minutes to read, rather than holding the relay's
+/// connections open. A redirect isn't followed: its target was never checked
+/// against [`ALLOWED_HOSTS`].
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(600))
         .build()
         .expect("the HTTP client builds")
 }
