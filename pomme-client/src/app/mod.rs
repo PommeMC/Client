@@ -25,9 +25,7 @@ use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, start_chunk_load, update_game};
 use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
-use crate::app::phases::{
-    AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Loading, Panorama,
-};
+use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Loading, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
@@ -242,6 +240,7 @@ fn start_connecting(
         protocol,
         distant_cache,
     );
+    core.particle_engine.set_level();
     core.apply_cursor_grab(&gfx.window, None);
     AppPhase::Connecting {
         gfx,
@@ -262,9 +261,9 @@ impl App {
         user: UserData,
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
-    ) -> Self {
-        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
-        Self {
+    ) -> std::io::Result<Self> {
+        let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size)?;
+        Ok(Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
                 loading: None,
@@ -281,7 +280,7 @@ impl App {
             #[cfg(feature = "test-harness")]
             harness: None,
             chunk_bench: None,
-        }
+        })
     }
 
     /// A `--chunk-bench` run: borderless, as most players play, never paused
@@ -786,15 +785,31 @@ impl ApplicationHandler for App {
                     }
                 };
 
+                let prepared_particles = match self.core.prepare_initial_particle_assets() {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::error!("Failed to prepare particle assets: {error}");
+                        event_loop.exit();
+                        return AppPhase::Setup {
+                            quick_play,
+                            loading: None,
+                        };
+                    }
+                };
                 let loading = match Renderer::begin(
                     &window,
                     self.core.resources(),
                     self.core.font_sources(),
+                    prepared_particles.cpu,
                     self.core.use_vanilla_block_cache(),
                     &self.core.data_dirs.cache_dir,
                     self.core.menu.vsync,
                 ) {
                     Ok(boot) => {
+                        self.core.apply_particle_assets(
+                            prepared_particles.descriptions,
+                            prepared_particles.sprites,
+                        );
                         window.request_redraw();
                         Some(Box::new(Loading {
                             boot,

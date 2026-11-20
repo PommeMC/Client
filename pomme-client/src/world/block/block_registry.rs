@@ -5,10 +5,23 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 
+use super::blocks::{
+    BeehiveBlock, BlastFurnaceBlock, BrewingStandBlock, BrushableBlock, BubbleColumnBlock,
+    CampfireBlock, CandleBlock, CandleCakeBlock, CryingObsidianBlock, DriedGhastBlock,
+    EnchantingTableBlock, EndPortalBlock, EndRodBlock, EnderChestBlock, FallingBlock, FireBlock,
+    FurnaceBlock, LeverBlock, MyceliumBlock, NetherPortalBlock, PotentSulfurBlock,
+    RedstoneTorchBlock, RedstoneWallTorchBlock, RedstoneWireBlock, RepeaterBlock,
+    RespawnAnchorBlock, SculkSensorBlock, SmokerBlock, SoulFireBlock, SporeBlossomBlock,
+    TorchBlock, WallTorchBlock, WetSpongeBlock, WitherRoseBlock,
+};
 use super::render_assets::{BlockRenderAssets, BlockRenderView, OwnedBlockRenderView};
 use super::{
     BlockStateData, BlockStateTable, BlockTags, load_behaviors, registry_names, resolve_block_tags,
 };
+use crate::particles::ParticleTypes;
+use crate::particles::dust_color_transition_options::DustColorTransitionOptions;
+use crate::particles::dust_particle_options::DustParticleOptions;
+use crate::particles::types::SimpleParticleType;
 use crate::position::BlockPos;
 use crate::world::level::LevelContext;
 
@@ -45,13 +58,218 @@ impl super::Block for DefaultBlock {
 }
 
 /// Selects and constructs block implementations, without owning definitions
-/// or protocol bindings. Add name-specific selections here as rules land;
-/// currently every name uses the default no-op animation behavior.
+/// or protocol bindings. Unrecognized names retain no-op animation behavior.
 pub(crate) struct BlockFactory;
 
 impl BlockFactory {
-    pub(crate) fn create(&self, _name: &str, block_data: BlockData) -> Box<dyn Block> {
-        Box::new(DefaultBlock { block_data })
+    pub(crate) fn create(
+        &self,
+        name: &str,
+        block_data: BlockData,
+        types: &ParticleTypes,
+    ) -> Box<dyn Block> {
+        match name {
+            "torch" | "wall_torch" | "soul_torch" | "soul_wall_torch" | "copper_torch"
+            | "copper_wall_torch" => {
+                let flame_type = match name {
+                    "soul_torch" | "soul_wall_torch" => &types.soul_fire_flame,
+                    "copper_torch" | "copper_wall_torch" => &types.copper_fire_flame,
+                    _ => &types.flame,
+                };
+                let smoke = SimpleParticleType::new(Rc::clone(&types.smoke));
+                let flame = SimpleParticleType::new(Rc::clone(flame_type));
+                match name {
+                    "torch" | "soul_torch" | "copper_torch" => {
+                        Box::new(TorchBlock::new(block_data, smoke, flame))
+                    }
+                    _ => Box::new(WallTorchBlock::new(block_data, smoke, flame)),
+                }
+            }
+            "redstone_torch" => Box::new(RedstoneTorchBlock::new(
+                block_data,
+                DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
+            "redstone_wall_torch" => Box::new(RedstoneWallTorchBlock::new(
+                block_data,
+                DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
+            "redstone_wire" => Box::new(RedstoneWireBlock::new(block_data, Rc::clone(&types.dust))),
+            "lever" => Box::new(LeverBlock::new(
+                block_data,
+                DustParticleOptions::new(Rc::clone(&types.dust), 0xFF0000, 0.5),
+            )),
+            "repeater" => Box::new(RepeaterBlock::new(
+                block_data,
+                DustParticleOptions::redstone(Rc::clone(&types.dust)),
+            )),
+            "end_rod" => Box::new(EndRodBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.end_rod)),
+            )),
+            "crying_obsidian" => Box::new(CryingObsidianBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.dripping_obsidian_tear)),
+            )),
+            "beehive" | "bee_nest" => Box::new(BeehiveBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.dripping_honey)),
+            )),
+            "brewing_stand" => Box::new(BrewingStandBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "wither_rose" => Box::new(WitherRoseBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "wet_sponge" => Box::new(WetSpongeBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.dripping_water)),
+            )),
+            "furnace" => Box::new(FurnaceBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+                SimpleParticleType::new(Rc::clone(&types.flame)),
+            )),
+            "blast_furnace" => Box::new(BlastFurnaceBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "smoker" => Box::new(SmokerBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "candle" | "white_candle" | "orange_candle" | "magenta_candle"
+            | "light_blue_candle" | "yellow_candle" | "lime_candle" | "pink_candle"
+            | "gray_candle" | "light_gray_candle" | "cyan_candle" | "purple_candle"
+            | "blue_candle" | "brown_candle" | "green_candle" | "red_candle" | "black_candle" => {
+                Box::new(CandleBlock::new(
+                    block_data,
+                    SimpleParticleType::new(Rc::clone(&types.smoke)),
+                    SimpleParticleType::new(Rc::clone(&types.small_flame)),
+                ))
+            }
+            "candle_cake"
+            | "white_candle_cake"
+            | "orange_candle_cake"
+            | "magenta_candle_cake"
+            | "light_blue_candle_cake"
+            | "yellow_candle_cake"
+            | "lime_candle_cake"
+            | "pink_candle_cake"
+            | "gray_candle_cake"
+            | "light_gray_candle_cake"
+            | "cyan_candle_cake"
+            | "purple_candle_cake"
+            | "blue_candle_cake"
+            | "brown_candle_cake"
+            | "green_candle_cake"
+            | "red_candle_cake"
+            | "black_candle_cake" => Box::new(CandleCakeBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+                SimpleParticleType::new(Rc::clone(&types.small_flame)),
+            )),
+            "fire" => Box::new(FireBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.large_smoke)),
+            )),
+            "soul_fire" => Box::new(SoulFireBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.large_smoke)),
+            )),
+            "campfire" => Box::new(CampfireBlock::new(
+                block_data,
+                true,
+                SimpleParticleType::new(Rc::clone(&types.lava)),
+            )),
+            "soul_campfire" => Box::new(CampfireBlock::new(
+                block_data,
+                false,
+                SimpleParticleType::new(Rc::clone(&types.lava)),
+            )),
+            "nether_portal" => Box::new(NetherPortalBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.portal)),
+            )),
+            "end_portal" => Box::new(EndPortalBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.smoke)),
+            )),
+            "ender_chest" => Box::new(EnderChestBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.portal)),
+            )),
+            "enchanting_table" => Box::new(EnchantingTableBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.enchant)),
+            )),
+            "respawn_anchor" => Box::new(RespawnAnchorBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.reverse_portal)),
+            )),
+            "bubble_column" => Box::new(BubbleColumnBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.bubble_column_up)),
+                SimpleParticleType::new(Rc::clone(&types.current_down)),
+            )),
+            "mycelium" => Box::new(MyceliumBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.mycelium)),
+            )),
+            "spore_blossom" => Box::new(SporeBlossomBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.falling_spore_blossom)),
+                SimpleParticleType::new(Rc::clone(&types.spore_blossom_air)),
+            )),
+            "dried_ghast" => Box::new(DriedGhastBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.white_smoke)),
+                SimpleParticleType::new(Rc::clone(&types.happy_villager)),
+            )),
+            "sculk_sensor" | "calibrated_sculk_sensor" => Box::new(SculkSensorBlock::new(
+                block_data,
+                DustColorTransitionOptions::sculk_to_redstone(Rc::clone(
+                    &types.dust_color_transition,
+                )),
+            )),
+            "potent_sulfur" => Box::new(PotentSulfurBlock::new(
+                block_data,
+                SimpleParticleType::new(Rc::clone(&types.sulfur_bubbles)),
+            )),
+            "sand"
+            | "red_sand"
+            | "gravel"
+            | "dragon_egg"
+            | "anvil"
+            | "chipped_anvil"
+            | "damaged_anvil"
+            | "white_concrete_powder"
+            | "orange_concrete_powder"
+            | "magenta_concrete_powder"
+            | "light_blue_concrete_powder"
+            | "yellow_concrete_powder"
+            | "lime_concrete_powder"
+            | "pink_concrete_powder"
+            | "gray_concrete_powder"
+            | "light_gray_concrete_powder"
+            | "cyan_concrete_powder"
+            | "purple_concrete_powder"
+            | "blue_concrete_powder"
+            | "brown_concrete_powder"
+            | "green_concrete_powder"
+            | "red_concrete_powder"
+            | "black_concrete_powder" => Box::new(FallingBlock::new(
+                block_data,
+                Rc::clone(&types.falling_dust),
+                matches!(name, "sand" | "red_sand"),
+            )),
+            "suspicious_sand" | "suspicious_gravel" => Box::new(BrushableBlock::new(
+                block_data,
+                Rc::clone(&types.falling_dust),
+            )),
+            _ => Box::new(DefaultBlock { block_data }),
+        }
     }
 }
 
@@ -60,16 +278,19 @@ pub(crate) struct BlockDefinitions {
 }
 
 impl BlockDefinitions {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(types: &ParticleTypes) -> Self {
         let factory = BlockFactory;
         let mut entries: Vec<_> = load_behaviors().iter().collect();
         entries.sort_unstable_by_key(|(name, _)| *name);
         let mut registry = Self {
             definitions: Vec::with_capacity(entries.len() + 1),
         };
-        registry.register("", factory.create("", BlockData::default()));
+        registry.register("", factory.create("", BlockData::default(), types));
         for (name, entry) in entries {
-            registry.register(name.as_str(), factory.create(name, entry.block_data()));
+            registry.register(
+                name.as_str(),
+                factory.create(name, entry.block_data(), types),
+            );
         }
         registry
     }
@@ -111,8 +332,9 @@ impl BlockRegistry {
     /// The native version's registry with no render assets.
     #[cfg(test)]
     pub(crate) fn native() -> Self {
+        let particle_types = ParticleTypes::new().expect("builtin particle types");
         Self::new(
-            Rc::new(BlockDefinitions::new()),
+            Rc::new(BlockDefinitions::new(&particle_types)),
             Arc::new(BlockRenderAssets::default()),
             pomme_protocol::version::NATIVE.protocol,
         )
