@@ -4,15 +4,15 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use azalea_inventory::operations::{
-    ClickOperation, CloneClick, PickupAllClick, PickupClick, QuickCraftClick, QuickCraftKind,
-    QuickCraftStatus, QuickMoveClick, SwapClick, ThrowClick,
-};
 use pomme_item::ItemStack;
 
 use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, gui_centered, hit_test,
     push_gradient_overlay, push_item_icon,
+};
+use crate::player::click::{
+    ClickOperation, CloneClick, PickupAllClick, PickupClick, QuickCraftClick, QuickCraftKind,
+    QuickCraftStatus, QuickMoveClick, SwapClick, ThrowClick,
 };
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -533,7 +533,7 @@ pub fn resolve_gesture(
         // Released: distribute across 2+ slots; one covered slot converts to a
         // normal click (vanilla quickCraftToSlots), none falls back to a click
         // wherever the cursor is now (vanilla mouseReleased, -999 outside).
-        let drag_kind = drag_kind.clone();
+        let drag_kind = *drag_kind;
         let covered = std::mem::take(covered);
         *drag = None;
         if covered.len() >= 2 {
@@ -602,10 +602,7 @@ pub fn resolve_gesture(
         if !carrying {
             ops.push(pickup(&click_kind, Some(slot)));
         }
-        ops.push(ClickOperation::PickupAll(PickupAllClick {
-            slot,
-            reversed: false,
-        }));
+        ops.push(ClickOperation::PickupAll(PickupAllClick { slot }));
     } else if carrying {
         // Start a drag; only an eligible slot joins the covered set (vanilla
         // gates every quick-craft slot on mayPlace). A single-slot or empty
@@ -640,7 +637,7 @@ fn pickup(kind: &QuickCraftKind, slot: Option<u16>) -> ClickOperation {
 
 fn quick_craft(kind: &QuickCraftKind, status: QuickCraftStatus) -> ClickOperation {
     ClickOperation::QuickCraft(QuickCraftClick {
-        kind: kind.clone(),
+        kind: *kind,
         status,
     })
 }
