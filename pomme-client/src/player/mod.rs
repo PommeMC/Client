@@ -1,3 +1,4 @@
+pub mod click;
 pub mod default_skin;
 pub mod entity_interact;
 pub mod interaction;

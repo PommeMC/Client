@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::operations::{ClickOperation, PickupClick};
 use pomme_item::components::{BlockItemStateProperties, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
@@ -16,6 +15,7 @@ use super::creative_tab_data::{
     FUNCTIONAL_BLOCKS_ITEMS, INGREDIENTS_ITEMS, NATURAL_BLOCKS_ITEMS, OP_BLOCKS_ITEMS,
     REDSTONE_BLOCKS_ITEMS, SPAWN_EGGS_ITEMS, TOOLS_AND_UTILITIES_ITEMS,
 };
+use crate::player::click::{ClickOperation, PickupClick};
 use crate::player::inventory::{Inventory, item_resource_name};
 use crate::player::menu_click::{self, BundleClick, ContainerKind};
 use crate::renderer::PlayerPreview;

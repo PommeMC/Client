@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use glam::FloatExt as _;
 use pomme_item::components::EquipmentSlot;
-use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
+use pomme_protocol::serverbound::{ContainerClick, GamePacket};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 
 use crate::app::core::{AppCore, PlayerInputState};
@@ -246,7 +246,7 @@ pub struct GameState {
     /// detect the close transition and send a container-close packet.
     pub container_was_open: Option<i32>,
     /// Active survival click-drag (button + slots covered), if any.
-    pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
+    pub inv_drag: Option<(crate::player::click::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
     /// The container screen's hand cursor is up.
@@ -2627,13 +2627,11 @@ pub(crate) fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
-    ops: Vec<azalea_inventory::operations::ClickOperation>,
+    ops: Vec<crate::player::click::ClickOperation>,
 ) {
-    use azalea_inventory::operations::{
-        ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
-    };
     use pomme_item::ItemStack;
 
+    use crate::player::click::{ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus};
     use crate::player::menu_click;
 
     let (container_id, state_id) = match &game.open_container {
@@ -2657,7 +2655,7 @@ pub(crate) fn send_container_clicks(
                 status,
             }) => match status {
                 QuickCraftStatus::Start => {
-                    drag_kind = qc_kind.clone();
+                    drag_kind = *qc_kind;
                     drag_slots.clear();
                     (Vec::new(), game.cursor_item.clone())
                 }
@@ -2714,27 +2712,13 @@ pub(crate) fn send_container_clicks(
                 state_id: state_id as i32,
                 slot: op.slot_num().map(|s| s as i16).unwrap_or(-999),
                 button: op.button_num() as i8,
-                input: container_input(op.click_type()),
+                input: op.input(),
                 changed_slots: menu_click::in_sent_order(changed)
                     .iter()
                     .map(|(s, item)| (*s as i16, hashed(item)))
                     .collect(),
                 carried: hashed(&carried),
             }));
-    }
-}
-
-/// The wire's `ContainerInput` for a click.
-fn container_input(click: azalea_inventory::operations::ClickType) -> ContainerInput {
-    use azalea_inventory::operations::ClickType;
-    match click {
-        ClickType::Pickup => ContainerInput::Pickup,
-        ClickType::QuickMove => ContainerInput::QuickMove,
-        ClickType::Swap => ContainerInput::Swap,
-        ClickType::Clone => ContainerInput::Clone,
-        ClickType::Throw => ContainerInput::Throw,
-        ClickType::QuickCraft => ContainerInput::QuickCraft,
-        ClickType::PickupAll => ContainerInput::PickupAll,
     }
 }
 
@@ -2746,10 +2730,9 @@ fn crafter_slot_clicked(
     game: &mut GameState,
     connection: &ConnectionHandle,
     audio: &crate::audio::AudioEngine,
-    op: &azalea_inventory::operations::ClickOperation,
+    op: &crate::player::click::ClickOperation,
 ) {
-    use azalea_inventory::operations::{ClickOperation, PickupClick};
-
+    use crate::player::click::{ClickOperation, PickupClick};
     use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
 
     let Some(c) = &mut game.open_container else {
@@ -4631,7 +4614,7 @@ pub fn update_game(
         // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
         // bundle unselects it before the click goes out.
         for op in &ops {
-            use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+            use crate::player::click::{ClickOperation, QuickMoveClick};
             let slot = match op {
                 ClickOperation::QuickMove(
                     QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot },

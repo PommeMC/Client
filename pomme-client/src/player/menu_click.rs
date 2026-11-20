@@ -4,14 +4,14 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::operations::{
-    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
-};
 use pomme_item::components::{BundleContents, EquipmentSlot, Equippable};
 use pomme_item::defaults::ItemKindExt;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
+use crate::player::click::{
+    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
+};
 use crate::player::inventory::{
     ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START, CRAFT_INPUT_START, CRAFT_OUTPUT, MAIN_START, OFFHAND,
 };
@@ -346,10 +346,7 @@ pub struct BundleClick {
 pub fn drops_item(slots: &[ItemStack], cursor: &ItemStack, op: &ClickOperation) -> bool {
     match op {
         ClickOperation::Pickup(
-            PickupClick::Left { slot: None }
-            | PickupClick::Right { slot: None }
-            | PickupClick::LeftOutside
-            | PickupClick::RightOutside,
+            PickupClick::Left { slot: None } | PickupClick::Right { slot: None },
         ) => cursor.is_present(),
         ClickOperation::Throw(ThrowClick::Single { slot } | ThrowClick::All { slot }) => {
             cursor.is_empty()
@@ -477,11 +474,9 @@ pub fn drag_distribution(
     if n == 0 {
         return (Vec::new(), cursor.clone());
     }
-    let max = carried.kind.max_stack_size();
     let place = match kind {
         QuickCraftKind::Left => carried.count / n,
         QuickCraftKind::Right => 1,
-        QuickCraftKind::Middle => max,
     };
     let mut remaining = carried.count;
     let mut changed = Vec::new();
@@ -532,10 +527,10 @@ fn apply_op(
             PickupClick::Right { slot: Some(s) } => {
                 pickup_click(kind, menu, cursor, *s as usize, false, bundle)
             }
-            PickupClick::Left { slot: None } | PickupClick::LeftOutside => {
+            PickupClick::Left { slot: None } => {
                 *cursor = ItemStack::Empty; // drop whole
             }
-            PickupClick::Right { slot: None } | PickupClick::RightOutside => shrink(cursor, 1),
+            PickupClick::Right { slot: None } => shrink(cursor, 1),
         },
         ClickOperation::QuickMove(q) => {
             let s = match q {
@@ -1193,7 +1188,7 @@ mod drop_tests {
         let stone = ItemStack::new(ItemKind::Stone, 5);
         let slots = [stone.clone(), ItemStack::Empty];
         let throw = |slot| ClickOperation::Throw(ThrowClick::Single { slot });
-        let outside = ClickOperation::Pickup(PickupClick::LeftOutside);
+        let outside = ClickOperation::Pickup(PickupClick::Left { slot: None });
 
         assert!(drops_item(&slots, &ItemStack::Empty, &throw(0)));
         assert!(drops_item(
@@ -1209,7 +1204,7 @@ mod drop_tests {
         assert!(drops_item(
             &slots,
             &stone,
-            &ClickOperation::Pickup(PickupClick::RightOutside)
+            &ClickOperation::Pickup(PickupClick::Right { slot: None })
         ));
         assert!(!drops_item(&slots, &ItemStack::Empty, &outside));
 
@@ -1664,7 +1659,7 @@ mod quick_move_tests {
         let hotbar = kind.hotbar_menu_slot(0);
         let mut slots = vec![ItemStack::Empty; kind.slot_count()];
         slots[usize::from(hotbar)] = ItemStack::new(ItemKind::GlassBottle, 5);
-        let op = ClickOperation::Swap(azalea_inventory::operations::SwapClick {
+        let op = ClickOperation::Swap(crate::player::click::SwapClick {
             source_slot: 0,
             target_slot: 0,
         });

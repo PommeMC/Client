@@ -251,22 +251,19 @@ pub enum ClickKind {
 }
 
 impl Click {
-    pub fn operation(self) -> azalea_inventory::operations::ClickOperation {
-        use azalea_inventory::operations::{
-            ClickOperation, PickupClick, QuickMoveClick, SwapClick,
-        };
+    pub fn operation(self) -> crate::player::click::ClickOperation {
+        use crate::player::click::{ClickOperation, PickupClick, QuickMoveClick, SwapClick};
         let slot = self.slot;
         match self.op {
             ClickKind::PickupLeft => ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) }),
             ClickKind::PickupRight => {
                 ClickOperation::Pickup(PickupClick::Right { slot: Some(slot) })
             }
-            ClickKind::QuickMove => QuickMoveClick::Left { slot }.into(),
-            ClickKind::Swap { hotbar } => SwapClick {
+            ClickKind::QuickMove => ClickOperation::QuickMove(QuickMoveClick::Left { slot }),
+            ClickKind::Swap { hotbar } => ClickOperation::Swap(SwapClick {
                 source_slot: slot,
                 target_slot: hotbar,
-            }
-            .into(),
+            }),
         }
     }
 }

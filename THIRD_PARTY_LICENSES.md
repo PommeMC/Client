@@ -137,7 +137,8 @@ License: MIT.
 `pomme-block` is a data-free shim patched in place of azalea-block, keeping its
 public types so the rest of azalea compiles while block semantics come from
 Pomme's own per-version tables. `pomme-inventory` is a fork of
-azalea-inventory, patched in the same way. Other azalea crates remain
+azalea-inventory, patched in the same way for the azalea crates that depend on
+it; the client itself no longer uses it. Other azalea crates remain
 dependencies.
 
 Source: <https://github.com/azalea-rs/azalea>
