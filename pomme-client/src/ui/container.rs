@@ -706,7 +706,7 @@ mod tests {
             press.as_slice(),
             [
                 ClickOperation::Pickup(PickupClick::Left { slot: Some(4) }),
-                ClickOperation::PickupAll(PickupAllClick { slot: 4, .. }),
+                ClickOperation::PickupAll(PickupAllClick { slot: 4 }),
             ]
         ));
         assert!(release.is_empty());
