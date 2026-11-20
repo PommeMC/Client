@@ -1003,8 +1003,7 @@ fn translate_game_login_26_1() {
 /// collision, color, prefix, suffix` with color as a `ChatFormatting`
 /// ordinal; 26.2 reordered to `displayName, prefix, suffix, visibility,
 /// collision, color, options` and changed color to `Optional<TeamColor>`.
-/// Pomme owns the native team decoder, so translation targets the real 26.2
-/// layout rather than Azalea's stale packet type.
+/// Translation targets that 26.2 layout, which pomme's team decoder reads.
 #[test]
 fn translate_set_player_team_26_1() {
     let team_id = table_id(Phase::Game, Direction::Clientbound, "set_player_team");
@@ -1299,12 +1298,10 @@ fn translate_entity_profile_774() {
 
 #[test]
 fn translate_empty_entity_particles_774() {
-    use pomme_protocol::entity_data::Value;
-
-    // index 10, particles, none; index 11, boolean, true
-    let entries = entity_data_entries(774, &[10, 17, 0, 11, 8, 1]);
-    let values: Vec<_> = entries.into_iter().map(|entry| entry.value).collect();
-    assert_eq!(values, [Value::Other, Value::Bool(true)]);
+    // index 10, particles, none; index 11, boolean, true: both serializers
+    // number alike on 26.2.
+    let values = [10, 17, 0, 11, 8, 1];
+    assert_eq!(entity_data_bytes(774, &values), values);
 }
 
 /// A stack component the walker doesn't know falls back to the verbatim-tail
@@ -1572,7 +1569,7 @@ fn translate_entity_data_compound_tag_old_versions() {
 /// there) has its particle type ids remapped and the `entity_effect` color
 /// copied, so entries after it keep translating (a verbatim tail would leave
 /// their shifted serializer ids in place). Byte-exact against the native
-/// layout: azalea's out-of-sync `Particle` ordinals can't decode it.
+/// layout.
 #[test]
 fn translate_entity_data_particles_772() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
@@ -2706,7 +2703,9 @@ fn translate_merchant_offers_765() {
     wire::write_varint(&mut old, 30); // villager xp
     old.extend_from_slice(&[1, 1]); // show progress, can restock
 
-    // Items keep their 765 ids, which the reader remaps.
+    // Items keep their 765 ids, as they do in the container packets.
+    // TODO: nothing reads `merchant_offers` yet; its reader has to remap
+    // them (`remap_item_to_native`) the way `container_wire` does.
     let mut native = vec![1, 1]; // container id, one offer
     native.extend_from_slice(&[SHIFTED_ITEM, 3, 0]); // costA: 3 of it, no component predicates
     native.extend_from_slice(&[1, 4, 0, 0]); // result: one, no components
@@ -4395,14 +4394,13 @@ fn translate_tag_query_763() {
     );
 }
 
-/// Every element pomme embeds for `minecraft:core` has to survive azalea's
-/// registry holder: an entry it fails to deserialize is logged and skipped
-/// (`RegistryType::append_nbt`), which shifts the protocol id of every entry
-/// after it. Claiming the pack is only safe while this holds, for every
-/// version with a table. A registry whose elements aren't compounds is left
-/// out whole, as it is when a server sends it.
+/// Every element pomme embeds for `minecraft:core` has to reach the registry
+/// holder: one that goes missing shifts the protocol id of every entry after
+/// it. Claiming the pack is only safe while this holds, for every version
+/// with a table. A registry whose elements aren't compounds is left out
+/// whole, as it is when a server sends it.
 #[test]
-fn embedded_known_pack_elements_deserialize_through_azalea() {
+fn embedded_known_pack_elements_all_reach_the_holder() {
     use crate::net::config_wire::RegistryError;
 
     for protocol in [pomme_protocol::version::NATIVE.protocol, 777] {
@@ -4421,9 +4419,8 @@ fn embedded_known_pack_elements_deserialize_through_azalea() {
                 "{protocol} {registry}: entries were dropped"
             );
 
-            // The values have to survive the JSON -> NBT conversion too, not
-            // just the deserialize: `dimension_info` reads these two off the
-            // holder.
+            // The values have to survive the JSON -> NBT conversion too:
+            // `dimension_info` reads these two off the holder.
             if registry == "dimension_type" {
                 let overworld =
                     &holder.get(&id).unwrap().map[&Identifier::new("minecraft:overworld")];
@@ -4844,7 +4841,7 @@ fn translate_level_particles_777() {
     dust.extend_from_slice(&0xFF0000i32.to_be_bytes());
     dust.extend_from_slice(&1f32.to_be_bytes());
     // stone, one, then a patch adding custom_name (numbered alike on both)
-    // as the NBT string "hi"; azalea's decoder sizes the value.
+    // as the NBT string "hi".
     let mut item = Vec::new();
     wire::write_varint(&mut item, particle("item"));
     item.extend_from_slice(&[1, 1, 1, 0]);
