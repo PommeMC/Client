@@ -175,5 +175,13 @@ mod tests {
             parts(ClickOperation::Clone(CloneClick { slot: 5 })),
             (Some(5), 2, ContainerInput::Clone)
         );
+        assert_eq!(
+            parts(ClickOperation::QuickMove(QuickMoveClick::Right { slot: 9 })),
+            (Some(9), 1, ContainerInput::QuickMove)
+        );
+        assert_eq!(
+            parts(ClickOperation::PickupAll(PickupAllClick { slot: 4 })),
+            (Some(4), 0, ContainerInput::PickupAll)
+        );
     }
 }
