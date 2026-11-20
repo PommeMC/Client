@@ -108,9 +108,10 @@ pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMa
             .rsplit(',')
             .next()?
             .trim();
-        // Some proxies add the client's port.
-        let with_port = || address.parse().ok().map(|socket: SocketAddr| socket.ip());
-        address.parse().ok().or_else(with_port)
+        // Some proxies add the client's port, or bracket an IPv6 address.
+        let with_port = address.parse().ok().map(|socket: SocketAddr| socket.ip());
+        let bare = address.trim_start_matches('[').trim_end_matches(']');
+        with_port.or_else(|| bare.parse().ok())
     };
     let address = if config.trust_proxy {
         forwarded().unwrap_or_else(|| {
@@ -242,6 +243,7 @@ mod tests {
         assert_eq!(client(true, &["1.2.3.4", "203.0.113.7"]), "203.0.113.7");
         assert_eq!(client(true, &["203.0.113.7:5678"]), "203.0.113.7");
         assert_eq!(client(true, &["[2001:db8::1]:5678"]), "2001:db8::");
+        assert_eq!(client(true, &["[2001:db8::1]"]), "2001:db8::");
         assert_eq!(client(true, &["nonsense"]), "10.0.0.1");
         assert_eq!(client(true, &[]), "10.0.0.1");
         assert_eq!(client(false, &["203.0.113.7"]), "10.0.0.1");

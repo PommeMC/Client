@@ -80,7 +80,8 @@ struct Config {
 
 /// A hostname as a `Host` header names it, less the port.
 fn hostname(value: &str) -> Result<String, &'static str> {
-    if value.is_empty() || value.ends_with('.') || value.contains([':', '/']) {
+    let named = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '.';
+    if value.is_empty() || value.ends_with('.') || !value.chars().all(named) {
         return Err("expected a bare hostname, such as play.pomme.rs");
     }
     Ok(value.to_owned())
@@ -141,17 +142,17 @@ mod tests {
     use futures_util::{SinkExt as _, StreamExt as _};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpStream;
-    use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use tokio_tungstenite::tungstenite::{self, Message};
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
     use tower::ServiceExt as _;
 
     use super::*;
 
-    /// A relay on a free local port, which may reach this machine's own.
-    async fn relay() -> SocketAddr {
+    /// A relay on a free local port.
+    async fn relay(allow_private_servers: bool) -> SocketAddr {
         let config = Config {
-            allow_private_servers: true,
+            allow_private_servers,
             connections_per_client: 8,
             max_connections: 8,
             ..Config::default()
@@ -170,20 +171,37 @@ mod tests {
             .expect("the step finishes")
     }
 
-    /// The page's WebSocket through a relay to a server, and the server's end
-    /// of the connection, on which it has already sent `BANNER`.
-    async fn connected() -> (WebSocketStream<MaybeTlsStream<TcpStream>>, TcpStream) {
-        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = server.local_addr().unwrap().port();
-        let relay = relay().await;
-        let mut request = format!("ws://{relay}/connect/127.0.0.1/{port}")
+    type Page = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+    /// Opens the page's WebSocket to `server`, a `<host>/<port>`, through
+    /// `relay`, as its own page or as one that sends no `Origin`.
+    async fn dial(relay: SocketAddr, server: &str, own_page: bool) -> Result<Page, StatusCode> {
+        let mut request = format!("ws://{relay}/connect/{server}")
             .into_client_request()
             .unwrap();
-        let origin = format!("http://{relay}").parse().unwrap();
-        request.headers_mut().insert(header::ORIGIN, origin);
-        let (page, _) = soon(tokio_tungstenite::connect_async(request))
-            .await
-            .unwrap();
+        if own_page {
+            let origin = format!("http://{relay}").parse().unwrap();
+            request.headers_mut().insert(header::ORIGIN, origin);
+        }
+        match soon(tokio_tungstenite::connect_async(request)).await {
+            Ok((page, _)) => Ok(page),
+            Err(tungstenite::Error::Http(response)) => Err(response.status()),
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// A local server, and the `<host>/<port>` that names it.
+    async fn server() -> (TcpListener, String) {
+        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("127.0.0.1/{}", server.local_addr().unwrap().port());
+        (server, address)
+    }
+
+    /// The page's WebSocket through a relay to a server, and the server's end
+    /// of the connection, on which it has already sent `BANNER`.
+    async fn connected() -> (Page, TcpStream) {
+        let (server, address) = server().await;
+        let page = dial(relay(true).await, &address, true).await.unwrap();
         let (mut tcp, _) = soon(server.accept()).await.unwrap();
         tcp.write_all(BANNER).await.unwrap();
         (page, tcp)
@@ -192,13 +210,30 @@ mod tests {
     const BANNER: &[u8] = b"banner";
 
     #[tokio::test]
+    async fn connections_the_page_may_not_make_are_refused() {
+        let (_listener, server) = server().await;
+        for (allow_private_servers, server, own_page) in [
+            (true, server.as_str(), false),
+            (true, "127.0.0.1/80", true),
+            (false, server.as_str(), true),
+        ] {
+            let refused = dial(relay(allow_private_servers).await, server, own_page).await;
+            assert_eq!(refused.err(), Some(StatusCode::FORBIDDEN), "{server}");
+        }
+    }
+
+    #[tokio::test]
     async fn anything_but_a_handshake_reaches_nothing() {
         let (mut page, mut tcp) = connected().await;
         let request = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n".repeat(32);
         page.send(Message::binary(request)).await.unwrap();
 
+        // Closing on the unread banner is a reset on some systems.
         let mut received = Vec::new();
-        soon(tcp.read_to_end(&mut received)).await.unwrap();
+        match soon(tcp.read_to_end(&mut received)).await {
+            Err(error) if error.kind() != std::io::ErrorKind::ConnectionReset => panic!("{error}"),
+            _ => {}
+        }
         assert!(received.is_empty(), "{received:?}");
         while let Some(Ok(message)) = soon(page.next()).await {
             assert!(message.is_close(), "{message:?}");

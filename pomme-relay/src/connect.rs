@@ -88,10 +88,14 @@ pub async fn connect(
     if port < FIRST_UNPRIVILEGED_PORT {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let lookup = tokio::net::lookup_host((host.as_str(), port));
+    // Not the system's lookup, which holds a thread until it gives up however
+    // long ago the wait for it ended.
+    let lookup = RESOLVER.lookup_ip(host.as_str());
     let addresses: Vec<SocketAddr> = match in_time("resolve", &host, lookup).await {
         Ok(addresses) => addresses
-            .filter(|address| reachable(&state.config, address.ip()))
+            .iter()
+            .filter(|ip| reachable(&state.config, *ip))
+            .map(|ip| SocketAddr::new(ip, port))
             .collect(),
         Err(status) => return status.into_response(),
     };
@@ -122,10 +126,10 @@ pub async fn connect(
 
 /// What `step` gives within [`REACH_WAIT`], or the status for it failing or
 /// taking longer, having logged which.
-async fn in_time<T>(
+async fn in_time<T, E: std::fmt::Display>(
     verb: &str,
     host: &str,
-    step: impl Future<Output = std::io::Result<T>>,
+    step: impl Future<Output = Result<T, E>>,
 ) -> Result<T, StatusCode> {
     match tokio::time::timeout(REACH_WAIT, step).await {
         Ok(Ok(value)) => Ok(value),
@@ -175,27 +179,19 @@ fn public(ip: IpAddr) -> bool {
     match unwrapped(ip) {
         IpAddr::V4(ip) => public_v4(ip),
         IpAddr::V6(ip) => {
-            let segments = ip.segments();
-            let first = segments[0];
-            // `::/96` holds loopback, the unspecified address and the old
-            // IPv4-compatible form; `::ffff:0:0/96` is IPv4-translated.
-            !(segments[..6] == [0; 6]
-                || segments[..6] == [0, 0, 0, 0, 0xffff, 0]
-                || ip.is_multicast()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || (first & 0xffc0) == 0xfec0
-                || segments[..2] == [0x2001, 0]
-                || segments[..2] == [0x2001, 0x0db8]
-                || (first & 0xfff0) == 0x3ff0
-                || segments[..4] == [0x100, 0, 0, 0]
-                || segments[..3] == [0x64, 0xff9b, 1])
+            let [first, second, ..] = ip.segments();
+            // Global unicast (`2000::/3`), less what it sets aside: protocol
+            // assignments (`2001::/23`) and documentation (`2001:db8::/32`,
+            // `3fff::/20`).
+            (first & 0xe000) == 0x2000
+                && !(first == 0x2001 && (second < 0x200 || second == 0x0db8))
+                && !(first == 0x3fff && second < 0x1000)
         }
     }
 }
 
 fn public_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, ..] = ip.octets();
+    let [a, b, c, _] = ip.octets();
     !(ip.is_private()
         || ip.is_loopback()
         || ip.is_link_local()
@@ -206,8 +202,8 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         || a == 0
         || a >= 240
         || (a == 100 && (64..128).contains(&b))
-        || (a == 192 && b == 0 && ip.octets()[2] == 0)
-        || (a == 192 && b == 88 && ip.octets()[2] == 99)
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 88 && c == 99)
         || (a == 198 && (18..20).contains(&b)))
 }
 
@@ -342,7 +338,16 @@ pub mod tests {
 
     #[test]
     fn only_open_internet_addresses_are_public() {
-        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700::1111"] {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700::1111",
+            "2a00:1450::1",
+            "2001:200::1",
+            "2001:db9::1",
+            "3ffe::1",
+            "3fff:1000::1",
+        ] {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
         for ip in [
@@ -366,8 +371,14 @@ pub mod tests {
             "::808:808",
             "::ffff:0:7f00:1",
             "2001::1",
+            "2001:1ff::1",
+            "2001:db8::1",
             "100::1",
             "3fff::1",
+            "3fff:fff::1",
+            "4000::1",
+            "5f00::1",
+            "ff02::1",
             "fec0::1",
             "192.88.99.1",
         ] {

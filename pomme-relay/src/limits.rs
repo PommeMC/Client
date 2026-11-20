@@ -141,37 +141,56 @@ impl Limits {
         self.allow_at(spend, client, Instant::now())
     }
 
-    /// Counts `bytes` relayed to `client` against what it may download, and
-    /// says whether it may have more. They were already sent, so the bucket
-    /// can go below empty, and stays shut until that is paid back.
+    /// Counts `bytes` fetched for `client` against what it may download, and
+    /// says whether it may have more. They were already fetched, so the
+    /// bucket can go below empty, and stays shut until that is paid back.
     pub fn downloaded(&self, client: IpAddr, bytes: usize) -> bool {
         self.downloaded_at(client, bytes, Instant::now())
     }
 
     fn allow_at(&self, spend: Spend, client: IpAddr, now: Instant) -> bool {
         let mut buckets = self.buckets();
+        // A download starts with a second's refill in hand, so one retried
+        // at the limit is refused here and not cut off at its first bytes.
         if spend == Spend::Download
             && !buckets
                 .bucket(Meter::DownloadBytes, client, now)
-                .is_some_and(|bytes| bytes.tokens > 0.0)
+                .is_some_and(|bytes| bytes.tokens >= Meter::DownloadBytes.rate().1)
         {
             return false;
         }
         let meter = Meter::Requests(spend);
-        buckets
+        // The shared total is only read here, and spent once the client's own
+        // token is, so neither is spent on a call the other refuses.
+        let shared = spend == Spend::Api;
+        if shared && buckets.api_total.tokens_at(API_TOTAL, now) < 1.0 {
+            return false;
+        }
+        let allowed = buckets
             .bucket(meter, client, now)
-            .is_some_and(|bucket| bucket.take(meter.rate(), now))
-            && (spend != Spend::Api || buckets.api_total.take(API_TOTAL, now))
+            .is_some_and(|bucket| bucket.take(meter.rate(), now));
+        if allowed && shared {
+            buckets.api_total.take(API_TOTAL, now);
+        }
+        allowed
     }
 
     fn downloaded_at(&self, client: IpAddr, bytes: usize, now: Instant) -> bool {
         let mut buckets = self.buckets();
+        // With no room to track it, the client is taken to be in credit.
         buckets
             .bucket(Meter::DownloadBytes, client, now)
-            .is_some_and(|bucket| {
+            .is_none_or(|bucket| {
                 bucket.tokens -= bytes as f64;
                 bucket.tokens > 0.0
             })
+    }
+
+    /// Leaves `client` `bytes` it may still download.
+    #[cfg(test)]
+    pub fn leave(&self, client: IpAddr, bytes: usize) {
+        let spent = Meter::DownloadBytes.rate().0 as usize - bytes;
+        self.downloaded(client, spent);
     }
 
     fn buckets(&self) -> MutexGuard<'_, Buckets> {
@@ -193,6 +212,15 @@ mod tests {
     fn debt(seconds: f64) -> usize {
         let (size, refill) = Meter::DownloadBytes.rate();
         (size + seconds * refill) as usize
+    }
+
+    /// Limits whose table is full of clients a minute in debt at `start`.
+    fn full_table(start: Instant) -> Limits {
+        let limits = Limits::default();
+        for n in 0..MAX_TRACKED as u32 {
+            limits.downloaded_at(client(n), debt(60.0), start);
+        }
+        limits
     }
 
     #[test]
@@ -219,7 +247,20 @@ mod tests {
                 assert!(limits.allow_at(Spend::Api, client(n + 1), start));
             }
         }
-        assert!(!limits.allow_at(Spend::Api, client(u32::MAX), start));
+        let late = client(u32::MAX);
+        assert!(!limits.allow_at(Spend::Api, late, start));
+        // Refused by the total, the late client kept its own tokens.
+        let total_refill = Duration::from_secs_f64(per_client as f64 / API_TOTAL.1);
+        for _ in 0..per_client {
+            assert!(limits.allow_at(Spend::Api, late, start + total_refill));
+        }
+    }
+
+    #[test]
+    fn a_download_no_bucket_tracks_is_not_cut() {
+        let start = Instant::now();
+        let limits = full_table(start);
+        assert!(limits.downloaded_at(client(u32::MAX), 1, start));
     }
 
     #[test]
@@ -232,17 +273,19 @@ mod tests {
         assert!(limits.allow_at(Spend::Download, client(2), start));
         let nearly = start + Duration::from_secs(9);
         assert!(!limits.allow_at(Spend::Download, client(1), nearly));
-        let paid = start + Duration::from_secs(11);
-        assert!(limits.allow_at(Spend::Download, client(1), paid));
+        let paid = start + Duration::from_secs(10);
+        assert!(
+            !limits.allow_at(Spend::Download, client(1), paid),
+            "no margin"
+        );
+        let ahead = start + Duration::from_secs(12);
+        assert!(limits.allow_at(Spend::Download, client(1), ahead));
     }
 
     #[test]
     fn a_full_table_refuses_new_clients_until_others_refill() {
-        let limits = Limits::default();
         let start = Instant::now();
-        for n in 0..MAX_TRACKED as u32 {
-            limits.downloaded_at(client(n), debt(60.0), start);
-        }
+        let limits = full_table(start);
         let newcomer = client(u32::MAX);
         for wait in [
             Duration::ZERO,

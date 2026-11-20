@@ -1,7 +1,8 @@
 //! `/relay/<host>/<path>`: the page's requests to Mojang and Microsoft, which
 //! don't allow cross-origin ones.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::BoxError;
@@ -9,9 +10,9 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt as _;
+use futures_util::{Stream, StreamExt as _};
 
-use crate::limits::Spend;
+use crate::limits::{Limits, Spend};
 use crate::{AppState, guard};
 
 /// Everything the client talks to, and what a request to it spends: the
@@ -67,9 +68,12 @@ const DROPPED_REQUEST_HEADERS: &[&str] = &[
     "cf-visitor",
 ];
 
-/// Response headers passed back; the rest belong to the relay's own hop.
+/// Response headers passed back; the rest belong to the relay's own hop. The
+/// length is one of them so that a body cut short reads as a failure even
+/// where nothing else marks its end.
 const KEPT_RESPONSE_HEADERS: &[header::HeaderName] = &[
     header::CONTENT_TYPE,
+    header::CONTENT_LENGTH,
     header::CACHE_CONTROL,
     header::ETAG,
     header::LAST_MODIFIED,
@@ -159,18 +163,29 @@ pub async fn relay(
             response = response.header(name, value);
         }
     }
-    let limits = state.limits;
-    let relayed = upstream.bytes_stream().map(move |chunk| {
-        let chunk = chunk.map_err(BoxError::from)?;
-        if spend == Spend::Download && !limits.downloaded(client, chunk.len()) {
+    let body = upstream.bytes_stream();
+    let body = match spend {
+        Spend::Download => Body::from_stream(metered(body, state.limits, client)),
+        _ => Body::from_stream(body),
+    };
+    response.body(body).expect("the relayed response builds")
+}
+
+/// `download`, counted against what `client` may download and ended with an
+/// error once that is spent, so the page sees it fail and not finish short.
+fn metered<E: Into<BoxError>>(
+    download: impl Stream<Item = Result<Bytes, E>>,
+    limits: Arc<Limits>,
+    client: IpAddr,
+) -> impl Stream<Item = Result<Bytes, BoxError>> {
+    download.map(move |chunk| {
+        let chunk = chunk.map_err(Into::into)?;
+        if !limits.downloaded(client, chunk.len()) {
             tracing::warn!("Cut {client}'s download short at what it may download");
-            return Err(BoxError::from("over the download limit"));
+            return Err("over the download limit".into());
         }
         Ok(chunk)
-    });
-    response
-        .body(Body::from_stream(relayed))
-        .expect("the relayed response builds")
+    })
 }
 
 /// The host, and the path and query after it, of a request under `/relay`,
@@ -208,6 +223,18 @@ mod tests {
         assert_eq!(target(&uri), Some(("api.mojang.com", "")));
         let uri = Uri::from_static("/api.mojang.com");
         assert_eq!(target(&uri), None);
+    }
+
+    #[tokio::test]
+    async fn a_download_ends_in_an_error_once_its_bytes_are_spent() {
+        let client = IpAddr::from([203, 0, 113, 7]);
+        let limits = Arc::new(Limits::default());
+        let chunk = Bytes::from(vec![0; 1 << 20]);
+        limits.leave(client, chunk.len() * 3 / 2);
+        let chunks = (0..3).map(|_| Ok::<_, BoxError>(chunk.clone()));
+        let download = metered(futures_util::stream::iter(chunks), limits, client);
+        let relayed: Vec<bool> = download.map(|chunk| chunk.is_ok()).collect().await;
+        assert_eq!(relayed, [true, false, false]);
     }
 
     #[test]
