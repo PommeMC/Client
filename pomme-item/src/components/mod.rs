@@ -20,6 +20,7 @@ use pomme_protocol::wire::{write_utf, write_varint};
 use pomme_registry::builtin::DataComponentKind;
 
 use crate::ItemStack;
+use crate::hash::{Hash, Names, Record};
 
 /// A data component's value, read from and written to its wire bytes.
 pub trait Component: Sized {
@@ -27,6 +28,11 @@ pub trait Component: Sized {
 
     fn read(r: &mut Reader) -> DecodeResult<Self>;
     fn write(&self, buf: &mut Vec<u8>);
+
+    /// The hash of the value's `CODEC` form, which a click sends in the
+    /// value's place; `None` for a value holding something whose form pomme
+    /// doesn't write yet, or a registry entry `names` doesn't have.
+    fn hash(&self, names: &dyn Names) -> Option<Hash>;
 
     /// The value `bytes` hold; `None` when they don't read as exactly one.
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -60,6 +66,90 @@ fn write_templates(buf: &mut Vec<u8>, items: &[ItemStack]) {
     }
 }
 
+/// The hash of the `kind` value `bytes` hold, for the kinds pomme reads.
+pub fn hash_value(kind: DataComponentKind, bytes: &[u8], names: &dyn Names) -> Option<Hash> {
+    macro_rules! of {
+        ($($component:ty,)*) => {
+            $(if kind == <$component>::KIND {
+                return <$component>::from_bytes(bytes)?.hash(names);
+            })*
+        };
+    }
+    of!(
+        MaxStackSize,
+        MaxDamage,
+        Damage,
+        Unbreakable,
+        DyedColor,
+        MapColor,
+        Rarity,
+        Dye,
+        CustomName,
+        ItemName,
+        Lore,
+        CustomData,
+        TooltipDisplay,
+        CustomModelData,
+        Equippable,
+        Trim,
+        ProvidesTrimMaterial,
+        AttributeModifiers,
+        Enchantments,
+        StoredEnchantments,
+        Food,
+        Consumable,
+        UseEffects,
+        UseCooldown,
+        PotionContents,
+        Tool,
+        MinimumAttackCharge,
+        KineticWeapon,
+        BlocksAttacks,
+        FireworkExplosion,
+        Bees,
+        Profile,
+        BundleContents,
+        ChargedProjectiles,
+        BlockItemStateProperties,
+    );
+    None
+}
+
+/// `ItemStackTemplate.CODEC` for each stack, as a list.
+fn hash_templates(items: &[ItemStack], names: &dyn Names) -> Option<Hash> {
+    let templates = items.iter().filter_map(ItemStack::as_present).map(|stack| {
+        // `DataComponentPatch.CODEC`: each value under its type's name, and
+        // a removed type under `!` and its name as an empty map.
+        let mut patch = Vec::new();
+        for (kind, value) in stack.component_patch.iter() {
+            let name = pomme_registry::Identifier::from(kind);
+            let entry = match value {
+                Some(_) if TRANSIENT.contains(&kind) => continue,
+                Some(bytes) => (Hash::identifier(&name), hash_value(kind, bytes, names)?),
+                None => (Hash::string(&format!("!{name}")), Record::new().build()),
+            };
+            patch.push(entry);
+        }
+        Some(
+            Record::new()
+                .field("id", codec::hash_entry(&stack.kind))
+                .int("count", stack.count, 1)
+                .unless("components", stack.component_patch.is_empty(), || {
+                    Hash::map(patch)
+                })
+                .build(),
+        )
+    });
+    Hash::try_list(templates)
+}
+
+/// The components with no `CODEC`, which a patch's own leaves out.
+const TRANSIENT: [DataComponentKind; 3] = [
+    DataComponentKind::CreativeSlotLock,
+    DataComponentKind::AdditionalTradeCost,
+    DataComponentKind::MapPostProcessing,
+];
+
 /// Vanilla `BundleContents`: the stacks in a bundle, newest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BundleContents {
@@ -76,6 +166,10 @@ impl Component for BundleContents {
 
     fn write(&self, buf: &mut Vec<u8>) {
         write_templates(buf, &self.items);
+    }
+
+    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+        hash_templates(&self.items, names)
     }
 }
 
@@ -101,6 +195,10 @@ impl Component for ChargedProjectiles {
     fn write(&self, buf: &mut Vec<u8>) {
         write_templates(buf, &self.items);
     }
+
+    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+        hash_templates(&self.items, names)
+    }
 }
 
 /// Vanilla `BlockItemStateProperties`: block state properties the placed
@@ -124,6 +222,14 @@ impl Component for BlockItemStateProperties {
             write_utf(buf, name);
             write_utf(buf, value);
         }
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let properties = self
+            .properties
+            .iter()
+            .map(|(name, value)| (Hash::string(name), Hash::string(value)));
+        Some(Hash::map(properties.collect()))
     }
 }
 
@@ -191,6 +297,93 @@ mod tests {
             Bees,
             BundleContents,
             ChargedProjectiles,
+        );
+    }
+
+    /// The game's own data pack, whose registries the default components
+    /// number in identifier order.
+    struct DataPack;
+
+    impl Names for DataPack {
+        fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
+            use pomme_registry::DataRegistryKey;
+            use pomme_registry::data::{
+                DamageKindKey, EnchantmentKey, TrimMaterialKey, TrimPatternKey,
+            };
+            fn nth<K: DataRegistryKey + Clone>(
+                all: &[K],
+                id: u32,
+            ) -> Option<pomme_registry::Identifier> {
+                Some(all.get(id as usize)?.clone().into_ident())
+            }
+            match registry {
+                "enchantment" => nth(EnchantmentKey::ALL, id),
+                "trim_material" => nth(TrimMaterialKey::ALL, id),
+                "trim_pattern" => nth(TrimPatternKey::ALL, id),
+                "damage_type" => nth(DamageKindKey::ALL, id),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn every_items_defaults_hash_as_the_game_hashes_them() {
+        let mut matched = std::collections::BTreeSet::new();
+        for (item, kind, expected) in crate::defaults::hashes() {
+            let bytes = crate::defaults::get(item, kind).unwrap();
+            if let Some(hash) = hash_value(kind, bytes, &DataPack) {
+                assert_eq!(hash.as_i32(), expected, "{item}'s {kind}");
+                matched.insert(kind);
+            }
+        }
+        // Every kind pomme reads that an item has by default, but the item
+        // name, whose text is not a plain string.
+        assert_eq!(matched.len(), 26, "{matched:?}");
+    }
+
+    /// The codec oracle's registries, of which the fixtures use one entry.
+    struct Oracle;
+
+    impl Names for Oracle {
+        fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
+            let sharpness = "minecraft:sharpness";
+            let known = registry == "enchantment"
+                && id == pomme_protocol::vanilla_fixtures::registry_id(registry, sharpness);
+            known.then(|| sharpness.into())
+        }
+    }
+
+    #[test]
+    fn fixture_values_hash_as_the_game_hashes_them() {
+        use pomme_protocol::vanilla_fixtures::case;
+
+        macro_rules! check {
+            ($($name:literal => $component:ty,)*) => {
+                $({
+                    let bytes = case(concat!("component/", $name));
+                    let expected = case(concat!("component_hash/", $name));
+                    let hash = hash_value(<$component>::KIND, &bytes, &Oracle)
+                        .unwrap_or_else(|| panic!("{} has no hash", $name));
+                    assert_eq!(hash.0.to_be_bytes(), expected[..], $name);
+                })*
+            };
+        }
+        check!(
+            "attribute_modifiers" => AttributeModifiers,
+            "bees" => Bees,
+            "custom_data" => CustomData,
+            "custom_model_data" => CustomModelData,
+            "dyed_color" => DyedColor,
+            "enchantments" => Enchantments,
+            "equippable" => Equippable,
+            "firework_explosion" => FireworkExplosion,
+            "map_color" => MapColor,
+            "potion_contents" => PotionContents,
+            "profile" => Profile,
+            "tooltip_display" => TooltipDisplay,
+            "trim" => Trim,
+            "unbreakable" => Unbreakable,
+            "use_cooldown" => UseCooldown,
         );
     }
 

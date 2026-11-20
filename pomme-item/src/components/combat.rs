@@ -7,9 +7,11 @@ use pomme_registry::{HolderSet, Identifier};
 
 use super::Component;
 use super::codec::{
-    Sound, holder_set, sound, write_bool, write_f32, write_holder_set, write_list, write_optional,
-    write_sound, write_var_i32,
+    Sound, hash_data_entry, hash_entries, hash_holder_set, hash_sound, holder_set, sound,
+    write_bool, write_f32, write_holder_set, write_list, write_optional, write_sound,
+    write_var_i32,
 };
+use crate::hash::{Hash, Names, Record};
 
 /// Vanilla `Tool.Rule`: how fast some blocks mine and whether they drop.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +60,29 @@ impl Component for Tool {
         write_var_i32(buf, self.damage_per_block);
         write_bool(buf, self.can_destroy_blocks_in_creative);
     }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let rules = self.rules.iter().map(|rule| {
+            Record::new()
+                .field("blocks", hash_entries(&rule.blocks))
+                .optional("speed", rule.speed.map(Hash::float))
+                .optional("correct_for_drops", rule.correct_for_drops.map(Hash::bool))
+                .build()
+        });
+        let speed = self.default_mining_speed;
+        Some(
+            Record::new()
+                .field("rules", Hash::list(rules))
+                .float("default_mining_speed", speed, 1.0)
+                .int("damage_per_block", self.damage_per_block, 1)
+                .flag(
+                    "can_destroy_blocks_in_creative",
+                    self.can_destroy_blocks_in_creative,
+                    true,
+                )
+                .build(),
+        )
+    }
 }
 
 /// Vanilla `DataComponents.MINIMUM_ATTACK_CHARGE`: how charged an attack
@@ -77,6 +102,10 @@ impl Component for MinimumAttackCharge {
 
     fn write(&self, buf: &mut Vec<u8>) {
         write_f32(buf, self.value);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        Some(Hash::float(self.value))
     }
 }
 
@@ -102,6 +131,15 @@ impl KineticWeaponCondition {
         write_var_i32(buf, self.max_duration_ticks);
         write_f32(buf, self.min_speed);
         write_f32(buf, self.min_relative_speed);
+    }
+
+    fn hash(&self) -> Hash {
+        let (speed, relative) = (self.min_speed, self.min_relative_speed);
+        Record::new()
+            .field("max_duration_ticks", Hash::int(self.max_duration_ticks))
+            .float("min_speed", speed, 0.0)
+            .float("min_relative_speed", relative, 0.0)
+            .build()
     }
 }
 
@@ -151,6 +189,27 @@ impl Component for KineticWeapon {
         write_f32(buf, self.damage_multiplier);
         write_optional(buf, &self.sound, write_sound);
         write_optional(buf, &self.hit_sound, write_sound);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let condition = |condition: &Option<KineticWeaponCondition>| condition.map(|c| c.hash());
+        let (forward, multiplier) = (self.forward_movement, self.damage_multiplier);
+        Some(
+            Record::new()
+                .int("contact_cooldown_ticks", self.contact_cooldown_ticks, 10)
+                .int("delay_ticks", self.delay_ticks, 0)
+                .optional("dismount_conditions", condition(&self.dismount_conditions))
+                .optional(
+                    "knockback_conditions",
+                    condition(&self.knockback_conditions),
+                )
+                .optional("damage_conditions", condition(&self.damage_conditions))
+                .float("forward_movement", forward, 0.0)
+                .float("damage_multiplier", multiplier, 1.0)
+                .optional("sound", self.sound.as_ref().map(hash_sound))
+                .optional("hit_sound", self.hit_sound.as_ref().map(hash_sound))
+                .build(),
+        )
     }
 }
 
@@ -226,5 +285,63 @@ impl Component for BlocksAttacks {
         write_optional(buf, &self.bypassed_by, write_holder_set);
         write_optional(buf, &self.block_sound, write_sound);
         write_optional(buf, &self.disabled_sound, write_sound);
+    }
+
+    fn hash(&self, names: &dyn Names) -> Option<Hash> {
+        let kinds = |kinds: &Option<HolderSet<DamageKind, Identifier>>| match kinds {
+            Some(kinds) => hash_holder_set(kinds, |kind| hash_data_entry(kind, names)).map(Some),
+            None => Some(None),
+        };
+        // `List.of(new DamageReduction(90.0f, Optional.empty(), 0.0f, 1.0f))`.
+        let default_reductions = matches!(
+            self.damage_reductions.as_slice(),
+            [DamageReduction {
+                horizontal_blocking_angle: 90.0,
+                kind: None,
+                base: 0.0,
+                factor: 1.0,
+            }]
+        );
+        let reductions = self
+            .damage_reductions
+            .iter()
+            .map(|reduction| {
+                let angle = reduction.horizontal_blocking_angle;
+                Some(
+                    Record::new()
+                        .float("horizontal_blocking_angle", angle, 90.0)
+                        .optional("type", kinds(&reduction.kind)?)
+                        .field("base", Hash::float(reduction.base))
+                        .field("factor", Hash::float(reduction.factor))
+                        .build(),
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let damage = self.item_damage;
+        // `ItemDamageFunction.DEFAULT`.
+        let default_damage = (damage.threshold, damage.base, damage.factor) == (1.0, 0.0, 1.0);
+        let (delay, scale) = (self.block_delay_seconds, self.disable_cooldown_scale);
+        Some(
+            Record::new()
+                .float("block_delay_seconds", delay, 0.0)
+                .float("disable_cooldown_scale", scale, 1.0)
+                .unless("damage_reductions", default_reductions, || {
+                    Hash::list(reductions)
+                })
+                .unless("item_damage", default_damage, || {
+                    Record::new()
+                        .field("threshold", Hash::float(damage.threshold))
+                        .field("base", Hash::float(damage.base))
+                        .field("factor", Hash::float(damage.factor))
+                        .build()
+                })
+                .optional("bypassed_by", kinds(&self.bypassed_by)?)
+                .optional("block_sound", self.block_sound.as_ref().map(hash_sound))
+                .optional(
+                    "disabled_sound",
+                    self.disabled_sound.as_ref().map(hash_sound),
+                )
+                .build(),
+        )
     }
 }

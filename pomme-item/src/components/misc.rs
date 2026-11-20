@@ -7,18 +7,19 @@ use pomme_registry::builtin::{DataComponentKind, EntityKind};
 
 use super::Component;
 use super::codec::{
-    Nbt, id_enum, identifier, registry, write_bool, write_i32, write_identifier, write_list,
-    write_optional, write_registry, write_var_i32,
+    Nbt, hash_compound, hash_entry, id_enum, identifier, registry, write_bool, write_i32,
+    write_identifier, write_list, write_optional, write_registry, write_var_i32,
 };
+use crate::hash::{Hash, Names, Record};
 
 id_enum!(
     /// Vanilla `FireworkExplosion.Shape`.
     FireworkExplosionShape {
-        SmallBall = 0,
-        LargeBall = 1,
-        Star = 2,
-        Creeper = 3,
-        Burst = 4,
+        SmallBall = 0, "small_ball";
+        LargeBall = 1, "large_ball";
+        Star = 2, "star";
+        Creeper = 3, "creeper";
+        Burst = 4, "burst";
     }
 );
 
@@ -51,6 +52,21 @@ impl Component for FireworkExplosion {
         write_list(buf, &self.fade_colors, |buf, color| write_i32(buf, *color));
         write_bool(buf, self.has_trail);
         write_bool(buf, self.has_twinkle);
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let colors = |colors: &[i32]| Hash::list(colors.iter().map(|color| Hash::int(*color)));
+        Some(
+            Record::new()
+                .field("shape", self.shape.hash_name())
+                .unless("colors", self.colors.is_empty(), || colors(&self.colors))
+                .unless("fade_colors", self.fade_colors.is_empty(), || {
+                    colors(&self.fade_colors)
+                })
+                .flag("has_trail", self.has_trail, false)
+                .flag("has_twinkle", self.has_twinkle, false)
+                .build(),
+        )
     }
 }
 
@@ -92,6 +108,22 @@ impl Component for Bees {
             write_var_i32(buf, occupant.ticks_in_hive);
             write_var_i32(buf, occupant.min_ticks_in_hive);
         });
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        let occupants = self.occupants.iter().map(|occupant| {
+            // `TypedEntityData.codec`: the type goes into the data as `id`.
+            let id = ("id", hash_entry(&occupant.entity));
+            let data = hash_compound(&occupant.entity_data.compound()?, Some(id));
+            Some(
+                Record::new()
+                    .field("entity_data", data)
+                    .field("ticks_in_hive", Hash::int(occupant.ticks_in_hive))
+                    .field("min_ticks_in_hive", Hash::int(occupant.min_ticks_in_hive))
+                    .build(),
+            )
+        });
+        Hash::try_list(occupants)
     }
 }
 
@@ -221,5 +253,64 @@ impl Component for Profile {
             write_optional(buf, texture, write_identifier);
         }
         write_optional(buf, &patch.slim, |buf, slim| write_bool(buf, *slim));
+    }
+
+    fn hash(&self, _: &dyn Names) -> Option<Hash> {
+        // `UUIDUtil.CODEC`: four ints, most significant first.
+        let uuid = |id: &u128| {
+            Hash::int_list(
+                id.to_be_bytes()
+                    .as_chunks()
+                    .0
+                    .iter()
+                    .map(|c| i32::from_be_bytes(*c)),
+            )
+        };
+        // `ExtraCodecs.PROPERTY_MAP`, which writes a list.
+        let properties = |properties: &[ProfileProperty]| {
+            Hash::list(properties.iter().map(|property| {
+                Record::new()
+                    .field("name", Hash::string(&property.name))
+                    .field("value", Hash::string(&property.value))
+                    .optional("signature", property.signature.as_deref().map(Hash::string))
+                    .build()
+            }))
+        };
+        let (contents, list) = match &self.contents {
+            ProfileContents::Full {
+                id,
+                name,
+                properties,
+            } => (
+                Record::new()
+                    .field("id", uuid(id))
+                    .field("name", Hash::string(name)),
+                properties,
+            ),
+            ProfileContents::Partial {
+                name,
+                id,
+                properties,
+            } => (
+                Record::new()
+                    .optional("name", name.as_deref().map(Hash::string))
+                    .optional("id", id.as_ref().map(uuid)),
+                properties,
+            ),
+        };
+        let contents = contents.unless("properties", list.is_empty(), || properties(list));
+        let patch = &self.skin_patch;
+        let texture = |texture: &Option<Identifier>| texture.as_ref().map(Hash::identifier);
+        let model = patch
+            .slim
+            .map(|slim| Hash::string(if slim { "slim" } else { "wide" }));
+        Some(
+            contents
+                .optional("texture", texture(&patch.body))
+                .optional("cape", texture(&patch.cape))
+                .optional("elytra", texture(&patch.elytra))
+                .optional("model", model)
+                .build(),
+        )
     }
 }

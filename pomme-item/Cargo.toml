@@ -6,6 +6,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+crc32c = "0.6"
 pomme-protocol = { path = "../pomme-protocol" }
 pomme-registry = { path = "../pomme-registry" }
 pomme-text = { path = "../pomme-text" }

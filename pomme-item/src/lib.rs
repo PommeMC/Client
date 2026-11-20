@@ -8,6 +8,7 @@
 
 pub mod components;
 pub mod defaults;
+pub mod hash;
 
 use pomme_protocol::item as wire;
 use pomme_registry::Registry;
