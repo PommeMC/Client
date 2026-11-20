@@ -361,15 +361,18 @@ mod tests {
         assert_eq!(kinds.len(), 59);
     }
 
-    /// The codec oracle's registries, of which the fixtures use one entry.
+    /// The codec oracle's registries, of which the fixtures use an entry each.
     struct Oracle;
 
     impl Names for Oracle {
         fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
-            let sharpness = "minecraft:sharpness";
-            let known = registry == "enchantment"
-                && id == pomme_protocol::vanilla_fixtures::registry_id(registry, sharpness);
-            known.then(|| sharpness.into())
+            let entry = match registry {
+                "enchantment" => "minecraft:sharpness",
+                "banner_pattern" => "minecraft:creeper",
+                _ => return None,
+            };
+            let known = id == pomme_protocol::vanilla_fixtures::registry_id(registry, entry);
+            known.then(|| entry.into())
         }
     }
 
@@ -439,6 +442,8 @@ mod tests {
             ("map_decorations", "map_decorations"),
             ("kinetic_negative_zero", "kinetic_weapon"),
             ("sprite_name", "custom_name"),
+            ("banner_patterns", "banner_patterns"),
+            ("sulfur_cube_content", "sulfur_cube_content"),
         ];
         for (fixture, component) in fixtures {
             let kind: DataComponentKind = component.parse().unwrap();

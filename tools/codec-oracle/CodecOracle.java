@@ -139,8 +139,10 @@ public final class CodecOracle {
         Registry<Biome> biomes = builtIn(Registries.BIOME);
         Registry<Dialog> dialogs = builtIn(Registries.DIALOG);
         Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments = builtIn(Registries.ENCHANTMENT);
+        Registry<net.minecraft.world.level.block.entity.BannerPattern> bannerPatterns =
+                builtIn(Registries.BANNER_PATTERN);
         registries = new RegistryAccess.ImmutableRegistryAccess(List.of(dimensionTypes, clocks, biomes, dialogs,
-                enchantments,
+                enchantments, bannerPatterns,
                 net.minecraft.core.registries.BuiltInRegistries.ATTRIBUTE,
                 net.minecraft.core.registries.BuiltInRegistries.ITEM,
                 net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_TYPE,
@@ -160,7 +162,7 @@ public final class CodecOracle {
         sections();
         border();
         components(enchantments);
-        hashedComponents();
+        hashedComponents(bannerPatterns);
         encode("trim_pattern/direct", TrimPattern.STREAM_CODEC::encode, Holder.direct(new TrimPattern(
                 Identifier.withDefaultNamespace("test"), Component.literal("Test Trim").withStyle(ChatFormatting.GOLD), true)));
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
@@ -226,6 +228,7 @@ public final class CodecOracle {
         idsOf(ids, "world_clock", clocks);
         idsOf(ids, "dialog", dialogs);
         idsOf(ids, "enchantment", enchantments);
+        idsOf(ids, "banner_pattern", bannerPatterns);
         out.add("registry_ids", ids);
         JsonObject sizes = new JsonObject();
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
@@ -724,7 +727,16 @@ public final class CodecOracle {
     }
 
     /** Values of the components pomme only hashes, none of them an item's default. */
-    private static void hashedComponents() {
+    private static void hashedComponents(Registry<net.minecraft.world.level.block.entity.BannerPattern> bannerPatterns) {
+        component("banner_patterns", net.minecraft.core.component.DataComponents.BANNER_PATTERNS,
+                new net.minecraft.world.level.block.entity.BannerPatternLayers(List.of(
+                        new net.minecraft.world.level.block.entity.BannerPatternLayers.Layer(
+                                bannerPatterns.getOrThrow(
+                                        net.minecraft.world.level.block.entity.BannerPatterns.CREEPER),
+                                net.minecraft.world.item.DyeColor.LIME))));
+        component("sulfur_cube_content", net.minecraft.core.component.DataComponents.SULFUR_CUBE_CONTENT,
+                new net.minecraft.world.item.component.SulfurCubeContent(
+                        new net.minecraft.world.item.ItemStackTemplate(net.minecraft.world.item.Items.TNT, 2)));
         Identifier custom = Identifier.withDefaultNamespace("custom");
         component("item_model", net.minecraft.core.component.DataComponents.ITEM_MODEL, custom);
         component("tooltip_style", net.minecraft.core.component.DataComponents.TOOLTIP_STYLE, custom);
