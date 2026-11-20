@@ -44,9 +44,9 @@ mod wire_corpus;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_inventory::components::EquipmentSlot;
 use glam::DVec3;
 use pomme_item::ItemStack;
+use pomme_item::components::EquipmentSlot;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;

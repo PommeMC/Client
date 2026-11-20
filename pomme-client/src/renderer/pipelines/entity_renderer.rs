@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
 use pomme_item::ItemStack;
+use pomme_item::components::{DyedColor, EquipmentSlot, Equippable};
 use pomme_registry::builtin::EntityKind;
 use serde::Deserialize;
 
 use crate::entity::components::Position;
 use crate::entity::dimensions;
-use crate::net::item_codec::Components;
 use crate::player::default_skin;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::{LightLevels, UNLIT_LANE};
@@ -66,7 +65,7 @@ pub struct ArmorRenderInfo {
 
 pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Option<ArmorRenderInfo> {
     let item = item?;
-    if item.get_component::<Equippable>()?.slot != slot {
+    if item.component::<Equippable>()?.slot != slot {
         return None;
     }
     equipment_render_info(item)
@@ -75,10 +74,10 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
 /// The stack's equipment asset and dye, whatever its `Equippable` slot
 /// (vanilla `LlamaDecorLayer` checks only `assetId().isPresent()`).
 pub fn equipment_render_info(item: &ItemStack) -> Option<ArmorRenderInfo> {
-    let equippable = item.get_component::<Equippable>()?;
+    let equippable = item.component::<Equippable>()?;
     let asset_id = equippable.asset_id.as_ref()?.to_string().into();
     let dyed_color = item
-        .get_component::<DyedColor>()
+        .component::<DyedColor>()
         .map(|color| color.rgb as u32 & 0x00ff_ffff);
     Some(ArmorRenderInfo {
         asset_id,
@@ -4149,15 +4148,14 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
     use pomme_item::ItemStack;
+    use pomme_item::components::{DyedColor, EquipmentSlot, Equippable};
     use pomme_registry::builtin::ItemKind;
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
         armor_render_info, body_route, layer_route,
     };
-    use crate::net::item_codec::Components;
 
     /// `LlamaDecorLayer` takes any equippable asset, whatever its slot.
     #[test]
@@ -4263,8 +4261,8 @@ mod tests {
         assert_eq!(diamond_info.dyed_color, None);
         assert!(armor_render_info(Some(&diamond), EquipmentSlot::Chest).is_none());
 
-        let leather = ItemStack::new(ItemKind::LeatherChestplate, 1)
-            .with_component(DyedColor { rgb: 0x12_34_56 });
+        let leather =
+            ItemStack::new(ItemKind::LeatherChestplate, 1).with(&DyedColor { rgb: 0x12_34_56 });
         let leather_info = armor_render_info(Some(&leather), EquipmentSlot::Chest)
             .expect("leather chestplate should expose its default equippable asset");
         assert_eq!(&*leather_info.asset_id, "minecraft:leather");
@@ -4273,8 +4271,7 @@ mod tests {
 
     #[test]
     fn armor_render_info_respects_explicit_equippable_removal() {
-        let stripped =
-            ItemStack::new(ItemKind::DiamondHelmet, 1).with_component::<Equippable>(None);
+        let stripped = ItemStack::new(ItemKind::DiamondHelmet, 1).without::<Equippable>();
         assert!(armor_render_info(Some(&stripped), EquipmentSlot::Head).is_none());
     }
 

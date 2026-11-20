@@ -1,15 +1,12 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_buf::AzBuf;
-use azalea_inventory::components::{
-    BlocksAttacks, Consumable, DataComponentTrait, EquipmentSlot, Equippable, Food,
-    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseEffects,
-};
 use glam::{DVec3, Vec3};
 use pomme_item::ItemStackData;
-use pomme_item::components::ChargedProjectiles;
+use pomme_item::components::{
+    BlocksAttacks, ChargedProjectiles, Consumable, EquipmentSlot, Equippable, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseEffects,
+};
 pub use pomme_protocol::serverbound::InteractionHand;
 use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
@@ -22,7 +19,6 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
-use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
@@ -151,13 +147,8 @@ fn block_use(hand: InteractionHand, stack: &ItemStackData) -> Option<ActiveUse> 
     if swappable(stack).is_some() {
         return None;
     }
-    stack_component::<BlocksAttacks>(stack)?;
-    Some(ActiveUse::new(
-        hand,
-        stack,
-        ItemUseAnimation::BlockKind,
-        72000,
-    ))
+    stack.component::<BlocksAttacks>()?;
+    Some(ActiveUse::new(hand, stack, ItemUseAnimation::Block, 72000))
 }
 
 impl ActiveUse {
@@ -174,7 +165,7 @@ impl ActiveUse {
             anim,
             bundle: None,
             consume: None,
-            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            use_effects: stack.component::<UseEffects>().unwrap_or_default(),
             duration,
             remaining: duration,
         }
@@ -683,7 +674,7 @@ impl InteractionState {
         attributes: &AttributeMap,
     ) -> bool {
         let required = held
-            .and_then(stack_component::<MinimumAttackCharge>)
+            .and_then(ItemStackData::component::<MinimumAttackCharge>)
             .map_or(0.0, |c| c.value);
         required > 0.0
             && (self.attack_strength_ticker as f32 / attack_strength_delay(attributes)) < required
@@ -1056,7 +1047,7 @@ impl InteractionState {
             return UseResult::Success { swing: true };
         }
 
-        let Some(consumable) = stack_component::<Consumable>(stack) else {
+        let Some(consumable) = stack.component::<Consumable>() else {
             if let Some(block) = block_use(hand, stack) {
                 self.using_item = Some(block);
             }
@@ -1065,7 +1056,7 @@ impl InteractionState {
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
         // invulnerable) always can. Non-food consumables have no gate.
-        if let Some(f) = stack_component::<Food>(stack)
+        if let Some(f) = stack.component::<Food>()
             && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
         {
             return UseResult::Fail;
@@ -1073,7 +1064,7 @@ impl InteractionState {
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
         let consume = ConsumeEffects {
-            sound: SoundRef::resolve(&consumable.sound),
+            sound: SoundRef::of_item(&consumable.sound),
             drink: consumable.animation == ItemUseAnimation::Drink,
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
@@ -1330,7 +1321,7 @@ impl InteractionState {
                 curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
                 duration: active.duration as f32,
             })),
-            ItemUseAnimation::BlockKind => Some(UseAnim::Block),
+            ItemUseAnimation::Block => Some(UseAnim::Block),
             _ => None,
         }
     }
@@ -1726,8 +1717,7 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
     if let Some(equippable) = swappable(stack) {
         return equip_swap_result(&equippable, stack, worn);
     }
-    if stack_component::<BlocksAttacks>(stack).is_some()
-        || stack_component::<KineticWeapon>(stack).is_some()
+    if stack.component::<BlocksAttacks>().is_some() || stack.component::<KineticWeapon>().is_some()
     {
         return UseResult::Success { swing: false };
     }
@@ -1746,7 +1736,7 @@ fn item_use_result(stack: &ItemStackData, worn: Worn) -> UseResult {
 
 /// The stack's `equippable`, if it swaps into its slot on use.
 fn swappable(stack: &ItemStackData) -> Option<Equippable> {
-    stack_component::<Equippable>(stack).filter(|e| e.swappable)
+    stack.component::<Equippable>().filter(|e| e.swappable)
 }
 
 /// Vanilla `Equippable.canBeEquippedBy`.
@@ -2007,12 +1997,6 @@ pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
         && stack
             .component::<ChargedProjectiles>()
             .is_some_and(|c| !c.items.is_empty())
-}
-
-/// The stack's component override if the server set one, else the item's
-/// default.
-pub(crate) fn stack_component<T: DataComponentTrait + AzBuf>(stack: &ItemStackData) -> Option<T> {
-    stack.get_component::<T>().map(Cow::into_owned)
 }
 
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
@@ -2651,7 +2635,7 @@ mod tests {
     fn a_shield_is_held_up_and_nothing_else_is() {
         let shield = ItemStackData::new(ItemKind::Shield, 1);
         let use_ = block_use(InteractionHand::OffHand, &shield).expect("a shield blocks");
-        assert_eq!(use_.anim, ItemUseAnimation::BlockKind);
+        assert_eq!(use_.anim, ItemUseAnimation::Block);
         assert_eq!(
             (use_.duration, use_.hand),
             (72000, InteractionHand::OffHand)

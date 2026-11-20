@@ -14,14 +14,14 @@
 // - a pig's saddle before 1.21.5, which was a synced flag and isn't read, so a
 //   saddled pig there passes an empty hand.
 
-use azalea_inventory::components::{CustomName, Damage, Dye, EquipmentSlot, Equippable};
 use glam::DVec3;
 use pomme_item::ItemStackData;
+use pomme_item::components::{CustomName, Damage, Dye, EquipmentSlot, Equippable};
 use pomme_protocol::serverbound::InteractionHand;
 use pomme_registry::builtin::{EntityKind, ItemKind};
 use pomme_registry::tags;
 
-use super::interaction::{can_be_equipped_by, stack_component};
+use super::interaction::can_be_equipped_by;
 use crate::entity::{LivingEntity, is_ageable_mob, is_boat, is_chest_boat, is_equine, is_llama};
 use crate::recipe::ItemTags;
 
@@ -84,13 +84,13 @@ impl Clicker<'_> {
     }
 
     fn equippable(&self) -> Option<Equippable> {
-        self.held.and_then(stack_component::<Equippable>)
+        self.held.and_then(ItemStackData::component::<Equippable>)
     }
 
     /// Holds a dye of another colour than `colour`, a `DyeColor` id.
     fn dyes_over(&self, colour: u8) -> bool {
         self.held
-            .and_then(stack_component::<Dye>)
+            .and_then(ItemStackData::component::<Dye>)
             .is_some_and(|dye| dye.color as u8 != colour)
     }
 }
@@ -142,7 +142,7 @@ impl Target<'_> {
     /// Vanilla `Mob.isSaddled` and `isWearingBodyArmor`.
     fn wears_fitting(&self, slot: EquipmentSlot) -> bool {
         self.wears(slot)
-            .and_then(stack_component::<Equippable>)
+            .and_then(ItemStackData::component::<Equippable>)
             .is_some_and(|equippable| self.equippable_in(&equippable, slot))
     }
 }
@@ -207,7 +207,7 @@ fn mob_interact(target: Target, clicker: Clicker) -> Option<Taken> {
         && target.entity.equipment.values().any(|stack| {
             stack
                 .as_present()
-                .and_then(stack_component::<Equippable>)
+                .and_then(ItemStackData::component::<Equippable>)
                 .is_some_and(|equippable| equippable.can_be_sheared)
         })
     {
@@ -230,7 +230,7 @@ fn item_interact(target: Target, clicker: Clicker) -> Option<Taken> {
     match held.kind {
         // `EntityType.canSerialize`: a player can't be named.
         ItemKind::NameTag => swing_if(
-            stack_component::<CustomName>(held).is_some() && target.kind() != EntityKind::Player,
+            held.component::<CustomName>().is_some() && target.kind() != EntityKind::Player,
         ),
         _ if target.kind() == EntityKind::Sheep => {
             let sheep = target.entity;
@@ -443,7 +443,7 @@ fn wolf_interact(target: Target, clicker: Clicker) -> Option<Taken> {
             .is_some_and(|e| target.equippable_in(&e, EquipmentSlot::Body));
     let repairs = entity.is_sitting
         && armor
-            .and_then(stack_component::<Damage>)
+            .and_then(ItemStackData::component::<Damage>)
             .is_some_and(|damage| damage.amount > 0)
         && clicker.in_tag("repairs_wolf_armor");
     if dresses || repairs {

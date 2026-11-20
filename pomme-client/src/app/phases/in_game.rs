@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_inventory::components::EquipmentSlot;
 use glam::FloatExt as _;
+use pomme_item::components::EquipmentSlot;
 use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
 use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 
@@ -2715,7 +2715,7 @@ pub(crate) fn send_container_clicks(
                 slot: op.slot_num().map(|s| s as i16).unwrap_or(-999),
                 button: op.button_num() as i8,
                 input: container_input(op.click_type()),
-                changed_slots: changed
+                changed_slots: menu_click::in_sent_order(changed)
                     .iter()
                     .map(|(s, item)| (*s as i16, hashed(item)))
                     .collect(),

@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_inventory::components::{AttributeModifiers, MaxDamage, Rarity};
+use pomme_item::components::{AttributeModifiers, MaxDamage, Rarity};
 use pomme_registry::builtin::ItemKind;
 use simdnbt::owned::{NbtCompound, NbtTag};
 
@@ -18,7 +18,6 @@ use crate::net::commands::{
     CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
     UnattendedCommandCheck, UsageLine,
 };
-use crate::net::item_codec::{Components, default_component};
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::text::{
@@ -2631,14 +2630,14 @@ fn stack_json(
     data: &pomme_item::ItemStackData,
     registries: &azalea_core::registry_holder::RegistryHolder,
 ) -> serde_json::Value {
-    use azalea_inventory::components::{DataComponentTrait, Enchantments, StoredEnchantments};
+    use pomme_item::components::{Component as _, Enchantments, StoredEnchantments};
     use pomme_registry::DataRegistry;
 
     let mut stack = data.clone();
     stack.component_patch.remove(Enchantments::KIND);
     stack.component_patch.remove(StoredEnchantments::KIND);
     let mut value = crate::net::item_codec::stack_json(&stack).unwrap_or_default();
-    let names = |levels: &std::collections::HashMap<pomme_registry::data::Enchantment, i32>| {
+    let names = |levels: &[(pomme_registry::data::Enchantment, i32)]| {
         levels
             .iter()
             .filter_map(|(enchantment, level)| {
@@ -2653,13 +2652,12 @@ fn stack_json(
     let enchantments = [
         (
             "minecraft:enchantments",
-            data.get_component::<Enchantments>()
-                .map(|e| names(&e.levels)),
+            data.component::<Enchantments>().map(|e| names(&e.levels)),
         ),
         (
             "minecraft:stored_enchantments",
-            data.get_component::<StoredEnchantments>()
-                .map(|e| names(&e.enchantments)),
+            data.component::<StoredEnchantments>()
+                .map(|e| names(&e.levels)),
         ),
     ];
     if let Some(map) = value.as_object_mut() {
@@ -2711,7 +2709,7 @@ fn item_tooltip_lines_with_bindings(
     let rarity = component_value(components, "rarity")
         .and_then(serde_json::Value::as_str)
         .and_then(item_rarity_from_name)
-        .or_else(|| kind.and_then(default_component::<Rarity>))
+        .or_else(|| kind.and_then(pomme_item::defaults::component::<Rarity>))
         .unwrap_or(Rarity::Common);
     let rarity = if enchanted {
         match rarity {
@@ -2836,8 +2834,8 @@ fn item_tooltip_lines_with_bindings(
             Some(modifiers) => modifiers,
             None => {
                 defaults = kind
-                    .and_then(default_component::<AttributeModifiers>)
-                    .and_then(|modifiers| serde_json::to_value(modifiers).ok())
+                    .and_then(pomme_item::defaults::component::<AttributeModifiers>)
+                    .map(|modifiers| attribute_modifiers_json(&modifiers))
                     .unwrap_or_default();
                 &defaults
             }
@@ -2866,7 +2864,7 @@ fn item_tooltip_lines_with_bindings(
             .and_then(serde_json::Value::as_i64)
             .map(|value| value as i32)
             .or_else(|| {
-                kind.and_then(default_component::<MaxDamage>)
+                kind.and_then(pomme_item::defaults::component::<MaxDamage>)
                     .map(|value| value.amount)
             })
             .unwrap_or(0);
@@ -2916,17 +2914,38 @@ fn item_tooltip_lines_with_bindings(
 // TODO: the modifiers enchantments add (`EnchantmentHelper.forEachModifier`),
 // which come from the enchantment registry's effects; and the player's own
 // base attack damage and speed, where a server changed them.
+/// An item's default modifiers in the JSON form [`attribute_tooltip_lines`]
+/// reads off a stack; no default overrides its line's text.
+fn attribute_modifiers_json(modifiers: &AttributeModifiers) -> serde_json::Value {
+    use pomme_item::components::AttributeModifierDisplay;
+
+    modifiers
+        .modifiers
+        .iter()
+        .map(|entry| {
+            let display = match entry.display {
+                AttributeModifierDisplay::Default => "default",
+                AttributeModifierDisplay::Hidden => "hidden",
+                AttributeModifierDisplay::Override { .. } => "override",
+            };
+            serde_json::json!({
+                "type": entry.kind.to_string(),
+                "id": entry.modifier.id.to_string(),
+                "amount": entry.modifier.amount,
+                "operation": entry.modifier.operation.name(),
+                "slot": entry.slot.name(),
+                "display": display,
+            })
+        })
+        .collect()
+}
+
 fn attribute_tooltip_lines(
     modifiers: &[serde_json::Value],
     bindings: &KeyBindings,
 ) -> Vec<TooltipLine> {
     use crate::attribute::AttributeKind;
 
-    /// `EquipmentSlotGroup`, in order.
-    const SLOT_GROUPS: [&str; 11] = [
-        "any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body",
-        "saddle",
-    ];
     let colored = |component: &Component, rgb| colored_tooltip_lines(component, rgb, bindings);
     let path = |value: Option<&serde_json::Value>| {
         let id = value
@@ -2935,7 +2954,8 @@ fn attribute_tooltip_lines(
         id.split(':').next_back().unwrap_or(id).to_owned()
     };
     let mut lines = Vec::new();
-    for group in SLOT_GROUPS {
+    for group in pomme_item::components::EquipmentSlotGroup::ALL {
+        let group = group.name();
         let mut first = true;
         for entry in modifiers {
             if entry
@@ -5089,9 +5109,10 @@ mod tests {
 
     #[test]
     fn a_modifiers_override_text_replaces_its_line_in_either_shape() {
+        // The fork's values, whose serialized shape a stack's JSON still has.
         use azalea_inventory::components::{
-            AttributeModifier, AttributeModifierDisplay, AttributeModifiersEntry,
-            EquipmentSlotGroup,
+            AttributeModifier, AttributeModifierDisplay, AttributeModifiers,
+            AttributeModifiersEntry, EquipmentSlotGroup,
         };
         let entry = AttributeModifiersEntry {
             kind: pomme_registry::builtin::Attribute::Armor,

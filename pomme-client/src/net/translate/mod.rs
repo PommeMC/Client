@@ -381,9 +381,8 @@
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
-use azalea_buf::AzBuf;
-use azalea_inventory::components::Profile;
 use glam::DVec3;
+use pomme_item::components::{Component as _, Profile};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::serverbound::{GamePacket, HashedStack};

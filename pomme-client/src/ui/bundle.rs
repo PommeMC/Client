@@ -1,8 +1,6 @@
-use azalea_inventory::components::{Bees, TooltipDisplay};
-use pomme_item::components::{BundleContents, MaxStackSize};
+use pomme_item::components::{Bees, BundleContents, MaxStackSize, TooltipDisplay};
 use pomme_item::{ItemStack, ItemStackData};
 
-use crate::net::item_codec::Components;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 pub const NO_SELECTION: i32 = -1;
@@ -99,7 +97,7 @@ pub fn item_weight(data: &ItemStackData) -> Option<Frac> {
         return weight(&bundle.items)?.add(Frac(1, 16));
     }
     if data
-        .get_component::<Bees>()
+        .component::<Bees>()
         .is_some_and(|bees| !bees.occupants.is_empty())
     {
         return Some(Frac::ONE);
@@ -283,7 +281,7 @@ pub fn push_tooltip(
     footer: Vec<TooltipLine>,
     (cursor, screen_w, screen_h, gui_scale): ((f32, f32), f32, f32, f32),
 ) {
-    let display = data.get_component::<TooltipDisplay>();
+    let display = data.component::<TooltipDisplay>();
     if display.as_ref().is_some_and(|d| d.hide_tooltip) {
         return;
     }
@@ -329,6 +327,25 @@ mod tests {
     use pomme_registry::builtin::ItemKind;
 
     use super::*;
+
+    #[test]
+    fn a_hive_holding_bees_weighs_a_whole_bundle() {
+        use pomme_item::components::{BeehiveOccupant, Nbt};
+        use pomme_registry::builtin::EntityKind;
+        use simdnbt::owned::{NbtCompound, NbtTag};
+
+        let empty = ItemStackData::new(ItemKind::BeeNest, 1);
+        assert_eq!(item_weight(&empty), Some(Frac::new(1, 64)));
+        let occupied = empty.with(&Bees {
+            occupants: vec![BeehiveOccupant {
+                entity: EntityKind::Bee,
+                entity_data: Nbt::new(&NbtTag::Compound(NbtCompound::new())),
+                ticks_in_hive: 0,
+                min_ticks_in_hive: 0,
+            }],
+        });
+        assert_eq!(item_weight(&occupied), Some(Frac::ONE));
+    }
 
     #[test]
     fn shown_items_match_vanilla_grid_rules() {

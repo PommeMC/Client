@@ -1,4 +1,4 @@
-use azalea_inventory::components::EquipmentSlot;
+use pomme_item::components::EquipmentSlot;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 

@@ -1,5 +1,5 @@
-use azalea_inventory::components::{
-    CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
+use pomme_item::components::{
+    CustomName, Damage, ItemName, MaxDamage, Profile, ProfileContents, ProfileProperty, Unbreakable,
 };
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
@@ -7,7 +7,6 @@ use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
 use crate::chat_component::{Component, ComponentText};
-use crate::net::item_codec::Components;
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -35,11 +34,10 @@ pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32
 
 /// The hover-name component: custom name, else item-name component.
 fn item_hover_component(data: &ItemStackData) -> Option<Component> {
-    let name = match data.get_component::<CustomName>() {
-        Some(custom) => custom.name.clone(),
-        None => data.get_component::<ItemName>()?.name.clone(),
-    };
-    Some(crate::net::item_codec::text_component(&name))
+    match data.component::<CustomName>() {
+        Some(custom) => custom.name.component(),
+        None => data.component::<ItemName>()?.name.component(),
+    }
 }
 
 /// Vanilla `Window.getGuiScaledWidth` and `getGuiScaledHeight`: `px` in GUI
@@ -98,15 +96,15 @@ pub fn item_display_name(data: &ItemStackData) -> String {
 /// Vanilla `ItemStack.getStyledHoverName`: the hover name in its rarity color,
 /// italic when custom. The name's own styling wins where it sets one.
 pub fn styled_hover_name(data: &ItemStackData) -> Vec<crate::ui::text::TextSpan> {
-    use azalea_inventory::components::Rarity;
+    use pomme_item::components::Rarity;
     // Default-component rarities aren't synced; absent means common.
-    let color = match data.get_component::<Rarity>().as_deref() {
+    let color = match data.component::<Rarity>() {
         Some(Rarity::Uncommon) => rgb(0xffff55),
         Some(Rarity::Rare) => rgb(0x55ffff),
         Some(Rarity::Epic) => rgb(0xff55ff),
         _ => WHITE,
     };
-    let italic = data.get_component::<CustomName>().is_some();
+    let italic = data.component::<CustomName>().is_some();
     let mut spans = item_display_spans(data, color);
     for span in &mut spans {
         span.italic |= italic;
@@ -709,26 +707,37 @@ impl HeadProfile {
         if data.kind != ItemKind::PlayerHead {
             return None;
         }
-        let profile = data.get_component::<Profile>()?;
-        let textures = |properties: &azalea_auth::game_profile::GameProfileProperties| {
-            properties.map.get("textures").map(|p| p.value.clone())
+        let profile = data.component::<Profile>()?;
+        let textures = |properties: &[ProfileProperty]| {
+            properties
+                .iter()
+                .find(|property| property.name == "textures")
+                .map(|property| property.value.clone())
         };
         let patch_texture = profile
             .skin_patch
             .body
             .as_ref()
-            .map(|texture| format!("{}:{}", texture.id.namespace(), texture.id.path()));
-        Some(match &*profile.unpack {
-            PartialOrFullProfile::Partial(partial) => Self {
-                id: partial.id,
-                name: partial.name.clone(),
-                textures: textures(&partial.properties),
+            .map(|texture| format!("{}:{}", texture.namespace(), texture.path()));
+        Some(match profile.contents {
+            ProfileContents::Partial {
+                name,
+                id,
+                properties,
+            } => Self {
+                id: id.map(uuid::Uuid::from_u128),
+                name,
+                textures: textures(&properties),
                 patch_texture,
             },
-            PartialOrFullProfile::Full(full) => Self {
-                id: Some(full.uuid),
-                name: Some(full.name.clone()),
-                textures: textures(&full.properties),
+            ProfileContents::Full {
+                id,
+                name,
+                properties,
+            } => Self {
+                id: Some(uuid::Uuid::from_u128(id)),
+                name: Some(name),
+                textures: textures(&properties),
                 patch_texture,
             },
         })
@@ -930,11 +939,11 @@ fn bundle_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
 
 /// Vanilla `Item` durability bar metrics for a damageable stack.
 fn durability_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
-    if data.get_component::<Unbreakable>().is_some() {
+    if data.component::<Unbreakable>().is_some() {
         return None;
     }
-    let max_damage = data.get_component::<MaxDamage>()?.amount;
-    let damage = data.get_component::<Damage>()?.amount;
+    let max_damage = data.component::<MaxDamage>()?.amount;
+    let damage = data.component::<Damage>()?.amount;
     if max_damage <= 0 {
         return None;
     }
@@ -1281,8 +1290,7 @@ pub struct SliderResult {
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{Damage, MaxDamage, Unbreakable};
-    use pomme_item::components::BundleContents;
+    use pomme_item::components::{BundleContents, Damage, MaxDamage, Unbreakable};
     use pomme_item::{ItemStack, ItemStackData};
     use pomme_registry::builtin::ItemKind;
 
@@ -1290,7 +1298,6 @@ mod tests {
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
-    use crate::net::item_codec::Components;
     use crate::player::item_cooldowns::ItemCooldowns;
 
     #[test]
@@ -1412,12 +1419,12 @@ mod tests {
     }
 
     fn damaged_pickaxe(damage: i32) -> ItemStackData {
-        present(ItemStack::new(ItemKind::IronPickaxe, 1).with_component(Damage { amount: damage }))
+        present(ItemStack::new(ItemKind::IronPickaxe, 1).with(&Damage { amount: damage }))
     }
 
     fn pickaxe_max_damage() -> i32 {
         ItemStackData::new(ItemKind::IronPickaxe, 1)
-            .get_component::<MaxDamage>()
+            .component::<MaxDamage>()
             .expect("iron pickaxe should have max damage")
             .amount
     }
@@ -1459,17 +1466,17 @@ mod tests {
 
         let unbreakable = present(
             ItemStack::new(ItemKind::IronPickaxe, 1)
-                .with_component(Damage { amount: 1 })
-                .with_component(Unbreakable),
+                .with(&Damage { amount: 1 })
+                .with(&Unbreakable),
         );
         assert!(item_bar(&unbreakable).is_none());
 
         let damage_without_max =
-            present(ItemStack::new(ItemKind::Stone, 1).with_component(Damage { amount: 1 }));
+            present(ItemStack::new(ItemKind::Stone, 1).with(&Damage { amount: 1 }));
         assert!(item_bar(&damage_without_max).is_none());
 
         let max_without_damage =
-            present(ItemStack::new(ItemKind::Stone, 1).with_component(MaxDamage { amount: 10 }));
+            present(ItemStack::new(ItemKind::Stone, 1).with(&MaxDamage { amount: 10 }));
         assert!(item_bar(&max_without_damage).is_none());
     }
 
@@ -1533,8 +1540,8 @@ mod tests {
 
         let damaged_empty = present(
             ItemStack::new(ItemKind::Bundle, 1)
-                .with_component(MaxDamage { amount: 10 })
-                .with_component(Damage { amount: 5 }),
+                .with(&MaxDamage { amount: 10 })
+                .with(&Damage { amount: 5 }),
         );
         assert!(item_bar(&damaged_empty).is_none());
     }

@@ -81,11 +81,19 @@ impl ItemStack {
     }
 
     /// The stack with the component `value` set.
-    pub fn with<T: components::Component>(mut self, value: &T) -> Self {
-        if let Some(data) = self.as_present_mut() {
-            data.component_patch.write(value);
+    pub fn with<T: components::Component>(self, value: &T) -> Self {
+        match self {
+            Self::Present(data) => Self::Present(data.with(value)),
+            Self::Empty => Self::Empty,
         }
-        self
+    }
+
+    /// The stack with the component `T` removed, default or not.
+    pub fn without<T: components::Component>(self) -> Self {
+        match self {
+            Self::Present(data) => Self::Present(data.without::<T>()),
+            Self::Empty => Self::Empty,
+        }
     }
 
     /// The stack a packet carried; empty for an item this version lacks.
@@ -178,6 +186,18 @@ impl ItemStackData {
     /// `DataComponentHolder.get`; `None` too for a value that doesn't read.
     pub fn component<T: components::Component>(&self) -> Option<T> {
         T::from_bytes(self.component_bytes(T::KIND)?)
+    }
+
+    /// The stack with the component `value` set.
+    pub fn with<T: components::Component>(mut self, value: &T) -> Self {
+        self.component_patch.write(value);
+        self
+    }
+
+    /// The stack with the component `T` removed, default or not.
+    pub fn without<T: components::Component>(mut self) -> Self {
+        self.component_patch.remove(T::KIND);
+        self
     }
 
     /// `ItemStack.getComponents().keySet()`: every component the stack has,
@@ -280,6 +300,11 @@ impl ComponentPatch {
     /// Sets `T` to `value`.
     pub fn write<T: components::Component>(&mut self, value: &T) {
         self.set(T::KIND, value.to_bytes());
+    }
+
+    /// The value the patch sets `T` to, whatever the item's default.
+    pub fn read<T: components::Component>(&self) -> Option<T> {
+        T::from_bytes(self.get(T::KIND)?)
     }
 
     /// The patch a packet carried; a component this version lacks is left
