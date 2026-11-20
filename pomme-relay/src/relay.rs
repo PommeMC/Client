@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use axum::BoxError;
 use axum::body::{Body, Bytes};
-use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{Stream, StreamExt as _};
 
@@ -90,6 +90,10 @@ const DATA_TYPES: &[&str] = &[
     "text/plain",
 ];
 
+/// More than an account or sign-in request sends; the largest is a skin, a
+/// few kilobytes of PNG.
+pub const MAX_BODY: usize = 256 * 1024;
+
 /// Gives up on a host that won't answer, or a download that stalls, rather
 /// than holding the relay's connections open. A redirect isn't followed: its
 /// target was never checked against [`ALLOWED_HOSTS`].
@@ -105,35 +109,47 @@ pub fn client() -> reqwest::Client {
 pub async fn relay(
     State(state): State<AppState>,
     peer: ConnectInfo<SocketAddr>,
-    uri: Uri,
-    method: Method,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
-    let Some((host, rest)) = target(&uri) else {
+    let (request, body) = request.into_parts();
+    let Some((host, rest)) = target(&request.uri) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if guard::cross_site(&headers) {
-        tracing::warn!("Refused a cross-site request for {host}");
+    if guard::cross_site(&request.headers) {
+        tracing::debug!("Refused a cross-site request for {host}");
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(&(_, spend)) = ALLOWED_HOSTS.iter().find(|(allowed, _)| *allowed == host) else {
-        tracing::warn!("Refused a request for {host}");
+        tracing::debug!("Refused a request for {host}");
         return StatusCode::FORBIDDEN.into_response();
     };
-    let client = guard::client(&state.config, peer, &headers);
+    let download = spend == Spend::Download;
+    if download && !matches!(request.method, Method::GET | Method::HEAD) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let client = guard::client(&state.config, peer, &request.headers);
     if !state.limits.allow(spend, client) {
-        tracing::warn!("Rate limited {client}'s requests for {host}");
+        tracing::debug!("Rate limited {client}'s requests for {host}");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
+    // Read only now, and never for a download, so nothing is uploaded for a
+    // request the relay refuses or to a host that takes none.
+    let body = if download {
+        Bytes::new()
+    } else {
+        match axum::body::to_bytes(body, MAX_BODY).await {
+            Ok(body) => body,
+            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        }
+    };
     let url = format!("https://{host}/{rest}");
-    let mut forwarded = headers;
+    let mut forwarded = request.headers;
     for name in DROPPED_REQUEST_HEADERS {
         forwarded.remove(*name);
     }
     let upstream = match state
         .http
-        .request(method, &url)
+        .request(request.method, &url)
         .headers(forwarded)
         .body(body)
         .send()
@@ -141,13 +157,13 @@ pub async fn relay(
     {
         Ok(upstream) => upstream,
         Err(error) => {
-            tracing::warn!("Couldn't reach {url}: {error}");
+            tracing::warn!("Couldn't reach {host}: {}", error.without_url());
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
     // The page couldn't follow one either: its target isn't under `/relay`.
     if upstream.status().is_redirection() && upstream.headers().contains_key(header::LOCATION) {
-        tracing::warn!("{url} redirects, which the relay doesn't follow");
+        tracing::warn!("{host} redirects, which the relay doesn't follow");
         return StatusCode::BAD_GATEWAY.into_response();
     }
     let mut response = Response::builder()
@@ -164,9 +180,10 @@ pub async fn relay(
         }
     }
     let body = upstream.bytes_stream();
-    let body = match spend {
-        Spend::Download => Body::from_stream(metered(body, state.limits, client)),
-        _ => Body::from_stream(body),
+    let body = if download {
+        Body::from_stream(metered(body, state.limits, client))
+    } else {
+        Body::from_stream(body)
     };
     response.body(body).expect("the relayed response builds")
 }
@@ -180,7 +197,7 @@ fn metered<E: Into<BoxError>>(
 ) -> impl Stream<Item = Result<Bytes, BoxError>> {
     download.map(move |chunk| {
         let chunk = chunk.map_err(Into::into)?;
-        if !limits.downloaded(client, chunk.len()) {
+        if !limits.relayed(client, chunk.len()) {
             tracing::warn!("Cut {client}'s download short at what it may download");
             return Err("over the download limit".into());
         }

@@ -10,9 +10,10 @@
 //! Public hosting puts it behind a TLS reverse proxy, run as
 //! `--public-host play.pomme.rs --trust-proxy`. It then answers only for that
 //! hostname, refuses cross-site requests, dials only public addresses at
-//! unprivileged ports (never the machine's own, given as `--block-address`),
-//! and rate limits each client. The proxy must pass the request's `Host` on
-//! unchanged and add the client's address to `X-Forwarded-For`.
+//! unprivileged ports (never the machine's own; one that a NAT in front maps
+//! to it is given as `--block-address`), and rate limits each client. The
+//! proxy must pass the request's `Host` on unchanged and add the client's
+//! address to `X-Forwarded-For`.
 
 mod connect;
 mod guard;
@@ -49,6 +50,17 @@ struct AppState {
     limits: Arc<limits::Limits>,
 }
 
+impl AppState {
+    fn new(config: Config) -> Self {
+        Self {
+            http: relay::client(),
+            config: Arc::new(config),
+            connections: Arc::default(),
+            limits: Arc::default(),
+        }
+    }
+}
+
 #[derive(clap::Args)]
 #[cfg_attr(test, derive(Default))]
 struct Config {
@@ -71,9 +83,10 @@ struct Config {
     /// Game connections open at once across every client.
     #[arg(long, default_value_t = 512)]
     max_connections: usize,
-    /// An address game connections may never reach, such as the relay
-    /// machine's own public one, whose services would otherwise be dialed
-    /// from inside. Repeatable.
+    /// An address game connections may never reach. The relay refuses its
+    /// machine's own by itself; this is for a public one a NAT in front maps
+    /// to it, whose services would otherwise be dialed from inside.
+    /// Repeatable.
     #[arg(long = "block-address")]
     block_addresses: Vec<IpAddr>,
 }
@@ -100,7 +113,12 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("failed to listen on {}: {e}", args.listen));
     tracing::info!("Serving {} on http://{}", args.dir.display(), args.listen);
-    serve(listener, app(args.config, &args.dir)).await;
+    if args.config.public_host.is_none() && !args.listen.ip().is_loopback() {
+        tracing::warn!(
+            "Listening beyond this machine without --public-host: anything that names localhost is answered"
+        );
+    }
+    serve(listener, app(AppState::new(args.config), &args.dir)).await;
 }
 
 async fn serve(listener: TcpListener, app: Router) {
@@ -113,13 +131,7 @@ async fn serve(listener: TcpListener, app: Router) {
 }
 
 /// The routes, with the page in `dir` served for everything else.
-fn app(config: Config, dir: &Path) -> Router {
-    let state = AppState {
-        http: relay::client(),
-        config: Arc::new(config),
-        connections: Arc::default(),
-        limits: Arc::default(),
-    };
+fn app(state: AppState, dir: &Path) -> Router {
     Router::new()
         .nest("/relay", Router::new().fallback(any(relay::relay)))
         .route("/connect/{host}/{port}", get(connect::connect))
@@ -137,7 +149,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{Request, StatusCode, header, request};
     use axum::response::Response;
     use futures_util::{SinkExt as _, StreamExt as _};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -149,17 +161,20 @@ mod tests {
 
     use super::*;
 
-    /// A relay on a free local port.
-    async fn relay(allow_private_servers: bool) -> SocketAddr {
-        let config = Config {
+    fn state(allow_private_servers: bool) -> AppState {
+        AppState::new(Config {
             allow_private_servers,
             connections_per_client: 8,
             max_connections: 8,
             ..Config::default()
-        };
+        })
+    }
+
+    /// A relay on a free local port.
+    async fn relay(state: AppState) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(serve(listener, app(config, Path::new("no-such-dir"))));
+        tokio::spawn(serve(listener, app(state, Path::new("no-such-dir"))));
         address
     }
 
@@ -199,15 +214,25 @@ mod tests {
 
     /// The page's WebSocket through a relay to a server, and the server's end
     /// of the connection, on which it has already sent `BANNER`.
-    async fn connected() -> (Page, TcpStream) {
+    async fn connected(state: AppState) -> (Page, TcpStream) {
         let (server, address) = server().await;
-        let page = dial(relay(true).await, &address, true).await.unwrap();
+        let page = dial(relay(state).await, &address, true).await.unwrap();
         let (mut tcp, _) = soon(server.accept()).await.unwrap();
         tcp.write_all(BANNER).await.unwrap();
         (page, tcp)
     }
 
     const BANNER: &[u8] = b"banner";
+
+    /// What the server is sent before the relay closes its connection. With
+    /// the banner unread, that close is a reset on some systems.
+    async fn sent_to(mut tcp: TcpStream) -> Vec<u8> {
+        let mut received = Vec::new();
+        match soon(tcp.read_to_end(&mut received)).await {
+            Err(error) if error.kind() != std::io::ErrorKind::ConnectionReset => panic!("{error}"),
+            _ => received,
+        }
+    }
 
     #[tokio::test]
     async fn connections_the_page_may_not_make_are_refused() {
@@ -217,23 +242,19 @@ mod tests {
             (true, "127.0.0.1/80", true),
             (false, server.as_str(), true),
         ] {
-            let refused = dial(relay(allow_private_servers).await, server, own_page).await;
+            let relay = relay(state(allow_private_servers)).await;
+            let refused = dial(relay, server, own_page).await;
             assert_eq!(refused.err(), Some(StatusCode::FORBIDDEN), "{server}");
         }
     }
 
     #[tokio::test]
     async fn anything_but_a_handshake_reaches_nothing() {
-        let (mut page, mut tcp) = connected().await;
+        let (mut page, tcp) = connected(state(true)).await;
         let request = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n".repeat(32);
         page.send(Message::binary(request)).await.unwrap();
 
-        // Closing on the unread banner is a reset on some systems.
-        let mut received = Vec::new();
-        match soon(tcp.read_to_end(&mut received)).await {
-            Err(error) if error.kind() != std::io::ErrorKind::ConnectionReset => panic!("{error}"),
-            _ => {}
-        }
+        let received = sent_to(tcp).await;
         assert!(received.is_empty(), "{received:?}");
         while let Some(Ok(message)) = soon(page.next()).await {
             assert!(message.is_close(), "{message:?}");
@@ -241,8 +262,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_connection_ends_once_its_bytes_are_spent() {
+        const PIECE: usize = 200 * 1024;
+        const PIECES: usize = 32;
+        let state = state(true);
+        let client = IpAddr::from([127, 0, 0, 1]);
+        state.limits.leave(client, PIECE * PIECES / 4);
+        let (mut page, tcp) = connected(state).await;
+        let received = tokio::spawn(sent_to(tcp));
+
+        page.send(Message::binary(connect::tests::handshake()))
+            .await
+            .unwrap();
+        for _ in 0..PIECES {
+            if page.send(Message::binary(vec![0; PIECE])).await.is_err() {
+                break;
+            }
+        }
+        let received = received.await.unwrap().len();
+        assert!((PIECE..PIECE * PIECES).contains(&received), "{received}");
+    }
+
+    #[tokio::test]
     async fn a_handshake_is_bridged() {
-        let (mut page, mut tcp) = connected().await;
+        let (mut page, mut tcp) = connected(state(true)).await;
         let mut opening = connect::tests::handshake();
         opening.extend([1, 0]);
         for piece in opening.chunks(7) {
@@ -271,15 +314,20 @@ mod tests {
 
     async fn get(uri: &str, headers: &[(&str, &str)]) -> Response {
         let mut request = Request::get(uri);
-        if !headers.iter().any(|(name, _)| *name == "host") {
-            request = request.header(header::HOST, "localhost:8080");
-        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        app(Config::default(), Path::new("no-such-dir"))
+        send(request, Body::empty()).await
+    }
+
+    /// The answer to `request`, sent to localhost unless it names a host.
+    async fn send(mut request: request::Builder, body: Body) -> Response {
+        if !request.headers_ref().unwrap().contains_key(header::HOST) {
+            request = request.header(header::HOST, "localhost:8080");
+        }
+        app(AppState::new(Config::default()), Path::new("no-such-dir"))
             .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))))
-            .oneshot(request.body(Body::empty()).unwrap())
+            .oneshot(request.body(body).unwrap())
             .await
             .unwrap()
     }
@@ -289,6 +337,17 @@ mod tests {
         for uri in ["/relay/example.com/x", "/relay/example.com/"] {
             assert_eq!(get(uri, &[]).await.status(), StatusCode::FORBIDDEN, "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn uploads_go_only_to_the_services_and_only_so_large() {
+        let files = Request::post("/relay/piston-data.mojang.com/x");
+        let response = send(files, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let service = Request::post("/relay/api.mojang.com/x");
+        let response = send(service, Body::from(vec![0; relay::MAX_BODY + 1])).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

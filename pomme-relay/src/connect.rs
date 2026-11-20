@@ -1,7 +1,7 @@
 //! `/connect/<host>/<port>`: a WebSocket from the page, bridged to a game
 //! server's TCP port, since a page can't open sockets.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -11,6 +11,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_util::future::select_ok;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt as _, StreamExt as _};
 use hickory_resolver::config::{GOOGLE, ResolverConfig};
@@ -23,7 +24,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
-use crate::limits::Spend;
+use crate::limits::{Limits, Spend};
 use crate::{AppState, Config, guard};
 
 /// Several times what the page sends in one message, which is a piece of the
@@ -47,6 +48,9 @@ const MAX_HANDSHAKE: usize = 1024;
 /// The bytes a frame's length may take, past which a server drops the
 /// connection.
 const MAX_LENGTH_PREFIX: usize = 3;
+
+/// The most of a name's addresses dialed, all at once.
+const MAX_DIALED: usize = 4;
 
 /// Below this, ports belong to services such as mail, not game servers.
 const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
@@ -76,12 +80,12 @@ pub async fn connect(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     if !guard::same_origin(&state.config, &headers) {
-        tracing::warn!("Refused a cross-site connection to {host:?}:{port}");
+        tracing::debug!("Refused a cross-site connection to {host:?}:{port}");
         return StatusCode::FORBIDDEN.into_response();
     }
     let client = guard::client(&state.config, peer, &headers);
     if !state.limits.allow(Spend::Connect, client) {
-        tracing::warn!("Rate limited {client}'s connections");
+        tracing::debug!("Rate limited {client}'s connections");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let (host, port) = server_address(host, port).await;
@@ -95,6 +99,7 @@ pub async fn connect(
         Ok(addresses) => addresses
             .iter()
             .filter(|ip| reachable(&state.config, *ip))
+            .take(MAX_DIALED)
             .map(|ip| SocketAddr::new(ip, port))
             .collect(),
         Err(status) => return status.into_response(),
@@ -108,10 +113,11 @@ pub async fn connect(
         tracing::warn!("Refused {client} another connection");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    // The checked addresses themselves, so DNS can't answer differently twice.
-    let dial = TcpStream::connect(addresses.as_slice());
-    let tcp = match in_time("reach", &host, dial).await {
-        Ok(tcp) => tcp,
+    // The checked addresses themselves, so DNS can't answer differently
+    // twice, and together, so one that never answers doesn't use up the wait.
+    let dials = addresses.into_iter().map(TcpStream::connect).map(Box::pin);
+    let tcp = match in_time("reach", &host, select_ok(dials)).await {
+        Ok((tcp, _)) => tcp,
         Err(status) => return status.into_response(),
     };
     tracing::info!("Connected {client} to {host:?}:{port}");
@@ -119,7 +125,7 @@ pub async fn connect(
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
         .on_upgrade(move |socket| async move {
-            bridge(socket, tcp).await;
+            bridge(socket, tcp, &state.limits, client).await;
             drop(slot);
         })
 }
@@ -161,15 +167,21 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
     }
 }
 
-/// Whether the relay may dial `ip`: not one of its own `--block-address`es,
-/// and public unless private servers are allowed.
+/// Whether the relay may dial `ip`: not a `--block-address`, and unless
+/// private servers are allowed, public and not the relay's own machine.
 fn reachable(config: &Config, ip: IpAddr) -> bool {
     let ip = unwrapped(ip);
     !config
         .block_addresses
         .iter()
         .any(|blocked| unwrapped(*blocked) == ip)
-        && (config.allow_private_servers || public(ip))
+        && (config.allow_private_servers || (public(ip) && !own(ip)))
+}
+
+/// Whether `ip` is one of this machine's addresses, which are the only ones
+/// it can bind.
+fn own(ip: IpAddr) -> bool {
+    UdpSocket::bind((ip, 0)).is_ok()
 }
 
 /// Whether `ip` is on the open internet, not a network only the relay's
@@ -195,9 +207,7 @@ fn public_v4(ip: Ipv4Addr) -> bool {
     !(ip.is_private()
         || ip.is_loopback()
         || ip.is_link_local()
-        || ip.is_broadcast()
         || ip.is_documentation()
-        || ip.is_unspecified()
         || ip.is_multicast()
         || a == 0
         || a >= 240
@@ -222,10 +232,11 @@ fn unwrapped(ip: IpAddr) -> IpAddr {
         .map_or(ip, IpAddr::V4)
 }
 
-/// Copies bytes both ways until either side closes or both fall silent, once
-/// the page has opened with a handshake: nothing reaches the server, or comes
-/// back from it, for a client that isn't speaking to a game server.
-async fn bridge(socket: WebSocket, tcp: TcpStream) {
+/// Copies bytes both ways until either side closes, both fall silent or
+/// `client` has had all it may, once the page has opened with a handshake:
+/// nothing reaches the server, or comes back from it, for a client that isn't
+/// speaking to a game server.
+async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAddr) {
     let _ = tcp.set_nodelay(true);
     let (mut from_server, mut to_server) = tcp.into_split();
     let (mut to_page, mut from_page) = socket.split();
@@ -238,12 +249,19 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
         return;
     }
     let activity = Activity::start();
+    let carried = |bytes: usize| {
+        activity.mark();
+        let allowed = limits.relayed(client, bytes);
+        if !allowed {
+            tracing::warn!("Closed {client}'s connection at what it may have relayed");
+        }
+        allowed
+    };
     let upstream = async {
         while let Some(Ok(message)) = from_page.next().await {
             match message {
                 Message::Binary(bytes) if !bytes.is_empty() => {
-                    activity.mark();
-                    if to_server.write_all(&bytes).await.is_err() {
+                    if !carried(bytes.len()) || to_server.write_all(&bytes).await.is_err() {
                         break;
                     }
                 }
@@ -255,9 +273,8 @@ async fn bridge(socket: WebSocket, tcp: TcpStream) {
     let downstream = async {
         let mut buffer = vec![0; 64 * 1024];
         while let Ok(read @ 1..) = from_server.read(&mut buffer).await {
-            activity.mark();
             let bytes = Bytes::copy_from_slice(&buffer[..read]);
-            if to_page.send(Message::Binary(bytes)).await.is_err() {
+            if !carried(read) || to_page.send(Message::Binary(bytes)).await.is_err() {
                 break;
             }
         }
@@ -402,6 +419,12 @@ pub mod tests {
             assert!(!reachable(&config, ip.parse().unwrap()), "{ip}");
         }
         assert!(reachable(&config, "192.168.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_machines_own_addresses_are_told_from_others() {
+        assert!(own("127.0.0.1".parse().unwrap()));
+        assert!(!own("203.0.113.7".parse().unwrap()));
     }
 
     #[tokio::test(start_paused = true)]

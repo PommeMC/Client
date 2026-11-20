@@ -30,7 +30,7 @@ const MIB: f64 = 1024.0 * 1024.0;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Meter {
     Requests(Spend),
-    DownloadBytes,
+    Bytes,
 }
 
 impl Meter {
@@ -41,8 +41,9 @@ impl Meter {
             Self::Requests(Spend::Api) => (60.0, 1.0),
             // Server list pings connect too.
             Self::Requests(Spend::Connect) => (60.0, 1.0),
-            // A few first installs at once, then a megabyte a second.
-            Self::DownloadBytes => (2048.0 * MIB, MIB),
+            // A few first installs at once, then a megabyte a second, game
+            // connections included.
+            Self::Bytes => (2048.0 * MIB, MIB),
         }
     }
 }
@@ -141,21 +142,23 @@ impl Limits {
         self.allow_at(spend, client, Instant::now())
     }
 
-    /// Counts `bytes` fetched for `client` against what it may download, and
-    /// says whether it may have more. They were already fetched, so the
-    /// bucket can go below empty, and stays shut until that is paid back.
-    pub fn downloaded(&self, client: IpAddr, bytes: usize) -> bool {
-        self.downloaded_at(client, bytes, Instant::now())
+    /// Counts `bytes` relayed for `client`, a download's or a game
+    /// connection's, against what it may have, and says whether it may have
+    /// more. They were already carried, so the bucket can go below empty, and
+    /// stays shut until that is paid back.
+    pub fn relayed(&self, client: IpAddr, bytes: usize) -> bool {
+        self.relayed_at(client, bytes, Instant::now())
     }
 
     fn allow_at(&self, spend: Spend, client: IpAddr, now: Instant) -> bool {
         let mut buckets = self.buckets();
-        // A download starts with a second's refill in hand, so one retried
-        // at the limit is refused here and not cut off at its first bytes.
-        if spend == Spend::Download
+        // A download or connection starts with a second's refill in hand, so
+        // one retried at the limit is refused here and not cut off at its
+        // first bytes.
+        if spend != Spend::Api
             && !buckets
-                .bucket(Meter::DownloadBytes, client, now)
-                .is_some_and(|bytes| bytes.tokens >= Meter::DownloadBytes.rate().1)
+                .bucket(Meter::Bytes, client, now)
+                .is_some_and(|bytes| bytes.tokens >= Meter::Bytes.rate().1)
         {
             return false;
         }
@@ -175,22 +178,22 @@ impl Limits {
         allowed
     }
 
-    fn downloaded_at(&self, client: IpAddr, bytes: usize, now: Instant) -> bool {
+    fn relayed_at(&self, client: IpAddr, bytes: usize, now: Instant) -> bool {
         let mut buckets = self.buckets();
         // With no room to track it, the client is taken to be in credit.
         buckets
-            .bucket(Meter::DownloadBytes, client, now)
+            .bucket(Meter::Bytes, client, now)
             .is_none_or(|bucket| {
                 bucket.tokens -= bytes as f64;
                 bucket.tokens > 0.0
             })
     }
 
-    /// Leaves `client` `bytes` it may still download.
+    /// Leaves `client` `bytes` it may still have relayed.
     #[cfg(test)]
     pub fn leave(&self, client: IpAddr, bytes: usize) {
-        let spent = Meter::DownloadBytes.rate().0 as usize - bytes;
-        self.downloaded(client, spent);
+        let spent = Meter::Bytes.rate().0 as usize - bytes;
+        self.relayed(client, spent);
     }
 
     fn buckets(&self) -> MutexGuard<'_, Buckets> {
@@ -210,7 +213,7 @@ mod tests {
 
     /// A download that leaves a client `seconds` of refill below empty.
     fn debt(seconds: f64) -> usize {
-        let (size, refill) = Meter::DownloadBytes.rate();
+        let (size, refill) = Meter::Bytes.rate();
         (size + seconds * refill) as usize
     }
 
@@ -218,7 +221,7 @@ mod tests {
     fn full_table(start: Instant) -> Limits {
         let limits = Limits::default();
         for n in 0..MAX_TRACKED as u32 {
-            limits.downloaded_at(client(n), debt(60.0), start);
+            limits.relayed_at(client(n), debt(60.0), start);
         }
         limits
     }
@@ -260,15 +263,15 @@ mod tests {
     fn a_download_no_bucket_tracks_is_not_cut() {
         let start = Instant::now();
         let limits = full_table(start);
-        assert!(limits.downloaded_at(client(u32::MAX), 1, start));
+        assert!(limits.relayed_at(client(u32::MAX), 1, start));
     }
 
     #[test]
     fn downloads_stop_until_their_bytes_are_paid_back() {
         let limits = Limits::default();
         let start = Instant::now();
-        assert!(limits.downloaded_at(client(1), 1, start), "in credit");
-        assert!(!limits.downloaded_at(client(1), debt(10.0), start), "spent");
+        assert!(limits.relayed_at(client(1), 1, start), "in credit");
+        assert!(!limits.relayed_at(client(1), debt(10.0), start), "spent");
         assert!(!limits.allow_at(Spend::Download, client(1), start));
         assert!(limits.allow_at(Spend::Download, client(2), start));
         let nearly = start + Duration::from_secs(9);

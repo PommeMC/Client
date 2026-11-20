@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Once, PoisonError};
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -18,7 +18,7 @@ use crate::{AppState, Config, relay};
 pub async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let host = text(request.headers(), header::HOST);
     if !host.is_some_and(|host| serves(&state.config, host)) {
-        tracing::warn!("Refused a request for host {host:?}");
+        tracing::debug!("Refused a request for host {host:?}");
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     }
     let mut response = next.run(request).await;
@@ -115,7 +115,10 @@ pub fn client(config: &Config, peer: ConnectInfo<SocketAddr>, headers: &HeaderMa
     };
     let address = if config.trust_proxy {
         forwarded().unwrap_or_else(|| {
-            tracing::warn!("The proxy sent no client address; its own stands in");
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!("The proxy sent no client address; its own stands in");
+            });
             peer.0.ip()
         })
     } else {
