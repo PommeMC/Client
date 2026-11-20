@@ -1,0 +1,94 @@
+# Components whose values decide what the client does: a hive's bees fill a
+# bundle, an equippable with a sound of its own still names its slot, and a
+# consumable with the bundle animation is still used up.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/tp @s ~ ~ ~ 0 -60"
+
+[[step]]
+chat = '/item replace entity @s hotbar.0 with minecraft:bundle'
+
+[[step]]
+chat = '/item replace entity @s hotbar.1 with minecraft:bee_nest[minecraft:bees=[{entity_data:{id:"minecraft:bee"},ticks_in_hive:0,min_ticks_in_hive:0}]]'
+
+[[step]]
+chat = '/item replace entity @s hotbar.2 with minecraft:dirt 8'
+
+[[step]]
+chat = '/item replace entity @s hotbar.3 with minecraft:diamond_helmet[minecraft:equippable={slot:"chest",equip_sound:{sound_id:"minecraft:custom"}}]'
+
+[[step]]
+expect = { slot = 39, item = "diamond_helmet", components = ["equippable"] }
+
+[[step]]
+open_inventory = true
+
+# The occupied nest alone fills the bundle, so the dirt stays where it is.
+[[step]]
+click = { slot = 37, op = "pickup_left" }
+
+[[step]]
+click = { slot = 36, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 37, item = "air" }
+
+[[step]]
+click = { slot = 38, op = "pickup_left" }
+
+[[step]]
+click = { slot = 36, op = "pickup_left" }
+
+[[step]]
+click = { slot = 38, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 38, item = "dirt", count = 8 }
+
+[[step]]
+click = { slot = 39, op = "quick_move" }
+
+[[step]]
+expect = { slot = 6, item = "diamond_helmet" }
+
+[[step]]
+expect = { slot = 5, item = "air" }
+
+[[step]]
+screenshot = "inventory"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = '/item replace entity @s hotbar.4 with minecraft:stick[minecraft:consumable={consume_seconds:0.5,animation:"bundle"}] 2'
+
+[[step]]
+expect = { slot = 40, item = "stick", count = 2 }
+
+[[step]]
+press = { key = "key.keyboard.5" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+expect = { slot = 40, item = "stick", count = 1 }
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+chat = "/clear @s"
