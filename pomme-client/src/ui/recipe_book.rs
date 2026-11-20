@@ -1296,13 +1296,10 @@ fn direct_trim_material_name(
 }
 
 fn stack_tooltip_lines(stack: &ResolvedSlotStack) -> Vec<TooltipLine> {
-    let mut lines = match crate::net::item_codec::stack_json(&stack.stack) {
-        Ok(value) => crate::ui::chat::item_tooltip_lines(&value, None, false),
-        Err(_) => vec![TooltipLine::new(
-            super::common::item_display_name(&stack.stack),
-            WHITE,
-        )],
-    };
+    // TODO: the recipe book has no registries in reach, so a component
+    // holding an entry of one a server sends is left out of the tooltip.
+    let value = pomme_item::components::stack_json(&stack.stack, &pomme_item::hash::Unnamed);
+    let mut lines = crate::ui::chat::item_tooltip_lines(&value, None, false);
     if let Some(trim) = &stack.direct_trim {
         let insert_at = lines.len().min(1);
         let upgrade = crate::lang::translate("item.minecraft.smithing_template.upgrade")

@@ -117,22 +117,32 @@ pub fn value_of(kind: DataComponentKind, bytes: &[u8], names: &dyn Names) -> Opt
     forms::value_of(kind, bytes, names)
 }
 
+/// `DataComponentPatch.CODEC`'s entries: each value under its type's name,
+/// with no form where it has none here, and a removed type under `!` and its
+/// name as an empty map.
+fn patch_values<'a>(
+    patch: &'a crate::ComponentPatch,
+    names: &'a dyn Names,
+) -> impl Iterator<Item = (String, Option<Value>)> + 'a {
+    patch
+        .iter()
+        .filter(|(kind, value)| !(value.is_some() && TRANSIENT.contains(kind)))
+        .map(|(kind, value)| {
+            let name = pomme_registry::Identifier::from(kind);
+            match value {
+                Some(bytes) => (name.to_string(), value_of(kind, bytes, names)),
+                None => (format!("!{name}"), Some(Record::new().build())),
+            }
+        })
+}
+
 /// `ItemStackTemplate.CODEC`: the item, with its count and patch when they
 /// aren't one and empty.
 fn template_value(stack: &ItemStack, names: &dyn Names) -> Option<Value> {
     let stack = stack.as_present()?;
-    // `DataComponentPatch.CODEC`: each value under its type's name, and a
-    // removed type under `!` and its name as an empty map.
-    let mut patch = Vec::new();
-    for (kind, value) in stack.component_patch.iter() {
-        let name = pomme_registry::Identifier::from(kind);
-        let entry = match value {
-            Some(_) if TRANSIENT.contains(&kind) => continue,
-            Some(bytes) => (Value::identifier(&name), value_of(kind, bytes, names)?),
-            None => (Value::String(format!("!{name}")), Record::new().build()),
-        };
-        patch.push(entry);
-    }
+    let patch = patch_values(&stack.component_patch, names)
+        .map(|(name, value)| Some((Value::String(name), value?)))
+        .collect::<Option<Vec<_>>>()?;
     Some(
         Record::new()
             .field("id", codec::entry_value(&stack.kind))
@@ -142,6 +152,22 @@ fn template_value(stack: &ItemStack, names: &dyn Names) -> Option<Value> {
             })
             .build(),
     )
+}
+
+/// The stack as the JSON a hover event shows an item with, which a tooltip
+/// is built from: its id, count and patch, each component in its `CODEC`
+/// form.
+// TODO: a component with no form here is left out, as is one holding an
+// entry `names` lacks.
+pub fn stack_json(stack: &crate::ItemStackData, names: &dyn Names) -> serde_json::Value {
+    let components: serde_json::Map<_, _> = patch_values(&stack.component_patch, names)
+        .filter_map(|(name, value)| Some((name, value?.to_json())))
+        .collect();
+    serde_json::json!({
+        "id": pomme_registry::Identifier::from(stack.kind).to_string(),
+        "count": stack.count,
+        "components": components,
+    })
 }
 
 /// Each stack's template, as a list.
@@ -457,6 +483,28 @@ mod tests {
                 "{fixture}: {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_stack_is_json_in_the_shape_a_hover_shows_an_item_with() {
+        let sword = crate::ItemStackData::new(ItemKind::DiamondSword, 1)
+            .with(&Damage { amount: 5 })
+            .with(&CustomName {
+                name: Text::literal("Excalibur"),
+            })
+            .without::<MaxDamage>();
+        assert_eq!(
+            stack_json(&sword, &crate::hash::Unnamed),
+            serde_json::json!({
+                "id": "minecraft:diamond_sword",
+                "count": 1,
+                "components": {
+                    "minecraft:damage": 5,
+                    "minecraft:custom_name": "Excalibur",
+                    "!minecraft:max_damage": {},
+                },
+            })
+        );
     }
 
     /// `component/<name>` as vanilla's own stream codec wrote it, read and

@@ -98,6 +98,36 @@ impl Value {
         Self::LongList(values.into_iter().collect())
     }
 
+    /// `JsonOps`: the form as JSON, which a tooltip is built from. A number
+    /// JSON can't hold (a float that is not finite) is null.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::Value as Json;
+        match self {
+            Self::Empty => Json::Null,
+            Self::Bool(value) => Json::from(*value),
+            Self::Byte(value) => Json::from(*value),
+            Self::Short(value) => Json::from(*value),
+            Self::Int(value) => Json::from(*value),
+            Self::Long(value) => Json::from(*value),
+            Self::Float(value) => Json::from(*value),
+            Self::Double(value) => Json::from(*value),
+            Self::String(value) => Json::from(value.as_str()),
+            Self::List(values) => values.iter().map(Self::to_json).collect(),
+            // A map's keys are strings in every `CODEC` here.
+            Self::Map(entries) => entries
+                .iter()
+                .filter_map(|(key, value)| match key {
+                    Self::String(key) => Some((key.clone(), value.to_json())),
+                    _ => None,
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into(),
+            Self::ByteList(values) => Json::from(values.as_slice()),
+            Self::IntList(values) => Json::from(values.as_slice()),
+            Self::LongList(values) => Json::from(values.as_slice()),
+        }
+    }
+
     /// `HashOps`: each variant as the method that hashes it.
     pub fn hash(&self) -> Hash {
         fn bytes(hashes: impl Iterator<Item = Hash>) -> Vec<u8> {
@@ -208,6 +238,15 @@ impl Record {
     }
 }
 
+/// No connection's registries: every entry of one is without a name.
+pub struct Unnamed;
+
+impl Names for Unnamed {
+    fn name(&self, _: &str, _: u32) -> Option<Identifier> {
+        None
+    }
+}
+
 /// The names of entries in the registries a server sends, which a value's
 /// `CODEC` form holds in place of their ids.
 pub trait Names {
@@ -219,6 +258,19 @@ pub trait Names {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_form_is_json_of_the_same_shape() {
+        let form = Record::new()
+            .field("count", Value::Int(3))
+            .field("flags", Value::list([Value::Bool(true), Value::Byte(-1)]))
+            .field("uuid", Value::IntList(vec![1, -2]))
+            .build();
+        assert_eq!(
+            form.to_json(),
+            serde_json::json!({"count": 3, "flags": [true, -1], "uuid": [1, -2]})
+        );
+    }
 
     #[test]
     fn a_negative_zero_is_not_the_default_zero() {
