@@ -18,7 +18,7 @@ use futures_util::stream::SplitStream;
 use futures_util::{SinkExt as _, StreamExt as _};
 use hickory_resolver::config::{GOOGLE, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::proto::rr::RData;
+use hickory_resolver::proto::rr::{Name, RData};
 use hickory_resolver::{Resolver, TokioResolver};
 use pomme_protocol::status::Intention;
 use pomme_protocol::wire::read_varint;
@@ -99,13 +99,10 @@ pub async fn connect(
     if port < FIRST_UNPRIVILEGED_PORT {
         return StatusCode::FORBIDDEN.into_response();
     }
-    // Not the system's lookup, which holds a thread until it gives up however
-    // long ago the wait for it ended.
-    let lookup = RESOLVER.lookup_ip(host.as_str());
     // A name that doesn't resolve is refused as one with no address the relay
     // may reach is, so the answer doesn't say which names exist behind it.
-    let found = in_time("resolve", &host, lookup).await;
-    let resolved = found.iter().flat_map(|found| found.iter());
+    let found = in_time("resolve", &host, resolved(&host)).await;
+    let resolved = found.iter().flatten().copied();
     let addresses: Vec<SocketAddr> = dialed(resolved, |ip| reachable(&state.config, ip))
         .map(|ip| SocketAddr::new(ip, port))
         .collect();
@@ -157,15 +154,18 @@ async fn in_time<T, E: std::fmt::Display>(
     }
 }
 
-/// Where `host:port` is served: at the default port, the target of its
-/// `_minecraft._tcp` SRV record when it has one, as the desktop client finds
-/// it.
+/// Where `host:port` is served: for a name at the default port, the target
+/// of its `_minecraft._tcp` SRV record when it has one, as the desktop client
+/// finds it.
 async fn server_address(host: String, port: u16) -> (String, u16) {
-    if port != 25565 {
+    if port != 25565 || host.parse::<IpAddr>().is_ok() {
         return (host, port);
     }
-    let lookup = RESOLVER.srv_lookup(format!("_minecraft._tcp.{host}"));
-    let Ok(Ok(lookup)) = tokio::time::timeout(REACH_WAIT, lookup).await else {
+    let lookup = async {
+        let name = queried(&format!("_minecraft._tcp.{host}")).ok()?;
+        RESOLVER.srv_lookup(name).await.ok()
+    };
+    let Ok(Some(lookup)) = tokio::time::timeout(REACH_WAIT, lookup).await else {
         return (host, port);
     };
     let served = lookup
@@ -176,6 +176,25 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
             _ => None,
         });
     served.unwrap_or((host, port))
+}
+
+type LookupError = Box<dyn std::error::Error + Send + Sync>;
+
+/// `host`'s addresses: itself when it is one, and otherwise what DNS has for
+/// it. Not through the system's lookup, which holds a thread until it gives
+/// up however long ago the wait for it ended.
+async fn resolved(host: &str) -> Result<Vec<IpAddr>, LookupError> {
+    if let Ok(ip) = host.parse() {
+        return Ok(vec![ip]);
+    }
+    let lookup = RESOLVER.lookup_ip(queried(host)?).await?;
+    Ok(lookup.iter().collect())
+}
+
+/// `name` as DNS is asked for it. As ASCII: read as UTF-8, a name with an
+/// underscore in it (an SRV target can have one) is refused.
+fn queried(name: &str) -> Result<Name, LookupError> {
+    Ok(Name::from_ascii(name)?)
 }
 
 /// The addresses to dial of those a name has: the first `reachable` ones of
@@ -527,6 +546,16 @@ pub mod tests {
         for ip in ["8.8.8.8", "::ffff:8.8.8.8"] {
             assert!(reachable(&config, ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_address_resolves_to_itself_and_a_name_may_have_an_underscore() {
+        for ip in ["203.0.113.5", "2001:db8::5"] {
+            let found = resolved(ip).await.unwrap();
+            assert_eq!(found, [ip.parse::<IpAddr>().unwrap()]);
+        }
+        let name = queried("_minecraft._tcp.node_3.host.example").unwrap();
+        assert_eq!(name.to_ascii(), "_minecraft._tcp.node_3.host.example");
     }
 
     #[test]
