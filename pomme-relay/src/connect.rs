@@ -191,10 +191,16 @@ async fn resolved(host: &str) -> Result<Vec<IpAddr>, LookupError> {
     Ok(lookup.iter().collect())
 }
 
-/// `name` as DNS is asked for it. As ASCII: read as UTF-8, a name with an
-/// underscore in it (an SRV target can have one) is refused.
+/// `name` as DNS is asked for it: an ASCII one as written, since read as
+/// UTF-8 a name with an underscore in it (an SRV target can have one) is
+/// refused, and any other in its ASCII form.
 fn queried(name: &str) -> Result<Name, LookupError> {
-    Ok(Name::from_ascii(name)?)
+    let parse = if name.is_ascii() {
+        Name::from_ascii
+    } else {
+        Name::from_utf8
+    };
+    Ok(parse(name)?)
 }
 
 /// The addresses to dial of those a name has: the first `reachable` ones of
@@ -549,13 +555,24 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn an_address_resolves_to_itself_and_a_name_may_have_an_underscore() {
+    async fn an_address_resolves_to_itself() {
         for ip in ["203.0.113.5", "2001:db8::5"] {
             let found = resolved(ip).await.unwrap();
             assert_eq!(found, [ip.parse::<IpAddr>().unwrap()]);
         }
-        let name = queried("_minecraft._tcp.node_3.host.example").unwrap();
-        assert_eq!(name.to_ascii(), "_minecraft._tcp.node_3.host.example");
+    }
+
+    #[test]
+    fn a_name_may_have_an_underscore_or_letters_outside_ascii() {
+        for (name, asked) in [
+            (
+                "_minecraft._tcp.node_3.host.example",
+                "_minecraft._tcp.node_3.host.example",
+            ),
+            ("b\u{fc}cher.example", "xn--bcher-kva.example"),
+        ] {
+            assert_eq!(queried(name).unwrap().to_ascii(), asked);
+        }
     }
 
     #[test]
