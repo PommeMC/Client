@@ -2613,66 +2613,12 @@ pub(crate) fn stack_tooltip_lines(
     advanced: bool,
 ) -> Vec<TooltipLine> {
     item_tooltip_lines_with_bindings(
-        &stack_json(data, registries),
+        &crate::net::item_codec::stack_json(data, registries),
         None,
         Some(data.component_kinds().len()),
         advanced,
         &KeyBindings::default(),
     )
-}
-
-/// The stack in `show_item`'s JSON shape, for [`item_tooltip_lines`].
-/// azalea's serde writes an enchantment as an enum variant, which can't key a
-/// JSON map, so enchantments go in by their registry names.
-// TODO: pomme's item grammar has no JSON output yet, so the rest still goes
-// through azalea's serde shape.
-fn stack_json(
-    data: &pomme_item::ItemStackData,
-    registries: &azalea_core::registry_holder::RegistryHolder,
-) -> serde_json::Value {
-    use pomme_item::components::{Component as _, Enchantments, StoredEnchantments};
-    use pomme_registry::DataRegistry;
-
-    let mut stack = data.clone();
-    stack.component_patch.remove(Enchantments::KIND);
-    stack.component_patch.remove(StoredEnchantments::KIND);
-    let mut value = crate::net::item_codec::stack_json(&stack).unwrap_or_default();
-    let names = |levels: &[(pomme_registry::data::Enchantment, i32)]| {
-        levels
-            .iter()
-            .filter_map(|(enchantment, level)| {
-                let (id, _) = registries
-                    .enchantment
-                    .map
-                    .get_index(enchantment.protocol_id() as usize)?;
-                Some((id.to_string(), serde_json::Value::from(*level)))
-            })
-            .collect::<serde_json::Map<_, _>>()
-    };
-    let enchantments = [
-        (
-            "minecraft:enchantments",
-            data.component::<Enchantments>().map(|e| names(&e.levels)),
-        ),
-        (
-            "minecraft:stored_enchantments",
-            data.component::<StoredEnchantments>()
-                .map(|e| names(&e.levels)),
-        ),
-    ];
-    if let Some(map) = value.as_object_mut() {
-        let components = map
-            .entry("components")
-            .or_insert_with(|| serde_json::Value::Object(Default::default()));
-        if let Some(components) = components.as_object_mut() {
-            for (key, levels) in enchantments {
-                if let Some(levels) = levels {
-                    components.insert(key.to_owned(), serde_json::Value::Object(levels));
-                }
-            }
-        }
-    }
-    value
 }
 
 /// `component_count` is the stack's components including its item's
@@ -2835,7 +2781,13 @@ fn item_tooltip_lines_with_bindings(
             None => {
                 defaults = kind
                     .and_then(pomme_item::defaults::component::<AttributeModifiers>)
-                    .map(|modifiers| attribute_modifiers_json(&modifiers))
+                    .and_then(|modifiers| {
+                        pomme_item::components::Component::value(
+                            &modifiers,
+                            &pomme_item::hash::Unnamed,
+                        )
+                    })
+                    .map(|modifiers| modifiers.to_json())
                     .unwrap_or_default();
                 &defaults
             }
@@ -2914,32 +2866,6 @@ fn item_tooltip_lines_with_bindings(
 // TODO: the modifiers enchantments add (`EnchantmentHelper.forEachModifier`),
 // which come from the enchantment registry's effects; and the player's own
 // base attack damage and speed, where a server changed them.
-/// An item's default modifiers in the JSON form [`attribute_tooltip_lines`]
-/// reads off a stack; no default overrides its line's text.
-fn attribute_modifiers_json(modifiers: &AttributeModifiers) -> serde_json::Value {
-    use pomme_item::components::AttributeModifierDisplay;
-
-    modifiers
-        .modifiers
-        .iter()
-        .map(|entry| {
-            let display = match entry.display {
-                AttributeModifierDisplay::Default => "default",
-                AttributeModifierDisplay::Hidden => "hidden",
-                AttributeModifierDisplay::Override { .. } => "override",
-            };
-            serde_json::json!({
-                "type": entry.kind.to_string(),
-                "id": entry.modifier.id.to_string(),
-                "amount": entry.modifier.amount,
-                "operation": entry.modifier.operation.name(),
-                "slot": entry.slot.name(),
-                "display": display,
-            })
-        })
-        .collect()
-}
-
 fn attribute_tooltip_lines(
     modifiers: &[serde_json::Value],
     bindings: &KeyBindings,
