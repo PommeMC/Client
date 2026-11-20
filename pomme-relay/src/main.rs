@@ -10,17 +10,19 @@
 //! Public hosting puts it behind a TLS reverse proxy, run as
 //! `--public-host play.pomme.rs --trust-proxy`. It then answers only for that
 //! hostname, refuses cross-site requests, dials only public addresses at
-//! unprivileged ports (never the machine's own; one that a NAT in front maps
-//! to it is given as `--block-address`), and rate limits each client. The
-//! proxy must pass the request's `Host` on unchanged and add the client's
-//! address to `X-Forwarded-For`.
+//! unprivileged ports, and rate limits each client. It never dials its own
+//! machine's addresses, but can't know one that a NAT or a container's
+//! network maps to it, nor which public addresses are its neighbours behind
+//! the same firewall: those are given as `--block-address`. The proxy must
+//! pass the request's `Host` on unchanged and add the client's address to
+//! `X-Forwarded-For`.
 
 mod connect;
 mod guard;
 mod limits;
 mod relay;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -83,12 +85,13 @@ struct Config {
     /// Game connections open at once across every client.
     #[arg(long, default_value_t = 512)]
     max_connections: usize,
-    /// An address game connections may never reach. The relay refuses its
-    /// machine's own by itself; this is for a public one a NAT in front maps
-    /// to it, whose services would otherwise be dialed from inside.
+    /// An address, or a network such as 203.0.113.0/24, game connections
+    /// may never reach. The relay refuses its machine's own by itself; this
+    /// is for a public one a NAT in front maps to it, and for neighbours on
+    /// its network, whose services would otherwise be dialed from inside.
     /// Repeatable.
     #[arg(long = "block-address")]
-    block_addresses: Vec<IpAddr>,
+    block_addresses: Vec<connect::Network>,
 }
 
 /// A hostname as a `Host` header names it, less the port.
@@ -145,6 +148,7 @@ fn app(state: AppState, dir: &Path) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use std::time::Duration;
 
     use axum::body::Body;

@@ -72,7 +72,6 @@ const DROPPED_REQUEST_HEADERS: &[&str] = &[
 /// length is one of them so that a body cut short reads as a failure even
 /// where nothing else marks its end.
 const KEPT_RESPONSE_HEADERS: &[header::HeaderName] = &[
-    header::CONTENT_TYPE,
     header::CONTENT_LENGTH,
     header::CACHE_CONTROL,
     header::ETAG,
@@ -81,8 +80,8 @@ const KEPT_RESPONSE_HEADERS: &[header::HeaderName] = &[
     header::CONTENT_RANGE,
 ];
 
-/// The content types the client reads. Anything else is relayed as bytes, so
-/// no relayed response can be a page running as this relay's origin.
+/// The content types the client reads. Anything else, or none, is relayed as
+/// bytes, so no relayed response can be a page running as this relay's origin.
 const DATA_TYPES: &[&str] = &[
     "application/json",
     "application/octet-stream",
@@ -93,6 +92,9 @@ const DATA_TYPES: &[&str] = &[
 /// More than an account or sign-in request sends; the largest is a skin, a
 /// few kilobytes of PNG.
 pub const MAX_BODY: usize = 256 * 1024;
+
+/// How long a request has to send its body.
+const BODY_WAIT: Duration = Duration::from_secs(10);
 
 /// Gives up on a host that won't answer, or a download that stalls, rather
 /// than holding the relay's connections open. A redirect isn't followed: its
@@ -137,9 +139,11 @@ pub async fn relay(
     let body = if download {
         Bytes::new()
     } else {
-        match axum::body::to_bytes(body, MAX_BODY).await {
-            Ok(body) => body,
-            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        let read = axum::body::to_bytes(body, MAX_BODY);
+        match tokio::time::timeout(BODY_WAIT, read).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
         }
     };
     let url = format!("https://{host}/{rest}");
@@ -166,16 +170,18 @@ pub async fn relay(
         tracing::warn!("{host} redirects, which the relay doesn't follow");
         return StatusCode::BAD_GATEWAY.into_response();
     }
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .filter(|content_type| data(content_type))
+        .cloned()
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
     let mut response = Response::builder()
         .status(upstream.status())
-        .header(header::CONTENT_SECURITY_POLICY, "sandbox");
+        .header(header::CONTENT_SECURITY_POLICY, "sandbox")
+        .header(header::CONTENT_TYPE, content_type);
     for name in KEPT_RESPONSE_HEADERS {
         if let Some(value) = upstream.headers().get(name) {
-            let value = if name == header::CONTENT_TYPE && !data(value) {
-                &HeaderValue::from_static("application/octet-stream")
-            } else {
-                value
-            };
             response = response.header(name, value);
         }
     }

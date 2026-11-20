@@ -1,9 +1,11 @@
 //! `/connect/<host>/<port>`: a WebSocket from the page, bridged to a game
 //! server's TCP port, since a page can't open sockets.
 
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::LazyLock;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Once};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -95,15 +97,16 @@ pub async fn connect(
     // Not the system's lookup, which holds a thread until it gives up however
     // long ago the wait for it ended.
     let lookup = RESOLVER.lookup_ip(host.as_str());
-    let addresses: Vec<SocketAddr> = match in_time("resolve", &host, lookup).await {
-        Ok(addresses) => addresses
-            .iter()
-            .filter(|ip| reachable(&state.config, *ip))
-            .take(MAX_DIALED)
-            .map(|ip| SocketAddr::new(ip, port))
-            .collect(),
-        Err(status) => return status.into_response(),
-    };
+    // A name that doesn't resolve is refused as one with no address the relay
+    // may reach is, so the answer doesn't say which names exist behind it.
+    let addresses: Vec<SocketAddr> = in_time("resolve", &host, lookup)
+        .await
+        .iter()
+        .flat_map(|found| found.iter())
+        .filter(|ip| reachable(&state.config, *ip))
+        .take(MAX_DIALED)
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
     if addresses.is_empty() {
         tracing::warn!("Refused {host:?}:{port}, which has no address it may reach");
         return StatusCode::FORBIDDEN.into_response();
@@ -161,10 +164,14 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
     let Ok(Ok(lookup)) = tokio::time::timeout(REACH_WAIT, lookup).await else {
         return (host, port);
     };
-    match lookup.answers().first().map(|record| &record.data) {
-        Some(RData::SRV(srv)) => (srv.target.to_ascii(), srv.port),
-        _ => (host, port),
-    }
+    let served = lookup
+        .answers()
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::SRV(srv) => Some((srv.target.to_ascii(), srv.port)),
+            _ => None,
+        });
+    served.unwrap_or((host, port))
 }
 
 /// Whether the relay may dial `ip`: not a `--block-address`, and unless
@@ -174,14 +181,74 @@ fn reachable(config: &Config, ip: IpAddr) -> bool {
     !config
         .block_addresses
         .iter()
-        .any(|blocked| unwrapped(*blocked) == ip)
+        .any(|blocked| blocked.contains(ip))
         && (config.allow_private_servers || (public(ip) && !own(ip)))
 }
 
-/// Whether `ip` is one of this machine's addresses, which are the only ones
-/// it can bind.
+/// A `--block-address`: one address, or every address under a prefix.
+#[derive(Clone, Copy)]
+pub struct Network {
+    prefix: u128,
+    bits: u32,
+}
+
+impl Network {
+    /// Whether it holds `ip`, already [`unwrapped`].
+    fn contains(self, ip: IpAddr) -> bool {
+        let differing = (as_v6(ip) ^ self.prefix).checked_shr(u128::BITS - self.bits);
+        differing.unwrap_or(0) == 0
+    }
+}
+
+impl FromStr for Network {
+    type Err = &'static str;
+
+    fn from_str(written: &str) -> Result<Self, Self::Err> {
+        let (address, bits) = match written.split_once('/') {
+            Some((address, bits)) => (address, Some(bits)),
+            None => (written, None),
+        };
+        let address: IpAddr = address.parse().map_err(|_| "expected an IP address")?;
+        let Some(bits) = bits else {
+            return Ok(Self {
+                prefix: as_v6(unwrapped(address)),
+                bits: u128::BITS,
+            });
+        };
+        let (width, mapped) = match address {
+            IpAddr::V4(_) => (Ipv4Addr::BITS, u128::BITS - Ipv4Addr::BITS),
+            IpAddr::V6(_) => (u128::BITS, 0),
+        };
+        let bits = bits.parse::<u32>().ok().filter(|bits| *bits <= width);
+        Ok(Self {
+            prefix: as_v6(address),
+            bits: mapped + bits.ok_or("expected a prefix length the address has")?,
+        })
+    }
+}
+
+/// `ip` as IPv6 bits, an IPv4 address as its IPv4-mapped one.
+fn as_v6(ip: IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(ip) => ip.to_ipv6_mapped().into(),
+        IpAddr::V6(ip) => ip.into(),
+    }
+}
+
+/// Whether `ip` is one of this machine's addresses, the only ones it can
+/// bind. A bind that fails any other way doesn't say, so `ip` counts as one.
 fn own(ip: IpAddr) -> bool {
-    UdpSocket::bind((ip, 0)).is_ok()
+    match UdpSocket::bind((ip, 0)) {
+        Err(error) if error.kind() == ErrorKind::AddrNotAvailable => false,
+        Err(error) => {
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!("Can't tell this machine's addresses from others: {error}");
+            });
+            true
+        }
+        Ok(_) => true,
+    }
 }
 
 /// Whether `ip` is on the open internet, not a network only the relay's
@@ -244,10 +311,6 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
     let Ok(Some(sent)) = sent.await else {
         return;
     };
-    let written = tokio::time::timeout(IDLE, to_server.write_all(&sent));
-    if !matches!(written.await, Ok(Ok(()))) {
-        return;
-    }
     let activity = Activity::start();
     let carried = |bytes: usize| {
         activity.mark();
@@ -257,6 +320,10 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
         }
         allowed
     };
+    let written = tokio::time::timeout(IDLE, to_server.write_all(&sent));
+    if !carried(sent.len()) || !matches!(written.await, Ok(Ok(()))) {
+        return;
+    }
     let upstream = async {
         while let Some(Ok(message)) = from_page.next().await {
             match message {
@@ -266,7 +333,12 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
                     }
                 }
                 Message::Close(_) => break,
-                _ => {}
+                // Not carried on, but the relay still had to receive it.
+                other => {
+                    if !limits.relayed(client, other.into_data().len()) {
+                        break;
+                    }
+                }
             }
         }
     };
@@ -287,14 +359,14 @@ async fn bridge(socket: WebSocket, tcp: TcpStream, limits: &Limits, client: IpAd
     }
 }
 
-/// The page's first bytes, if they open with a handshake.
+/// The page's first bytes, if they open with a handshake and it sent nothing
+/// else first.
 async fn opening(from_page: &mut SplitStream<WebSocket>) -> Option<Vec<u8>> {
     let mut sent = Vec::new();
     while let Some(Ok(message)) = from_page.next().await {
         match message {
             Message::Binary(bytes) => sent.extend_from_slice(&bytes),
-            Message::Close(_) => break,
-            _ => continue,
+            _ => break,
         }
         if let Some(handshake) = opens_with_handshake(&sent) {
             return handshake.then_some(sent);
@@ -405,9 +477,15 @@ pub mod tests {
 
     #[test]
     fn blocked_addresses_stay_blocked_however_written() {
+        let blocked = [
+            "203.0.113.7",
+            "198.51.100.0/24",
+            "2001:db8:5::/64",
+            "64:ff9b::cb00:7109",
+        ];
         let config = Config {
             allow_private_servers: true,
-            block_addresses: vec!["203.0.113.7".parse().unwrap()],
+            block_addresses: blocked.map(|network| network.parse().unwrap()).into(),
             ..Config::default()
         };
         for ip in [
@@ -415,10 +493,34 @@ pub mod tests {
             "::ffff:203.0.113.7",
             "64:ff9b::cb00:7107",
             "2002:cb00:7107::1",
+            "203.0.113.9",
+            "198.51.100.0",
+            "198.51.100.255",
+            "::ffff:198.51.100.9",
+            "2001:db8:5::20",
+            "2001:db8:5:0:ffff::1",
         ] {
             assert!(!reachable(&config, ip.parse().unwrap()), "{ip}");
         }
-        assert!(reachable(&config, "192.168.0.1".parse().unwrap()));
+        for ip in [
+            "192.168.0.1",
+            "203.0.113.8",
+            "198.51.99.255",
+            "198.51.101.0",
+            "2001:db8:4:ffff::1",
+            "2001:db8:5:1::1",
+        ] {
+            assert!(reachable(&config, ip.parse().unwrap()), "{ip}");
+        }
+        for written in [
+            "",
+            "play.pomme.rs",
+            "203.0.113.7/33",
+            "2001:db8::/129",
+            "203.0.113.7/",
+        ] {
+            assert!(written.parse::<Network>().is_err(), "{written}");
+        }
     }
 
     #[test]
