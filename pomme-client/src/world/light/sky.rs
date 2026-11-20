@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::data::{DataLayer, LAYER_BYTES};
 use super::engine::LightEngine;

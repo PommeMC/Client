@@ -4610,6 +4610,7 @@ dependencies = [
 name = "pomme-client"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "arboard",
  "azalea-auth",
  "azalea-block",
@@ -4622,6 +4623,7 @@ dependencies = [
  "azalea-protocol",
  "base64 0.23.1",
  "bytemuck",
+ "cfb8",
  "chrono",
  "clap",
  "criterion",
@@ -4636,6 +4638,7 @@ dependencies = [
  "glsl-lang",
  "hickory-resolver",
  "image",
+ "indexmap",
  "jni",
  "libloading 0.9.0",
  "libmimalloc-sys",
@@ -4665,6 +4668,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rsa",
+ "rsa_public_encrypt_pkcs1",
  "scopeguard",
  "self_cell",
  "serde",

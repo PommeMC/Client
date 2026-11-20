@@ -6,7 +6,7 @@
 //! per column, same semantics (including the `min_y` slot doubling as the
 //! open-column sentinel that reads as `i32::MIN`).
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use crate::world::block;
 use crate::world::chunk::{Chunk, SectionBlocks};

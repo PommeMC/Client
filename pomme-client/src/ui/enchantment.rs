@@ -6,7 +6,6 @@
 
 use std::time::Instant;
 
-use azalea_core::registry_holder::RegistryHolder;
 use glam::FloatExt;
 use pomme_item::ItemStack;
 
@@ -16,6 +15,7 @@ use super::container::{
     resolve_gesture,
 };
 use super::text::TextSpan;
+use crate::net::registry_holder::RegistryHolder;
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::BookPreview;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -562,7 +562,7 @@ fn clue_spans(registries: &RegistryHolder, clue: i16, level: i16) -> Option<Vec<
     if clue < 0 {
         return None;
     }
-    let (id, _) = registries.enchantment.map.get_index(clue as usize)?;
+    let id = registries.name(&crate::net::ENCHANTMENT_REGISTRY.into(), clue as u32)?;
     let path = id.path();
 
     let key = format!("enchantment.{}.{}", id.namespace(), path);

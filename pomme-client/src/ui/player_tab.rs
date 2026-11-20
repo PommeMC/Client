@@ -10,7 +10,6 @@ use crate::ui::text::{TextSpan, font_spans};
 
 const MAX_ROWS_PER_COL: usize = 20;
 const HEAD_COL_W: i32 = 9;
-const SPECTATOR_GAME_MODE: u8 = 3;
 
 const BG_BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 0.5]; // Integer.MIN_VALUE (0x80000000)
 const BG_ROW: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0]; // 0x20FFFFFF
@@ -164,7 +163,7 @@ pub fn build_player_tab_overlay(
             });
         }
         let mut spans = display_names[i].clone();
-        if info.game_mode == SPECTATOR_GAME_MODE {
+        if info.game_mode == crate::player::SPECTATOR {
             // Vanilla `decorateName`: spectators are italicized, nothing else.
             for span in &mut spans {
                 span.italic = true;

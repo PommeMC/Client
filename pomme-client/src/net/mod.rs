@@ -15,6 +15,7 @@ mod config_wire;
 pub mod conn;
 pub mod connection;
 mod container_wire;
+mod crypt;
 mod dialog;
 mod entity_data;
 mod entity_wire;
@@ -29,6 +30,7 @@ mod lifecycle_wire;
 mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
+pub mod registry_holder;
 pub mod resolve;
 mod resource_pack_wire;
 mod scoreboard_wire;
@@ -43,8 +45,8 @@ mod wire_corpus;
 
 use std::sync::Arc;
 
-use azalea_block::BlockState;
 use glam::DVec3;
+use pomme_block::BlockState;
 use pomme_item::ItemStack;
 use pomme_item::components::EquipmentSlot;
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -136,6 +138,7 @@ pub struct DimensionInfo {
 
 /// The painting variants' registry, which also names its tags.
 pub(crate) const PAINTING_VARIANT_REGISTRY: &str = "minecraft:painting_variant";
+pub(crate) const ENCHANTMENT_REGISTRY: &str = "minecraft:enchantment";
 
 pub enum NetworkEvent {
     /// Ordered before login/configuration events on both transports.
@@ -145,7 +148,7 @@ pub enum NetworkEvent {
     /// Login is done: configuration starts, or play where there is none.
     LoggedIn,
     Connected,
-    Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    Registries(Arc<crate::net::registry_holder::RegistryHolder>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
@@ -264,7 +267,7 @@ pub enum NetworkEvent {
         title: String,
     },
     OpenSignEditor {
-        pos: azalea_core::position::BlockPos,
+        pos: crate::position::BlockPos,
         is_front_text: bool,
     },
     ContainerClosed,

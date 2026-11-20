@@ -160,7 +160,7 @@ fn apply_server_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     sync_block_entities(game, pos, state);
     if game.interaction.update_known_server_state(&pos, state) {
@@ -175,7 +175,7 @@ fn set_client_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     sync_block_entities(game, pos, state);
     write_block(game, priority_remesh, pos, state);
@@ -184,7 +184,7 @@ fn set_client_block(
 fn sync_block_entities(
     game: &mut GameState,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     let block_state_data = game.block_registry.block_state_data(state);
     // Vanilla drops a moving block's entity once its cell holds anything else.
@@ -203,7 +203,7 @@ fn write_block(
     game: &mut GameState,
     priority_remesh: &mut Vec<(crate::position::ChunkPos, i32)>,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     crate::world::light::set_block_and_light(
         &game.chunk_store,
@@ -231,7 +231,7 @@ fn write_block(
 struct ClientPistonLevel<'a> {
     game: &'a mut GameState,
     remesh: &'a mut Vec<(crate::position::ChunkPos, i32)>,
-    destroyed: Vec<(crate::position::BlockPos, azalea_block::BlockState)>,
+    destroyed: Vec<(crate::position::BlockPos, pomme_block::BlockState)>,
 }
 
 impl<'a> ClientPistonLevel<'a> {
@@ -249,11 +249,11 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
         &self.game.block_registry
     }
 
-    fn block(&self, pos: crate::position::BlockPos) -> azalea_block::BlockState {
+    fn block(&self, pos: crate::position::BlockPos) -> pomme_block::BlockState {
         self.game.chunk_store.get_block_state(pos.x, pos.y, pos.z)
     }
 
-    fn set_block(&mut self, pos: crate::position::BlockPos, state: azalea_block::BlockState) {
+    fn set_block(&mut self, pos: crate::position::BlockPos, state: pomme_block::BlockState) {
         set_client_block(self.game, self.remesh, pos, state);
     }
 
@@ -274,7 +274,7 @@ impl crate::world::piston::PistonLevel for ClientPistonLevel<'_> {
         &mut self.game.block_entity_anim.pistons
     }
 
-    fn destroy_effect(&mut self, pos: crate::position::BlockPos, state: azalea_block::BlockState) {
+    fn destroy_effect(&mut self, pos: crate::position::BlockPos, state: pomme_block::BlockState) {
         self.destroyed.push((pos, state));
     }
 }
@@ -410,7 +410,7 @@ fn block_break_effect(
     audio: &crate::audio::AudioEngine,
     game: &mut GameState,
     pos: crate::position::BlockPos,
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
 ) {
     let block_state_data = game.block_registry.block_state_data(state);
     if !block_state_data.is_air() {
@@ -2783,7 +2783,7 @@ impl AppCore {
                     game.server_links = links;
                 }
                 NetworkEvent::OpenSignEditor { pos, is_front_text } => {
-                    if let Some(editor) = game.sign_editor_for(pos.into(), is_front_text) {
+                    if let Some(editor) = game.sign_editor_for(pos, is_front_text) {
                         self.replace_screen(connection, game);
                         game.close_menu();
                         game.sign_editor = Some(editor);
@@ -4666,9 +4666,8 @@ fn worn_for<'a>(
     inventory: &'a crate::player::inventory::Inventory,
     selected: u8,
     creative: bool,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
 ) -> crate::player::interaction::Worn<'a> {
-    use azalea_core::registry_holder::components::PreventArmorChange;
     use pomme_item::components::{Enchantments, Equippable};
     use pomme_registry::DataRegistry;
 
@@ -4684,11 +4683,14 @@ fn worn_for<'a>(
             .and_then(|w| w.component::<Enchantments>())
             .is_some_and(|e| {
                 e.levels.iter().any(|(enchantment, _)| {
+                    // `EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE`.
                     registries
-                        .enchantment
-                        .map
-                        .get_index(enchantment.protocol_id() as usize)
-                        .is_some_and(|(_, data)| data.get::<PreventArmorChange>().is_some())
+                        .get(&crate::net::ENCHANTMENT_REGISTRY.into())
+                        .and_then(|registry| {
+                            registry.map.get_index(enchantment.protocol_id() as usize)
+                        })
+                        .and_then(|(_, data)| data.compound("effects"))
+                        .is_some_and(|effects| effects.contains("minecraft:prevent_armor_change"))
                 })
             });
     crate::player::interaction::Worn {

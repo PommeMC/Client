@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
 use glam::{DVec3, Vec3};
+use pomme_block::BlockState;
 use pomme_item::ItemStackData;
 use pomme_item::components::{
     BlocksAttacks, ChargedProjectiles, Consumable, EquipmentSlot, Equippable, Food,

@@ -1,7 +1,6 @@
 //! Configuration-phase frames, decoded by pomme, and the registries collected
 //! from them.
 
-use azalea_core::registry_holder::RegistryHolder;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::configuration::{self, ConfigPacket, RegistryData};
 use pomme_protocol::lifecycle::{self, LifecyclePacket};
@@ -10,6 +9,8 @@ use pomme_protocol::tags::{self, Tags};
 use pomme_protocol::{Direction, KnownPack, PacketTable, Phase};
 use pomme_registry::identifier::Identifier;
 use simdnbt::owned::NbtTag;
+
+use crate::net::registry_holder::RegistryHolder;
 
 /// A configuration packet pomme acts on, by the module that reads it.
 #[derive(Debug)]
@@ -105,7 +106,7 @@ impl Registries {
     }
 
     /// Appends one registry. The server omits the data of every entry a pack
-    /// we claimed carries, so those are filled in before azalea drops them.
+    /// we claimed carries, so those are filled in before the holder drops them.
     pub fn append(&mut self, protocol: i32, data: RegistryData) -> Result<(), RegistryError> {
         let registry = Identifier::new(&data.registry);
         let entries: Option<Vec<_>> = data
@@ -136,7 +137,7 @@ impl Registries {
 /// Why a registry wasn't appended.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum RegistryError {
-    /// azalea's holder can't hold it.
+    /// The holder can't hold it.
     #[error("{0}")]
     Unsupported(String),
     /// A claimed pack lacks an element the server left out; vanilla
@@ -147,7 +148,7 @@ pub(super) enum RegistryError {
 
 impl RegistryError {
     // TODO: vanilla takes any tag as an element (26.3's `block_transformer`
-    // entries are lists); azalea's holder only compounds, so such a registry
+    // entries are lists); the holder only compounds, so such a registry
     // is left out whole.
     pub fn not_a_compound(registry: &Identifier) -> Self {
         Self::Unsupported(format!("an element of {registry} isn't a compound"))
@@ -300,7 +301,7 @@ mod tests {
         let mut registries = Registries::default();
         assert!(registries.select_packs(NATIVE.protocol, &[]).is_empty());
         registries.append(NATIVE.protocol, biomes()).unwrap();
-        // azalea drops the entry that came without data.
+        // The holder drops the entry that came without data.
         assert_eq!(crate::net::connection::biome_count(&registries.holder), 1);
     }
 }

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 use simdnbt::owned::NbtCompound;
 
 use crate::position::BlockPos;

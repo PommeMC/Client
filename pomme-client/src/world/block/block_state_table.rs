@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::{
     BEDROCK_LIGHT, BLOCK_DATA, BLOCK_TABLES, BlockStateData, FIRST_STATES, Fluid, FluidKind,

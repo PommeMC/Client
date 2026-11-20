@@ -2,8 +2,8 @@
 //! in the wire version's id space (the connection's selected table reads them),
 //! and only `block_entity_data`'s type needs a registry remap.
 
-use azalea_block::BlockState;
 use crossbeam_channel::Sender;
+use pomme_block::BlockState;
 use pomme_protocol::block::{self, BlockPacket};
 use pomme_protocol::codec::DecodeResult;
 use pomme_registry::Registry;

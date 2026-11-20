@@ -22,10 +22,10 @@ pub mod sound;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use azalea_block::BlockState;
 pub use block_registry::{Block, BlockData};
 pub(crate) use block_state_table::BlockStateTable;
 use glam::{DVec3, dvec3};
+use pomme_block::BlockState;
 pub(crate) use render_props::{FaceCover, MeshKind, RenderProps};
 
 use crate::physics::block_shape::LocalBox;

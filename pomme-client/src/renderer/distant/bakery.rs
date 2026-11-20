@@ -2,8 +2,8 @@
 //! each of its six sides into a 16x16 face texture on the CPU, colour, depth
 //! and which texels are tinted.
 
-use azalea_block::BlockState;
 use glam::{Mat4, Quat, Vec3, Vec4};
+use pomme_block::BlockState;
 
 use crate::renderer::chunk::atlas::{AtlasUVMap, SpritePixels};
 use crate::world::block::FluidKind;

@@ -71,7 +71,7 @@ pub(crate) struct States {
 impl States {
     pub fn new(table: BlockStateTable) -> Self {
         let data = (0..table.state_count() as u32).map(|id| {
-            azalea_block::BlockState::try_from(id).map(|state| table.block_state_data(state))
+            pomme_block::BlockState::try_from(id).map(|state| table.block_state_data(state))
         });
         let air = data
             .clone()

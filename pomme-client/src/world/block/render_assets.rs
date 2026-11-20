@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 use pomme_item::ItemStackData;
 use pomme_item::components::{
     BlockItemStateProperties, ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion,

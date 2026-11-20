@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::block_lighter::{self, LightLevels, LightSource, VertexLight};
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
@@ -1120,7 +1120,7 @@ impl MeshDispatcher {
     pub fn mesh_moving_block(
         &self,
         chunk_store: &ChunkStore,
-        state: azalea_block::BlockState,
+        state: pomme_block::BlockState,
         cell: [i32; 3],
         base: [f32; 3],
     ) -> MovingBlockMesh {
@@ -1130,7 +1130,7 @@ impl MeshDispatcher {
             ChunkPos::new(x.div_euclid(16), z.div_euclid(16)),
         );
         let blocks = GridBox::spanning([x - 1, y - 1, z - 1], [x + 1, y + 1, z + 1]);
-        let mut states = vec![azalea_block::BlockState::AIR; blocks.len()];
+        let mut states = vec![pomme_block::BlockState::AIR; blocks.len()];
         states[blocks.index(cell).expect("the cell is the box's centre")] = state;
         snapshot.blocks = Some(BlockSlice { blocks, states });
         snapshot.tint_biome = Some(snapshot.get_biome(x, y, z));
@@ -1569,7 +1569,7 @@ impl ClimateCache {
 /// as [`ChunkStoreSnapshot::get_block_state`] reads them.
 struct BlockSlice {
     blocks: GridBox,
-    states: Vec<azalea_block::BlockState>,
+    states: Vec<pomme_block::BlockState>,
 }
 
 impl BlockSlice {
@@ -1580,7 +1580,7 @@ impl BlockSlice {
         ys: std::ops::Range<i32>,
     ) -> Self {
         let blocks = GridBox::bordered_column(pos, ys);
-        let mut states = vec![azalea_block::BlockState::AIR; blocks.len()];
+        let mut states = vec![pomme_block::BlockState::AIR; blocks.len()];
         let [min_x, min_y_box, min_z] = blocks.min;
         let [size_x, size_y, size_z] = blocks.size;
         let y_end = min_y_box + size_y;
@@ -1602,7 +1602,7 @@ impl BlockSlice {
                     continue;
                 };
                 let single = section.single_block_state();
-                if single == Some(azalea_block::BlockState::AIR) {
+                if single == Some(pomme_block::BlockState::AIR) {
                     continue;
                 }
                 for x in span(chunk_pos.x * 16, min_x, size_x) {
@@ -1645,7 +1645,7 @@ impl BlockSlice {
         }
     }
 
-    fn get(&self, x: i32, y: i32, z: i32) -> Option<azalea_block::BlockState> {
+    fn get(&self, x: i32, y: i32, z: i32) -> Option<pomme_block::BlockState> {
         Some(self.states[self.blocks.index([x, y, z])?])
     }
 }
@@ -1696,7 +1696,7 @@ impl ChunkStoreSnapshot {
         }
     }
 
-    fn get_block_state(&self, x: i32, y: i32, z: i32) -> azalea_block::BlockState {
+    fn get_block_state(&self, x: i32, y: i32, z: i32) -> pomme_block::BlockState {
         if let Some(state) = self.blocks.as_ref().and_then(|b| b.get(x, y, z)) {
             return state;
         }
@@ -1708,7 +1708,7 @@ impl ChunkStoreSnapshot {
             .and_then(|(_, c): &(ChunkPos, _)| c.as_ref());
 
         let Some(chunk_lock) = chunk_lock else {
-            return azalea_block::BlockState::AIR;
+            return pomme_block::BlockState::AIR;
         };
 
         let c = chunk_lock.read();
@@ -2065,7 +2065,7 @@ fn mesh_chunk_snapshot(
 fn emit_block_model(
     sink: &mut MeshSink,
     model_pos: [f32; 3],
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
@@ -2173,7 +2173,7 @@ fn neighbour_light(snapshot: &ChunkStoreSnapshot, pos: [i32; 3], dir: Direction)
 fn emit_quads<'q>(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     quads: impl Iterator<Item = &'q crate::world::block::model::BakedQuad> + Clone,
     snapshot: &ChunkStoreSnapshot,
     uv_map: &AtlasUVMap,
@@ -2489,7 +2489,7 @@ fn fluid_corner_heights(
 
 #[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     dir: Direction,
     uv_map: &AtlasUVMap,
     snapshot: &ChunkStoreSnapshot,
@@ -2533,7 +2533,7 @@ fn emit_fluid(
     sink: &mut MeshSink,
     kind: MeshKind,
     block_pos: [f32; 3],
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,
@@ -2693,7 +2693,7 @@ fn emit_fluid(
 fn emit_lod_cube(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: BlockRenderView<'_>,
     uv_map: &AtlasUVMap,

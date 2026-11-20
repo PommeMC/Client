@@ -2,8 +2,8 @@
 // on ground impact; Player.causeFallDamage returns false when may_fly, and
 // fall distance resets every tick while flying
 
-use azalea_block::BlockState;
 use glam::{DVec3, dvec3};
+use pomme_block::BlockState;
 
 use super::aabb::Aabb;
 use super::block_shape::CollisionContext;
@@ -426,7 +426,7 @@ fn on_climbable_state(
     chunk_store: &ChunkStore,
     block_state_table: BlockStateTable,
     tags: &BlockTags,
-) -> Option<azalea_block::BlockState> {
+) -> Option<pomme_block::BlockState> {
     // TODO: `onClimbable` also rejects fall-flying in `can_glide_through`.
     if player.flying || is_spectator(player.game_mode) {
         return None;
@@ -1358,7 +1358,7 @@ fn collision_context(player: &LocalPlayer, descending: bool) -> CollisionContext
 fn block_state_at_player_position(
     player: &LocalPlayer,
     chunk_store: &ChunkStore,
-) -> azalea_block::BlockState {
+) -> pomme_block::BlockState {
     chunk_store.get_block_state(
         player.position.x.floor() as i32,
         player.position.y.floor() as i32,
@@ -1371,7 +1371,7 @@ fn block_below_affecting_movement(
     player: &LocalPlayer,
     world: CollisionWorld<'_>,
     tags: &BlockTags,
-) -> azalea_block::BlockState {
+) -> pomme_block::BlockState {
     let pos = on_pos(player, world, tags, 0.500_001);
     world.chunks.get_block_state(pos.x, pos.y, pos.z)
 }

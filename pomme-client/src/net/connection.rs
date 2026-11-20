@@ -262,7 +262,7 @@ struct Joined {
 
 /// What a configuration phase leaves the session with.
 struct Configured {
-    registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
+    registries: std::sync::Arc<crate::net::registry_holder::RegistryHolder>,
     dialogs: std::sync::Arc<DialogRegistry>,
 }
 
@@ -449,7 +449,7 @@ async fn handle_encryption(
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
 ) -> Result<(), ConnectionError> {
-    let e = azalea_crypto::encrypt(&hello.public_key, &hello.challenge)
+    let e = super::crypt::key_exchange(&hello.public_key, &hello.challenge)
         .map_err(ConnectionError::Encryption)?;
 
     if hello.should_authenticate {
@@ -470,7 +470,7 @@ async fn handle_encryption(
     }
 
     let key = ServerboundLogin::Key {
-        key: e.encrypted_public_key,
+        key: e.encrypted_secret_key,
         encrypted_challenge: e.encrypted_challenge,
     };
     send_login(conn, key).await?;
@@ -636,22 +636,20 @@ async fn config_sequence(
 
 /// The synced biome registry, in protocol-id order.
 pub(crate) fn biome_registry(
-    holder: &azalea_core::registry_holder::RegistryHolder,
-) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
-    holder
-        .extra
-        .get(&pomme_registry::identifier::Identifier::new(
-            "minecraft:worldgen/biome",
-        ))
+    holder: &crate::net::registry_holder::RegistryHolder,
+) -> Option<&crate::net::registry_holder::Registry> {
+    holder.get(&pomme_registry::identifier::Identifier::new(
+        "minecraft:worldgen/biome",
+    ))
 }
 
 /// How many biomes chunk sections can name.
-pub(crate) fn biome_count(holder: &azalea_core::registry_holder::RegistryHolder) -> usize {
+pub(crate) fn biome_count(holder: &crate::net::registry_holder::RegistryHolder) -> usize {
     biome_registry(holder).map_or(0, |registry| registry.map.len())
 }
 
 fn extract_biome_climate(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
 ) -> std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate> {
     use crate::renderer::chunk::mesher::{BiomeClimate, GrassColorModifier, int_to_rgb};
 
@@ -732,11 +730,10 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
 }
 
 pub(super) fn chat_types_from_registry_holder(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
 ) -> super::chat::ChatTypeRegistry {
     let key: pomme_registry::identifier::Identifier = "minecraft:chat_type".into();
     let entries = holder
-        .extra
         .get(&key)
         .map(|registry| registry.map.values().cloned().collect())
         .unwrap_or_default();
@@ -751,11 +748,10 @@ fn dialog_registry_key() -> pomme_registry::identifier::Identifier {
 }
 
 fn dialog_registry(
-    holder: &azalea_core::registry_holder::RegistryHolder,
+    holder: &crate::net::registry_holder::RegistryHolder,
     tags: std::collections::HashMap<String, Vec<usize>>,
 ) -> DialogRegistry {
     let entries = holder
-        .extra
         .get(&dialog_registry_key())
         .map(|registry| {
             registry
@@ -1240,7 +1236,8 @@ mod tests {
 
         let holder = crate::net::known_packs::filled_holder(NATIVE.protocol, "worldgen/biome")
             .expect("biomes fill");
-        let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
+        let plains_id = biome_registry(&holder)
+            .expect("biomes")
             .map
             .get_index_of(&Identifier::new("minecraft:plains"))
             .expect("plains biome") as u32;

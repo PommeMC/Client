@@ -2609,7 +2609,7 @@ pub(crate) fn item_tooltip_lines(
 /// container slot and the creative inventory show.
 pub(crate) fn stack_tooltip_lines(
     data: &pomme_item::ItemStackData,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     advanced: bool,
 ) -> Vec<TooltipLine> {
     item_tooltip_lines_with_bindings(

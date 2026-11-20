@@ -515,7 +515,7 @@ pub fn build_creative_inventory(
     drop: Option<bool>,
     can_drop: bool,
     inventory: &Inventory,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     gs: f32,
     advanced_tooltips: bool,
     left_held: bool,
@@ -1082,7 +1082,7 @@ fn item_or_empty(slots: &[ItemStack], idx: usize) -> ItemStack {
 }
 
 struct TooltipCtx<'a> {
-    registries: &'a azalea_core::registry_holder::RegistryHolder,
+    registries: &'a crate::net::registry_holder::RegistryHolder,
     cursor: (f32, f32),
     screen_w: f32,
     screen_h: f32,
@@ -1144,7 +1144,7 @@ fn tabs_containing(kind: ItemKind, operator_tab: bool) -> &'static [&'static str
 // TODO: the search tab's matching item tags, which follow the name there.
 fn build_item_tooltip_lines(
     data: &ItemStackData,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     advanced: bool,
     tab_names: bool,
     operator_tab: bool,
@@ -1680,7 +1680,7 @@ fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
 /// mode, a light per level from the brightest, and a painting of each variant
 /// `#minecraft:placeable` leaves out, smallest first.
 pub fn operator_stacks(
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
     placeable_paintings: &[i32],
 ) -> Vec<ItemStack> {
     let with_state = |kind, property: &str, value: String| {
@@ -1698,7 +1698,6 @@ pub fn operator_stacks(
         .map(|level| with_state(ItemKind::Light, "level", level.to_string()));
 
     let sizes: Vec<(i32, i32)> = registries
-        .extra
         .get(&crate::net::PAINTING_VARIANT_REGISTRY.into())
         .into_iter()
         .flat_map(|registry| registry.map.values())

@@ -1,7 +1,6 @@
 //! `set_entity_data`, decoded with pomme's grammar for every session:
 //! translated frames already carry the native layout.
 
-use azalea_core::registry_holder::RegistryHolder;
 use crossbeam_channel::Sender;
 use pomme_item::{ItemStack, ItemStackData};
 use pomme_protocol::codec::{DecodeResult, Reader};
@@ -16,6 +15,7 @@ use super::{NetworkEvent, item_codec};
 use crate::chat_component::ComponentText;
 use crate::entity::MetaValue;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+use crate::net::registry_holder::RegistryHolder;
 use crate::position::BlockPos;
 
 /// `ItemEntity.DATA_ITEM`.
