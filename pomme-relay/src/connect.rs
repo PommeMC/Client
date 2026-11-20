@@ -54,10 +54,10 @@ const MAX_LENGTH_PREFIX: usize = 3;
 
 /// What a message costs its client on top of its bytes, for its frame and
 /// the handling of it, so that empty ones aren't free.
-const MESSAGE_COST: usize = 16;
+pub const MESSAGE_COST: usize = 16;
 
-/// The most of a name's addresses dialed, all at once.
-const MAX_DIALED: usize = 4;
+/// The most of a name's IPv4 addresses, and of its IPv6 ones, dialed at once.
+const DIALED_PER_FAMILY: usize = 2;
 
 /// Below this, ports belong to services such as mail, not game servers.
 const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
@@ -105,11 +105,11 @@ pub async fn connect(
     // A name that doesn't resolve is refused as one with no address the relay
     // may reach is, so the answer doesn't say which names exist behind it.
     let found = in_time("resolve", &host, lookup).await;
-    let addresses: Vec<SocketAddr> = found
+    let allowed = found
         .iter()
         .flat_map(|found| found.iter())
-        .filter(|ip| reachable(&state.config, *ip))
-        .take(MAX_DIALED)
+        .filter(|ip| reachable(&state.config, *ip));
+    let addresses: Vec<SocketAddr> = dialed(allowed)
         .map(|ip| SocketAddr::new(ip, port))
         .collect();
     if addresses.is_empty() {
@@ -181,15 +181,28 @@ async fn server_address(host: String, port: u16) -> (String, u16) {
     served.unwrap_or((host, port))
 }
 
+/// The addresses to dial of those a name has: some of each family, so its
+/// IPv6 ones don't crowd out the rest on a relay with no IPv6 route.
+fn dialed(addresses: impl Iterator<Item = IpAddr>) -> impl Iterator<Item = IpAddr> {
+    let (v4, v6): (Vec<_>, Vec<_>) = addresses.partition(IpAddr::is_ipv4);
+    [v4, v6]
+        .into_iter()
+        .flat_map(|family| family.into_iter().take(DIALED_PER_FAMILY))
+}
+
 /// Whether the relay may dial `ip`: not a `--block-address`, and unless
-/// private servers are allowed, public and not the relay's own machine.
+/// private servers are allowed, public and not the relay's own machine. Each
+/// holds for `ip` as written and for the IPv4 address it may carry.
 fn reachable(config: &Config, ip: IpAddr) -> bool {
-    let ip = unwrapped(ip);
-    !config
-        .block_addresses
-        .iter()
-        .any(|blocked| blocked.contains(ip))
-        && (config.allow_private_servers || (public(ip) && !own(ip)))
+    let forms = [ip, unwrapped(ip)];
+    let blocked = |ip| {
+        config
+            .block_addresses
+            .iter()
+            .any(|network| network.contains(ip))
+    };
+    !forms.into_iter().any(blocked)
+        && (config.allow_private_servers || (public(ip) && !forms.into_iter().any(own)))
 }
 
 /// A `--block-address`: one address, or every address under a prefix.
@@ -200,7 +213,7 @@ pub struct Network {
 }
 
 impl Network {
-    /// Whether it holds `ip`, already [`unwrapped`].
+    /// Whether it holds `ip`.
     fn contains(self, ip: IpAddr) -> bool {
         let differing = (as_v6(ip) ^ self.prefix).checked_shr(u128::BITS - self.bits);
         differing.unwrap_or(0) == 0
@@ -222,9 +235,6 @@ impl FromStr for Network {
                 bits: u128::BITS,
             });
         };
-        if unwrapped(address) != address {
-            return Err("expected a network of IPv4 addresses written as IPv4");
-        }
         let (width, mapped) = match address {
             IpAddr::V4(_) => (Ipv4Addr::BITS, u128::BITS - Ipv4Addr::BITS),
             IpAddr::V6(_) => (u128::BITS, 0),
@@ -378,10 +388,12 @@ async fn opening(
 ) -> Option<Vec<u8>> {
     let mut sent = Vec::new();
     while let Some(Ok(message)) = from_page.next().await {
-        match message {
-            Message::Binary(bytes) if charged(bytes.len()) => sent.extend_from_slice(&bytes),
-            _ => break,
+        let binary = matches!(message, Message::Binary(_));
+        let bytes = message.into_data();
+        if !charged(bytes.len()) || !binary {
+            break;
         }
+        sent.extend_from_slice(&bytes);
         if let Some(handshake) = opens_with_handshake(&sent) {
             return handshake.then_some(sent);
         }
@@ -489,19 +501,47 @@ pub mod tests {
         }
     }
 
+    /// A relay that reaches anything but `networks`.
+    fn blocking(networks: &[&str]) -> Config {
+        Config {
+            allow_private_servers: true,
+            block_addresses: networks
+                .iter()
+                .map(|network| network.parse().unwrap())
+                .collect(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_blocked_ipv6_network_holds_the_ipv4_carriers_in_it() {
+        let config = blocking(&["2000::/3", "64:ff9b::/96"]);
+        for ip in ["2606:4700::1111", "2002:808:808::1", "64:ff9b::808:808"] {
+            assert!(!reachable(&config, ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "::ffff:8.8.8.8"] {
+            assert!(reachable(&config, ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn some_of_each_family_are_dialed() {
+        let addresses =
+            |family: &'static str| (1..=5).map(move |n| format!("{family}{n}").parse().unwrap());
+        let v6_first = addresses("2001:db8::").chain(addresses("203.0.113."));
+        let dialed: Vec<String> = dialed(v6_first).map(|ip| ip.to_string()).collect();
+        let expected = ["203.0.113.1", "203.0.113.2", "2001:db8::1", "2001:db8::2"];
+        assert_eq!(dialed, expected);
+    }
+
     #[test]
     fn blocked_addresses_stay_blocked_however_written() {
-        let blocked = [
+        let config = blocking(&[
             "203.0.113.7",
             "198.51.100.0/24",
             "2001:db8:5::/64",
             "64:ff9b::cb00:7109",
-        ];
-        let config = Config {
-            allow_private_servers: true,
-            block_addresses: blocked.map(|network| network.parse().unwrap()).into(),
-            ..Config::default()
-        };
+        ]);
         for ip in [
             "203.0.113.7",
             "::ffff:203.0.113.7",
@@ -531,9 +571,6 @@ pub mod tests {
             "play.pomme.rs",
             "203.0.113.7/33",
             "2001:db8::/129",
-            "64:ff9b::/96",
-            "2002:c633:6400::/40",
-            "::ffff:198.51.100.0/120",
             "203.0.113.7/",
         ] {
             assert!(written.parse::<Network>().is_err(), "{written}");

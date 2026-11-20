@@ -148,7 +148,7 @@ fn app(state: AppState, dir: &Path) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
     use axum::body::Body;
@@ -228,6 +228,9 @@ mod tests {
 
     const BANNER: &[u8] = b"banner";
 
+    /// The client every test's page is.
+    const LOCAL: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
     /// What the server is sent before the relay closes its connection. With
     /// the banner unread, that close is a reset on some systems.
     async fn sent_to(mut tcp: TcpStream) -> Vec<u8> {
@@ -266,12 +269,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_opening_that_is_no_handshake_is_still_paid_for() {
+        const JUNK: usize = 200 * 1024;
+        let state = state(true);
+        let limits = Arc::clone(&state.limits);
+        let (mut page, _tcp) = connected(state).await;
+        page.send(Message::binary(vec![0xff; JUNK])).await.unwrap();
+        while let Some(Ok(_)) = soon(page.next()).await {}
+        assert_eq!(limits.spent(LOCAL), JUNK + connect::MESSAGE_COST);
+    }
+
+    #[tokio::test]
     async fn a_connection_ends_once_its_bytes_are_spent() {
         const PIECE: usize = 200 * 1024;
         const PIECES: usize = 32;
         let state = state(true);
-        let client = IpAddr::from([127, 0, 0, 1]);
-        state.limits.leave(client, PIECE * PIECES / 4);
+        state.limits.leave(LOCAL, PIECE * PIECES / 4);
         let (mut page, tcp) = connected(state).await;
         let received = tokio::spawn(sent_to(tcp));
 

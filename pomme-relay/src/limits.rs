@@ -196,6 +196,13 @@ impl Limits {
         self.relayed(client, spent);
     }
 
+    /// How far below a full allowance `client` was when last counted.
+    #[cfg(test)]
+    pub fn spent(&self, client: IpAddr) -> usize {
+        let left = self.buckets().clients[&(Meter::Bytes, client)].tokens;
+        (Meter::Bytes.rate().0 - left) as usize
+    }
+
     fn buckets(&self) -> MutexGuard<'_, Buckets> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }

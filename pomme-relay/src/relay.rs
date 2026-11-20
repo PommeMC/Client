@@ -221,7 +221,6 @@ fn target(uri: &Uri) -> Option<(&str, &str)> {
         .split_once('/')
 }
 
-/// Whether `content_type` is one of [`DATA_TYPES`].
 fn data(content_type: &HeaderValue) -> bool {
     content_type
         .to_str()
