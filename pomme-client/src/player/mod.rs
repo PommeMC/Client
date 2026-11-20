@@ -38,9 +38,14 @@ pub fn is_survival(game_mode: u8) -> bool {
     game_mode == 0 || game_mode == 2
 }
 
+/// `GameType.CREATIVE`'s id.
+pub const CREATIVE: u8 = 1;
+/// `GameType.SPECTATOR`'s id, the last.
+pub const SPECTATOR: u8 = 3;
+
 /// Matches vanilla GameType.isCreative(): Creative (1).
 pub fn is_creative(game_mode: u8) -> bool {
-    game_mode == 1
+    game_mode == CREATIVE
 }
 
 /// `StringUtil.isValidPlayerName`, which `ExtraCodecs.PLAYER_NAME` enforces
@@ -54,11 +59,11 @@ pub fn valid_player_name(name: &str) -> bool {
 const GAMEMASTER_PERMISSION_LEVEL: u8 = 2;
 
 pub fn is_spectator(game_mode: u8) -> bool {
-    game_mode == 3
+    game_mode == SPECTATOR
 }
 
 pub(crate) fn is_water_block(
-    state: azalea_block::BlockState,
+    state: pomme_block::BlockState,
     block_state_table: BlockStateTable,
 ) -> bool {
     block_state_table.block_state_data(state).fluid().kind == FluidKind::Water

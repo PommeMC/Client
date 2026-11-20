@@ -81,18 +81,6 @@ impl From<Position> for DVec3 {
     }
 }
 
-impl From<Position> for azalea_core::position::Vec3 {
-    fn from(value: Position) -> Self {
-        Self::new(value.x, value.y, value.z)
-    }
-}
-
-impl From<azalea_core::position::Vec3> for Position {
-    fn from(value: azalea_core::position::Vec3) -> Self {
-        Self(DVec3::new(value.x, value.y, value.z))
-    }
-}
-
 // -- VELOCITY --
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -154,18 +142,6 @@ impl From<Velocity> for DVec3 {
     }
 }
 
-impl From<Velocity> for azalea_core::position::Vec3 {
-    fn from(value: Velocity) -> Self {
-        Self::new(value.x, value.y, value.z)
-    }
-}
-
-impl From<azalea_core::position::Vec3> for Velocity {
-    fn from(value: azalea_core::position::Vec3) -> Self {
-        Self(DVec3::new(value.x, value.y, value.z))
-    }
-}
-
 // -- LOOK DIRECTION --
 
 /// y_rot: n*360° + 0º: +Z (South), n*360° + 90°: -X (West)
@@ -207,12 +183,6 @@ impl LookDirection {
         let (sin_y_rot, cos_y_rot) = y_rot_rad.sin_cos();
         let (sin_x_rot, cos_x_rot) = x_rot_rad.sin_cos();
         vec3(-sin_y_rot * cos_x_rot, -sin_x_rot, cos_y_rot * cos_x_rot)
-    }
-}
-
-impl From<LookDirection> for azalea_entity::LookDirection {
-    fn from(value: LookDirection) -> Self {
-        Self::new(value.y_rot_deg, value.x_rot_deg)
     }
 }
 

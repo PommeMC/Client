@@ -3,20 +3,20 @@
 //! native layout, and their registry ids index the session's own synced
 //! registries.
 
-use azalea_core::registry_holder::RegistryHolder;
-use azalea_core::registry_holder::dimension_type::DimensionKindElement;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
 use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use pomme_registry::identifier::Identifier;
+use simdnbt::owned::NbtCompound;
 
 use super::chat_security::ProfileKeyServices;
 use super::handler::send_ordered;
 use super::sender::PacketSender;
 use super::{DimensionInfo, NetworkEvent};
 use crate::chat_component::ComponentText;
+use crate::net::registry_holder::RegistryHolder;
 use crate::world::block::model::CardinalLightType;
 
 /// Decodes a lifecycle packet other than `login`, which the game loop reads
@@ -176,9 +176,7 @@ fn handle(
             },
         ),
         LifecyclePacket::SetTime { game_time, clocks } => {
-            let names = registry_holder
-                .extra
-                .get(&Identifier::new("minecraft:world_clock"));
+            let names = registry_holder.get(&Identifier::new("minecraft:world_clock"));
             let clocks = clocks
                 .into_iter()
                 .filter_map(|(id, state)| {
@@ -210,11 +208,10 @@ fn spawn_events(
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
-    match registry_holder
-        .dimension_type
-        .map
-        .get_index(spawn.dimension_type as usize)
-    {
+    match registry_holder.entry(
+        &super::environment_wire::DIMENSION_TYPE_REGISTRY.into(),
+        spawn.dimension_type,
+    ) {
         Some((_, dim)) => {
             send_ordered(
                 event_tx,
@@ -243,48 +240,40 @@ fn spawn_events(
     );
 }
 
-/// Dimension info from a login/respawn registry entry. Fields that azalea does
-/// not model directly live in its flattened extras. Missing `has_skylight`
+/// Dimension info from a login/respawn registry entry. Missing `has_skylight`
 /// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
 fn dimension_info(
-    dim: &DimensionKindElement,
+    dim: &NbtCompound,
     dimension: &str,
     flat: bool,
     registries: &RegistryHolder,
 ) -> NetworkEvent {
     let string = |key: &str| {
-        dim._extra
-            .get(key)
+        dim.get(key)
             .and_then(|tag| tag.string())
             .map(|value| value.to_str().into_owned())
     };
-    let flag = |key: &str| {
-        dim._extra
-            .get(key)
-            .and_then(|tag| tag.byte())
-            .map(|b| b != 0)
-    };
+    let flag = |key: &str| dim.get(key).and_then(|tag| tag.byte()).map(|b| b != 0);
     let has_skylight = flag("has_skylight").unwrap_or(true);
     // Vanilla `Level.canHaveWeather`, which names the end.
     let has_weather =
         has_skylight && !flag("has_ceiling").unwrap_or(false) && dimension != "minecraft:the_end";
     NetworkEvent::DimensionInfo(DimensionInfo {
-        height: dim.height,
-        min_y: dim.min_y,
+        height: dim.int("height").unwrap_or_default() as u32,
+        min_y: dim.int("min_y").unwrap_or_default(),
         has_skylight,
         cardinal_light: match string("cardinal_light").as_deref() {
             Some("nether") => CardinalLightType::Nether,
             _ => CardinalLightType::Default,
         },
         ambient_light: dim
-            ._extra
             .get("ambient_light")
             .and_then(|tag| tag.float())
             .unwrap_or(0.0),
         default_clock: string("default_clock"),
         flat,
         environment: Box::new(super::environment_wire::environment(
-            &dim._extra,
+            dim,
             registries,
             has_weather,
         )),
@@ -293,38 +282,32 @@ fn dimension_info(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use simdnbt::owned::NbtTag;
 
     use super::*;
 
-    fn dimension(extra: &[(&str, NbtTag)]) -> DimensionKindElement {
-        DimensionKindElement {
-            height: 384,
-            min_y: -64,
-            ultrawarm: None,
-            _extra: extra
-                .iter()
-                .map(|(key, tag)| (key.to_string(), tag.clone()))
-                .collect::<HashMap<_, _>>(),
+    fn dimension(extra: &[(&str, NbtTag)]) -> NbtCompound {
+        let mut dimension = NbtCompound::new();
+        dimension.insert("height", 384);
+        dimension.insert("min_y", -64);
+        for (key, tag) in extra {
+            dimension.insert(*key, tag.clone());
         }
+        dimension
     }
 
     #[test]
     fn set_time_names_clocks_by_the_synced_registry() {
-        use azalea_core::registry_holder::RegistryType;
         use pomme_protocol::lifecycle::ClockState;
         use simdnbt::owned::NbtCompound;
 
         let mut registries = RegistryHolder::default();
-        let mut clocks = RegistryType::<NbtCompound>::default();
-        for name in ["minecraft:overworld", "minecraft:the_end"] {
-            clocks.map.insert(Identifier::new(name), NbtCompound::new());
-        }
-        registries
-            .extra
-            .insert(Identifier::new("minecraft:world_clock"), clocks);
+        registries.append(
+            Identifier::new("minecraft:world_clock"),
+            ["minecraft:overworld", "minecraft:the_end"]
+                .map(|name| (Identifier::new(name), Some(NbtCompound::new())))
+                .into(),
+        );
         let state = |total_ticks| ClockState {
             total_ticks,
             partial_tick: 0.0,

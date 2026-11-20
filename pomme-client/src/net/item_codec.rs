@@ -35,19 +35,17 @@ pub(super) fn item_packet_ids() -> ItemPacketIds {
 /// tooltips are built from.
 pub fn stack_json(
     stack: &ItemStackData,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
 ) -> serde_json::Value {
     pomme_item::components::stack_json(stack, &SessionNames(registries))
 }
 
 /// The connection's registries, for the entry names a hash holds.
-struct SessionNames<'a>(&'a azalea_core::registry_holder::RegistryHolder);
+struct SessionNames<'a>(&'a crate::net::registry_holder::RegistryHolder);
 
 impl pomme_item::hash::Names for SessionNames<'_> {
     fn name(&self, registry: &str, id: u32) -> Option<pomme_registry::Identifier> {
-        self.0
-            .protocol_id_to_identifier(registry.into(), id)
-            .cloned()
+        self.0.name(&registry.into(), id).cloned()
     }
 }
 
@@ -57,7 +55,7 @@ impl pomme_item::hash::Names for SessionNames<'_> {
 // holding one.
 pub fn hashed_stack(
     stack: &ItemStack,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registries: &crate::net::registry_holder::RegistryHolder,
 ) -> Option<pomme_protocol::serverbound::HashedStack> {
     let data = stack.as_present()?;
     let names = SessionNames(registries);

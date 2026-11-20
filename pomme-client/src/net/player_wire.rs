@@ -133,7 +133,7 @@ fn event(packet: PlayerPacket) -> Option<NetworkEvent> {
             pos: (x, y, z),
             is_front_text,
         } => NetworkEvent::OpenSignEditor {
-            pos: azalea_core::position::BlockPos::new(x, y, z),
+            pos: crate::position::BlockPos::new(x, y, z),
             is_front_text,
         },
     })

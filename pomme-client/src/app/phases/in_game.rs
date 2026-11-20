@@ -260,7 +260,7 @@ pub struct GameState {
     /// `BundleMouseActions`' `ScrollWheelHandler` accumulators (x, y).
     pub bundle_scroll: (f32, f32),
     /// Server registries, for hashing predicted container clicks.
-    pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    pub registries: Arc<crate::net::registry_holder::RegistryHolder>,
     /// Session metadata and state bindings to the app-owned block definitions.
     pub(crate) block_registry: BlockRegistry,
     /// Per-session recipe book, recipe container, ghost placement, and item
@@ -626,7 +626,7 @@ impl GameState {
             bundle_selection: None,
             bundle_hovered: None,
             bundle_scroll: (0.0, 0.0),
-            registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            registries: Arc::new(crate::net::registry_holder::RegistryHolder::default()),
             block_registry,
             recipe_book: crate::recipe::RecipeBookState::default(),
             placeable_paintings: Vec::new(),
@@ -1500,16 +1500,15 @@ impl GameState {
             }
             _ if bindings.matches(Action::DebugSpectate, &input) => {
                 // Sent unconditionally; the server refuses without permission.
-                use azalea_core::game_type::GameMode;
-                let target = if self.player.game_mode != 3 {
-                    GameMode::Spectator
+                let target = if self.player.game_mode != crate::player::SPECTATOR {
+                    crate::player::SPECTATOR
                 } else {
                     self.previous_game_mode
-                        .and_then(GameMode::from_id)
-                        .unwrap_or(GameMode::Creative)
+                        .filter(|mode| *mode <= crate::player::SPECTATOR)
+                        .unwrap_or(crate::player::CREATIVE)
                 };
                 connection.packet_tx.send(GamePacket::ChangeGameMode {
-                    mode: u32::from(target.to_id()),
+                    mode: u32::from(target),
                 });
                 true
             }
@@ -1583,12 +1582,11 @@ impl GameState {
             return;
         };
         if modifier && let Some(switcher) = self.game_mode_switcher.take() {
-            use azalea_core::game_type::GameMode;
             if switcher.selected != self.player.game_mode
-                && let Some(mode) = GameMode::from_id(switcher.selected)
+                && switcher.selected <= crate::player::SPECTATOR
             {
                 connection.packet_tx.send(GamePacket::ChangeGameMode {
-                    mode: u32::from(mode.to_id()),
+                    mode: u32::from(switcher.selected),
                 });
             }
             self.f3_chord_consumed = false;

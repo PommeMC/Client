@@ -1,6 +1,6 @@
 //! Answering `select_known_packs` and filling in the registry entries the
 //! server then sends without data, from pomme-protocol's `KnownPackTable`.
-//! The fill has to happen before azalea's registry holder, which drops a
+//! The fill has to happen before the registry holder, which drops a
 //! data-less entry and shifts every later entry's protocol id.
 
 use pomme_protocol::{KnownPack, KnownPackTable};
@@ -94,7 +94,7 @@ fn json_to_nbt(value: &serde_json::Value) -> Option<NbtTag> {
 pub(super) fn filled_holder(
     protocol: i32,
     registry: &str,
-) -> Result<azalea_core::registry_holder::RegistryHolder, RegistryError> {
+) -> Result<crate::net::registry_holder::RegistryHolder, RegistryError> {
     let registry_id = Identifier::new(format!("minecraft:{registry}"));
     let sent = KnownPackTable::for_protocol(protocol)
         .expect("embedded table")
@@ -105,7 +105,7 @@ pub(super) fn filled_holder(
         .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
         .collect();
     let filled = fill_known_entries(protocol, &registry_id, sent)?;
-    let mut holder = azalea_core::registry_holder::RegistryHolder::default();
+    let mut holder = crate::net::registry_holder::RegistryHolder::default();
     holder.append(registry_id, filled);
     Ok(holder)
 }

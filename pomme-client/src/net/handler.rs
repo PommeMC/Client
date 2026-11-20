@@ -1,4 +1,3 @@
-use azalea_core::registry_holder::RegistryHolder;
 use crossbeam_channel::{Sender, TrySendError};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_registry::builtin::EntityKind;
@@ -7,6 +6,7 @@ use super::NetworkEvent;
 use super::commands::SharedCommandTree;
 use super::sender::PacketSender;
 use crate::net::chunk_batch::ChunkBatchSizeCalculator;
+use crate::net::registry_holder::RegistryHolder;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
@@ -76,13 +76,12 @@ pub(super) fn variant_index(
     let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     let fallback = order_pos(default).unwrap_or(0);
     // Position == protocol id only holds while every entry carries NBT
-    // (azalea shift_removes NBT-less ones). Entries the server skips for a
+    // (the holder takes NBT-less ones out). Entries the server skips for a
     // pack pomme claimed are filled in first (`net::known_packs`).
-    let Some((ident, nbt)) = registry_holder
-        .extra
-        .get(&pomme_registry::identifier::Identifier::new(registry))
-        .and_then(|r| r.map.get_index(protocol_id as usize))
-    else {
+    let Some((ident, nbt)) = registry_holder.entry(
+        &pomme_registry::identifier::Identifier::new(registry),
+        protocol_id,
+    ) else {
         return fallback;
     };
     if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str())

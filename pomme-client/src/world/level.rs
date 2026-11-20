@@ -1,8 +1,8 @@
 //! Conceptual equivalent to Vanilla ClientLevel/Level.  Provides access to
 //! resources other game systems need, without exposing internals of GameState
 //! generally.
-use azalea_block::BlockState;
 use glam::DVec3;
+use pomme_block::BlockState;
 
 use super::block::block_registry::BlockRegistry;
 use super::chunk::ChunkStore;

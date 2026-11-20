@@ -4596,11 +4596,8 @@ fn embedded_known_pack_elements_deserialize_through_azalea() {
                 Err(RegistryError::Unsupported(_)) if registry == "block_transformer" => continue,
                 Err(e) => panic!("{protocol} {registry}: {e}"),
             };
-            let kept = match registry {
-                "dimension_type" => holder.dimension_type.map.len(),
-                "enchantment" => holder.enchantment.map.len(),
-                _ => holder.extra.values().map(|r| r.map.len()).sum(),
-            };
+            let id = Identifier::new(format!("minecraft:{registry}"));
+            let kept = holder.get(&id).map_or(0, |registry| registry.map.len());
             assert_eq!(
                 kept,
                 elements.count(),
@@ -4611,9 +4608,10 @@ fn embedded_known_pack_elements_deserialize_through_azalea() {
             // just the deserialize: `dimension_info` reads these two off the
             // holder.
             if registry == "dimension_type" {
-                let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
-                assert_eq!(overworld.height, 384);
-                assert_eq!(overworld.min_y, -64);
+                let overworld =
+                    &holder.get(&id).unwrap().map[&Identifier::new("minecraft:overworld")];
+                assert_eq!(overworld.int("height"), Some(384));
+                assert_eq!(overworld.int("min_y"), Some(-64));
             }
         }
     }
@@ -6746,9 +6744,9 @@ fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>)
 
 #[test]
 fn block_packets_match_azalea() {
-    use azalea_block::BlockState;
     use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
     use azalea_protocol::packets::game::*;
+    use pomme_block::BlockState;
     use pomme_protocol::block::{self, BlockPacket};
     use pomme_registry::Registry;
     use pomme_registry::builtin::{BlockEntityKind, BlockKind};
@@ -7896,7 +7894,7 @@ fn azalea_encoded_player_and_world_packets_read_in_pomme() {
     };
     assert_eq!(
         (pos, is_front_text),
-        (azalea_core::position::BlockPos::new(-12, 70, 345), false)
+        (crate::position::BlockPos::new(-12, 70, 345), false)
     );
     let NetworkEvent::ResourcePackPush {
         id: pushed, url, ..

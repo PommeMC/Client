@@ -4,17 +4,18 @@
 
 use std::collections::HashMap;
 
-use azalea_core::registry_holder::RegistryHolder;
 use glam::{Vec3, Vec4};
 use pomme_registry::identifier::Identifier;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
+use crate::net::registry_holder::RegistryHolder;
 use crate::world::environment::{
     Argument, AttributeLayers, AttributeValue, Ease, EnvAttribute, Environment, Modifier,
     ModifierOp, Skybox, Track,
 };
 
 pub(super) const TIMELINE_REGISTRY: &str = "minecraft:timeline";
+pub(super) const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
 
 /// An attribute's value type and its codecs.
 trait WireValue: AttributeValue {
@@ -282,12 +283,12 @@ fn layers<T: WireValue>(
 /// The dimension type's attribute layers. `timelines` must already be a list
 /// of ids (see [`resolve_timeline_tags`]).
 pub(super) fn environment(
-    extra: &HashMap<String, NbtTag>,
+    extra: &NbtCompound,
     registries: &RegistryHolder,
     has_weather: bool,
 ) -> Environment {
     let attributes = extra.get("attributes").and_then(NbtTag::compound);
-    let timeline_registry = registries.extra.get(&TIMELINE_REGISTRY.into());
+    let timeline_registry = registries.get(&TIMELINE_REGISTRY.into());
     let timelines: Vec<&NbtCompound> = timeline_ids(extra.get("timelines"))
         .iter()
         .filter_map(|id| timeline_registry?.map.get(&Identifier::new(id)))
@@ -377,12 +378,14 @@ pub(super) fn resolve_timeline_tags(
     tags: &HashMap<String, Vec<usize>>,
 ) {
     let names: Vec<String> = registries
-        .extra
         .get(&TIMELINE_REGISTRY.into())
         .map(|registry| registry.map.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
-    for dim in registries.dimension_type.map.values_mut() {
-        let Some(NbtTag::String(reference)) = dim._extra.get("timelines") else {
+    let Some(dimensions) = registries.get_mut(&DIMENSION_TYPE_REGISTRY.into()) else {
+        return;
+    };
+    for dim in dimensions.map.values_mut() {
+        let Some(NbtTag::String(reference)) = dim.get("timelines") else {
             continue;
         };
         let Some(tag) = reference.to_str().strip_prefix('#').map(str::to_owned) else {
@@ -397,8 +400,9 @@ pub(super) fn resolve_timeline_tags(
             .filter_map(|&i| names.get(i))
             .map(|name| name.as_str().into())
             .collect();
-        dim._extra
-            .insert("timelines".to_owned(), NbtTag::List(NbtList::String(ids)));
+        if let Some(timelines) = dim.get_mut("timelines") {
+            *timelines = NbtTag::List(NbtList::String(ids));
+        }
     }
 }
 
@@ -524,36 +528,29 @@ mod tests {
 
     #[test]
     fn timeline_tags_resolve_to_their_ids() {
-        use azalea_core::registry_holder::RegistryType;
-        use azalea_core::registry_holder::dimension_type::DimensionKindElement;
-
         let mut registries = RegistryHolder::default();
-        let mut timelines = RegistryType::<NbtCompound>::default();
-        for name in [
+        let timelines = [
             "minecraft:day",
             "minecraft:moon",
             "minecraft:villager_schedule",
-        ] {
-            timelines.map.insert(name.into(), NbtCompound::new());
-        }
-        registries.extra.insert(TIMELINE_REGISTRY.into(), timelines);
-        registries.dimension_type.map.insert(
-            "minecraft:overworld".into(),
-            DimensionKindElement {
-                height: 384,
-                min_y: -64,
-                ultrawarm: None,
-                _extra: HashMap::from([(
-                    "timelines".to_owned(),
-                    NbtTag::String("#minecraft:in_overworld".into()),
-                )]),
-            },
+        ];
+        registries.append(
+            TIMELINE_REGISTRY.into(),
+            timelines
+                .map(|name| (name.into(), Some(NbtCompound::new())))
+                .into(),
+        );
+        let mut overworld = NbtCompound::new();
+        overworld.insert("timelines", "#minecraft:in_overworld");
+        registries.append(
+            DIMENSION_TYPE_REGISTRY.into(),
+            vec![("minecraft:overworld".into(), Some(overworld))],
         );
         let tags = HashMap::from([("minecraft:in_overworld".to_owned(), vec![2, 0])]);
         resolve_timeline_tags(&mut registries, &tags);
-        let dim = &registries.dimension_type.map[0];
+        let dim = &registries.get(&DIMENSION_TYPE_REGISTRY.into()).unwrap().map[0];
         assert_eq!(
-            timeline_ids(dim._extra.get("timelines")),
+            timeline_ids(dim.get("timelines")),
             ["minecraft:villager_schedule", "minecraft:day"]
         );
     }

@@ -66,12 +66,6 @@ impl From<BlockPos> for (i32, i32, i32) {
     }
 }
 
-impl From<azalea_core::position::BlockPos> for BlockPos {
-    fn from(pos: azalea_core::position::BlockPos) -> Self {
-        Self::new(pos.x, pos.y, pos.z)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use glam::dvec3;

@@ -234,12 +234,12 @@ impl PackBlockIds {
         Self { source, states }
     }
 
-    pub fn block(&self, state: azalea_block::BlockState) -> u32 {
+    pub fn block(&self, state: pomme_block::BlockState) -> u32 {
         self.states.get(state.id() as usize).copied().unwrap_or(0)
     }
 
     /// A fluid quad's: the id of the fluid's legacy block.
-    pub fn fluid(&self, legacy_block: azalea_block::BlockState) -> u32 {
+    pub fn fluid(&self, legacy_block: pomme_block::BlockState) -> u32 {
         self.block(legacy_block) | 1
     }
 }

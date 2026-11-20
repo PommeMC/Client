@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
 use parking_lot::RwLock;
+use pomme_block::BlockState;
 
 use super::storage::LightPos;
 use crate::world::block::BlockStateTable;
