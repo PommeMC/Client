@@ -5,7 +5,6 @@
 
 use pomme_registry::Identifier;
 
-const TAG_EMPTY: u8 = 1;
 const TAG_MAP_START: u8 = 2;
 const TAG_MAP_END: u8 = 3;
 const TAG_LIST_START: u8 = 4;
@@ -41,10 +40,6 @@ impl Hash {
     /// `HashCode.asInt`, as a click sends it.
     pub fn as_i32(self) -> i32 {
         self.0 as i32
-    }
-
-    pub fn empty() -> Self {
-        Self(crc32c::crc32c(&[TAG_EMPTY]))
     }
 
     pub fn bool(value: bool) -> Self {
@@ -167,8 +162,11 @@ impl Record {
         self.unless(name, value == default, || Hash::int(value))
     }
 
+    /// `Float.equals`, which tells the two zeros apart.
     pub fn float(self, name: &str, value: f32, default: f32) -> Self {
-        self.unless(name, value == default, || Hash::float(value))
+        self.unless(name, value.to_bits() == default.to_bits(), || {
+            Hash::float(value)
+        })
     }
 
     /// A `MapCodec`'s fields, which sit beside this record's own.
@@ -188,4 +186,17 @@ pub trait Names {
     /// The entry numbered `id` in the registry at `registry`, like
     /// `enchantment`.
     fn name(&self, registry: &str, id: u32) -> Option<Identifier>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_negative_zero_is_not_the_default_zero() {
+        let field = |value| Record::new().float("speed", value, 0.0).build();
+        let empty = Record::new().build();
+        assert_eq!(field(0.0), empty);
+        assert_ne!(field(-0.0), empty);
+    }
 }

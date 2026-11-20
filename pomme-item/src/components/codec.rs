@@ -259,6 +259,18 @@ pub(crate) fn hash_sound(sound: &Sound) -> Hash {
     }
 }
 
+/// `ListTag.tryUnwrap`: a list of mixed types holds each element that is
+/// not a compound inside one, under an empty name.
+fn unwrapped(element: &NbtTag) -> &NbtTag {
+    if let NbtTag::Compound(compound) = element
+        && compound.len() == 1
+        && let Some(inner) = compound.get("")
+    {
+        return inner;
+    }
+    element
+}
+
 /// `NbtOps.convertTo`: a tag as the value of the same shape.
 pub(crate) fn hash_tag(tag: &NbtTag) -> Hash {
     match tag {
@@ -270,7 +282,11 @@ pub(crate) fn hash_tag(tag: &NbtTag) -> Hash {
         NbtTag::Double(v) => Hash::double(*v),
         NbtTag::ByteArray(v) => Hash::byte_list(v),
         NbtTag::String(v) => Hash::string(&v.to_str()),
-        NbtTag::List(list) => Hash::list(list.as_nbt_tags().iter().map(hash_tag)),
+        NbtTag::List(list) => Hash::list(
+            list.as_nbt_tags()
+                .iter()
+                .map(|tag| hash_tag(unwrapped(tag))),
+        ),
         NbtTag::Compound(compound) => hash_compound(compound, None),
         NbtTag::IntArray(v) => Hash::int_list(v.iter().copied()),
         NbtTag::LongArray(v) => Hash::long_list(v.iter().copied()),
@@ -364,5 +380,23 @@ impl Text {
 
     pub(crate) fn write(&self, buf: &mut Vec<u8>) {
         self.nbt.write(buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use simdnbt::owned::{NbtCompound, NbtList};
+
+    use super::*;
+
+    #[test]
+    fn a_mixed_lists_wrapped_elements_hash_as_what_they_hold() {
+        let wrapped = NbtCompound::from_values(vec![("".into(), NbtTag::String("x".into()))]);
+        let plain = NbtCompound::from_values(vec![("a".into(), NbtTag::Int(1))]);
+        let list = NbtTag::List(NbtList::Compound(vec![wrapped, plain.clone()]));
+        assert_eq!(
+            hash_tag(&list),
+            Hash::list([Hash::string("x"), hash_compound(&plain, None)])
+        );
     }
 }
