@@ -527,4 +527,137 @@ mod tests {
             }
         );
     }
+
+    /// Vanilla's own encoding of every other entity packet
+    /// (`CodecOracle.entities`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{decoded, registry_id};
+
+        let vanilla = |name| decoded(name, read);
+        let position = DVec3::new(1.5, -60.0, 3.25);
+        let movement = DVec3::new(0.5, 0.25, -0.75);
+        // An `LpVec3` keeps 15 bits a component.
+        let close = |a: DVec3, b: DVec3| (a - b).abs().max_element() < 1e-3;
+
+        let EntityPacket::Add {
+            id: 7,
+            uuid: 42,
+            entity_type,
+            position: at,
+            movement: moving,
+            x_rot,
+            y_rot,
+            y_head_rot,
+            data: 5,
+        } = vanilla("add_entity/zombie")
+        else {
+            panic!("add_entity");
+        };
+        assert_eq!(entity_type, registry_id("entity_type", "minecraft:zombie"));
+        assert_eq!(at, position);
+        assert!(close(moving, movement), "{moving}");
+        assert_eq!((x_rot, y_rot, y_head_rot), (-90.0, 45.0, 22.5));
+
+        let EntityPacket::Motion { id: 7, velocity } = vanilla("set_entity_motion/fast") else {
+            panic!("set_entity_motion");
+        };
+        assert!(close(velocity, DVec3::new(6.0, -1.0, 0.0)), "{velocity}");
+
+        let delta = Some(DVec3::new(1.0, -0.5, 1.0 / 4096.0));
+        let rotation = Some((90.0, -45.0));
+        let cases = [
+            (
+                "move_entity_pos/on_ground",
+                EntityPacket::Move {
+                    id: 7,
+                    delta,
+                    rotation: None,
+                    on_ground: true,
+                },
+            ),
+            (
+                "move_entity_pos_rot/airborne",
+                EntityPacket::Move {
+                    id: 7,
+                    delta,
+                    rotation,
+                    on_ground: false,
+                },
+            ),
+            (
+                "move_entity_rot/on_ground",
+                EntityPacket::Move {
+                    id: 7,
+                    delta: None,
+                    rotation,
+                    on_ground: true,
+                },
+            ),
+            (
+                "entity_position_sync/on_ground",
+                EntityPacket::PositionSync {
+                    id: 7,
+                    values: PositionMoveRotation {
+                        position,
+                        delta: movement,
+                        y_rot: 45.0,
+                        x_rot: -10.0,
+                    },
+                    on_ground: true,
+                },
+            ),
+            (
+                "rotate_head/left",
+                EntityPacket::RotateHead {
+                    id: 7,
+                    y_head_rot: -135.0,
+                },
+            ),
+            (
+                "animate/wake_up",
+                EntityPacket::Animate { id: 7, action: 2 },
+            ),
+            (
+                "entity_event/death",
+                EntityPacket::Event { id: 300, event: 34 },
+            ),
+            (
+                "hurt_animation/behind",
+                EntityPacket::HurtAnimation { id: 7, yaw: 135.0 },
+            ),
+            (
+                "damage_event/mob_attack",
+                EntityPacket::Damage {
+                    id: 7,
+                    damage_type: registry_id("damage_type", "minecraft:mob_attack"),
+                    cause: Some(3),
+                    direct: None,
+                    position: Some(position),
+                },
+            ),
+            (
+                "take_item_entity/three",
+                EntityPacket::TakeItem {
+                    item: 9,
+                    collector: 1,
+                    amount: 3,
+                },
+            ),
+            (
+                "set_passengers/two",
+                EntityPacket::Passengers {
+                    vehicle: 7,
+                    passengers: vec![8, 9],
+                },
+            ),
+            (
+                "remove_entities/two",
+                EntityPacket::Remove { ids: vec![5, 7] },
+            ),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(vanilla(name), expected, "{name}");
+        }
+    }
 }

@@ -281,6 +281,79 @@ mod tests {
             .collect()
     }
 
+    /// The entries of codec fixture `set_entity_data/<case>`, sent for
+    /// `entity`.
+    fn vanilla(case: &str, entity: i32) -> Vec<DataValue> {
+        let payload = crate::vanilla_fixtures::case(&format!("set_entity_data/{case}"));
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().unwrap(), entity);
+        let values = codec().read_entity_data(&mut r).expect("valid entity data");
+        r.ensure_eof().unwrap();
+        values
+    }
+
+    /// One entry per serializer, each at the index of its serializer's id,
+    /// by vanilla's encoder (`CodecOracle.entityData`): every value the
+    /// client reads decodes, and every other one is skipped by its shape.
+    #[test]
+    fn every_serializer_matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{registry_id, registry_size};
+
+        let last = |registry| registry_size(registry) as u32 - 1;
+        let read: Vec<(u8, Value)> = vec![
+            (0, Value::Byte(5)),
+            (1, Value::Int(300)),
+            (2, Value::Long(127)),
+            (3, Value::Float(1.5)),
+            (
+                6,
+                Value::OptionalComponent(Some(Box::from([8, 0, 2, b'h', b'i']))),
+            ),
+            (
+                7,
+                Value::Item(Some(ItemStack {
+                    item: registry_id("item", "minecraft:stone"),
+                    count: 2,
+                    patch: Default::default(),
+                })),
+            ),
+            (8, Value::Bool(true)),
+            (11, Value::OptionalBlockPos(Some((-12, 70, 345)))),
+            (
+                18,
+                Value::VillagerData {
+                    kind: registry_id("villager_type", "minecraft:swamp"),
+                    profession: registry_id("villager_profession", "minecraft:farmer"),
+                    level: 3,
+                },
+            ),
+            // `Pose.SLEEPING`
+            (20, Value::Pose(2)),
+            (21, Value::Variant(Variant::Cat, last("cat_variant"))),
+            (23, Value::Variant(Variant::Cow, last("cow_variant"))),
+            (25, Value::Variant(Variant::Wolf, last("wolf_variant"))),
+            (
+                30,
+                Value::Variant(Variant::Chicken, last("chicken_variant")),
+            ),
+            // DIGGING, UNROLLING, DROPPING_ITEM, WEATHERED
+            (35, Value::Int(5)),
+            (36, Value::Int(3)),
+            (37, Value::Int(3)),
+            (38, Value::Int(2)),
+        ];
+        let expected: Vec<DataValue> = (0..SERIALIZERS_26_2.len() as u8)
+            .map(|index| DataValue {
+                index,
+                value: read
+                    .iter()
+                    .find(|(at, _)| *at == index)
+                    .map_or(Value::Other, |(_, value)| value.clone()),
+            })
+            .collect();
+        assert_eq!(vanilla("every_serializer", 42), expected);
+    }
+
     #[test]
     fn table_covers_every_serializer() {
         assert_eq!(SERIALIZERS_26_2.len(), 43);
@@ -330,13 +403,8 @@ mod tests {
     /// by vanilla's encoder.
     #[test]
     fn copper_golem_states_match_vanilla_encoder() {
-        let payload = crate::vanilla_fixtures::case("set_entity_data/copper_golem");
-        let mut r = Reader::new(&payload);
-        assert_eq!(r.var_i32().unwrap(), 7);
-        let values = codec().read_entity_data(&mut r).expect("valid entity data");
-        r.ensure_eof().unwrap();
         assert_eq!(
-            values,
+            vanilla("copper_golem", 7),
             [
                 DataValue {
                     index: 16,
@@ -353,13 +421,8 @@ mod tests {
     /// `Sniffer.DATA_STATE` (index 18) set to DIGGING by vanilla's encoder.
     #[test]
     fn sniffer_state_matches_vanilla_encoder() {
-        let payload = crate::vanilla_fixtures::case("set_entity_data/sniffer_state");
-        let mut r = Reader::new(&payload);
-        assert_eq!(r.var_i32().unwrap(), 7);
-        let values = codec().read_entity_data(&mut r).expect("valid entity data");
-        r.ensure_eof().unwrap();
         assert_eq!(
-            values,
+            vanilla("sniffer_state", 7),
             [DataValue {
                 index: 18,
                 value: Value::Int(5),
@@ -371,13 +434,8 @@ mod tests {
     /// encoder.
     #[test]
     fn armadillo_state_matches_vanilla_encoder() {
-        let payload = crate::vanilla_fixtures::case("set_entity_data/armadillo_state");
-        let mut r = Reader::new(&payload);
-        assert_eq!(r.var_i32().unwrap(), 7);
-        let values = codec().read_entity_data(&mut r).expect("valid entity data");
-        r.ensure_eof().unwrap();
         assert_eq!(
-            values,
+            vanilla("armadillo_state", 7),
             [DataValue {
                 index: 18,
                 value: Value::Int(3),

@@ -55,30 +55,68 @@ import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
 import net.minecraft.network.protocol.common.ClientboundShowDialogPacket;
 import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
+import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundAnimatePacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
+import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
+import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
+import net.minecraft.network.protocol.game.ClientboundHurtAnimationPacket;
+import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
-import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
-import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
-import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
+import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderLerpSizePacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderSizePacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDelayPacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDistancePacket;
+import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
+import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
+import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
+import net.minecraft.network.protocol.game.ServerboundChangeGameModePacket;
+import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
+import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
+import net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket;
+import net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundMoveVehiclePacket;
 import net.minecraft.network.protocol.game.ServerboundPaddleBoatPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
+import net.minecraft.network.protocol.game.ServerboundRenameItemPacket;
+import net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket;
+import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket;
+import net.minecraft.network.protocol.game.ServerboundSwingPacket;
+import net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket;
+import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
+import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.Identifier;
@@ -153,7 +191,17 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.CONSUME_EFFECT_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE,
-                net.minecraft.core.registries.BuiltInRegistries.MAP_DECORATION_TYPE));
+                net.minecraft.core.registries.BuiltInRegistries.MAP_DECORATION_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.PARTICLE_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION,
+                builtIn(Registries.DAMAGE_TYPE),
+                builtIn(Registries.CAT_VARIANT), builtIn(Registries.CAT_SOUND_VARIANT),
+                builtIn(Registries.CHICKEN_VARIANT), builtIn(Registries.CHICKEN_SOUND_VARIANT),
+                builtIn(Registries.COW_VARIANT), builtIn(Registries.COW_SOUND_VARIANT),
+                builtIn(Registries.WOLF_VARIANT), builtIn(Registries.WOLF_SOUND_VARIANT),
+                builtIn(Registries.FROG_VARIANT), builtIn(Registries.PIG_VARIANT),
+                builtIn(Registries.PIG_SOUND_VARIANT), builtIn(Registries.ZOMBIE_NAUTILUS_VARIANT),
+                builtIn(Registries.PAINTING_VARIANT)));
 
         lifecycle(dimensionTypes, clocks);
         status();
@@ -212,14 +260,18 @@ public final class CodecOracle {
                 new ClientboundShowDialogPacket(Holder.direct(serverLinks.value())));
         commands();
         serverbound();
+        entities();
+        entityData();
         Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
         blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
         blockTags.put(Identifier.withDefaultNamespace("empty"), IntList.of());
+        // In a map that keeps its order: `Map.of` changes it from run to run.
+        Map<ResourceKey<? extends Registry<?>>, TagNetworkSerialization.NetworkPayload> tags = new LinkedHashMap<>();
+        tags.put(Registries.BLOCK, new TagNetworkSerialization.NetworkPayload(blockTags));
+        tags.put(Registries.DIALOG, new TagNetworkSerialization.NetworkPayload(Map.of(
+                Identifier.withDefaultNamespace("pause_screen_additions"), IntList.of(2))));
         encode("update_tags/two_registries", ClientboundUpdateTagsPacket.STREAM_CODEC::encode,
-                new ClientboundUpdateTagsPacket(Map.of(
-                        Registries.BLOCK, new TagNetworkSerialization.NetworkPayload(blockTags),
-                        Registries.DIALOG, new TagNetworkSerialization.NetworkPayload(Map.of(
-                                Identifier.withDefaultNamespace("pause_screen_additions"), IntList.of(2))))));
+                new ClientboundUpdateTagsPacket(tags));
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
@@ -229,10 +281,23 @@ public final class CodecOracle {
         idsOf(ids, "dialog", dialogs);
         idsOf(ids, "enchantment", enchantments);
         idsOf(ids, "banner_pattern", bannerPatterns);
+        // The entries `entities` and `entityData` send, out of registries too large to list whole.
+        for (String entry : List.of("damage_type/mob_attack", "entity_type/zombie", "villager_type/swamp",
+                "villager_profession/farmer", "item/stone")) {
+            String[] parts = entry.split("/");
+            Identifier name = Identifier.withDefaultNamespace(parts[1]);
+            Registry<?> registry = registries.lookupOrThrow(ResourceKey.createRegistryKey(
+                    Identifier.withDefaultNamespace(parts[0])));
+            ids.addProperty(parts[0] + "/" + name, idOf(registry, name));
+        }
         out.add("registry_ids", ids);
         JsonObject sizes = new JsonObject();
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
         sizes.addProperty("worldgen/biome", biomes.size());
+        for (ResourceKey<? extends Registry<?>> key : List.of(Registries.CAT_VARIANT, Registries.CHICKEN_VARIANT,
+                Registries.COW_VARIANT, Registries.WOLF_VARIANT)) {
+            sizes.addProperty(key.identifier().getPath(), registries.lookupOrThrow(key).size());
+        }
         out.add("registry_sizes", sizes);
         JsonObject cases = new JsonObject();
         CASES.forEach(cases::addProperty);
@@ -344,21 +409,21 @@ public final class CodecOracle {
         UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
         BlockPos pos = new BlockPos(-12, 70, 345);
         encode("serverbound/accept_teleportation",
-                net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket(300));
+                ServerboundAcceptTeleportationPacket.STREAM_CODEC::encode,
+                new ServerboundAcceptTeleportationPacket(300));
         encode("serverbound/bundle_item_selected",
-                net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket(36, -1));
+                ServerboundSelectBundleItemPacket.STREAM_CODEC::encode,
+                new ServerboundSelectBundleItemPacket(36, -1));
         encode("serverbound/change_game_mode",
-                net.minecraft.network.protocol.game.ServerboundChangeGameModePacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundChangeGameModePacket(GameType.SPECTATOR));
+                ServerboundChangeGameModePacket.STREAM_CODEC::encode,
+                new ServerboundChangeGameModePacket(GameType.SPECTATOR));
         encode("serverbound/chunk_batch_received",
-                net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket(12.5f));
+                ServerboundChunkBatchReceivedPacket.STREAM_CODEC::encode,
+                new ServerboundChunkBatchReceivedPacket(12.5f));
         encode("serverbound/client_command",
-                net.minecraft.network.protocol.game.ServerboundClientCommandPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundClientCommandPacket(
-                        net.minecraft.network.protocol.game.ServerboundClientCommandPacket.Action.REQUEST_STATS));
+                ServerboundClientCommandPacket.STREAM_CODEC::encode,
+                new ServerboundClientCommandPacket(
+                        ServerboundClientCommandPacket.Action.REQUEST_STATS));
         encode("serverbound/client_information",
                 net.minecraft.network.protocol.common.ServerboundClientInformationPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.common.ServerboundClientInformationPacket(
@@ -367,17 +432,17 @@ public final class CodecOracle {
                                 net.minecraft.world.entity.HumanoidArm.LEFT, false, true,
                                 net.minecraft.server.level.ParticleStatus.MINIMAL)));
         encode("serverbound/client_tick_end",
-                net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.STREAM_CODEC::encode,
-                net.minecraft.network.protocol.game.ServerboundClientTickEndPacket.INSTANCE);
+                ServerboundClientTickEndPacket.STREAM_CODEC::encode,
+                ServerboundClientTickEndPacket.INSTANCE);
         encode("serverbound/command_suggestion",
-                net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket(7, "/give @s sto"));
+                ServerboundCommandSuggestionPacket.STREAM_CODEC::encode,
+                new ServerboundCommandSuggestionPacket(7, "/give @s sto"));
         encode("serverbound/configuration_acknowledged",
-                net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket.STREAM_CODEC::encode,
-                net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket.INSTANCE);
+                ServerboundConfigurationAcknowledgedPacket.STREAM_CODEC::encode,
+                ServerboundConfigurationAcknowledgedPacket.INSTANCE);
         encode("serverbound/container_button_click",
-                net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket(3, 200));
+                ServerboundContainerButtonClickPacket.STREAM_CODEC::encode,
+                new ServerboundContainerButtonClickPacket(3, 200));
         var changed = new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<net.minecraft.network.HashedStack>();
         changed.put(5, new net.minecraft.network.HashedStack.ActualItem(
                 net.minecraft.core.registries.BuiltInRegistries.ITEM.wrapAsHolder(
@@ -387,16 +452,16 @@ public final class CodecOracle {
                         Map.of(net.minecraft.core.component.DataComponents.DAMAGE, 0x12345678),
                         Set.of(net.minecraft.core.component.DataComponents.CUSTOM_NAME))));
         encode("serverbound/container_click",
-                net.minecraft.network.protocol.game.ServerboundContainerClickPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(3, 300, (short) -999, (byte) 1,
+                ServerboundContainerClickPacket.STREAM_CODEC::encode,
+                new ServerboundContainerClickPacket(3, 300, (short) -999, (byte) 1,
                         net.minecraft.world.inventory.ContainerInput.THROW, changed,
                         net.minecraft.network.HashedStack.EMPTY));
         encode("serverbound/container_close",
-                net.minecraft.network.protocol.game.ServerboundContainerClosePacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(3));
+                ServerboundContainerClosePacket.STREAM_CODEC::encode,
+                new ServerboundContainerClosePacket(3));
         encode("serverbound/container_slot_state_changed",
-                net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket(8, 3, true));
+                ServerboundContainerSlotStateChangedPacket.STREAM_CODEC::encode,
+                new ServerboundContainerSlotStateChangedPacket(8, 3, true));
         encode("serverbound/custom_payload",
                 net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket(
@@ -405,71 +470,71 @@ public final class CodecOracle {
                 net.minecraft.network.protocol.common.ServerboundKeepAlivePacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.common.ServerboundKeepAlivePacket(-2L));
         encode("serverbound/move_player_pos",
-                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Pos.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Pos(1.5, 64.0, -2.25, true, false));
+                ServerboundMovePlayerPacket.Pos.STREAM_CODEC::encode,
+                new ServerboundMovePlayerPacket.Pos(1.5, 64.0, -2.25, true, false));
         encode("serverbound/move_player_pos_rot",
-                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.PosRot.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.PosRot(
+                ServerboundMovePlayerPacket.PosRot.STREAM_CODEC::encode,
+                new ServerboundMovePlayerPacket.PosRot(
                         1.5, 64.0, -2.25, 90.0f, -10.0f, false, true));
         encode("serverbound/move_player_rot",
-                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot(90.0f, -10.0f, true, true));
+                ServerboundMovePlayerPacket.Rot.STREAM_CODEC::encode,
+                new ServerboundMovePlayerPacket.Rot(90.0f, -10.0f, true, true));
         encode("serverbound/move_player_status_only",
-                net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.StatusOnly.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.StatusOnly(false, false));
+                ServerboundMovePlayerPacket.StatusOnly.STREAM_CODEC::encode,
+                new ServerboundMovePlayerPacket.StatusOnly(false, false));
         var abilities = new net.minecraft.world.entity.player.Abilities();
         abilities.flying = true;
         encode("serverbound/player_abilities",
-                net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket(abilities));
+                ServerboundPlayerAbilitiesPacket.STREAM_CODEC::encode,
+                new ServerboundPlayerAbilitiesPacket(abilities));
         encode("serverbound/player_action",
-                net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
-                        net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
+                ServerboundPlayerActionPacket.STREAM_CODEC::encode,
+                new ServerboundPlayerActionPacket(
+                        ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
                         pos, net.minecraft.core.Direction.WEST, 300));
         // The constructor wants an entity, so this one decodes the bytes
         // pomme writes (entity 300, START_RIDING_JUMP, 100) and encodes them back.
         encode("serverbound/player_command",
-                net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.STREAM_CODEC::encode,
-                net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.STREAM_CODEC.decode(
+                ServerboundPlayerCommandPacket.STREAM_CODEC::encode,
+                ServerboundPlayerCommandPacket.STREAM_CODEC.decode(
                         new FriendlyByteBuf(Unpooled.wrappedBuffer(new byte[] {(byte) 0xAC, 2, 3, 100}))));
         encode("serverbound/player_input",
-                net.minecraft.network.protocol.game.ServerboundPlayerInputPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundPlayerInputPacket(
+                ServerboundPlayerInputPacket.STREAM_CODEC::encode,
+                new ServerboundPlayerInputPacket(
                         new net.minecraft.world.entity.player.Input(true, false, false, true, true, false, true)));
         encode("serverbound/player_loaded",
-                net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket());
+                ServerboundPlayerLoadedPacket.STREAM_CODEC::encode,
+                new ServerboundPlayerLoadedPacket());
         encode("serverbound/pong",
                 net.minecraft.network.protocol.common.ServerboundPongPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.common.ServerboundPongPacket(-5));
         encode("serverbound/rename_item",
-                net.minecraft.network.protocol.game.ServerboundRenameItemPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundRenameItemPacket("Sting"));
+                ServerboundRenameItemPacket.STREAM_CODEC::encode,
+                new ServerboundRenameItemPacket("Sting"));
         encode("serverbound/resource_pack",
                 net.minecraft.network.protocol.common.ServerboundResourcePackPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.common.ServerboundResourcePackPacket(uuid,
                         net.minecraft.network.protocol.common.ServerboundResourcePackPacket.Action.FAILED_RELOAD));
         encode("serverbound/set_carried_item",
-                net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(8));
+                ServerboundSetCarriedItemPacket.STREAM_CODEC::encode,
+                new ServerboundSetCarriedItemPacket(8));
         encode("serverbound/sign_update",
-                net.minecraft.network.protocol.game.ServerboundSignUpdatePacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundSignUpdatePacket(pos, false, "one", "", "thrée", "4"));
+                ServerboundSignUpdatePacket.STREAM_CODEC::encode,
+                new ServerboundSignUpdatePacket(pos, false, "one", "", "thrée", "4"));
         encode("serverbound/swing",
-                net.minecraft.network.protocol.game.ServerboundSwingPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundSwingPacket(
+                ServerboundSwingPacket.STREAM_CODEC::encode,
+                new ServerboundSwingPacket(
                         net.minecraft.world.InteractionHand.OFF_HAND));
         encode("serverbound/teleport_to_entity",
-                net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket(uuid));
+                ServerboundTeleportToEntityPacket.STREAM_CODEC::encode,
+                new ServerboundTeleportToEntityPacket(uuid));
         encode("serverbound/use_item",
-                net.minecraft.network.protocol.game.ServerboundUseItemPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundUseItemPacket(
+                ServerboundUseItemPacket.STREAM_CODEC::encode,
+                new ServerboundUseItemPacket(
                         net.minecraft.world.InteractionHand.MAIN_HAND, 300, 90.0f, -10.0f));
         encode("serverbound/use_item_on",
-                net.minecraft.network.protocol.game.ServerboundUseItemOnPacket.STREAM_CODEC::encode,
-                new net.minecraft.network.protocol.game.ServerboundUseItemOnPacket(
+                ServerboundUseItemOnPacket.STREAM_CODEC::encode,
+                new ServerboundUseItemOnPacket(
                         net.minecraft.world.InteractionHand.OFF_HAND,
                         new net.minecraft.world.phys.BlockHitResult(new Vec3(-11.25, 71.0, 345.5),
                                 net.minecraft.core.Direction.UP, pos, true, false),
@@ -614,6 +679,10 @@ public final class CodecOracle {
                 .sorted(Comparator.comparing(entry -> entry.key().identifier().toString()))
                 .forEach(entry -> registry.register(entry.key(), entry.value(), RegistrationInfo.BUILT_IN));
         return registry.freeze();
+    }
+
+    private static <T> int idOf(Registry<T> registry, Identifier name) {
+        return registry.getId(registry.getValue(name));
     }
 
     private static <T> void idsOf(JsonObject ids, String name, Registry<T> registry) {
@@ -883,6 +952,163 @@ public final class CodecOracle {
         new net.minecraft.core.component.TypedDataComponent<>(type, value)
                 .encodeValue(registries.createSerializationContext(net.minecraft.util.HashOps.CRC32C_INSTANCE))
                 .ifSuccess(hash -> CASES.put("component_hash/" + name, String.format("%08x", hash.asInt())));
+    }
+
+    /// The entity packets pomme reads (`pomme-protocol/src/entity.rs`).
+    private static void entities() throws Exception {
+        Vec3 position = new Vec3(1.5, -60.0, 3.25);
+        Vec3 movement = new Vec3(0.5, 0.25, -0.75);
+        encode("add_entity/zombie", ClientboundAddEntityPacket.STREAM_CODEC::encode,
+                new ClientboundAddEntityPacket(7, new UUID(0L, 42L),
+                        position.x, position.y, position.z, -90.0f, 45.0f,
+                        net.minecraft.world.entity.EntityTypes.ZOMBIE, 5, movement, 22.5));
+        encode("move_entity_pos/on_ground",
+                ClientboundMoveEntityPacket.Pos.STREAM_CODEC::encode,
+                new ClientboundMoveEntityPacket.Pos(
+                        7, (short) 4096, (short) -2048, (short) 1, true));
+        encode("move_entity_pos_rot/airborne",
+                ClientboundMoveEntityPacket.PosRot.STREAM_CODEC::encode,
+                new ClientboundMoveEntityPacket.PosRot(
+                        7, (short) 4096, (short) -2048, (short) 1, (byte) 64, (byte) -32, false));
+        encode("move_entity_rot/on_ground",
+                ClientboundMoveEntityPacket.Rot.STREAM_CODEC::encode,
+                new ClientboundMoveEntityPacket.Rot(7, (byte) 64, (byte) -32, true));
+        encode("entity_position_sync/on_ground",
+                ClientboundEntityPositionSyncPacket.STREAM_CODEC::encode,
+                new ClientboundEntityPositionSyncPacket(
+                        7, new PositionMoveRotation(position, movement, 45.0f, -10.0f), true));
+        encode("set_entity_motion/fast",
+                ClientboundSetEntityMotionPacket.STREAM_CODEC::encode,
+                new ClientboundSetEntityMotionPacket(7, new Vec3(6.0, -1.0, 0.0)));
+        encode("hurt_animation/behind",
+                ClientboundHurtAnimationPacket.STREAM_CODEC::encode,
+                new ClientboundHurtAnimationPacket(7, 135.0f));
+        encode("damage_event/mob_attack",
+                ClientboundDamageEventPacket.STREAM_CODEC::encode,
+                new ClientboundDamageEventPacket(7,
+                        registries.lookupOrThrow(Registries.DAMAGE_TYPE)
+                                .getOrThrow(net.minecraft.world.damagesource.DamageTypes.MOB_ATTACK),
+                        3, -1, Optional.of(position)));
+        encode("take_item_entity/three",
+                ClientboundTakeItemEntityPacket.STREAM_CODEC::encode,
+                new ClientboundTakeItemEntityPacket(9, 1, 3));
+        encode("remove_entities/two",
+                ClientboundRemoveEntitiesPacket.STREAM_CODEC::encode,
+                new ClientboundRemoveEntitiesPacket(5, 7));
+        // These four are only built from a live entity, so their fields are set directly.
+        encode("rotate_head/left",
+                ClientboundRotateHeadPacket.STREAM_CODEC::encode,
+                withFields(ClientboundRotateHeadPacket.class,
+                        Map.of("entityId", 7, "yHeadRot", (byte) -96)));
+        encode("animate/wake_up",
+                ClientboundAnimatePacket.STREAM_CODEC::encode,
+                withFields(ClientboundAnimatePacket.class,
+                        Map.of("id", 7, "action", 2)));
+        encode("entity_event/death",
+                ClientboundEntityEventPacket.STREAM_CODEC::encode,
+                withFields(ClientboundEntityEventPacket.class,
+                        Map.of("entityId", 300, "eventId", (byte) 34)));
+        encode("set_passengers/two",
+                ClientboundSetPassengersPacket.STREAM_CODEC::encode,
+                withFields(ClientboundSetPassengersPacket.class,
+                        Map.of("vehicle", 7, "passengers", new int[] {8, 9})));
+    }
+
+    /// An instance of `type` whose constructor is skipped, with `fields` set.
+    /// The fields are final: a JDK that stops reflection from writing those
+    /// needs another way to build these packets.
+    private static <P> P withFields(Class<P> type, Map<String, Object> fields) throws Exception {
+        java.lang.reflect.Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        P packet = type.cast(((sun.misc.Unsafe) theUnsafe.get(null)).allocateInstance(type));
+        for (Map.Entry<String, Object> field : fields.entrySet()) {
+            java.lang.reflect.Field target = type.getDeclaredField(field.getKey());
+            target.setAccessible(true);
+            target.set(packet, field.getValue());
+        }
+        return packet;
+    }
+
+    /// One `set_entity_data` entry per serializer, each at the index of its
+    /// serializer's id.
+    private static void entityData() {
+        List<SynchedEntityData.DataValue<?>> values = new java.util.ArrayList<>();
+        BlockPos pos = new BlockPos(-12, 70, 345);
+        Component text = Component.literal("hi");
+        data(values, EntityDataSerializers.BYTE, (byte) 5);
+        data(values, EntityDataSerializers.INT, 300);
+        data(values, EntityDataSerializers.LONG, 127L);
+        data(values, EntityDataSerializers.FLOAT, 1.5f);
+        data(values, EntityDataSerializers.STRING, "hi");
+        data(values, EntityDataSerializers.COMPONENT, text);
+        data(values, EntityDataSerializers.OPTIONAL_COMPONENT, Optional.of(text));
+        // A stack reads its item's default components, which only a loaded world binds.
+        net.minecraft.world.item.Items.STONE.builtInRegistryHolder()
+                .bindComponents(net.minecraft.core.component.DataComponentMap.EMPTY);
+        data(values, EntityDataSerializers.ITEM_STACK,
+                new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.STONE, 2));
+        data(values, EntityDataSerializers.BOOLEAN, true);
+        data(values, EntityDataSerializers.ROTATIONS, new net.minecraft.core.Rotations(1.0f, 2.0f, 3.0f));
+        data(values, EntityDataSerializers.BLOCK_POS, pos);
+        data(values, EntityDataSerializers.OPTIONAL_BLOCK_POS, Optional.of(pos));
+        data(values, EntityDataSerializers.DIRECTION, net.minecraft.core.Direction.NORTH);
+        data(values, EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE,
+                Optional.of(net.minecraft.world.entity.EntityReference.of(new UUID(7L, 7L))));
+        data(values, EntityDataSerializers.BLOCK_STATE,
+                net.minecraft.world.level.block.Blocks.STONE.defaultBlockState());
+        data(values, EntityDataSerializers.OPTIONAL_BLOCK_STATE, Optional.empty());
+        data(values, EntityDataSerializers.PARTICLE, net.minecraft.core.particles.ParticleTypes.FLAME);
+        data(values, EntityDataSerializers.PARTICLES, List.of(net.minecraft.core.particles.ParticleTypes.FLAME,
+                new net.minecraft.core.particles.DustParticleOptions(0xFF0000, 1.0f)));
+        data(values, EntityDataSerializers.VILLAGER_DATA, new net.minecraft.world.entity.npc.villager.VillagerData(
+                net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerType.SWAMP),
+                net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION
+                        .getOrThrow(net.minecraft.world.entity.npc.villager.VillagerProfession.FARMER),
+                3));
+        data(values, EntityDataSerializers.OPTIONAL_UNSIGNED_INT, java.util.OptionalInt.of(4));
+        data(values, EntityDataSerializers.POSE, net.minecraft.world.entity.Pose.SLEEPING);
+        data(values, EntityDataSerializers.CAT_VARIANT, last(Registries.CAT_VARIANT));
+        data(values, EntityDataSerializers.CAT_SOUND_VARIANT, last(Registries.CAT_SOUND_VARIANT));
+        data(values, EntityDataSerializers.COW_VARIANT, last(Registries.COW_VARIANT));
+        data(values, EntityDataSerializers.COW_SOUND_VARIANT, last(Registries.COW_SOUND_VARIANT));
+        data(values, EntityDataSerializers.WOLF_VARIANT, last(Registries.WOLF_VARIANT));
+        data(values, EntityDataSerializers.WOLF_SOUND_VARIANT, last(Registries.WOLF_SOUND_VARIANT));
+        data(values, EntityDataSerializers.FROG_VARIANT, last(Registries.FROG_VARIANT));
+        data(values, EntityDataSerializers.PIG_VARIANT, last(Registries.PIG_VARIANT));
+        data(values, EntityDataSerializers.PIG_SOUND_VARIANT, last(Registries.PIG_SOUND_VARIANT));
+        data(values, EntityDataSerializers.CHICKEN_VARIANT, last(Registries.CHICKEN_VARIANT));
+        data(values, EntityDataSerializers.CHICKEN_SOUND_VARIANT, last(Registries.CHICKEN_SOUND_VARIANT));
+        data(values, EntityDataSerializers.ZOMBIE_NAUTILUS_VARIANT, last(Registries.ZOMBIE_NAUTILUS_VARIANT));
+        data(values, EntityDataSerializers.OPTIONAL_GLOBAL_POS, Optional.of(GlobalPos.of(Level.OVERWORLD, pos)));
+        data(values, EntityDataSerializers.PAINTING_VARIANT, last(Registries.PAINTING_VARIANT));
+        data(values, EntityDataSerializers.SNIFFER_STATE, Sniffer.State.DIGGING);
+        data(values, EntityDataSerializers.ARMADILLO_STATE, Armadillo.ArmadilloState.UNROLLING);
+        data(values, EntityDataSerializers.COPPER_GOLEM_STATE, CopperGolemState.DROPPING_ITEM);
+        data(values, EntityDataSerializers.WEATHERING_COPPER_STATE, WeatheringCopper.WeatherState.WEATHERED);
+        data(values, EntityDataSerializers.VECTOR3, new org.joml.Vector3f(1.0f, 2.0f, 3.0f));
+        data(values, EntityDataSerializers.QUATERNION, new org.joml.Quaternionf());
+        data(values, EntityDataSerializers.RESOLVABLE_PROFILE,
+                net.minecraft.world.item.component.ResolvableProfile.createUnresolved("Steve"));
+        data(values, EntityDataSerializers.HUMANOID_ARM, net.minecraft.world.entity.HumanoidArm.RIGHT);
+        for (SynchedEntityData.DataValue<?> value : values) {
+            if (EntityDataSerializers.getSerializedId(value.serializer()) != value.id()) {
+                throw new IllegalStateException("serializer " + value.id() + " is out of order");
+            }
+        }
+        encode("set_entity_data/every_serializer", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
+                new ClientboundSetEntityDataPacket(42, values));
+    }
+
+    private static <T> void data(List<SynchedEntityData.DataValue<?>> values, EntityDataSerializer<T> serializer,
+            T value) {
+        values.add(SynchedEntityData.DataValue.create(new EntityDataAccessor<>(values.size(), serializer), value));
+    }
+
+    /// The entry of `registry` with the highest id.
+    private static <T> Holder<T> last(ResourceKey<Registry<T>> registry) {
+        Registry<T> entries = registries.lookupOrThrow(registry);
+        return entries.get(entries.size() - 1).orElseThrow();
     }
 
     private static <P> void encode(String name, BiConsumer<RegistryFriendlyByteBuf, P> codec, P packet) {
