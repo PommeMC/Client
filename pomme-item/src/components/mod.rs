@@ -434,6 +434,11 @@ mod tests {
             ("parrot_variant", "parrot/variant"),
             ("llama_variant", "llama/variant"),
             ("mooshroom_variant", "mooshroom/variant"),
+            ("block_entity_data", "block_entity_data"),
+            ("villager_variant", "villager/variant"),
+            ("map_decorations", "map_decorations"),
+            ("kinetic_negative_zero", "kinetic_weapon"),
+            ("sprite_name", "custom_name"),
         ];
         for (fixture, component) in fixtures {
             let kind: DataComponentKind = component.parse().unwrap();

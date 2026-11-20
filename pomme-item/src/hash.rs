@@ -190,8 +190,11 @@ impl Record {
         self.unless(name, value == default, || Value::Int(value))
     }
 
+    /// `Float.equals`, which tells the two zeros apart.
     pub fn float(self, name: &str, value: f32, default: f32) -> Self {
-        self.unless(name, value == default, || Value::Float(value))
+        self.unless(name, value.to_bits() == default.to_bits(), || {
+            Value::Float(value)
+        })
     }
 
     /// A `MapCodec`'s fields, which sit beside this record's own.

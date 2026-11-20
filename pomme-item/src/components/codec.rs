@@ -306,10 +306,11 @@ pub(crate) fn compound_value(
 }
 
 /// A text component's `CODEC` form from the NBT the same codec wrote. The
-/// shapes are the same but for a style's flags, which NBT holds as bytes.
-// TODO: a hover showing an item with components of its own has no form
-// here, their flags being bytes too; nor is a flag among a translation's
-// arguments told from a byte.
+/// shapes are the same but for its flags (a style's, an NBT text's
+/// `interpret`, a player sprite's `hat`), which NBT holds as bytes.
+// TODO: a hover showing an item with components of its own and a click
+// showing a dialog sent with it have no form here, their flags being bytes
+// too; nor is a flag among a translation's arguments told from a byte.
 pub(crate) fn text_value(tag: &NbtTag) -> Option<Value> {
     let compound = match tag {
         NbtTag::Compound(compound) => compound,
@@ -318,12 +319,13 @@ pub(crate) fn text_value(tag: &NbtTag) -> Option<Value> {
     };
     fields_value(compound, |key, value| match (key, value) {
         (
-            "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated" | "interpret",
+            "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated" | "interpret" | "hat",
             NbtTag::Byte(flag),
         ) => Some(Value::Bool(*flag != 0)),
         ("extra" | "with", NbtTag::List(list)) => texts_value(&list.as_nbt_tags()),
         ("separator", text) => text_value(text),
         ("hover_event", NbtTag::Compound(hover)) if hover.contains("components") => None,
+        ("click_event", NbtTag::Compound(click)) if click.compound("dialog").is_some() => None,
         ("hover_event", NbtTag::Compound(hover)) => fields_value(hover, |key, value| match key {
             "value" | "name" => text_value(value),
             _ => Some(tag_value(value)),

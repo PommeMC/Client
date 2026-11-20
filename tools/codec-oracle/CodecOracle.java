@@ -148,7 +148,10 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.POTION,
                 net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT,
                 net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE,
-                net.minecraft.core.registries.BuiltInRegistries.CONSUME_EFFECT_TYPE));
+                net.minecraft.core.registries.BuiltInRegistries.CONSUME_EFFECT_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.MAP_DECORATION_TYPE));
 
         lifecycle(dimensionTypes, clocks);
         status();
@@ -836,6 +839,24 @@ public final class CodecOracle {
                 new net.minecraft.world.item.component.SeededContainerLoot(
                         net.minecraft.resources.ResourceKey.create(
                                 net.minecraft.core.registries.Registries.LOOT_TABLE, custom), 11L));
+        component("block_entity_data", net.minecraft.core.component.DataComponents.BLOCK_ENTITY_DATA,
+                net.minecraft.world.item.component.TypedEntityData.of(
+                        net.minecraft.world.level.block.entity.BlockEntityTypes.CHEST, data));
+        component("villager_variant", net.minecraft.core.component.DataComponents.VILLAGER_VARIANT,
+                net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE.getOrThrow(
+                        net.minecraft.world.entity.npc.villager.VillagerType.DESERT));
+        component("map_decorations", net.minecraft.core.component.DataComponents.MAP_DECORATIONS,
+                new net.minecraft.world.item.component.MapDecorations(java.util.Map.of("spot",
+                        new net.minecraft.world.item.component.MapDecorations.Entry(
+                                net.minecraft.world.level.saveddata.maps.MapDecorationTypes.RED_X, 1.5, -2.0,
+                                90.0f))));
+        var none = java.util.Optional.<net.minecraft.world.item.component.KineticWeapon.Condition>empty();
+        component("kinetic_negative_zero", net.minecraft.core.component.DataComponents.KINETIC_WEAPON,
+                new net.minecraft.world.item.component.KineticWeapon(10, 0, none, none, none, -0.0f, 1.0f,
+                        java.util.Optional.empty(), java.util.Optional.empty()));
+        component("sprite_name", net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+                Component.object(new net.minecraft.network.chat.contents.objects.PlayerSprite(
+                        net.minecraft.world.item.component.ResolvableProfile.createUnresolved("Steve"), false)));
         component("item_name", net.minecraft.core.component.DataComponents.ITEM_NAME,
                 Component.literal("a").withStyle(style -> style.withBold(true).withItalic(false)
                                 .withHoverEvent(new net.minecraft.network.chat.HoverEvent.ShowText(
