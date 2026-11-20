@@ -675,8 +675,12 @@ impl AudioEngine {
         resources: &dyn ResourceManager,
         volumes: [f32; SoundCategory::COUNT],
     ) {
+        self.restart_with(|| Self::new(resources, volumes));
+    }
+
+    fn restart_with(&mut self, start: impl FnOnce() -> Self) {
         self.shut_down();
-        *self = Self::new(resources, volumes);
+        *self = start();
     }
 
     fn shut_down(&mut self) {
@@ -1198,6 +1202,15 @@ fn category_gain(volumes: &[f32; SoundCategory::COUNT], category: SoundCategory)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_stops_the_old_worker_before_starting_the_new_one() {
+        let (mut engine, _events, commands) = AudioEngine::for_test();
+        engine.restart_with(|| {
+            assert!(matches!(commands.try_recv(), Ok(AudioCommand::Shutdown)));
+            AudioEngine::silent()
+        });
+    }
 
     #[test]
     fn listener_vectors_match_vanilla_axes() {
