@@ -214,7 +214,7 @@ impl Translation {
             id,
             payload,
             ids.advancements,
-            self.item_grammar(),
+            self.item_grammar()?,
             self.to_native,
         )
     }
@@ -475,11 +475,20 @@ impl Translation {
         }
     }
 
-    /// The frame for native packet `id` whose `payload` every earlier rewrite
-    /// has left in 26.2's layout, lifted to 26.3's: `None` when 26.3 kept
-    /// the layout, `Some(None)` when the payload doesn't parse.
+    /// The last pass, on native packet `id` once the version's own rewrite
+    /// has run: a packet carrying item stacks goes through the wire
+    /// version's item grammar, and one 26.3 laid out anew is lifted from
+    /// 26.2's layout. `None` when neither applies, `Some(None)` when the
+    /// payload doesn't parse.
     fn upgrade(&self, id: u32, payload: &[u8]) -> Option<Option<Box<[u8]>>> {
         let ids = self.game_ids.as_ref()?;
+        if let Some(rewrite) = ids.items.as_ref().and_then(|items| items.rewrite(id)) {
+            let translated = rewrite(id, payload, self.item_grammar()?);
+            if translated.is_none() {
+                tracing::warn!("Dropping game packet {id} with an unparsable item stack");
+            }
+            return Some(translated.map(Vec::into_boxed_slice));
+        }
         let v776 = ids.v776.as_ref()?;
         if id == v776.level_particles_id {
             let upgraded = upgrade_level_particles(id, payload, ids, self.to_native);

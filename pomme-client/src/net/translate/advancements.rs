@@ -7,8 +7,6 @@ pub(super) struct AdvancementLayout {
     /// Through 1.21.11 a display's icon is a non-empty `ItemStack` (count,
     /// item, patch) rather than 26.1's `ItemStackTemplate`.
     pub icon_count_first: bool,
-    /// Pre-1.21.9 `profile` component layout.
-    pub old_profile: bool,
     /// Through 1.21.4 the packet lacks the trailing `showAdvancements`
     /// bool, true in every vanilla send path.
     pub append_show: bool,
@@ -20,13 +18,11 @@ pub(super) struct AdvancementLayout {
 /// entry, where 26.3 sends one even without a display, and the rest follows
 /// `layout`. An icon whose item the native version lacks takes its display
 /// with it, so that advancement is tracked but not shown.
-/// TODO: without an item grammar (1.20.5 to 1.21.11), an icon carrying a
-/// component [`translate_component_patch`] can't walk drops the packet.
 pub(super) fn translate_update_advancements(
     id: u32,
     payload: &[u8],
     layout: AdvancementLayout,
-    items: Option<Items<'_>>,
+    items: Items<'_>,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -92,12 +88,12 @@ fn translate_icon(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     layout: AdvancementLayout,
-    items: Option<Items<'_>>,
+    items: Items<'_>,
     remaps: &RegistryRemaps,
 ) -> Option<bool> {
     let (item, count) = read_item_and_count(cur, layout.icon_count_first)?;
     let mut patch = Vec::new();
-    translate_patch(cur, &mut patch, items, remaps, layout.old_profile)?;
+    items.patch(cur, &mut patch)?;
     let Some(item) = remaps.remap(ClientRegistry::Item, item) else {
         return Some(false);
     };

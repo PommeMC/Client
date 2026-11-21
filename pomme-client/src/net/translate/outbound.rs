@@ -89,7 +89,19 @@ impl Translation {
         if let (Some(items), Some(old)) = (&ids.items, old)
             && id == items.set_creative_mode_slot_id
         {
-            return translate_creative_slot(old, &frame[pos..], items.codec, self.from_native);
+            let frames = translate_creative_slot(old, &frame[pos..], items.codec, self.from_native);
+            if ids.v769.is_none() {
+                return frames;
+            }
+            // 1.21.4 and older don't length-prefix each component value.
+            return frames
+                .iter()
+                .flat_map(|frame| {
+                    let mut at = 0;
+                    wire::read_varint(frame, &mut at);
+                    undelimit_creative_slot(old, &frame[at..])
+                })
+                .collect();
         }
         if let Some(lowered) = ids.v776.as_ref().and_then(|v| v.lower(id, &frame[pos..])) {
             return lowered;

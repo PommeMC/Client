@@ -35,7 +35,6 @@ impl Translation {
             update_recipes_id: id(Phase::Game, "update_recipes"),
             place_ghost_recipe_id: id(Phase::Game, "place_ghost_recipe"),
             recipe_layout: (protocol >= 768).then_some(RecipeLayout {
-                old_profile: protocol <= 772,
                 item_stack_count_first: protocol <= 774,
                 trim_pattern_display: protocol <= 769,
             }),
@@ -82,11 +81,6 @@ impl Translation {
             let Some(ids) = ids else { continue };
             if id == ids.set_entity_data_id {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_entity_data));
-            }
-            if ids.items.as_ref().is_some_and(|v| v.rewrite(id).is_some()) {
-                slot.get_or_insert(Rewrite::Item(
-                    ids.items.as_ref().unwrap().rewrite(id).unwrap(),
-                ));
             }
             if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_chunk_774));
@@ -194,7 +188,6 @@ impl GameIds {
             update_advancements_id: id(Clientbound, "update_advancements"),
             advancements: AdvancementLayout {
                 icon_count_first: protocol <= 774,
-                old_profile: protocol <= 772,
                 append_show: protocol <= 769,
             },
             wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),

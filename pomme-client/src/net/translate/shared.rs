@@ -13,7 +13,6 @@ impl Rewrite {
             Self::Context(f) => f(t, id, payload, state),
             Self::SessionFrame(f) => f(id, payload, state),
             Self::Frame(f) => f(id, payload),
-            Self::Item(f) => f(id, payload, t.item_grammar()?),
             Self::Recipe(f) => f(id, payload, t.recipe_ctx()?),
         }
     }
@@ -25,7 +24,6 @@ impl Rewrite {
             (Self::Context(a), Self::Context(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::Frame(a), Self::Frame(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::SessionFrame(a), Self::SessionFrame(b)) => std::ptr::fn_addr_eq(a, b),
-            (Self::Item(a), Self::Item(b)) => std::ptr::fn_addr_eq(a, b),
             (Self::Recipe(a), Self::Recipe(b)) => std::ptr::fn_addr_eq(a, b),
             _ => false,
         }

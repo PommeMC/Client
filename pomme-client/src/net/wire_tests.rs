@@ -441,48 +441,43 @@ fn remap_add_entity_26_1() {
     );
 }
 
-/// A creative stack's component values can't be rewritten on a version
-/// without an item grammar, so a patch touching a component that version
-/// numbers differently is cleared wholesale outbound; unshifted ones survive.
+/// A creative stack reaches an older server in that version's ids: a
+/// component it numbers differently is renumbered, not dropped.
 #[test]
-fn strip_creative_components_774() {
+fn creative_slot_components_are_renumbered_774() {
     use pomme_protocol::item::{ComponentPatch, ItemStack};
     use pomme_protocol::serverbound::GamePacket;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let component = |name| {
-        registry_id(
-            RegistryTable::native(),
-            ClientRegistry::DataComponentType,
-            name,
-        )
-    };
-    let remap = |name| {
-        let mut packet = GamePacket::SetCreativeModeSlot {
-            slot: 36,
-            stack: Some(ItemStack {
-                item: registry_id(RegistryTable::native(), ClientRegistry::Item, "stone"),
-                count: 1,
-                patch: ComponentPatch {
-                    added: Vec::new(),
-                    removed: vec![component(name)],
-                },
-            }),
-        };
-        translation_for(774).remap_outbound(&mut packet);
-        let GamePacket::SetCreativeModeSlot { stack, .. } = packet else {
-            unreachable!()
-        };
-        stack.expect("stack cleared").patch
-    };
-
-    // max_stack_size is numbered the same in 1.21.11: kept.
-    assert_eq!(
-        remap("max_stack_size").removed,
-        [component("max_stack_size")]
+    let id = |table, registry, name| registry_id(table, registry, name);
+    let (native, old) = (
+        RegistryTable::native(),
+        RegistryTable::for_protocol(774).unwrap(),
     );
-    // lock is shifted in 1.21.11: the patch is cleared.
-    assert_eq!(remap("lock"), ComponentPatch::default());
+    let lock = ClientRegistry::DataComponentType;
+    assert_ne!(id(native, lock, "lock"), id(old, lock, "lock"));
+
+    let packet = GamePacket::SetCreativeModeSlot {
+        slot: 36,
+        stack: Some(ItemStack {
+            item: id(native, ClientRegistry::Item, "stone"),
+            count: 1,
+            patch: ComponentPatch {
+                added: Vec::new(),
+                removed: vec![id(native, lock, "lock")],
+            },
+        }),
+    };
+    let mut expected = vec![old_id(774, Direction::Serverbound, "set_creative_mode_slot") as u8];
+    expected.extend(36i16.to_be_bytes());
+    expected.push(1); // count
+    wire::write_varint(&mut expected, id(old, ClientRegistry::Item, "stone"));
+    expected.extend([0, 1]); // none added, one removed
+    wire::write_varint(&mut expected, id(old, lock, "lock"));
+    assert_eq!(
+        translation_for(774).translate_outbound_game_frame(packet.encode()),
+        [expected]
+    );
 }
 
 /// 1.20.5 to 1.21.4 read a creative stack's component values without the
@@ -593,11 +588,10 @@ fn translate_empty_entity_particles_774() {
     assert_eq!(entity_data_bytes(774, &values), values);
 }
 
-/// A stack component the walker doesn't know falls back to the verbatim-tail
-/// copy instead of dropping the packet. `damage` (id 3 in both 774 and the
-/// native registry, varint payload) keeps the verbatim bytes decodable.
+/// An entity-data stack goes through the wire version's item grammar, with
+/// its components.
 #[test]
-fn translate_entity_item_stack_fallback_774() {
+fn translate_entity_item_stack_774() {
     // index 5, serializer 7 (item stack): count 1, item 1, 1 added
     // component, 0 removed, component 3 (damage) = 7.
     let entries = entity_data_entries(774, &[5, 7, 1, 1, 1, 0, 3, 7]);
@@ -605,28 +599,6 @@ fn translate_entity_item_stack_fallback_774() {
         panic!("wrong value");
     };
     assert_eq!(stack.patch.added, [(3, Box::from([7u8]))]);
-}
-
-/// `translate_item_stack`'s component ids against the native registry table.
-#[test]
-fn component_id_anchors() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let table = RegistryTable::native();
-    assert_eq!(
-        table.name_of(
-            ClientRegistry::DataComponentType,
-            super::translate::COMPONENT_MAP_ID
-        ),
-        Some("map_id")
-    );
-    assert_eq!(
-        table.name_of(
-            ClientRegistry::DataComponentType,
-            super::translate::COMPONENT_PROFILE
-        ),
-        Some("profile")
-    );
 }
 
 /// A `level_chunk_with_light` at chunk (3, -2) with no heightmaps, holding
@@ -894,8 +866,8 @@ fn translate_entity_data_particles_772() {
 }
 
 /// A 1.21.8 `profile` item component (61 there; bare optional name/uuid +
-/// properties) is rewrapped into 26.2's `ResolvableProfile` partial arm
-/// with an empty skin patch (see `translate_old_profile`).
+/// properties) is rewrapped into the later `ResolvableProfile` partial arm
+/// with an empty skin patch.
 #[test]
 fn translate_entity_item_profile_772() {
     use pomme_item::components::{Component, Profile, ProfileContents};

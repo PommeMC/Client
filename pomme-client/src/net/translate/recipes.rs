@@ -6,7 +6,7 @@ impl Translation {
         Some(RecipeCtx {
             remaps: self.to_native,
             layout: self.recipe_layout?,
-            items: self.item_grammar(),
+            items: self.item_grammar()?,
         })
     }
 

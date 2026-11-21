@@ -77,18 +77,12 @@ pub(super) fn translate_entity_data(
                 items.items(remaps).stack(&mut cur, &mut out)?;
                 continue;
             }
-            let walked = if ids.v765.is_some() {
-                translate_item_765(&mut cur, &mut out, ids.v763.is_some()).map(|()| true)
-            } else {
-                translate_item_stack(&mut cur, &mut out, remaps, ids.v772.is_some())
-            };
-            if walked == Some(true) {
+            // Without a grammar the version predates components (1.20.4).
+            if translate_item_765(&mut cur, &mut out, ids.v763.is_some()).is_some() {
                 continue;
             }
             tracing::debug!("Copying entity data tail verbatim past an item stack");
-            if walked.is_none() {
-                out.extend_from_slice(&payload[value_at..]);
-            }
+            out.extend_from_slice(&payload[value_at..]);
             return Some(out);
         }
         if new == 16 || new == 17 {
@@ -106,26 +100,6 @@ pub(super) fn translate_entity_data(
     }
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(out)
-}
-
-/// Rewrites a pre-1.21.9 `profile` component value (optional name, optional
-/// uuid, property map) into 26.2's `ResolvableProfile`: an either bool
-/// picking full/partial profile — the old triple matches the partial arm
-/// byte for byte — plus a skin patch, empty here (four absent optionals).
-pub(super) fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let value_at = cur.position() as usize;
-    skip_optional(cur, skip_utf)?; // name
-    skip_optional(cur, |c| advance(c, 16))?; // uuid
-    let properties = var_u32(cur)?;
-    for _ in 0..properties {
-        skip_utf(cur)?; // property name
-        skip_utf(cur)?; // value
-        skip_optional(cur, skip_utf)?; // signature
-    }
-    out.push(0); // either: the partial-profile arm
-    out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
-    out.extend_from_slice(&[0; 4]); // empty PlayerSkin.Patch
-    Some(())
 }
 
 /// Advances past one entity-data value of the given native-version

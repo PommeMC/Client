@@ -342,27 +342,16 @@
 //!   `map_item_data`, `update_recipes`, `player_chat`, the chunk framing) was
 //!   refactored without changing its layout
 //!
-//! Known limitation (accepted): an inbound item stack carrying a data
-//! component at/after the first id the versions number differently (26.3:
-//! 40, where 26.3 replaced `swing_animation` with `attack_animation`; 26.1:
-//! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`; 1.21.10 and every older version with a
-//! component registry: 5, where 1.21.11 inserted `use_effects` — so even
-//! `custom_name` and `enchantments` are affected on all of them) decodes under
-//! the wrong 26.2 codec — usually a misparse that skips the packet with a
-//! warning, though a coincidentally parsable layout yields a
-//! silently wrong component. Common survival items only use earlier, unshifted
-//! components. Items nested inside component values (bundles, containers) also
-//! keep their source-version ids. On 26.3 a stack carrying one of the
-//! components whose value layout changed (`pot_decorations`, inline `trim` or
-//! `instrument`, a `teleport_randomly` consume effect) misdecodes the same
-//! way, and recipe displays keep their items in wire space.
+//! Item stacks: every version from 1.20.5 has an item grammar
+//! (`pomme_protocol::item`), which carries each component across in the
+//! other version's ids and layout, in both directions, and drops the ones
+//! the other version can't hold. What a version loses that way is marked
+//! `// TODO:` at its shapes and conversions there.
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
 use glam::DVec3;
-use pomme_item::components::{Component as _, Profile};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
 use pomme_protocol::serverbound::{GamePacket, HashedStack, InteractionHand};
@@ -383,7 +372,6 @@ enum Rewrite {
     Context(ContextRewrite),
     Frame(FrameRewrite),
     SessionFrame(fn(u32, &[u8], &SessionState) -> Option<Vec<u8>>),
-    Item(ItemRewrite),
     Recipe(RecipeTranslator),
 }
 
@@ -761,13 +749,6 @@ const ACTION_INTERACT_AT: u32 = 2;
 const LOGIN_HEAD_763: usize = 5;
 const LOGIN_PREFIX_763: usize = 7;
 
-/// Native-registry component ids whose payloads the stack walker can advance
-/// past (26.3 `DataComponents` registration order; anchored in
-/// `component_id_anchors` in `wire_tests`). Matching happens after the
-/// remap, so one set of ids serves every wire version.
-pub(crate) const COMPONENT_MAP_ID: u32 = 48;
-pub(crate) const COMPONENT_PROFILE: u32 = 72;
-
 /// 26.2 particle names whose options carry a payload after the type id;
 /// every older supported version's payload set is a strict subset of this
 /// one, so a name outside it is a bare type id on both sides.
@@ -839,8 +820,6 @@ enum SectionPadding {
 /// the registry remap (decompiled 1.21.4 / 1.21.5 / 1.21.11 `SlotDisplay`).
 #[derive(Clone, Copy)]
 struct RecipeLayout {
-    /// Pre-1.21.9 `profile` component layout.
-    old_profile: bool,
     /// Through 1.21.11 an `item_stack` display wraps a non-empty `ItemStack`
     /// (count, item, patch) rather than 26.1's `ItemStackTemplate`.
     item_stack_count_first: bool,
@@ -853,8 +832,8 @@ struct RecipeLayout {
 struct RecipeCtx<'a> {
     remaps: &'a RegistryRemaps,
     layout: RecipeLayout,
-    /// The wire version's item grammar, when it has one.
-    items: Option<Items<'a>>,
+    /// The wire version's item grammar.
+    items: Items<'a>,
 }
 
 type RecipeTranslator = fn(u32, &[u8], RecipeCtx<'_>) -> Option<Vec<u8>>;
