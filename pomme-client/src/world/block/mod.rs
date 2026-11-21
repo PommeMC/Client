@@ -653,8 +653,8 @@ macro_rules! embedded_blocks {
 
 /// Per-protocol block-state data, the native version at [`NATIVE_SLOT`].
 const BLOCK_DATA: &[EmbeddedBlocks] = &[
-    embedded_blocks!(pomme_protocol::version::NATIVE.protocol, "26.2"),
-    embedded_blocks!(777, "26.3"),
+    embedded_blocks!(pomme_protocol::version::NATIVE.protocol, "26.3"),
+    embedded_blocks!(776, "26.2"),
     embedded_blocks!(775, "26.1"),
     embedded_blocks!(774, "1.21.11"),
     embedded_blocks!(773, "1.21.10"),

@@ -3311,15 +3311,12 @@ mod tests {
 
     #[test]
     fn direct_trim_material_is_preserved_in_resolved_stack_and_tooltip() {
-        use pomme_item::components::{DirectTrimMaterial, MaterialAssetGroup, Text};
+        use pomme_item::components::{DirectTrimMaterial, Text};
         use pomme_registry::builtin::ItemKind;
 
         let mut patch = pomme_item::ComponentPatch::default();
         let direct_material = DirectTrimMaterial {
-            assets: MaterialAssetGroup {
-                base_suffix: "test".into(),
-                overrides: Vec::new(),
-            },
+            palette_id: "minecraft:trim/test".into(),
             description: Text::literal("Test Material"),
         };
         patch.write(&ProvidesTrimMaterial {

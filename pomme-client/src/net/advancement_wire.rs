@@ -33,11 +33,19 @@ pub(super) fn handle_raw_advancements(
     }))
 }
 
-/// `ClientboundUpdateAdvancementsPacket.java:42-48`.
+/// `ClientboundUpdateAdvancementsPacket.STREAM_CODEC` (:28). Each added
+/// advancement is followed by where it sits on its tab
+/// (`PositionedAdvancement`, :40).
+// TODO: the position is read past; the advancements screen will need it.
 pub(super) fn read_update(payload: &[u8]) -> DecodeResult<AdvancementsUpdate> {
     let mut r = Reader::new(payload);
     let reset = r.bool()?;
-    let added = r.list(usize::MAX, |r| Ok((string(r)?, read_advancement(r)?)))?;
+    let added = r.list(usize::MAX, |r| {
+        let advancement = (string(r)?, read_advancement(r)?);
+        r.f32()?;
+        r.f32()?;
+        Ok(advancement)
+    })?;
     let removed = r.list(usize::MAX, string)?;
     let progress = r.list(usize::MAX, |r| Ok((string(r)?, read_progress(r)?)))?;
     let show_advancements = r.bool()?;
@@ -51,7 +59,7 @@ pub(super) fn read_update(payload: &[u8]) -> DecodeResult<AdvancementsUpdate> {
     })
 }
 
-/// `Advancement.read` (`Advancement.java:85-86`): parent, display,
+/// `Advancement.STREAM_CODEC` (`Advancement.java:53`): parent, display,
 /// requirements, then the telemetry flag.
 fn read_advancement(r: &mut Reader) -> DecodeResult<AdvancementData> {
     if r.bool()? {
@@ -71,7 +79,7 @@ fn read_advancement(r: &mut Reader) -> DecodeResult<AdvancementData> {
     })
 }
 
-/// `DisplayInfo.fromNetwork` (`DisplayInfo.java:116-131`).
+/// `DisplayInfo.fromNetwork` (`DisplayInfo.java:48`).
 fn read_display(r: &mut Reader) -> DecodeResult<AdvancementDisplay> {
     let title = read_text(r)?;
     read_text(r)?;
@@ -86,8 +94,6 @@ fn read_display(r: &mut Reader) -> DecodeResult<AdvancementDisplay> {
     if flags & HAS_BACKGROUND != 0 {
         string(r)?;
     }
-    r.f32()?;
-    r.f32()?;
     let icon_item = ItemCodec::native()
         .registries()
         .name_of(ClientRegistry::Item, icon.item)
@@ -143,9 +149,11 @@ mod tests {
         write_varint(&mut p, stick);
         p.extend([1, 0, 0, frame]);
         p.extend(flags.to_be_bytes());
+        // No requirements, no telemetry, at the tab's origin; nothing
+        // removed or progressed.
+        p.extend([0, 0]);
         p.extend([0; 8]);
-        // No requirements, no telemetry; nothing removed or progressed.
-        p.extend([0, 0, 0, 0, 1]);
+        p.extend([0, 0, 1]);
         p
     }
 

@@ -1554,12 +1554,9 @@ fn translate_teleport_entity_767() {
         translate_and_read(767, old, "entity_position_sync", entity::read),
         EntityPacket::PositionSync {
             id: 9,
-            values: entity::PositionMoveRotation {
-                position: DVec3::new(1.0, 70.0, 2.0),
-                delta: DVec3::ZERO,
-                y_rot: 90.0,
-                x_rot: 0.0,
-            },
+            path: entity::PositionPath::Linear(DVec3::new(1.0, 70.0, 2.0)),
+            y_rot: 90.0,
+            x_rot: 0.0,
             on_ground: true,
         }
     );
@@ -3898,12 +3895,9 @@ fn translate_entity_position_sync_777() {
             translate_and_read(777, old, "entity_position_sync", entity::read),
             EntityPacket::PositionSync {
                 id: 9,
-                values: entity::PositionMoveRotation {
-                    position: DVec3::new(1.0, 65.0, -2.0),
-                    delta: DVec3::ZERO,
-                    y_rot: 90.0,
-                    x_rot: -10.0,
-                },
+                path: entity::PositionPath::Linear(DVec3::new(1.0, 65.0, -2.0)),
+                y_rot: 90.0,
+                x_rot: -10.0,
                 on_ground: true,
             }
         );
