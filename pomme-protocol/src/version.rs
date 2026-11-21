@@ -187,9 +187,8 @@ pub(crate) fn embedded_get<T>(
 /// Protocols the client's wire translation fully covers. A version with
 /// embedded tables but no entry here (the staging state while its
 /// translation is built) pings with the right version but stays un-joinable.
-// TODO: 776 joins this list once its translation up to 26.3 is built.
 pub const TRANSLATED: &[i32] = &[
-    775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
+    776, 775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
 ];
 
 /// Whether a server speaking `protocol` can be joined: the native version,

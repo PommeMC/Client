@@ -60,13 +60,6 @@ impl Translation {
         }
     }
 
-    /// Whether the wire version reports use swings: 26.3 replaced `swing`
-    /// with `punch`, sent only for attacks (`Minecraft.startAttack`); the
-    /// server swings on handling a use.
-    pub fn reports_use_swings(&self) -> bool {
-        self.game_ids.as_ref().is_none_or(|g| g.v777.is_none())
-    }
-
     /// Whether outbound game frames need translation before hitting the
     /// wire (the version's serverbound ids or layouts diverge from native).
     pub fn translates_outbound(&self) -> bool {
@@ -77,11 +70,7 @@ impl Translation {
     /// version's: id remap, `attack`/`interact` layout rewrites, and
     /// suppression of packets the older version lacks. Returns the frames to
     /// send (empty = suppressed, two for `interact`, one otherwise).
-    pub(super) fn translate_outbound_game_frame_with_state(
-        &self,
-        mut frame: Vec<u8>,
-        state: &mut SessionState,
-    ) -> Vec<Vec<u8>> {
+    pub(super) fn translate_outbound_game_frame(&self, mut frame: Vec<u8>) -> Vec<Vec<u8>> {
         let Some(ids) = &self.game_ids else {
             return vec![frame];
         };
@@ -94,25 +83,6 @@ impl Translation {
             && id == items.set_creative_mode_slot_id
         {
             return translate_creative_slot(old, &frame[pos..], items.codec, self.from_native);
-        }
-        if let Some(v777) = &ids.v777 {
-            if id == v777.swing_id {
-                return translate_swing_777(v777.punch_old_id, &frame[pos..]);
-            }
-            if id == v777.player_action_id {
-                return translate_player_action_777(v777.player_action_old_id, &frame[pos..]);
-            }
-            if id == v777.accept_teleportation_id {
-                return translate_accept_teleportation_777(state, &frame[pos..]);
-            }
-            if id == v777.sign_update_id {
-                return translate_sign_update_777(v777.sign_update_old_id, &frame[pos..]);
-            }
-            if id == v777.move_player_pos_rot_id
-                && let Some(frames) = translate_move_player_pos_rot_777(v777, &frame[pos..], state)
-            {
-                return frames;
-            }
         }
         if let Some(v774) = &ids.v774 {
             if id == v774.attack_id {

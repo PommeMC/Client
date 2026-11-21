@@ -82,23 +82,6 @@ pub(super) fn skip_heightmaps(cur: &mut Cursor<&[u8]>) -> Option<()> {
     Some(())
 }
 
-/// Rewrites one 26.3 `ByteBufCodecs.BIT_SET` (`BitSet.toByteArray`: a varint
-/// byte count, little-endian bytes) as the 26.2 `writeBitSet` form
-/// (`toLongArray`: a varint long count, big-endian longs).
-pub(super) fn repack_bit_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let len = var_u32(cur)? as usize;
-    let at = cur.position() as usize;
-    advance(cur, len)?;
-    let bytes = &cur.get_ref()[at..at + len];
-    wire::write_varint(out, len.div_ceil(8) as u32);
-    for chunk in bytes.chunks(8) {
-        let mut word = [0; 8];
-        word[..chunk.len()].copy_from_slice(chunk);
-        out.extend_from_slice(&u64::from_le_bytes(word).to_be_bytes());
-    }
-    Some(())
-}
-
 /// Copies a chunk's block-entity list (`packedXZ`, `y`, type, tag), rewriting
 /// each tag into the unnamed NBT form. Leaves the cursor at the light data.
 pub(super) fn copy_block_entities(

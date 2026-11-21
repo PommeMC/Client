@@ -151,6 +151,7 @@ import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundSoundEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.network.protocol.game.ClientboundStopSoundPacket;
+import net.minecraft.network.protocol.game.ClientboundSwingAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundTabListPacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
@@ -1194,7 +1195,11 @@ public final class CodecOracle {
         encode("animate/wake_up",
                 ClientboundAnimatePacket.STREAM_CODEC::encode,
                 withFields(ClientboundAnimatePacket.class,
-                        Map.of("id", 7, "action", 2)));
+                        Map.of("id", 7, "action", ClientboundAnimatePacket.WAKE_UP)));
+        encode("swing_animation/off_hand_stab", ClientboundSwingAnimationPacket.STREAM_CODEC::encode,
+                new ClientboundSwingAnimationPacket(7, net.minecraft.world.InteractionHand.OFF_HAND,
+                        new net.minecraft.world.item.component.SwingAnimation(
+                                net.minecraft.world.item.SwingAnimationType.STAB, 10)));
         encode("entity_event/death",
                 ClientboundEntityEventPacket.STREAM_CODEC::encode,
                 withFields(ClientboundEntityEventPacket.class,

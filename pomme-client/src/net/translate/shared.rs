@@ -624,77 +624,6 @@ pub(super) fn advance(cur: &mut Cursor<&[u8]>, n: usize) -> Option<()> {
     Some(())
 }
 
-/// Reads a 26.3 `VecDelta` (`ClientboundMoveEntityPacket`) for `step_count`
-/// steps — zero is one plain `xa/ya/za` short triple, otherwise `ticks, xa,
-/// ya, za` per step — and collapses it to the end displacement 26.2 carries.
-/// Each step's shorts are relative to the previous step's position
-/// (`VecDelta.Stepped.decode` advances the codec base per step), so the sum
-/// is exact; a sum past the short range saturates until the next
-/// `entity_position_sync`. The tick offsets shape only the intermediate
-/// positions, which 26.2's readers never had.
-/// TODO: keep the per-step path once entities interpolate along one.
-pub(super) fn collapse_vec_delta(cur: &mut Cursor<&[u8]>, step_count: u32) -> Option<[i16; 3]> {
-    let mut sum = [0i32; 3];
-    for _ in 0..step_count.max(1) {
-        if step_count > 0 {
-            varint_span(cur)?; // ticks
-        }
-        for c in &mut sum {
-            *c += i32::from(read_u16(cur)? as i16);
-        }
-    }
-    Some(sum.map(|c| c.clamp(i16::MIN.into(), i16::MAX.into()) as i16))
-}
-
-/// Advances past a 26.3 `PositionPath` (varint tag: 0 = one `Vec3`, 1 = a
-/// counted list of `Vec3` + tick-offset varint steps), returning the 24
-/// position bytes it ends at.
-pub(super) fn read_position_path_end<'a>(cur: &mut Cursor<&'a [u8]>) -> Option<&'a [u8]> {
-    let stepped = match var_u32(cur)? {
-        0 => false,
-        1 => true,
-        _ => return None,
-    };
-    let steps = if stepped { var_u32(cur)? } else { 1 };
-    let mut end = None;
-    for _ in 0..steps {
-        let at = cur.position() as usize;
-        advance(cur, 24)?;
-        end = Some(at);
-        if stepped {
-            varint_span(cur)?; // tick offset
-        }
-    }
-    let data: &'a [u8] = cur.get_ref();
-    end.map(|at| &data[at..at + 24])
-}
-
-/// Rewrites the `previousGameType` of a `CommonPlayerSpawnInfo` starting at
-/// `spawn_info_at`: 26.3 sends an optional varint (0 = none, else id + 1)
-/// where 26.2 reads a signed byte (-1 = none). `gameType` before it went
-/// from a byte to a varint, byte-identical for its four values.
-pub(super) fn rewrite_previous_game_type(
-    id: u32,
-    payload: &[u8],
-    spawn_info_at: usize,
-) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    cur.set_position(spawn_info_at as u64);
-    varint_span(&mut cur)?; // dimension type
-    skip_utf(&mut cur)?; // dimension
-    advance(&mut cur, 8)?; // seed
-    varint_span(&mut cur)?; // game type
-    let previous_at = cur.position() as usize;
-    let previous = var_u32(&mut cur)?;
-
-    let mut out = Vec::with_capacity(payload.len() + 1);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(&payload[..previous_at]);
-    out.push(previous.checked_sub(1).map_or(0xFF, |g| g as u8));
-    out.extend_from_slice(&payload[cur.position() as usize..]);
-    Some(out)
-}
-
 pub(super) fn read_f64s<const N: usize>(cur: &mut Cursor<&[u8]>) -> Option<[f64; N]> {
     let mut v = [0.0; N];
     for c in &mut v {
@@ -707,10 +636,8 @@ pub(super) fn read_f64s<const N: usize>(cur: &mut Cursor<&[u8]>) -> Option<[f64;
 
 /// Rewrites `commands`, whose argument-type registry (`ArgumentTypeInfos`)
 /// gains and renames parsers between versions: every parser id is remapped
-/// by name, and a parser 26.2 lacks (26.3's five singletons) becomes the one a
-/// 26.2 server sent for the same argument. Node and property layouts are
-/// unchanged from 1.20.1 to 26.3 (`ClientboundCommandsPacket`), so node
-/// indices never move.
+/// by name. Node and property layouts are unchanged from 1.20.1 to 26.3
+/// (`ClientboundCommandsPacket`), so node indices never move.
 pub(super) fn translate_commands(
     id: u32,
     payload: &[u8],
@@ -736,15 +663,11 @@ pub(super) fn translate_commands(
         if node_type == 2 {
             let parser = var_u32(&mut cur)?;
             let name = wire_registries.name_of(ClientRegistry::CommandArgumentType, parser)?;
-            match remaps.remap(ClientRegistry::CommandArgumentType, parser) {
-                Some(native) => {
-                    wire::write_varint(&mut out, native);
-                    let at = cur.position() as usize;
-                    skip_parser_properties(&mut cur, name)?;
-                    out.extend_from_slice(&payload[at..cur.position() as usize]);
-                }
-                None => write_substitute_parser(&mut out, name)?,
-            }
+            let native = remaps.remap(ClientRegistry::CommandArgumentType, parser)?;
+            wire::write_varint(&mut out, native);
+            let at = cur.position() as usize;
+            skip_parser_properties(&mut cur, name)?;
+            out.extend_from_slice(&payload[at..cur.position() as usize]);
             if flags & 0x10 != 0 {
                 copy_utf(&mut cur, &mut out)?; // suggestions
             }
@@ -776,34 +699,6 @@ pub(super) fn skip_parser_properties(cur: &mut Cursor<&[u8]>, parser: &str) -> O
         if flags & bit != 0 {
             advance(cur, bound)?;
         }
-    }
-    Some(())
-}
-
-/// Writes the native parser standing in for a 26.3-only one, as a 26.2
-/// server sent the same argument: `/place feature` read a `resource_key`
-/// over configured features (26.2 `PlaceCommand`), slot sources item slots,
-/// and the swing animation (an unquoted `none`/`whack`/`stab`) a single
-/// word. The number providers take an id or inline SNBT; a resource
-/// location covers the id form.
-pub(super) fn write_substitute_parser(out: &mut Vec<u8>, parser: &str) -> Option<()> {
-    let native = match parser {
-        "feature" => "resource_key",
-        "slot_source" => "item_slots",
-        "swing_animation" => "brigadier:string",
-        "context_float_provider" | "context_int_provider" => "resource_location",
-        _ => return None,
-    };
-    let native = RegistryTable::native().id_of(ClientRegistry::CommandArgumentType, native)?;
-    wire::write_varint(out, native);
-    match parser {
-        "feature" => {
-            let registry = "minecraft:worldgen/configured_feature";
-            wire::write_varint(out, registry.len() as u32);
-            out.extend_from_slice(registry.as_bytes());
-        }
-        "swing_animation" => wire::write_varint(out, 0), // SINGLE_WORD
-        _ => {}
     }
     Some(())
 }

@@ -20,8 +20,11 @@ struct Fixtures {
     entity_dimensions: std::collections::HashMap<String, [f32; 3]>,
     registry_ids: std::collections::HashMap<String, u32>,
     registry_sizes: std::collections::HashMap<String, usize>,
-    cases: std::collections::HashMap<String, String>,
+    cases: Cases,
 }
+
+/// Hex payloads by case name.
+type Cases = std::collections::HashMap<String, String>;
 
 fn fixtures() -> &'static Fixtures {
     static FIXTURES: OnceLock<Fixtures> = OnceLock::new();
@@ -60,8 +63,26 @@ pub fn entity_dimensions(name: &str) -> [f32; 3] {
 
 /// The payload of case `name` (`<packet>/<case>`), without its packet id.
 pub fn case(name: &str) -> Vec<u8> {
-    let hex = fixtures()
-        .cases
+    bytes(&fixtures().cases, name)
+}
+
+/// Case `name` as 26.2 encoded it, for the rewrites that lift its layouts.
+pub fn case_26_2(name: &str) -> Vec<u8> {
+    static CASES: OnceLock<Cases> = OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        #[derive(Deserialize)]
+        struct Older {
+            cases: Cases,
+        }
+        let older: Older = serde_json::from_str(include_str!("data/codec-fixtures-26.2.json"))
+            .expect("codec fixtures parse");
+        older.cases
+    });
+    bytes(cases, name)
+}
+
+fn bytes(cases: &Cases, name: &str) -> Vec<u8> {
+    let hex = cases
         .get(name)
         .unwrap_or_else(|| panic!("no codec fixture {name}; run `just codec-fixtures`"));
     (0..hex.len())

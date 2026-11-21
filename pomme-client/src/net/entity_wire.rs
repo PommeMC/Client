@@ -11,10 +11,8 @@ use pomme_registry::builtin::EntityKind;
 use super::NetworkEvent;
 use super::handler::send_ordered;
 
-/// `ClientboundAnimatePacket` actions.
-const SWING_MAIN_HAND: u8 = 0;
-const WAKE_UP: u8 = 2;
-const SWING_OFF_HAND: u8 = 3;
+/// `ClientboundAnimatePacket.WAKE_UP`.
+const WAKE_UP: u8 = 0;
 
 /// Decodes an entity packet; `None` for any other packet.
 pub(super) fn handle_raw_entity_packet(
@@ -128,14 +126,17 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
             id,
             head_y_rot_deg: y_head_rot,
         },
-        // Either hand's swing drives the zombie attack swing (skeleton aim
-        // uses the aggressive flag instead); WAKE_UP is vanilla
-        // `handleAnimate`'s `stopSleepInBed(false, false)`.
+        // WAKE_UP is vanilla `handleAnimate`'s `stopSleepInBed(false, false)`.
+        // TODO: the two critical hit actions spawn particles.
         EntityPacket::Animate { id, action } => match action {
-            SWING_MAIN_HAND | SWING_OFF_HAND => NetworkEvent::EntitySwing { id },
             WAKE_UP => NetworkEvent::EntityWakeUp { id },
             _ => return None,
         },
+        // Either hand's swing drives the zombie attack swing (skeleton aim
+        // uses the aggressive flag instead).
+        // TODO: the animation's type and length are unused; 26.3 swings
+        // through `SwingState.startIfAble` with them.
+        EntityPacket::Swing { id, .. } => NetworkEvent::EntitySwing { id },
         EntityPacket::Event { id, event } => entity_event(id, event)?,
         EntityPacket::HurtAnimation { id, yaw } => NetworkEvent::HurtAnimation { id, yaw },
         EntityPacket::Damage { id, .. } => NetworkEvent::EntityDamaged { id },

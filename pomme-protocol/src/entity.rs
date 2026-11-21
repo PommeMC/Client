@@ -135,6 +135,14 @@ pub enum EntityPacket {
         id: i32,
         action: u8,
     },
+    /// A swing of `hand` (an `InteractionHand` ordinal) with the swinging
+    /// item's animation: a `SwingAnimationType` id and its length in ticks.
+    Swing {
+        id: i32,
+        hand: u32,
+        kind: u32,
+        duration: i32,
+    },
     Event {
         id: i32,
         event: i8,
@@ -221,6 +229,15 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
             Ok(EntityPacket::Animate {
                 id: r.var_i32()?,
                 action: r.u8()?,
+            })
+        },
+        // ClientboundSwingAnimationPacket.java:22
+        "swing_animation" => |r| {
+            Ok(EntityPacket::Swing {
+                id: r.var_i32()?,
+                hand: r.varint()?,
+                kind: r.varint()?,
+                duration: r.var_i32()?,
             })
         },
         // ClientboundEntityEventPacket.java:30-32: a plain int id.
@@ -719,7 +736,17 @@ mod tests {
             ),
             (
                 "animate/wake_up",
-                EntityPacket::Animate { id: 7, action: 2 },
+                EntityPacket::Animate { id: 7, action: 0 },
+            ),
+            (
+                // An off-hand stab of ten ticks.
+                "swing_animation/off_hand_stab",
+                EntityPacket::Swing {
+                    id: 7,
+                    hand: 1,
+                    kind: 2,
+                    duration: 10,
+                },
             ),
             (
                 "entity_event/death",

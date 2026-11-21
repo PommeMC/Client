@@ -175,7 +175,7 @@ pub(super) fn translate_particles(
                 out.extend_from_slice(&cur.get_ref()[color_at..cur.position() as usize]);
             }
             n if PAYLOAD_PARTICLES.contains(&n) => {
-                if ids.v777.is_none() {
+                if !ids.sized_particle_payloads {
                     tracing::debug!("Dropping a packet with an untranslatable {n} particle");
                     return None;
                 }

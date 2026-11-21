@@ -1,6 +1,7 @@
 use super::*;
 
-/// How a wire version's `update_advancements` differs from 26.2's.
+/// How a wire version's `update_advancements` differs from 26.2's, the
+/// layout every version this rewrites shares its screen positions with.
 #[derive(Clone, Copy)]
 pub(super) struct AdvancementLayout {
     /// Through 1.21.11 a display's icon is a non-empty `ItemStack` (count,
@@ -8,18 +9,17 @@ pub(super) struct AdvancementLayout {
     pub icon_count_first: bool,
     /// Pre-1.21.9 `profile` component layout.
     pub old_profile: bool,
-    /// 26.3 moved the screen position (two floats) out of `DisplayInfo` to
-    /// a pair after each entry, sent even without a display.
-    pub position_after_entry: bool,
     /// Through 1.21.4 the packet lacks the trailing `showAdvancements`
     /// bool, true in every vanilla send path.
     pub append_show: bool,
 }
 
-/// Rewrites `update_advancements` into 26.2's layout: each display's icon
-/// becomes an `ItemStackTemplate` (item, count, patch) in native ids, and the
-/// rest follows `layout`. An icon whose item the native version lacks takes
-/// its display with it, so that advancement is tracked but not shown.
+/// Rewrites `update_advancements` into the native layout: each display's
+/// icon becomes an `ItemStackTemplate` (item, count, patch) in native ids,
+/// its screen position (two floats) moves out of `DisplayInfo` to after the
+/// entry, where 26.3 sends one even without a display, and the rest follows
+/// `layout`. An icon whose item the native version lacks takes its display
+/// with it, so that advancement is tracked but not shown.
 /// TODO: without an item grammar (1.20.5 to 1.21.11), an icon carrying a
 /// component [`translate_component_patch`] can't walk drops the packet.
 pub(super) fn translate_update_advancements(
@@ -46,6 +46,7 @@ pub(super) fn translate_update_advancements(
         copy(&cur, &mut out, entry_at);
 
         let mut display = Vec::new();
+        let mut position = [0; 8];
         let shown = read_u8(&mut cur)? != 0 && {
             let text_at = cur.position() as usize;
             skip_nbt(&mut cur)?; // title
@@ -57,10 +58,10 @@ pub(super) fn translate_update_advancements(
             if read_i32(&mut cur)? & 1 != 0 {
                 skip_utf(&mut cur)?; // background
             }
-            if !layout.position_after_entry {
-                advance(&mut cur, 8)?; // x, y
-            }
             copy(&cur, &mut display, tail_at);
+            let position_at = cur.position() as usize;
+            advance(&mut cur, 8)?; // x, y
+            position.copy_from_slice(&payload[position_at..position_at + 8]);
             icon
         };
 
@@ -71,17 +72,12 @@ pub(super) fn translate_update_advancements(
             }
         }
         advance(&mut cur, 1)?; // sends telemetry
-        let rest_end = cur.position() as usize;
-        if layout.position_after_entry {
-            advance(&mut cur, 8)?; // x, y
-            display.extend_from_slice(&payload[rest_end..rest_end + 8]);
-        }
-
         out.push(u8::from(shown));
         if shown {
             out.extend_from_slice(&display);
         }
-        out.extend_from_slice(&payload[rest_at..rest_end]);
+        out.extend_from_slice(&payload[rest_at..cur.position() as usize]);
+        out.extend_from_slice(&position);
     }
     out.extend_from_slice(&payload[cur.position() as usize..]);
     if layout.append_show {
