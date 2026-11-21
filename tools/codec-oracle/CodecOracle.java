@@ -281,6 +281,8 @@ public final class CodecOracle {
                         "0123456789abcdef0123456789abcdef01234567", true, Optional.of(Component.literal("Please"))));
         encode("resource_pack_pop/all", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
                 new ClientboundResourcePackPopPacket(Optional.empty()));
+        encode("resource_pack_pop/one", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
+                new ClientboundResourcePackPopPacket(Optional.of(waypointId)));
         Holder<Dialog> serverLinks = dialogs.getOrThrow(Dialogs.SERVER_LINKS);
         encode("show_dialog/reference", ClientboundShowDialogPacket.STREAM_CODEC::encode,
                 new ClientboundShowDialogPacket(serverLinks));

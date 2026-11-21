@@ -69,6 +69,9 @@ pub fn assert_decoded<'a, P: PartialEq + std::fmt::Debug>(
     }
 }
 
+/// The id `CodecOracle` gives its resource pack and its waypoints.
+pub const ORACLE_ID: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+
 /// The compound `{d: 5}` as network NBT, which `CodecOracle.d5` gives the
 /// block entities it sends.
 pub const D5_TAG: [u8; 10] = [10, 3, 0, 1, b'd', 0, 0, 0, 5, 0];

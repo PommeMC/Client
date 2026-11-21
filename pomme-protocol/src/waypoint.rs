@@ -110,9 +110,7 @@ fn tracked_waypoint(r: &mut Reader) -> DecodeResult<TrackedWaypoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vanilla_fixtures::case;
-
-    const ID: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    use crate::vanilla_fixtures::{ORACLE_ID, case};
 
     fn decode(bytes: &[u8]) -> WaypointPacket {
         let mut r = Reader::new(bytes);
@@ -123,7 +121,7 @@ mod tests {
 
     fn waypoint(style: &str, color: Option<[u8; 3]>, data: WaypointData) -> TrackedWaypoint {
         TrackedWaypoint {
-            id: WaypointId::Uuid(ID),
+            id: WaypointId::Uuid(ORACLE_ID),
             style: style.into(),
             color,
             data,

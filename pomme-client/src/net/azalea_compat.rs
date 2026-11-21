@@ -6681,8 +6681,7 @@ fn player_and_world_fixtures_land_as_events() {
         rx.try_iter().next().expect("an event")
     };
 
-    // The id `CodecOracle` gives its resource pack and its waypoints.
-    let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    let id = uuid::Uuid::from_u128(pomme_protocol::vanilla_fixtures::ORACLE_ID);
     assert!(matches!(
         read("set_camera", "set_camera/other"),
         NetworkEvent::SetCamera { id: 300 }
