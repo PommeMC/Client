@@ -186,20 +186,48 @@ static PROPERTY_MATCHER: Shape = Struct(&[
 ]);
 
 /// `DataComponentMatchers.STREAM_CODEC`: exact components, then up to 64
-/// partial predicates, each a predicate or component type and an NBT body
+/// partial predicates, each a `$kind` and an NBT body
 /// (`DataComponentPredicate.TypeBase` encodes through its Codec).
-static COMPONENT_MATCHERS: Shape = Struct(&[
-    List(UNBOUNDED, &TypedComponent),
-    List(64, &Struct(&[Either(&VarInt, &VarInt), Nbt])),
-]);
+macro_rules! component_matchers {
+    ($kind:expr) => {
+        Struct(&[
+            List(UNBOUNDED, &TypedComponent),
+            List(64, &Struct(&[$kind, Nbt])),
+        ])
+    };
+}
 
-/// `advancements.predicates.BlockPredicate.STREAM_CODEC`.
-static BLOCK_PREDICATE: Shape = Struct(&[
-    Optional(&HolderSet),
-    Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
-    Optional(&Compound),
-    Ref(&COMPONENT_MATCHERS),
-]);
+/// A partial predicate's kind is a predicate type or a component type.
+static COMPONENT_MATCHERS: Shape = component_matchers!(Either(&VarInt, &VarInt));
+
+/// `advancements.predicates.BlockPredicate.STREAM_CODEC`, whose component
+/// matchers arrived in 1.21.5.
+macro_rules! block_predicate {
+    ($matchers:expr) => {
+        Struct(&[
+            Optional(&HolderSet),
+            Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
+            Optional(&Compound),
+            $matchers,
+        ])
+    };
+}
+
+static BLOCK_PREDICATE: Shape = block_predicate!(Ref(&COMPONENT_MATCHERS));
+
+/// `AdventureModePredicate.STREAM_CODEC` from 1.21.5 to 1.21.10, whose
+/// partial predicates are typed by a predicate type's id alone
+/// (DataComponentPredicate.java:31). 1.21.11 made that an either with a
+/// component type.
+static ADVENTURE_PREDICATE_1_21_10: Shape =
+    List(UNBOUNDED, &block_predicate!(component_matchers!(VarInt)));
+
+/// 1.21.10's components that differ from 1.21.11's, layered over
+/// [`COMPONENTS_1_21_11`].
+static COMPONENTS_1_21_10: &[(&str, Shape)] = &[
+    ("can_place_on", Ref(&ADVENTURE_PREDICATE_1_21_10)),
+    ("can_break", Ref(&ADVENTURE_PREDICATE_1_21_10)),
+];
 
 /// `ByteBufCodecs.GAME_PROFILE_PROPERTIES`.
 static PROFILE_PROPERTIES: Shape = List(16, &Struct(&[Utf(64), Utf(32767), Optional(&Utf(1024))]));
@@ -792,6 +820,10 @@ static COMPONENTS_1_21_1: &[(&str, Shape)] = &[
     // 1.21.2 made it `damage_resistant` to the fire tag.
     // TODO: carry it over as `damage_resistant`; it is dropped.
     ("fire_resistant", Unit),
+    // LockCode.java:21: the key as a string tag, where 1.21.2 has an item
+    // predicate compound.
+    // TODO: carry it over as a predicate on the key's name; it is dropped.
+    ("lock", Nbt),
 ];
 
 /// 1.21.3's components that differ from 1.21.4's, layered over
@@ -846,15 +878,7 @@ static COMPONENTS_1_21_4: &[(&str, Shape)] = &[
 /// 1.21.4 `AdventureModePredicate.STREAM_CODEC`: block predicates without
 /// 1.21.5's component matchers (empty by default), and `showInTooltip`.
 static ADVENTURE_PREDICATE_1_21_4: Shape = Struct(&[
-    List(
-        UNBOUNDED,
-        &Struct(&[
-            Optional(&HolderSet),
-            Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
-            Optional(&Compound),
-            Absent(&[0, 0]),
-        ]),
-    ),
+    List(UNBOUNDED, &block_predicate!(Absent(&[0, 0]))),
     SHOWN_IN_TOOLTIP,
 ]);
 
@@ -985,7 +1009,7 @@ struct Layer {
 }
 
 /// Oldest first.
-static LAYERS: [Layer; 8] = [
+static LAYERS: [Layer; 9] = [
     Layer {
         versions: &["1.20.6"],
         shapes: &COMPONENTS_1_20_6,
@@ -1028,9 +1052,15 @@ static LAYERS: [Layer; 8] = [
         down: TO_1_21_8,
         entity_data: &[],
     },
-    // 1.21.10 only has fewer components than 1.21.11.
     Layer {
-        versions: &["1.21.10", "1.21.11"],
+        versions: &["1.21.10"],
+        shapes: &COMPONENTS_1_21_10,
+        up: &[],
+        down: &[],
+        entity_data: &[],
+    },
+    Layer {
+        versions: &["1.21.11"],
         shapes: &COMPONENTS_1_21_11,
         up: FROM_1_21_11,
         down: TO_1_21_11,
@@ -1123,7 +1153,7 @@ impl ItemCodec {
         self.registries
     }
 
-    pub(crate) fn entity_data_serializers(&self) -> &'static [Serializer] {
+    pub fn entity_data_serializers(&self) -> &'static [Serializer] {
         self.entity_data
     }
 
@@ -1720,6 +1750,21 @@ impl Translator<'_> {
                     out.extend_from_slice(&set[1..]);
                 }
                 named
+            }
+            (ItemTemplate, ItemTemplate) => self.template(r, out, depth)?,
+            (TypedComponent, TypedComponent) => self.typed_component(r, out, depth)?,
+            // A value that a later version made the left arm of an either.
+            (Either(left, right), _) if !matches!(to, Either(..)) => {
+                if r.bool()? {
+                    self.convert(r, out, left, to, depth)?
+                } else {
+                    self.from.walk(r, right, depth)?;
+                    false
+                }
+            }
+            (_, Either(left, _)) if !matches!(from, Either(..)) => {
+                out.push(1);
+                self.convert(r, out, from, left, depth)?
             }
             (EitherHolder(holder), _) => {
                 if r.bool()? {
@@ -4126,5 +4171,40 @@ pub(crate) mod tests {
                 Wire::default().var(item_26_3("bowl")).var(1).var(0).var(0)
             )
         );
+    }
+
+    /// From 1.21.5 to 1.21.10 a partial predicate is typed by a predicate
+    /// type's id; 1.21.11 reads an either, whose left arm that is.
+    #[test]
+    fn partial_predicates_gain_their_either_and_back() {
+        // One block predicate with nothing set but one partial predicate of
+        // type 2, whose body is an empty compound.
+        let predicate = |kind: Wire| {
+            Wire::default()
+                .var(1)
+                .bool(false)
+                .bool(false)
+                .bool(false)
+                .var(0)
+                .var(1)
+                .bytes(&kind.0)
+                .empty_compound()
+        };
+        for protocol in [770, PROTOCOL_1_21_8, 773] {
+            assert_converts_both_ways(
+                protocol,
+                "can_break",
+                predicate(Wire::default().var(2)),
+                predicate(Wire::default().bool(true).var(2)),
+            );
+        }
+    }
+
+    /// 1.21.1's lock is a string tag, which has no later form: the component
+    /// is left out, where it used to fail the whole patch.
+    #[test]
+    fn a_string_lock_is_dropped_without_failing_the_stack() {
+        let lock = one_older_component(767, "lock", Wire::default().bytes(&[8, 0, 1, b'k']));
+        assert_eq!(translate_older(767, true, &lock), NO_COMPONENTS);
     }
 }

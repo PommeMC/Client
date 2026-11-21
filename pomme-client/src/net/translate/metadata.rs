@@ -107,7 +107,9 @@ pub(super) fn translate_entity_data(
 /// thus anything after it) can't be walked; `None` means the data is
 /// malformed.
 pub(super) fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
-    let Some(serializer) = pomme_protocol::entity_data::SERIALIZERS_26_2.get(serializer as usize)
+    let Some(serializer) = ItemCodec::native()
+        .entity_data_serializers()
+        .get(serializer as usize)
     else {
         return Some(false);
     };
