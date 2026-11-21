@@ -1,12 +1,6 @@
 use super::*;
 
 impl Translation {
-    /// The native-version particle id for a source-version one, for the raw
-    /// `level_particles` path; `None` drops the particle.
-    pub fn remap_particle(&self, id: u32) -> Option<u32> {
-        self.to_native.remap(ClientRegistry::ParticleType, id)
-    }
-
     /// The native-version id in `registry` for a source-version one, for the
     /// raw decode paths; `None` drops what carries it.
     pub fn remap_to_native(&self, registry: ClientRegistry, id: u32) -> Option<u32> {

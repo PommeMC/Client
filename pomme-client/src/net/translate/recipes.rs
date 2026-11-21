@@ -172,7 +172,12 @@ pub(super) fn translate_slot_display(
             Some(())
         }
         5 => translate_item_stack_template(cur, out, ctx),
-        6 => copy_utf(cur, out), // tag resource location
+        6 => {
+            // tag: 26.3 reads a `HolderSet`, whose named form is a zero
+            // ahead of the tag id every older version sent.
+            out.push(0);
+            copy_utf(cur, out)
+        }
         7 | 9 => {
             // dyed (dye, target), with_remainder (input, remainder)
             nested(cur, out)?;

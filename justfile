@@ -56,7 +56,7 @@ client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 
 # In-game test scripts (tests/ingame/README.md) against a local vanilla
-# 26.2 server, e.g. `just ingame-test player/armor_equip` or a whole folder like
+# 26.3 server, e.g. `just ingame-test player/armor_equip` or a whole folder like
 # `just ingame-test entities`; no name runs them all.
 ingame-test *scripts: openal
     @cargo run -p ingame-test -- {{ scripts }}
@@ -95,12 +95,12 @@ android-push-assets src=(home_directory() / "Library/Application Support/Pomme/m
     stage=/data/local/tmp/pomme
     adb shell rm -rf "$stage" && adb shell mkdir -p "$stage/versions"
     adb push "{{ src }}/assets" "$stage/"
-    adb push "{{ src }}/versions/26.2" "$stage/versions/"
+    adb push "{{ src }}/versions/26.3" "$stage/versions/"
     adb shell run-as {{ android_app }} sh -c "'mkdir -p files/minecraft && cp -r $stage/. files/minecraft/'"
     adb shell rm -rf "$stage"
 
 # The launch arguments, as on a command line, e.g.
-# `just android-config --version 26.2 --username Tester --quick-access-multiplayer 10.0.2.2:25565`.
+# `just android-config --version 26.3 --username Tester --quick-access-multiplayer 10.0.2.2:25565`.
 android-config *args:
     #!/usr/bin/env bash
     set -e
@@ -166,20 +166,20 @@ ci-singleplayer:
     @cargo nextest run -p pomme-singleplayer --run-ignored all
 
 # Regenerate a version's packet-id table from the decompiled reference.
-protogen version="26.2":
+protogen version="26.3":
     @cargo run -p protogen -- reference/{{ version }}/decompiled {{ version }} pomme-protocol/src/data/protocol-{{ version }}.json
 
 # Regenerate a version's client-registry id table from the data-generator report.
-registrygen version="26.2":
+registrygen version="26.3":
     @cargo run -p protogen -- registries reference/{{ version }} {{ version }} pomme-protocol/src/data/registries-{{ version }}.json
 
 # Regenerate a version's known-pack table from the extracted reference data.
-knownpackgen version="26.2":
+knownpackgen version="26.3":
     @cargo run -p protogen -- knownpacks reference/{{ version }} {{ version }} pomme-protocol/src/data/known-packs-{{ version }}.json
 
 # Regenerate a version's entity-data serializer order from its server jar's
 # bytecode (tools/protogen/entity_serializers.py); needs javap from the JDK.
-serializergen version="26.2":
+serializergen version="26.3":
     #!/usr/bin/env bash
     set -euo pipefail
     python=$(command -v python3 || command -v python)
@@ -189,7 +189,7 @@ serializergen version="26.2":
 # default item components (tools/codec-oracle/DefaultComponents.java, run on
 # the reference server jar) from a version's reference dir. Needs Java 25 on
 # PATH or JAVA_HOME.
-typegen version="26.2":
+typegen version="26.3":
     #!/usr/bin/env bash
     set -euo pipefail
     ref="reference/{{ version }}"
@@ -198,17 +198,17 @@ typegen version="26.2":
     "{{ just_executable() }}" _oracle "$ref/server.jar" DefaultComponents pomme-item/src/data/default-components.json
 
 # Regenerate a version's block-state table from the data-generator report.
-blockgen version="26.2":
+blockgen version="26.3":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
-# Regenerate the vanilla codec fixtures: packets encoded by the 26.2 server's own
+# Regenerate the vanilla codec fixtures: packets encoded by the 26.3 server's own
 # STREAM_CODECs (tools/codec-oracle/CodecOracle.java), which pomme-protocol's
 # decoders are tested against. Needs Java 25 on PATH or JAVA_HOME.
 codec-fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
     jar=$(cargo run -q -p ingame-test -- --fetch-server)
-    "{{ just_executable() }}" _oracle "$jar" CodecOracle pomme-protocol/src/data/codec-fixtures-26.2.json
+    "{{ just_executable() }}" _oracle "$jar" CodecOracle pomme-protocol/src/data/codec-fixtures-26.3.json
 
 # Compiles `tools/codec-oracle/<tool>.java` against the game classes and
 # libraries in a server bundler jar and runs it with `args`.
@@ -236,7 +236,7 @@ jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
 # compacting the dump with `blockgen state`. Uses the deobf server jar when
 # one exists (pre-26.x); needs the Corretto JDK for 26.x class files. Also
 # writes the version's per-block piston table (piston-<version>.json).
-stategen version="26.2":
+stategen version="26.3":
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{ version }}"

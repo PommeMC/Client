@@ -292,7 +292,8 @@ impl Translation {
         raw
     }
 
-    /// Whether configuration frames need translation (767 and older).
+    /// Whether configuration frames need translation: every version with a
+    /// configuration phase, since 26.3 inserted `post_effects` among its ids.
     pub fn translates_config(&self) -> bool {
         self.config_ids.is_some()
     }
@@ -461,8 +462,9 @@ impl Translation {
         let rewritten = rewrite.apply(self, id, payload, state);
         match rewritten {
             Some(out) => {
+                // A rewrite can move the packet to another id.
                 let mut at = 0;
-                wire::read_varint(&out, &mut at)?;
+                let id = wire::read_varint(&out, &mut at)?;
                 self.upgrade(id, &out[at..])
                     .unwrap_or_else(|| Some(out.into_boxed_slice()))
             }
@@ -477,7 +479,15 @@ impl Translation {
     /// has left in 26.2's layout, lifted to 26.3's: `None` when 26.3 kept
     /// the layout, `Some(None)` when the payload doesn't parse.
     fn upgrade(&self, id: u32, payload: &[u8]) -> Option<Option<Box<[u8]>>> {
-        let v776 = self.game_ids.as_ref()?.v776.as_ref()?;
+        let ids = self.game_ids.as_ref()?;
+        let v776 = ids.v776.as_ref()?;
+        if id == v776.level_particles_id {
+            let upgraded = upgrade_level_particles(id, payload, ids, self.to_native);
+            if upgraded.is_none() {
+                tracing::debug!("Dropping level_particles with an untranslatable particle");
+            }
+            return Some(upgraded.map(Vec::into_boxed_slice));
+        }
         let upgraded = v776.upgrade(id, payload)?;
         if upgraded.is_none() {
             tracing::warn!("Dropping game packet {id} with an unparsable 26.2 layout");

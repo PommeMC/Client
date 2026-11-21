@@ -34,7 +34,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MC_VERSION: "26.2"
+  MC_VERSION: "26.3"
   # The schedules above, which tell their runs apart.
   NIGHTLY_CRON: "7 3 * * *"
   CANDIDATE_CRON: "7 4 * * 4"

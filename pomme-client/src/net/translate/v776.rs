@@ -1,6 +1,7 @@
 //! The layouts 26.3 changed, for wire versions below it. Every older gate's
-//! rewrites leave a packet in its 26.2 layout; the upgrades here run after
-//! them and lift that layout to 26.3's.
+//! rewrites leave a clientbound packet in its 26.2 layout; the upgrades here
+//! run after them and lift that layout to 26.3's. Serverbound, the packets
+//! 26.3 changed are lowered straight to the wire version's frames.
 
 use super::*;
 
@@ -24,6 +25,86 @@ impl Ids776 {
             _ => return None,
         })
     }
+
+    /// The wire frames for a 26.3-layout serverbound `payload` of native
+    /// packet `id`, or `None` when 26.3 left the packet alone. None of these
+    /// packets changed between 1.20.1 and 26.2, so the frames are final.
+    pub(super) fn lower(&self, id: u32, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let frames = match id {
+            i if i == self.punch_id => Some(vec![swing_frame(
+                self.swing_old_id,
+                InteractionHand::MainHand,
+            )]),
+            i if i == self.accept_teleportation_id => self.lower_accept_teleportation(payload),
+            i if i == self.player_action_id => {
+                lower_player_action(self.player_action_old_id, payload)
+            }
+            i if i == self.sign_update_id => lower_sign_update(self.sign_update_old_id, payload),
+            _ => return None,
+        };
+        if frames.is_none() {
+            tracing::warn!("Not sending game packet {id} with an unparsable 26.3 layout");
+        }
+        Some(frames.unwrap_or_default())
+    }
+
+    /// `accept_teleportation`: 26.3 appends the accepted pose, which 26.2's
+    /// `ClientPacketListener.handleMovePlayer` sent as a
+    /// `move_player_pos_rot` right after the accept, neither on the ground
+    /// nor against a wall. The pose is laid out as that packet's.
+    fn lower_accept_teleportation(&self, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let mut cur = Cursor::new(payload);
+        let teleport = varint_span(&mut cur)?;
+        let pose = &payload[teleport.end..];
+        if pose.len() != 32 {
+            return None;
+        }
+        let mut accept = Vec::with_capacity(teleport.len() + 1);
+        wire::write_varint(&mut accept, self.accept_teleportation_old_id);
+        accept.extend_from_slice(&payload[teleport]);
+        let mut moved = Vec::with_capacity(pose.len() + 2);
+        wire::write_varint(&mut moved, self.move_player_pos_rot_old_id);
+        moved.extend_from_slice(pose);
+        moved.push(0);
+        Some(vec![accept, moved])
+    }
+}
+
+/// `ServerboundSwingPacket`, the hand's ordinal.
+pub(super) fn swing_frame(swing_old_id: u32, hand: InteractionHand) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2);
+    wire::write_varint(&mut out, swing_old_id);
+    out.push(hand as u8);
+    out
+}
+
+/// `player_action`: 26.3 inserted `CHANGE_DESTROY_DIRECTION` at 1, so every
+/// later action sits one lower on an older wire. The new action itself has
+/// no older form and is not sent.
+fn lower_player_action(old_id: u32, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (&action, rest) = payload.split_first()?;
+    if action == 1 {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    wire::write_varint(&mut out, old_id);
+    out.push(action - u8::from(action > 1));
+    out.extend_from_slice(rest);
+    Some(vec![out])
+}
+
+/// `sign_update`: 26.3 sends the text side after the four lines, as a
+/// `SignTextSlot` (0 back, 1 front); 26.2 reads it before them, as the
+/// `isFrontText` bool the same byte spells.
+fn lower_sign_update(old_id: u32, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (&side, body) = payload.split_last()?;
+    let (pos, lines) = body.split_at_checked(8)?;
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(pos);
+    out.push(side);
+    out.extend_from_slice(lines);
+    Some(vec![out])
 }
 
 /// `move_entity_pos` / `move_entity_pos_rot`: 26.2 sends three shorts, the
@@ -241,6 +322,58 @@ fn upgrade_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         pack_bit_set(&mut cur, &mut out)?;
     }
     out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// `level_particles`: 26.2 ends with the particle, after one `maxSpeed` float
+/// and an int `count`. 26.3 leads with it, sends a speed per axis and a
+/// varint `count`, and appends a randomization type, whose `DEFAULT` (0) is
+/// the gaussian spread 26.2's `handleParticleEvent` always used.
+///
+/// The particle goes through [`translate_particles`]. One whose payload that
+/// can't rewrite is still carried, with the payload as sent, when the native
+/// grammar sizes it exactly: pomme reads only the particle's type.
+// TODO: such a payload keeps the wire version's ids and layout.
+pub(super) fn upgrade_level_particles(
+    id: u32,
+    payload: &[u8],
+    ids: &GameIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    const PARTICLE_AT: usize = 46;
+    let head = payload.get(..PARTICLE_AT)?;
+    let (placement, tail) = head.split_at(38); // two bools, position, spread
+    let (max_speed, count) = tail.split_at(4);
+    let wire_particle = &payload[PARTICLE_AT..];
+
+    let mut out = Vec::with_capacity(payload.len() + 12);
+    wire::write_varint(&mut out, id);
+    let mut cur = Cursor::new(wire_particle);
+    let mut particle = Vec::new();
+    if translate_particles(&mut cur, &mut particle, ids, remaps, false).is_none()
+        || cur.position() as usize != wire_particle.len()
+    {
+        particle.clear();
+        let mut at = 0;
+        let kind = wire::read_varint(wire_particle, &mut at)?;
+        wire::write_varint(
+            &mut particle,
+            remaps.remap(ClientRegistry::ParticleType, kind)?,
+        );
+        particle.extend_from_slice(&wire_particle[at..]);
+        let mut r = Reader::new(&particle);
+        ItemCodec::native()
+            .skip(&mut r, &pomme_protocol::item::PARTICLE)
+            .ok()?;
+        r.ensure_eof().ok()?;
+    }
+    out.extend_from_slice(&particle);
+    out.extend_from_slice(placement);
+    for _ in 0..3 {
+        out.extend_from_slice(max_speed);
+    }
+    wire::write_varint(&mut out, i32::from_be_bytes(count.try_into().ok()?) as u32);
+    out.push(0);
     Some(out)
 }
 

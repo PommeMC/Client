@@ -831,6 +831,11 @@ fn parse_item_tint_sources(
                 "constant" => Ok(ItemTintSource::Constant(opaque(required_color(
                     value, "value",
                 )?))),
+                // Assets through 26.2: the `map_color` component this read left
+                // the game in 26.3, so the tint is always its default.
+                "map_color" => Ok(ItemTintSource::Constant(opaque(required_color(
+                    value, "default",
+                )?))),
                 "grass" => Ok(ItemTintSource::Grass {
                     color: opaque(grass_colormap.rgb(
                         required_unit_float(value, "temperature")?,
@@ -3058,6 +3063,8 @@ mod tests {
                 "default": 0x515253
             }),
             serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
+            // 26.2's, which reads as its default.
+            serde_json::json!({"type": "minecraft:map_color", "default": 0x414243}),
         ];
         let tints = parse_tints(&values).unwrap();
         assert_eq!(tints.len(), values.len());
@@ -3069,6 +3076,7 @@ mod tests {
             }
         );
         assert_eq!(tints[5], ItemTintSource::Team { default: 0x616263 });
+        assert_eq!(tints[6], ItemTintSource::Constant(0xFF414243));
     }
 
     #[test]

@@ -81,7 +81,8 @@ pub enum SlotDisplay {
     },
     Item(u32),
     ItemStack(ItemStackTemplate),
-    Tag(String),
+    /// `TagSlotDisplay`'s `HolderSet<Item>`: a named tag or listed items.
+    Tag(Ingredient),
     Dyed {
         dye: Box<SlotDisplay>,
         target: Box<SlotDisplay>,

@@ -181,6 +181,7 @@ impl GameIds {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Game, dir, name);
+        let old_id = |name| required_id(table, Phase::Game, Serverbound, name);
         Some(GameIds {
             inbound,
             outbound,
@@ -218,6 +219,16 @@ impl GameIds {
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 light_update_id: id(Clientbound, "light_update"),
                 player_chat_id: id(Clientbound, "player_chat"),
+                level_particles_id: id(Clientbound, "level_particles"),
+                punch_id: id(Serverbound, "punch"),
+                swing_old_id: old_id("swing"),
+                accept_teleportation_id: id(Serverbound, "accept_teleportation"),
+                accept_teleportation_old_id: old_id("accept_teleportation"),
+                move_player_pos_rot_old_id: old_id("move_player_pos_rot"),
+                player_action_id: id(Serverbound, "player_action"),
+                player_action_old_id: old_id("player_action"),
+                sign_update_id: id(Serverbound, "sign_update"),
+                sign_update_old_id: old_id("sign_update"),
             }),
             sized_particle_payloads: protocol >= 776,
             remaps_explode: protocol == 776,

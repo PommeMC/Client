@@ -2261,11 +2261,10 @@ fn send_action(
 }
 
 /// A swing from using an item, block or entity, which 26.3 leaves to the
-/// server: it swings on handling the use.
-// TODO: a wire version before 26.3 expects its `swing` packet here, for
-// either hand; until the 26.2 translation sends it, those servers see no
-// use swings.
-pub(crate) fn send_use_swing(_sender: &PacketSender, _hand: InteractionHand) {}
+/// server: it swings on handling the use. An older server is told.
+pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
+    sender.use_swing(hand);
+}
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
 pub(crate) fn send_drop(sender: &PacketSender, whole_stack: bool) {

@@ -1,4 +1,4 @@
-use pomme_protocol::serverbound::GamePacket;
+use pomme_protocol::serverbound::{GamePacket, InteractionHand};
 use tokio::sync::mpsc;
 
 use crate::recipe::{RecipeBookType, RecipeDisplayId};
@@ -17,6 +17,9 @@ pub enum Outbound {
         online_mode: bool,
     },
     ChatMark(Box<ChatMark>),
+    /// A swing from using an item, block or entity. A server before 26.3
+    /// expects a packet for it; 26.3's swings by itself.
+    UseSwing(InteractionHand),
     /// A dialog or chat `custom` click, encoded for whichever phase the
     /// connection is in when it goes out.
     CustomClick {
@@ -43,6 +46,10 @@ impl PacketSender {
 
     pub fn send(&self, packet: GamePacket) {
         self.queue(Outbound::Packet(Box::new(packet)));
+    }
+
+    pub fn use_swing(&self, hand: InteractionHand) {
+        self.queue(Outbound::UseSwing(hand));
     }
 
     pub fn send_raw(&self, bytes: Vec<u8>) {

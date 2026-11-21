@@ -1634,7 +1634,7 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
             })
             .into_iter()
             .collect(),
-        SlotDisplay::Tag(tag) => book
+        SlotDisplay::Tag(Ingredient::Tag(tag)) => book
             .item_tags()
             .ordered(tag)
             .into_iter()
@@ -1642,6 +1642,9 @@ fn slot_stacks(slot: &SlotDisplay, book: &RecipeBookState) -> Vec<ResolvedSlotSt
             .copied()
             .filter_map(basic)
             .collect(),
+        SlotDisplay::Tag(Ingredient::Items(items)) => {
+            items.iter().copied().filter_map(basic).collect()
+        }
         SlotDisplay::Composite(parts) => parts
             .iter()
             .flat_map(|part| slot_stacks(part, book))

@@ -42,10 +42,10 @@ Early Android and iOS builds build from source: see [BUILDING.md](./BUILDING.md)
 - **Vanilla behaviour**: physics, rendering, menus and networking are ported line
   by line from the decompiled game, and checked against it.
 - **Tested against real servers**: scripted [in-game tests](./tests/ingame/README.md)
-  run the client against a vanilla 26.2 server and screenshot the results, with
+  run the client against a vanilla 26.3 server and screenshot the results, with
   the [latest results](https://pomme.rs/parity) published on pomme.rs.
 - **Many versions, one client**: per-version protocol tables are generated from
-  each version's decompiled source, and other versions are translated to 26.2.
+  each version's decompiled source, and other versions are translated to 26.3.
 
 > [!WARNING]
 > Pomme is in active development. Expect missing features and bugs, and please

@@ -433,15 +433,6 @@ fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
     let _z_max_speed = r.f32()?;
     let count = r.varint()?;
     let _randomization = r.varint()?;
-    // Particle ids shift between versions; translate into the native id
-    // space (`ServerParticleKind`'s) when speaking an older protocol.
-    let type_id = match super::translate::active() {
-        Some(t) => match t.remap_particle(type_id) {
-            Some(id) => id,
-            None => return Ok(None),
-        },
-        None => type_id,
-    };
     let Some(kind) = crate::particle::ServerParticleKind::from_id(type_id) else {
         return Ok(None);
     };

@@ -38,13 +38,21 @@
 //! - `swing_animation` and `map_color` left `data_component_type` and thirteen
 //!   components joined it; the item grammar (`pomme_protocol::item`) remaps the
 //!   ids and converts the changed layouts
-//! - TODO: `level_particles` (particle first, per-axis speed, varint count, a
-//!   randomization type) and the `tag` slot display (a `HolderSet` where 26.2
-//!   sent a tag id) are not lifted yet
-//! - TODO: outbound. `punch` has no 26.2 id, `accept_teleportation` appends the
-//!   accepted pose where 26.2 expects a `move_player_pos_rot` after it,
-//!   `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1, `sign_update`
-//!   moved the text side after the lines, and 26.2 expects a `swing` for uses
+//! - `level_particles` leads with the particle, splits `maxSpeed` per axis,
+//!   sends `count` as a varint and appends a randomization type, the default
+//!   one being 26.2's spread
+//! - the `tag` slot display carries a `HolderSet` where 26.2 sent a tag id,
+//!   which is the set's named form behind a zero
+//! - serverbound `swing` became `punch`, sent only for attacks and always the
+//!   main hand; an older server gets a main-hand `swing` for it, and the
+//!   `swing` it expects for each use (`use_swing_frame`), which a 26.3 server
+//!   does itself
+//! - `accept_teleportation` appends the accepted pose, which 26.2 sent as a
+//!   `move_player_pos_rot` right after the accept
+//! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
+//!   which has no older form and is not sent
+//! - `sign_update` moved the text side from a boolean before the four lines to
+//!   a `SignTextSlot` (0 back, 1 front) after them
 //!
 //! 26.1 -> 26.2 wire changes:
 //! - login `login_finished` gained a trailing session-id UUID
@@ -357,7 +365,7 @@ use glam::DVec3;
 use pomme_item::components::{Component as _, Profile};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
-use pomme_protocol::serverbound::{GamePacket, HashedStack};
+use pomme_protocol::serverbound::{GamePacket, HashedStack, InteractionHand};
 pub use pomme_protocol::version::joinable;
 use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
@@ -697,6 +705,17 @@ struct Ids776 {
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
+    level_particles_id: u32,
+    punch_id: u32,
+    /// The wire's `swing`, which stands in for `punch` and reports use swings.
+    swing_old_id: u32,
+    accept_teleportation_id: u32,
+    accept_teleportation_old_id: u32,
+    move_player_pos_rot_old_id: u32,
+    player_action_id: u32,
+    player_action_old_id: u32,
+    sign_update_id: u32,
+    sign_update_old_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus
@@ -743,11 +762,11 @@ const LOGIN_HEAD_763: usize = 5;
 const LOGIN_PREFIX_763: usize = 7;
 
 /// Native-registry component ids whose payloads the stack walker can advance
-/// past (26.2 `DataComponents` registration order; anchored in
+/// past (26.3 `DataComponents` registration order; anchored in
 /// `component_id_anchors` in `wire_tests`). Matching happens after the
 /// remap, so one set of ids serves every wire version.
-pub(crate) const COMPONENT_MAP_ID: u32 = 46;
-pub(crate) const COMPONENT_PROFILE: u32 = 70;
+pub(crate) const COMPONENT_MAP_ID: u32 = 48;
+pub(crate) const COMPONENT_PROFILE: u32 = 72;
 
 /// 26.2 particle names whose options carry a payload after the type id;
 /// every older supported version's payload set is a strict subset of this

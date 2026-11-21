@@ -179,7 +179,7 @@ pub(super) fn translate_particles(
                     tracing::debug!("Dropping a packet with an untranslatable {n} particle");
                     return None;
                 }
-                copy_particle_payload(cur, out, n, remaps)?;
+                copy_particle_payload(cur, out, n, ids, remaps)?;
             }
             _ => {}
         }
@@ -187,15 +187,15 @@ pub(super) fn translate_particles(
     Some(())
 }
 
-/// Copies one 26.3 particle payload through (`net/minecraft/core/particles`
-/// option codecs, byte-identical to 26.2's): block states stay in wire space
-/// like every block id pomme reads, and an `item`'s ids are remapped. `None`
-/// for a payload that can't be sized (an item component the native version
-/// lacks).
+/// Copies one 26.2 particle payload through (`net/minecraft/core/particles`
+/// option codecs, byte-identical to 26.3's): block states stay in wire space
+/// like every block id pomme reads, and an `item` goes through the wire
+/// version's item grammar. `None` for a payload that can't be sized.
 pub(super) fn copy_particle_payload(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     name: &str,
+    ids: &GameIds,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
     let at = cur.position() as usize;
@@ -227,7 +227,7 @@ pub(super) fn copy_particle_payload(
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
             let count = varint_span(cur)?;
             out.extend_from_slice(&cur.get_ref()[count]);
-            return copy_component_patch(cur, out, remaps);
+            return ids.items.as_ref()?.items(remaps).patch(cur, out);
         }
         _ => return None,
     }

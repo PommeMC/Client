@@ -60,6 +60,13 @@ impl Translation {
         }
     }
 
+    /// The wire frame reporting a use swing of `hand`, on a version whose
+    /// server doesn't swing by itself on handling a use (before 26.3).
+    pub fn use_swing_frame(&self, hand: InteractionHand) -> Option<Vec<u8>> {
+        let v776 = self.game_ids.as_ref()?.v776.as_ref()?;
+        Some(swing_frame(v776.swing_old_id, hand))
+    }
+
     /// Whether outbound game frames need translation before hitting the
     /// wire (the version's serverbound ids or layouts diverge from native).
     pub fn translates_outbound(&self) -> bool {
@@ -83,6 +90,9 @@ impl Translation {
             && id == items.set_creative_mode_slot_id
         {
             return translate_creative_slot(old, &frame[pos..], items.codec, self.from_native);
+        }
+        if let Some(lowered) = ids.v776.as_ref().and_then(|v| v.lower(id, &frame[pos..])) {
+            return lowered;
         }
         if let Some(v774) = &ids.v774 {
             if id == v774.attack_id {

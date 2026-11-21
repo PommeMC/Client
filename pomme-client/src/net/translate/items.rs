@@ -355,18 +355,3 @@ pub(super) fn translate_merchant_offers(
         Some(())
     })
 }
-
-/// Copies a 26.3 component patch into native ids through 26.3's item
-/// grammar, dropping components the native version lacks or lays out
-/// differently.
-pub(super) fn copy_component_patch(
-    cur: &mut Cursor<&[u8]>,
-    out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-) -> Option<()> {
-    let items = Items {
-        codec: ItemCodec::for_protocol(777)?,
-        remaps,
-    };
-    items.patch(cur, out)
-}

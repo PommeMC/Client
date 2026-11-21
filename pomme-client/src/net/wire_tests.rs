@@ -275,11 +275,11 @@ fn translate_login_finished_26_1() {
 #[test]
 fn translate_game_login_26_1() {
     let mut native = fixture_frame("login", "login/fresh");
-    // A 26.1 frame is the same bytes without the online_mode bool, which
-    // sits right before the trailing enforces_secure_chat bool.
+    // A 26.1 frame is 26.2's bytes without the online_mode bool, which sits
+    // right before the trailing enforces_secure_chat bool.
+    let mut old = frame_26_2(Direction::Clientbound, "login", "login/fresh");
+    old.remove(old.len() - 2);
     let online_mode = native.len() - 2;
-    let mut old = native.clone();
-    old.remove(online_mode);
 
     let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
@@ -302,7 +302,7 @@ fn translate_set_player_team_26_1() {
     let suffix: &[u8] = &[8, 0, 1, b'S'];
 
     let mut old = Vec::new();
-    old.push(team_id as u8);
+    old.push(old_id(775, Direction::Clientbound, "set_player_team") as u8);
     old.extend_from_slice(&[4, b'c', b'r', b'e', b'w']); // name
     old.push(2); // method: change (parameters, no player list)
     old.extend_from_slice(display);
@@ -340,7 +340,7 @@ fn translate_set_player_team_26_1_reset_color() {
     let component: &[u8] = &[8, 0, 1, b'x'];
 
     let mut old = Vec::new();
-    old.push(team_id as u8);
+    old.push(old_id(775, Direction::Clientbound, "set_player_team") as u8);
     old.extend_from_slice(&[1, b'a']); // name
     old.push(0); // method: add (parameters + player list)
     old.extend_from_slice(component);
@@ -423,16 +423,16 @@ fn registry_table_matches_the_registry_enums() {
     assert_eq!(mismatches, []);
 }
 
-/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
-/// numbering (ids past the sulfur_cube insertion shift by one); the remap
+/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.3's
+/// numbering (later insertions shift it); the remap
 /// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
     use pomme_registry::Registry;
     use pomme_registry::builtin::EntityKind;
 
-    // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
-    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
+    // 26.1 tadpole is id 130, which 26.3 numbers as squid.
+    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::Squid));
     let native =
         translation_for(775).remap_to_native(pomme_protocol::ClientRegistry::EntityType, 130);
     assert_eq!(
@@ -767,12 +767,7 @@ fn suppress_unknown_outbound_774() {
 /// (`swing` is 60 on 1.21.11, 63 on 26.2).
 #[test]
 fn remap_outbound_ids_774() {
-    let mut frame = Vec::new();
-    wire::write_varint(
-        &mut frame,
-        table_id(Phase::Game, Direction::Serverbound, "swing"),
-    );
-    frame.push(0); // main hand
+    let frame = game_frame(Direction::Serverbound, "punch", "serverbound/punch");
     let frames = translation_for(774).translate_outbound_game_frame(frame);
     assert_eq!(
         frames,
@@ -1106,6 +1101,7 @@ fn translate_explode_772() {
         sound_id(native_table, "entity.generic.explode") + 1,
     );
     expected.push(0); // no block particles
+    expected.push(1); // plays its sound
     assert_eq!(&translated[..], &expected[..]);
 }
 
@@ -1415,25 +1411,50 @@ fn level_particles_fields() -> Vec<u8> {
     fields
 }
 
+/// The `explosion` particle's id on `protocol`'s wire.
+fn explosion_particle(protocol: i32) -> u32 {
+    registry_id(
+        pomme_protocol::RegistryTable::for_protocol(protocol).unwrap(),
+        pomme_protocol::ClientRegistry::ParticleType,
+        "explosion",
+    )
+}
+
+/// What [`level_particles_fields`] with the limiter overridden and an
+/// `explosion` particle come out as: the particle first, one speed per axis,
+/// a varint count and the default randomization.
+fn level_particles_native() -> Vec<u8> {
+    let fields = level_particles_fields();
+    let (placement, tail) = fields.split_at(36);
+    let speed = &tail[..4];
+    let mut native = Vec::new();
+    wire::write_varint(
+        &mut native,
+        explosion_particle(pomme_protocol::version::NATIVE.protocol),
+    );
+    native.extend_from_slice(&[1, 0]); // override limiter, always show
+    native.extend_from_slice(placement);
+    native.extend([speed, speed, speed].concat());
+    native.extend_from_slice(&[7, 0]); // count, randomization
+    native
+}
+
 /// 1.21.4 inserted `alwaysShow` after `overrideLimiter`; the shim
 /// synthesizes false for 1.21.3-and-older frames.
 #[test]
 fn translate_level_particles_768() {
-    let mut fields = level_particles_fields();
-    wire::write_varint(&mut fields, 30); // particle (26.2 id space)
-
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(768, Direction::Clientbound, "level_particles"),
     );
     old.push(1); // override limiter
-    old.extend_from_slice(&fields);
+    old.extend_from_slice(&level_particles_fields());
+    wire::write_varint(&mut old, explosion_particle(768));
 
     assert_eq!(
         translate_to_payload(768, old, "level_particles"),
-        // The override limiter, then `alwaysShow`.
-        [&[1, 0][..], &fields].concat()
+        level_particles_native()
     );
 }
 
@@ -2062,25 +2083,22 @@ fn translate_update_attributes_765() {
     );
 }
 
-/// 1.20.4 `level_particles` led with the particle type id; it moves to
-/// just before the payload and `alwaysShow` is synthesized.
+/// 1.20.4 `level_particles` led with the particle type id, as 26.3 does
+/// again, and lacked `alwaysShow`, which is synthesized.
 #[test]
 fn translate_level_particles_765() {
-    let fields = level_particles_fields();
-
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(765, Direction::Clientbound, "level_particles"),
     );
-    wire::write_varint(&mut old, 30); // particle (26.2 id space)
+    wire::write_varint(&mut old, explosion_particle(765));
     old.push(1); // override limiter
-    old.extend_from_slice(&fields);
+    old.extend_from_slice(&level_particles_fields());
 
     assert_eq!(
         translate_to_payload(765, old, "level_particles"),
-        // The override limiter and `alwaysShow` first, the particle last.
-        [&[1, 0][..], &fields, &[30]].concat()
+        level_particles_native()
     );
 }
 
@@ -2384,14 +2402,14 @@ fn translate_game_login_765() {
     assert!(!p.enforces_secure_chat);
 }
 
-/// Config ids remap by name at 765 and 26.2-only packets suppress
+/// Config ids remap by name at 765 and newer-only packets suppress
 /// (`select_known_packs` predates the known-packs handshake).
 #[test]
 fn translate_config_ids_765() {
     let t = translation_for(765);
     assert!(t.translates_config());
-    assert!(translation_for(767).translates_config());
-    assert!(!translation_for(768).translates_config());
+    // 26.3 inserted `post_effects`, shifting every later clientbound id.
+    assert!(translation_for(776).translates_config());
     assert!(!translation_for(763).translates_config());
 
     // Inbound finish_configuration lands on its 26.2 id.
@@ -3540,7 +3558,9 @@ fn only_the_core_pack_is_claimed() {
 
 /// One `update_advancements` entry as protocol `protocol` lays it out: a
 /// display whose icon is `item` (a name in that version's registry) unless
-/// `item` is `None`, one requirement, and the screen position (1.5, -2).
+/// `item` is `None`, one requirement, and the screen position: (1.5, -2)
+/// with a display, the origin without one, which is all an older version's
+/// displayless entry can come out as.
 fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
@@ -3567,7 +3587,12 @@ fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
         out.push(2); // goal
         out.extend_from_slice(&2i32.to_be_bytes()); // show toast, no background
     }
-    let position = [1.5f32.to_be_bytes(), (-2.0f32).to_be_bytes()].concat();
+    let position = if item.is_some() {
+        [1.5f32, -2.0]
+    } else {
+        [0.0; 2]
+    };
+    let position = position.map(f32::to_be_bytes).concat();
     // 26.3 sends the position after the entry, display or not.
     if item.is_some() && protocol < 777 {
         out.extend_from_slice(&position);
@@ -3598,8 +3623,8 @@ fn advancements_frame(protocol: i32, id: u32, entries: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Every translated version's `update_advancements` lands as the frame a
-/// 26.2 server sends: the icon an `ItemStackTemplate` in native ids, the
-/// position inside the display, `showAdvancements` set.
+/// 26.3 server sends: the icon an `ItemStackTemplate` in native ids, the
+/// position after the entry, `showAdvancements` set.
 #[test]
 fn translate_update_advancements_to_native() {
     let native_id = table_id(Phase::Game, Direction::Clientbound, "update_advancements");
@@ -3609,13 +3634,12 @@ fn translate_update_advancements_to_native() {
             advancement_entry(protocol, "minecraft:story/mine_stone", None),
         ]
     };
-    // 26.1's frame is the native one but for its ids.
     let expected = advancements_frame(
-        775,
+        pomme_protocol::version::NATIVE.protocol,
         native_id,
         &entries(pomme_protocol::version::NATIVE.protocol),
     );
-    for protocol in [766, 769, 772, 774, 775, 777] {
+    for protocol in [766, 769, 772, 774, 775, 776] {
         let old = advancements_frame(
             protocol,
             old_id(protocol, Direction::Clientbound, "update_advancements"),
@@ -4020,7 +4044,8 @@ fn upgrades_26_2_layouts_to_the_games_26_3_bytes() {
     ] {
         let name = case.split('/').next().unwrap();
         assert_eq!(
-            t.translate_game_frame(frame_26_2(name, case)).as_deref(),
+            t.translate_game_frame(frame_26_2(Direction::Clientbound, name, case).into())
+                .as_deref(),
             Some(&fixture_frame(name, case)[..]),
             "{case}"
         );
@@ -4028,11 +4053,11 @@ fn upgrades_26_2_layouts_to_the_games_26_3_bytes() {
 }
 
 /// Packet `name`'s 26.2 id, then the payload 26.2 encoded for `case`.
-fn frame_26_2(name: &str, case: &str) -> Box<[u8]> {
+fn frame_26_2(direction: Direction, name: &str, case: &str) -> Vec<u8> {
     let mut frame = Vec::new();
-    wire::write_varint(&mut frame, old_id(776, Direction::Clientbound, name));
+    wire::write_varint(&mut frame, old_id(776, direction, name));
     frame.extend(pomme_protocol::vanilla_fixtures::case_26_2(case));
-    frame.into()
+    frame
 }
 
 /// A 26.2 advancement's position moves from its display to after the entry.
@@ -4050,8 +4075,62 @@ fn upgrades_26_2_advancement_positions() {
     expected[at..at + 8].fill(0);
     assert_eq!(
         translation_for(776)
-            .translate_game_frame(frame_26_2(name, case))
+            .translate_game_frame(frame_26_2(Direction::Clientbound, name, case).into())
             .as_deref(),
         Some(&expected[..])
+    );
+}
+
+/// What a 26.3 client sends reaches a 26.2 server as 26.2 encodes the same
+/// values: each case is the game's own bytes on both sides.
+#[test]
+fn lowers_26_3_serverbound_layouts_to_the_games_26_2_bytes() {
+    let t = translation_for(776);
+    let old = |name: &str, payload: &[u8]| {
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, old_id(776, Direction::Serverbound, name));
+        frame.extend_from_slice(payload);
+        frame
+    };
+    let old_case =
+        |name: &str| frame_26_2(Direction::Serverbound, name, &format!("serverbound/{name}"));
+    let sent = |name: &str| {
+        let case = format!("serverbound/{name}");
+        t.translate_outbound_game_frame(game_frame(Direction::Serverbound, name, &case))
+    };
+
+    assert_eq!(sent("sign_update"), [old_case("sign_update")]);
+    assert_eq!(sent("player_action"), [old_case("player_action")]);
+    // An attack's punch is a main-hand swing.
+    assert_eq!(sent("punch"), [old("swing", &[0])]);
+
+    // The accepted pose follows the accept as a position-and-rotation
+    // packet, neither on the ground nor against a wall.
+    let accept = pomme_protocol::vanilla_fixtures::case("serverbound/accept_teleportation");
+    let old_accept =
+        pomme_protocol::vanilla_fixtures::case_26_2("serverbound/accept_teleportation");
+    let mut pose = accept[old_accept.len()..].to_vec();
+    pose.push(0);
+    assert_eq!(
+        sent("accept_teleportation"),
+        [
+            old("accept_teleportation", &old_accept),
+            old("move_player_pos_rot", &pose)
+        ]
+    );
+
+    // CHANGE_DESTROY_DIRECTION has no 26.2 form.
+    let mut change = Vec::new();
+    wire::write_varint(
+        &mut change,
+        table_id(Phase::Game, Direction::Serverbound, "player_action"),
+    );
+    change.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(t.translate_outbound_game_frame(change).is_empty());
+
+    // A use swing is the hand's swing packet, and nothing on 26.3.
+    assert_eq!(
+        t.use_swing_frame(pomme_protocol::serverbound::InteractionHand::OffHand),
+        Some(old_case("swing"))
     );
 }

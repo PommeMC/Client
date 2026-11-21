@@ -651,13 +651,14 @@ fn read_filter_mask(raw: &[u8], pos: &mut usize) -> Result<FilterMask, String> {
     match read_varint_req(raw, pos, "player_chat.filter_mask.type")? {
         0 => Ok(FilterMask::PassThrough),
         1 => Ok(FilterMask::FullyFiltered),
+        // FilterMask.java: `ByteBufCodecs.BIT_SET`.
         2 => {
-            let count = read_varint_req(raw, pos, "player_chat.filter_mask.longs")?;
-            let mut longs = Vec::new();
-            for _ in 0..count {
-                longs.push(read_i64(raw, pos, "player_chat.filter_mask.long")? as u64);
-            }
-            Ok(FilterMask::Partial(longs))
+            let mut r = pomme_protocol::codec::Reader::new(&raw[*pos..]);
+            let bits = r
+                .bit_set()
+                .map_err(|e| format!("player_chat.filter_mask.bits: {e:?}"))?;
+            *pos += r.pos();
+            Ok(FilterMask::Partial(bits))
         }
         value => Err(format!("unknown player_chat filter mask type {value}")),
     }
@@ -1409,8 +1410,7 @@ mod tests {
             &update,
         );
 
-        // TODO: add 776 once its translation exists.
-        for protocol in [763, 765, 766, 769, 770, 777] {
+        for protocol in [763, 765, 766, 769, 770, 776, 777] {
             let frames = if protocol == pomme_protocol::version::NATIVE.protocol {
                 vec![native.clone()]
             } else {
@@ -1700,5 +1700,16 @@ mod tests {
         let decoded = simdnbt::owned::read_tag(&mut cursor).unwrap();
         assert_eq!(decoded, payload);
         assert_eq!(pos, frame.len());
+    }
+
+    /// A partial mask is a bit set's little-endian bytes behind their count.
+    #[test]
+    fn reads_a_partial_filter_mask_as_a_bit_set() {
+        let raw = [2, 2, 0b101, 0x80, 0xFF];
+        let mut pos = 0;
+        let Ok(FilterMask::Partial(bits)) = read_filter_mask(&raw, &mut pos) else {
+            panic!("a partial mask");
+        };
+        assert_eq!((bits, pos), (vec![0x8005], 4));
     }
 }
