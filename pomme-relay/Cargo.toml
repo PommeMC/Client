@@ -14,7 +14,7 @@ pomme-protocol = { path = "../pomme-protocol" }
 hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
 reqwest = { workspace = true, features = ["stream"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
