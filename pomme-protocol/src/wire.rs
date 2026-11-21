@@ -291,6 +291,10 @@ mod tests {
         let move_vehicle = encode_move_vehicle(DVec3::new(1.5, 64.0, -2.25), 90.0, 10.0, true);
         assert_eq!(move_vehicle[1..], case("move_vehicle"));
         assert_eq!(encode_paddle_boat(true, false)[1..], case("paddle_boat"));
+        assert_eq!(
+            encode_recipe_book_change_settings(RecipeBookType::BlastFurnace, true, false)[1..],
+            case("serverbound/recipe_book_change_settings")
+        );
     }
 
     #[test]

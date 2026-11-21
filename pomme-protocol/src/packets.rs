@@ -259,6 +259,23 @@ mod tests {
         }
     }
 
+    /// The whole native table is the game's own: every phase's packets in the
+    /// id order its protocols list them (`CodecOracle.phase`).
+    #[test]
+    fn native_table_matches_the_game() {
+        use crate::vanilla_fixtures::{packet_names, protocol};
+
+        let t = PacketTable::native();
+        assert_eq!(t.version().protocol, protocol());
+        let phases = ["handshake", "status", "login", "configuration", "game"];
+        for (phase, key) in PHASES.into_iter().zip(phases) {
+            for (dir, flow) in DIRECTIONS.into_iter().zip(["serverbound", "clientbound"]) {
+                let ours: Vec<_> = names(t, phase, dir).map(|(_, name)| name).collect();
+                assert_eq!(ours, packet_names(key, flow), "{key} {flow}");
+            }
+        }
+    }
+
     /// Registration-order anchors, spot-checked by hand against
     /// `reference/26.2/decompiled/.../GameProtocols.java`.
     #[test]

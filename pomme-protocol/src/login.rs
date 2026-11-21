@@ -217,6 +217,10 @@ mod tests {
                 name: "Player".into(),
                 profile_id: UUID,
             },
+            ServerboundLogin::Key {
+                key: vec![1, 2, 3],
+                encrypted_challenge: vec![4, 5],
+            },
             ServerboundLogin::CustomQueryAnswer {
                 transaction_id: 300,
             },
@@ -241,15 +245,8 @@ mod tests {
         }
     }
 
-    /// The key packet's constructor encrypts, so its layout is pinned by hand:
-    /// two length-prefixed byte arrays.
     #[test]
-    fn key_is_two_byte_arrays() {
-        let key = ServerboundLogin::Key {
-            key: vec![9; 3],
-            encrypted_challenge: vec![7; 2],
-        };
-        assert_eq!(key.encode(), [1, 3, 9, 9, 9, 2, 7, 7]);
+    fn an_absent_cookie_payload_is_one_flag() {
         let absent = ServerboundLogin::CookieResponse {
             key: "a".into(),
             payload: None,

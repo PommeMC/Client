@@ -1,4 +1,5 @@
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -16,6 +17,7 @@ import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.ints.IntList;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -56,8 +58,10 @@ import net.minecraft.core.Vec3i;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.LastSeenMessages;
 import net.minecraft.network.chat.Style;
 import net.minecraft.network.chat.numbers.BlankFormat;
 import net.minecraft.network.chat.numbers.FixedFormat;
@@ -153,8 +157,14 @@ import net.minecraft.network.protocol.game.ClientboundUpdateAdvancementsPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
+import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundChangeGameModePacket;
+import net.minecraft.network.protocol.game.ServerboundChatAckPacket;
+import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundChatCommandSignedPacket;
+import net.minecraft.network.protocol.game.ServerboundChatPacket;
+import net.minecraft.network.protocol.game.ServerboundChatSessionUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
@@ -172,6 +182,7 @@ import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
+import net.minecraft.network.protocol.game.ServerboundRecipeBookChangeSettingsPacket;
 import net.minecraft.network.protocol.game.ServerboundRenameItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
@@ -197,6 +208,7 @@ import net.minecraft.world.BossEvent;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
@@ -370,6 +382,29 @@ public final class CodecOracle {
 
         JsonObject out = new JsonObject();
         out.addProperty("version", SharedConstants.getCurrentVersion().name());
+        out.addProperty("protocol", SharedConstants.getProtocolVersion());
+        JsonObject packets = new JsonObject();
+        packets.add("handshake", phase(net.minecraft.network.protocol.handshake.HandshakeProtocols.SERVERBOUND_TEMPLATE,
+                null));
+        packets.add("status", phase(net.minecraft.network.protocol.status.StatusProtocols.SERVERBOUND_TEMPLATE,
+                net.minecraft.network.protocol.status.StatusProtocols.CLIENTBOUND_TEMPLATE));
+        packets.add("login", phase(net.minecraft.network.protocol.login.LoginProtocols.SERVERBOUND_TEMPLATE,
+                net.minecraft.network.protocol.login.LoginProtocols.CLIENTBOUND_TEMPLATE));
+        packets.add("configuration", phase(
+                net.minecraft.network.protocol.configuration.ConfigurationProtocols.SERVERBOUND_TEMPLATE,
+                net.minecraft.network.protocol.configuration.ConfigurationProtocols.CLIENTBOUND_TEMPLATE));
+        packets.add("game", phase(GameProtocols.SERVERBOUND_TEMPLATE, GameProtocols.CLIENTBOUND_TEMPLATE));
+        out.add("packets", packets);
+        JsonObject dimensions = new JsonObject();
+        for (EntityType<?> type : net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE) {
+            net.minecraft.world.entity.EntityDimensions of = type.getDimensions();
+            JsonArray size = new JsonArray();
+            size.add(of.width());
+            size.add(of.height());
+            size.add(of.eyeHeight());
+            dimensions.add(EntityType.getKey(type).toString(), size);
+        }
+        out.add("entity_dimensions", dimensions);
         JsonObject ids = new JsonObject();
         idsOf(ids, "dimension_type", dimensionTypes);
         idsOf(ids, "world_clock", clocks);
@@ -404,6 +439,28 @@ public final class CodecOracle {
     }
 
     /// The serverbound game packets pomme encodes itself.
+    /// A phase's packet names in id order, for each direction it has.
+    private static JsonObject phase(ProtocolInfo.DetailsProvider serverbound,
+            ProtocolInfo.DetailsProvider clientbound) {
+        JsonObject phase = new JsonObject();
+        phase.add("serverbound", packetNames(serverbound));
+        phase.add("clientbound", packetNames(clientbound));
+        return phase;
+    }
+
+    private static JsonArray packetNames(ProtocolInfo.DetailsProvider protocol) {
+        JsonArray names = new JsonArray();
+        if (protocol != null) {
+            protocol.details().listPackets((type, id) -> {
+                if (id != names.size()) {
+                    throw new IllegalStateException(type + " is listed out of id order");
+                }
+                names.add(type.id().getPath());
+            });
+        }
+        return names;
+    }
+
     private static void status() {
         long time = 0x0123456789abcdefL;
         encode("handshake/intention",
@@ -430,11 +487,15 @@ public final class CodecOracle {
                                 true)));
     }
 
-    private static void login() {
+    private static void login() throws Exception {
         UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
         Identifier cookie = Identifier.withDefaultNamespace("session");
         encode("login/serverbound/hello", net.minecraft.network.protocol.login.ServerboundHelloPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.login.ServerboundHelloPacket("Player", uuid));
+        // A real key packet encrypts a fresh secret, which differs from run to run.
+        encode("login/serverbound/key", net.minecraft.network.protocol.login.ServerboundKeyPacket.STREAM_CODEC::encode,
+                withFields(net.minecraft.network.protocol.login.ServerboundKeyPacket.class,
+                        Map.of("keybytes", new byte[] {1, 2, 3}, "encryptedChallenge", new byte[] {4, 5})));
         encode("login/serverbound/custom_query_answer",
                 net.minecraft.network.protocol.login.ServerboundCustomQueryAnswerPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.login.ServerboundCustomQueryAnswerPacket(300, null));
@@ -503,6 +564,30 @@ public final class CodecOracle {
     private static void serverbound() {
         UUID uuid = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
         BlockPos pos = new BlockPos(-12, 70, 345);
+        // Messages 0, 2 and 19 of the last twenty seen.
+        LastSeenMessages.Update seen = new LastSeenMessages.Update(3, BitSet.valueOf(new long[] {0x080005L}),
+                (byte) 0x42);
+        encode("serverbound/chat", ServerboundChatPacket.STREAM_CODEC::encode,
+                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, signature(9), seen));
+        encode("serverbound/chat_unsigned", ServerboundChatPacket.STREAM_CODEC::encode,
+                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, null, seen));
+        encode("serverbound/chat_command", ServerboundChatCommandPacket.STREAM_CODEC::encode,
+                new ServerboundChatCommandPacket("help"));
+        encode("serverbound/chat_command_signed", ServerboundChatCommandSignedPacket.STREAM_CODEC::encode,
+                new ServerboundChatCommandSignedPacket("msg a hi", Instant.ofEpochMilli(7), 8L,
+                        new net.minecraft.commands.arguments.ArgumentSignatures(List.of(
+                                new net.minecraft.commands.arguments.ArgumentSignatures.Entry("message",
+                                        signature(4)))),
+                        seen));
+        encode("serverbound/chat_session_update", ServerboundChatSessionUpdatePacket.STREAM_CODEC::encode,
+                new ServerboundChatSessionUpdatePacket(chatSession(new UUID(0L, 7L), 1234, new byte[] {1, 2},
+                        new byte[] {3})));
+        encode("serverbound/chat_ack", ServerboundChatAckPacket.STREAM_CODEC::encode,
+                new ServerboundChatAckPacket(300));
+        encode("serverbound/recipe_book_change_settings",
+                ServerboundRecipeBookChangeSettingsPacket.STREAM_CODEC::encode,
+                new ServerboundRecipeBookChangeSettingsPacket(
+                        net.minecraft.world.inventory.RecipeBookType.BLAST_FURNACE, true, false));
         encode("serverbound/accept_teleportation",
                 ServerboundAcceptTeleportationPacket.STREAM_CODEC::encode,
                 new ServerboundAcceptTeleportationPacket(300));
@@ -1262,7 +1347,7 @@ public final class CodecOracle {
         // A granted criterion is stamped with the time it was granted, so
         // these are built with a fixed one, in a map that keeps its order.
         Map<String, CriterionProgress> criteria = new LinkedHashMap<>();
-        criteria.put("a", new CriterionProgress(java.time.Instant.ofEpochMilli(5)));
+        criteria.put("a", new CriterionProgress(Instant.ofEpochMilli(5)));
         criteria.put("b", new CriterionProgress());
         var progress = AdvancementProgress.class.getDeclaredConstructor(Map.class);
         progress.setAccessible(true);
@@ -1370,8 +1455,26 @@ public final class CodecOracle {
     /// directly.
     private static void playerList() throws Exception {
         UUID bob = new UUID(0L, 9L);
-        // A real key would differ from run to run; only its bytes are sent.
-        java.security.PublicKey key = new java.security.PublicKey() {
+        var profile = new com.mojang.authlib.GameProfile(bob, "bob", textures("abc", "sig"));
+        var session = chatSession(new UUID(0L, 7L), 1000, new byte[] {(byte) 0xAA, (byte) 0xBB},
+                new byte[] {(byte) 0xCC});
+        playerInfo("every_action", EnumSet.allOf(ClientboundPlayerInfoUpdatePacket.Action.class),
+                new ClientboundPlayerInfoUpdatePacket.Entry(bob, profile, true, 42, GameType.CREATIVE,
+                        Component.literal("Bob"), true, 3, session));
+        playerInfo("cleared_name_and_session",
+                EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.INITIALIZE_CHAT,
+                        ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME),
+                new ClientboundPlayerInfoUpdatePacket.Entry(bob, null, false, 0, GameType.SURVIVAL, null, false,
+                        0, null));
+        encode("player_info_remove/two", ClientboundPlayerInfoRemovePacket.STREAM_CODEC::encode,
+                new ClientboundPlayerInfoRemovePacket(List.of(new UUID(0L, 1L), new UUID(0L, 2L))));
+    }
+
+    /// A chat session whose key encodes as `key`. A real key would differ from
+    /// run to run, and only its bytes are sent.
+    private static net.minecraft.network.chat.RemoteChatSession.Data chatSession(UUID id, long expiresAt,
+            byte[] key, byte[] keySignature) {
+        java.security.PublicKey encoded = new java.security.PublicKey() {
             @Override
             public String getAlgorithm() {
                 return "RSA";
@@ -1384,23 +1487,19 @@ public final class CodecOracle {
 
             @Override
             public byte[] getEncoded() {
-                return new byte[] {(byte) 0xAA, (byte) 0xBB};
+                return key;
             }
         };
-        var profile = new com.mojang.authlib.GameProfile(bob, "bob", textures("abc", "sig"));
-        var session = new net.minecraft.network.chat.RemoteChatSession.Data(new UUID(0L, 7L),
-                new net.minecraft.world.entity.player.ProfilePublicKey.Data(java.time.Instant.ofEpochMilli(1000), key,
-                        new byte[] {(byte) 0xCC}));
-        playerInfo("every_action", EnumSet.allOf(ClientboundPlayerInfoUpdatePacket.Action.class),
-                new ClientboundPlayerInfoUpdatePacket.Entry(bob, profile, true, 42, GameType.CREATIVE,
-                        Component.literal("Bob"), true, 3, session));
-        playerInfo("cleared_name_and_session",
-                EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.INITIALIZE_CHAT,
-                        ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME),
-                new ClientboundPlayerInfoUpdatePacket.Entry(bob, null, false, 0, GameType.SURVIVAL, null, false,
-                        0, null));
-        encode("player_info_remove/two", ClientboundPlayerInfoRemovePacket.STREAM_CODEC::encode,
-                new ClientboundPlayerInfoRemovePacket(List.of(new UUID(0L, 1L), new UUID(0L, 2L))));
+        return new net.minecraft.network.chat.RemoteChatSession.Data(id,
+                new net.minecraft.world.entity.player.ProfilePublicKey.Data(Instant.ofEpochMilli(expiresAt), encoded,
+                        keySignature));
+    }
+
+    /// A message signature of 256 bytes of `fill`.
+    private static net.minecraft.network.chat.MessageSignature signature(int fill) {
+        byte[] bytes = new byte[256];
+        java.util.Arrays.fill(bytes, (byte) fill);
+        return new net.minecraft.network.chat.MessageSignature(bytes);
     }
 
     /// A profile's properties: a signed `textures`.

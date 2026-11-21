@@ -14,6 +14,10 @@ use crate::entity::{PositionMoveRotation, Relative};
 #[derive(Deserialize)]
 struct Fixtures {
     version: String,
+    protocol: i32,
+    /// By phase, then direction, as the packet table files spell them.
+    packets: std::collections::HashMap<String, std::collections::HashMap<String, Vec<String>>>,
+    entity_dimensions: std::collections::HashMap<String, [f32; 3]>,
     registry_ids: std::collections::HashMap<String, u32>,
     registry_sizes: std::collections::HashMap<String, usize>,
     cases: std::collections::HashMap<String, String>,
@@ -32,6 +36,26 @@ fn fixtures() -> &'static Fixtures {
         );
         fixtures
     })
+}
+
+/// The protocol number the game reports.
+pub fn protocol() -> i32 {
+    fixtures().protocol
+}
+
+/// The game's packet names for a phase and direction, in id order.
+pub fn packet_names(phase: &str, direction: &str) -> &'static [String] {
+    &fixtures().packets[phase][direction]
+}
+
+/// How many entity types the game has.
+pub fn entity_type_count() -> usize {
+    fixtures().entity_dimensions.len()
+}
+
+/// The width, height and eye height the game gives entity type `name`.
+pub fn entity_dimensions(name: &str) -> [f32; 3] {
+    fixtures().entity_dimensions[name]
 }
 
 /// The payload of case `name` (`<packet>/<case>`), without its packet id.
