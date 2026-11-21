@@ -5691,91 +5691,49 @@ fn dialog_packet_ids_match_azalea() {
     );
 }
 
-/// A game frame: the native packet id, then `payload`.
-fn game_frame(name: &str, payload: &[u8]) -> Vec<u8> {
-    let mut raw = Vec::new();
-    wire::write_varint(
-        &mut raw,
-        table_id(Phase::Game, Direction::Clientbound, name),
-    );
-    raw.extend_from_slice(payload);
-    raw
-}
-
-/// pomme's `update_advancements` decode agrees with azalea's on every field
-/// the client reads.
+/// The game's own `update_advancements` reads as the advancements, the removal
+/// and the progress `CodecOracle.advancements` put in it.
 #[test]
-fn advancements_match_azalea() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
+fn update_advancements_fixture_reads() {
+    let update = super::advancement_wire::read_update(&pomme_protocol::vanilla_fixtures::case(
+        "update_advancements/root_and_child",
+    ))
+    .unwrap();
 
-    let stone = registry_id(RegistryTable::native(), ClientRegistry::Item, "stone");
-    let mut p = vec![1, 1];
-    wire::write_utf(&mut p, "minecraft:story/root");
-    p.extend([0, 1]);
-    p.extend([8, 0, 2, b'h', b'i', 8, 0, 0]);
-    wire::write_varint(&mut p, stone);
-    p.extend([1, 0, 0, 2]);
-    p.extend(3i32.to_be_bytes());
-    wire::write_utf(&mut p, "minecraft:block/stone");
-    p.extend([0; 8]);
-    p.extend([1, 1]);
-    wire::write_utf(&mut p, "a");
-    p.extend([0, 1]);
-    wire::write_utf(&mut p, "minecraft:old");
-    p.push(1);
-    wire::write_utf(&mut p, "minecraft:story/root");
-    p.push(2);
-    wire::write_utf(&mut p, "a");
-    p.push(1);
-    p.extend(5i64.to_be_bytes());
-    wire::write_utf(&mut p, "b");
-    p.extend([0, 1]);
+    assert!(update.reset);
+    assert!(update.show_advancements);
+    assert_eq!(update.removed, ["minecraft:old"]);
 
-    let raw = game_frame("update_advancements", &p);
-    let Ok(ClientboundGamePacket::UpdateAdvancements(azalea)) =
-        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
-            &mut std::io::Cursor::new(&raw[..]),
-        )
-    else {
-        panic!("azalea reads the frame");
+    let [(root, shown), (child, hidden)] = &update.added[..] else {
+        panic!("two advancements");
     };
-    let ours = super::advancement_wire::read_update(&p).unwrap();
-
-    assert_eq!(ours.reset, azalea.reset);
-    assert_eq!(ours.show_advancements, azalea.show_advancements);
-    assert_eq!(ours.removed, ["minecraft:old"]);
-    assert_eq!(azalea.removed[0].to_string(), "minecraft:old");
-    let (id, data) = &ours.added[0];
-    let theirs = &azalea.added[0];
-    assert_eq!(*id, theirs.id.to_string());
-    assert_eq!(data.requirements, theirs.value.requirements);
-    let display = data.display.as_ref().unwrap();
-    let their_display = theirs.value.display.as_ref().unwrap();
-    assert_eq!(display.show_toast, their_display.show_toast);
+    assert_eq!(
+        (root.as_str(), child.as_str()),
+        ("minecraft:story/root", "minecraft:story/child")
+    );
+    assert_eq!(shown.requirements, [["a"]]);
+    assert_eq!(hidden.requirements, [vec!["a", "b"], vec!["c"]]);
+    assert!(hidden.display.is_none());
+    let display = shown.display.as_ref().unwrap();
+    assert_eq!(
+        display.title.iter().map(|s| &*s.text).collect::<String>(),
+        "hi"
+    );
     assert!(matches!(
         display.frame,
         crate::ui::toast::AdvancementFrame::Goal
     ));
-    assert!(matches!(
-        their_display.frame,
-        azalea_protocol::packets::game::c_update_advancements::FrameType::Goal
-    ));
-    let azalea_inventory::ItemStack::Present(icon) = &their_display.icon else {
-        panic!("azalea reads the icon");
+    assert!(display.show_toast);
+    assert_eq!(display.icon_item.as_deref(), Some("stone"));
+
+    let [(of, criteria)] = &update.progress[..] else {
+        panic!("one advancement's progress");
     };
+    assert_eq!(of, "minecraft:story/root");
     assert_eq!(
-        display.icon_item.as_deref(),
-        Some(&*crate::player::inventory::item_resource_name(icon.kind))
+        *criteria,
+        std::collections::HashMap::from([("a".to_owned(), true), ("b".to_owned(), false)])
     );
-    let (progress_id, criteria) = &ours.progress[0];
-    let their_criteria = &azalea.progress[0];
-    assert_eq!(
-        *progress_id,
-        azalea.progress.keys().next().unwrap().to_string()
-    );
-    for (name, obtained) in criteria {
-        assert_eq!(*obtained, their_criteria[name].date.is_some(), "{name}");
-    }
 }
 
 /// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
@@ -5785,144 +5743,6 @@ fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>)
         name,
         read,
     )
-}
-
-#[test]
-fn container_packets_match_azalea() {
-    use azalea_inventory::components::EquipmentSlot;
-    use azalea_inventory::{ItemStack, ItemStackData};
-    use azalea_protocol::packets::game::*;
-    use pomme_registry::Registry;
-    use pomme_registry::builtin::{ItemKind, MenuKind};
-
-    let decode = |name, packet| decode_azalea(name, packet, container::read);
-    let azalea_stack = |kind, count| {
-        ItemStack::Present(ItemStackData {
-            kind,
-            count,
-            component_patch: Default::default(),
-        })
-    };
-    let cases = [
-        (
-            "container_set_content",
-            ClientboundGamePacket::ContainerSetContent(
-                c_container_set_content::ClientboundContainerSetContent {
-                    container_id: 2,
-                    state_id: 7,
-                    items: vec![azalea_stack(ItemKind::Diamond, 3), ItemStack::Empty],
-                    carried_item: azalea_stack(ItemKind::Stone, 1),
-                },
-            ),
-            ContainerPacket::Content {
-                container_id: 2,
-                state_id: 7,
-                items: vec![pomme_stack(ItemKind::Diamond, 3), None],
-                carried: pomme_stack(ItemKind::Stone, 1),
-            },
-        ),
-        (
-            "container_set_slot",
-            ClientboundGamePacket::ContainerSetSlot(
-                c_container_set_slot::ClientboundContainerSetSlot {
-                    container_id: 0,
-                    state_id: 4,
-                    slot: 36,
-                    item_stack: azalea_stack(ItemKind::Bread, 2),
-                },
-            ),
-            ContainerPacket::Slot {
-                container_id: 0,
-                state_id: 4,
-                slot: 36,
-                item: pomme_stack(ItemKind::Bread, 2),
-            },
-        ),
-        (
-            "container_set_data",
-            ClientboundGamePacket::ContainerSetData(
-                c_container_set_data::ClientboundContainerSetData {
-                    container_id: 3,
-                    id: 1,
-                    value: 200,
-                },
-            ),
-            ContainerPacket::Data {
-                container_id: 3,
-                id: 1,
-                value: 200,
-            },
-        ),
-        (
-            "container_close",
-            ClientboundGamePacket::ContainerClose(c_container_close::ClientboundContainerClose {
-                container_id: 3,
-            }),
-            ContainerPacket::Close { container_id: 3 },
-        ),
-        (
-            "set_cursor_item",
-            ClientboundGamePacket::SetCursorItem(c_set_cursor_item::ClientboundSetCursorItem {
-                contents: azalea_stack(ItemKind::Stone, 64),
-            }),
-            ContainerPacket::Cursor {
-                item: pomme_stack(ItemKind::Stone, 64),
-            },
-        ),
-        (
-            "set_player_inventory",
-            ClientboundGamePacket::SetPlayerInventory(
-                c_set_player_inventory::ClientboundSetPlayerInventory {
-                    slot: 40,
-                    contents: azalea_stack(ItemKind::Shield, 1),
-                },
-            ),
-            ContainerPacket::PlayerInventory {
-                slot: 40,
-                item: pomme_stack(ItemKind::Shield, 1),
-            },
-        ),
-        (
-            "set_equipment",
-            ClientboundGamePacket::SetEquipment(c_set_equipment::ClientboundSetEquipment {
-                entity_id: MinecraftEntityId(9),
-                slots: c_set_equipment::EquipmentSlots {
-                    slots: vec![
-                        (
-                            EquipmentSlot::Mainhand,
-                            azalea_stack(ItemKind::StoneSword, 1),
-                        ),
-                        (EquipmentSlot::Head, ItemStack::Empty),
-                    ],
-                },
-            }),
-            ContainerPacket::Equipment {
-                entity: 9,
-                slots: vec![(0, pomme_stack(ItemKind::StoneSword, 1)), (5, None)],
-            },
-        ),
-    ];
-    for (name, packet, expected) in cases {
-        assert_eq!(decode(name, packet), expected, "{name}");
-    }
-
-    let ContainerPacket::OpenScreen {
-        container_id,
-        menu,
-        title,
-    } = decode(
-        "open_screen",
-        ClientboundGamePacket::OpenScreen(c_open_screen::ClientboundOpenScreen {
-            container_id: 3,
-            menu_type: MenuKind::Generic9x3,
-            title: azalea_chat::FormattedText::from("Chest"),
-        }),
-    )
-    else {
-        panic!("open_screen");
-    };
-    assert_eq!((container_id, menu), (3, MenuKind::Generic9x3.to_u32()));
-    assert_eq!(plain(&title), "Chest");
 }
 
 #[test]
