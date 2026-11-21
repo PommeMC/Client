@@ -832,6 +832,9 @@ impl ApplicationHandler for App {
                     }
                     if let install::Step::Done(window) = step {
                         self.install = None;
+                        // TODO: an update check that installed nothing still
+                        // rebuilds everything here, so a published build
+                        // loads its resources and audio twice a launch.
                         self.core.reload_installed_assets();
                         self.installed_window = Some(window);
                         // In the background there's no surface to build the
