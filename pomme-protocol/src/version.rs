@@ -41,9 +41,9 @@ pub const VERSIONS: &[ProtocolVersion] = &[
 /// The newest listed version.
 pub const LATEST: ProtocolVersion = VERSIONS[0];
 
-/// The version the client speaks natively — azalea's pinned wire and the
-/// integrated server's. Every other listed version is joined by translating
-/// its wire to and from this layout, whether it is older or newer.
+/// The version the client speaks natively. Every other listed version is
+/// joined by translating its wire to and from this layout, whether it is
+/// older or newer.
 pub const NATIVE: ProtocolVersion = v("26.2", 776);
 
 /// A version with embedded protocol data — the one place a version's

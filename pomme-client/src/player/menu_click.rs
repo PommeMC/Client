@@ -104,8 +104,8 @@ fn brewing_may_place(recipes: &RecipeBookState, s: usize, item: &ItemStackData) 
         // `FuelSlot`: 26.3's `brewing_fuel` component, which only blaze
         // powder has by default; before, the item tag, or blaze powder alone
         // on a server that sends no such tag.
-        // TODO: a stack's own `brewing_fuel` is dropped bridging into azalea's
-        // types, so only the default is seen.
+        // TODO: read a stack's own `brewing_fuel`; only the item's default
+        // is seen.
         BREWING_FUEL_SLOT => match reagents {
             Some(_) => item.kind == ItemKind::BlazePowder,
             None => recipes
@@ -399,7 +399,7 @@ pub fn apply_click(
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
-        // Slots past azalea's menu (the crafter result) are left as they are.
+        // Slots past the menu (the crafter result) are left as they are.
         let Some(after) = menu.get(i) else {
             continue;
         };

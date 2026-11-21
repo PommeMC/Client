@@ -91,8 +91,7 @@ pub(super) fn translate_set_objective_764(id: u32, payload: &[u8]) -> Option<Vec
     if matches!(method, 0 | 2) {
         transcode_component(&mut cur, &mut out)?;
         copy_varint(&mut cur, &mut out)?; // render type
-        // Vanilla 26.2 wraps the numberFormat optional; azalea (ffedf17)
-        // reads a bare format kind. Zero decodes as absent/blank either way.
+        // 26.2 wraps the number format in an optional; zero is absent.
         out.push(0);
     }
     Some(out)

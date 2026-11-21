@@ -1,6 +1,5 @@
-//! Pomme-owned game-chat encoding and decoding. Inbound frames arrive after
-//! version translation and before azalea's typed decode, whose 26.2 component
-//! decoder drops hover events.
+//! Game-chat encoding and decoding. Inbound frames arrive after version
+//! translation.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
@@ -270,8 +269,7 @@ pub fn encode_outbound_custom_click_action(
 }
 
 /// Returns `None` when this is not a chat packet. Chat packets are always
-/// consumed, malformed ones included, so a bad payload never falls through to
-/// azalea's lossy component decoder.
+/// consumed, malformed ones included.
 pub fn handle_raw_chat_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
@@ -1093,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn system_chat_decodes_hover_before_azalea() {
+    fn system_chat_decodes_hover() {
         let mut root = text_component("Click me");
         root.insert("hover_event", show_text_hover("Tooltip"));
         let mut raw = Vec::new();

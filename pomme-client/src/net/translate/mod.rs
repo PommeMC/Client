@@ -2,7 +2,7 @@
 //!
 //! The client speaks 26.2 natively (`pomme_protocol::version::NATIVE`). When
 //! a connection negotiates a different wire version, inbound frames are
-//! rewritten into the native layout before azalea's typed decode where the
+//! rewritten into the native layout before the client reads them where the
 //! wire format changed, and static-registry ids (which shift between versions)
 //! are remapped in both directions so the rest of the client stays
 //! single-version. Layouts were line-checked against the decompiled
@@ -846,7 +846,7 @@ enum SectionPadding {
 }
 
 /// Normalizes post-1.21.2 recipe-book entries into 26.2's static-registry
-/// id space before azalea parses them. The recipe-display registry itself is
+/// id space before they are read. The recipe-display registry itself is
 /// stable across these versions, but slot-display, item and component ids
 /// are not (1.21.11's `item` slot is id 2; 26.2 id 2 means
 /// `with_any_potion`).

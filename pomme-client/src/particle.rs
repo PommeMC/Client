@@ -279,8 +279,7 @@ pub enum ServerParticleKind {
 
 impl ServerParticleKind {
     /// Maps a particle registry id (`ParticleTypes` registration order in the
-    /// 26.2 reference; ids shift between versions). Pomme owns this mapping
-    /// because azalea's particle wire enum is out of sync with the registry.
+    /// 26.2 reference; ids shift between versions).
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
             27 => Some(Self::EndRod),

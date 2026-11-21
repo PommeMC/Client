@@ -68,8 +68,7 @@ fn packet_ids() -> RecipePacketIds {
     })
 }
 
-/// Handles the recipe packets whose pinned Azalea structs do not match the
-/// vanilla 26.2 wire format. The frame has already been translated into the
+/// Handles the recipe packets. The frame has already been translated into the
 /// native packet/static-registry id space by
 /// `Translation::translate_game_frame`.
 ///

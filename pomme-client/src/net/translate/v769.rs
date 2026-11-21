@@ -112,8 +112,8 @@ pub(super) fn write_bare_stack(out: &mut Vec<u8>, stack: Option<(u32, u32)>) {
     }
 }
 
-/// Rewrites `player_chat`: 1.21.5 prepended a `globalIndex` varint; zero
-/// keeps azalea's ordering checks happy.
+/// Rewrites `player_chat`: 1.21.5 prepended a `globalIndex` varint, which an
+/// older layout gets as zero (the chat reader does not check the index then).
 pub(super) fn translate_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(payload.len() + 2);
     wire::write_varint(&mut out, id);

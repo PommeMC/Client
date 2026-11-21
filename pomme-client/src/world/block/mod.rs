@@ -1229,9 +1229,8 @@ mod tests {
     fn chest_states_decode() {
         let block_state_table = BlockStateTable::native();
         // Oracle from reference/26.2/generated/reports/blocks.json:
-        // chest[type=single,facing=south,waterlogged=false] is id 3994 — the
-        // state that previously decoded as facing=east under azalea's stale
-        // 26.1 tables.
+        // chest[type=single,facing=south,waterlogged=false] is id 3994, which
+        // a 26.1 table reads as facing=east.
         let state = block_state_table.try_state(3994).unwrap();
         assert_eq!(block_state_table.block_state_data(state).id(), "chest");
         let props = block_state_table.block_state_data(state).properties();

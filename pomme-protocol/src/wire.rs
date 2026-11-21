@@ -23,9 +23,7 @@ pub fn encode_interact(entity_id: i32, hand: u32, location: DVec3, sneaking: boo
     buf
 }
 
-/// Vanilla `ServerboundAttackPacket`: left-click on an entity. Encoded here
-/// because azalea serializes the entity id as a fixed i32 instead of a
-/// varint.
+/// Vanilla `ServerboundAttackPacket`: left-click on an entity.
 pub fn encode_attack(entity_id: i32) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("attack"));
