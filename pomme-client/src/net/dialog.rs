@@ -1,7 +1,6 @@
-//! Pomme-owned decoding of the common dialog packets (vanilla
+//! Decoding of the common dialog packets (vanilla
 //! `ClientCommonPacketListenerImpl`), read from native-layout frames in
-//! either phase before azalea's typed decode, which rejects object
-//! components.
+//! either phase.
 
 use crossbeam_channel::Sender;
 use pomme_protocol::wire::read_varint;

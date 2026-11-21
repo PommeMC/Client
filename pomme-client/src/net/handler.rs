@@ -101,8 +101,8 @@ pub(super) fn variant_index(
     order_pos(ident.path()).unwrap_or(fallback)
 }
 
-/// Consume packets that azalea's 26.2 codecs cannot represent correctly
-/// before the typed decode runs. Returns whether the packet was consumed.
+/// Hands a native-layout game frame to the reader that owns its packet.
+/// Returns whether one took it.
 pub fn handle_raw_game_packet(
     raw: &[u8],
     block_state_table: BlockStateTable,
@@ -450,8 +450,7 @@ fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
     }))
 }
 
-/// `ClientboundLevelParticles`' packet id from the vanilla-derived table
-/// (cross-checked against azalea's dispatch table in `azalea_compat`).
+/// `ClientboundLevelParticles`' packet id from the vanilla-derived table.
 fn level_particles_packet_id() -> u32 {
     use pomme_protocol::{Direction, PacketTable, Phase};
 
@@ -695,7 +694,7 @@ mod tests {
     fn raw_native_explosion_recovers_knockback_without_decoding_trailing_payload() {
         let expected = glam::DVec3::new(-0.3125, 0.4375, 0.0625);
         let mut raw = explosion_prefix(Some(expected));
-        // A tail azalea can't decode must not cost the knockback.
+        // A tail that can't be decoded must not cost the knockback.
         raw.extend_from_slice(&[0xff, 0x80]);
 
         let (tx, rx) = crossbeam_channel::bounded(1);

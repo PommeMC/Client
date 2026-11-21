@@ -62,7 +62,7 @@ pub struct AdvancementData {
     pub requirements: Vec<Vec<String>>,
 }
 
-/// Decoded `ClientboundUpdateAdvancements`, azalea-free.
+/// Decoded `ClientboundUpdateAdvancements`.
 pub struct AdvancementsUpdate {
     pub reset: bool,
     pub added: Vec<(String, AdvancementData)>,

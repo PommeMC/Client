@@ -107,7 +107,7 @@ impl KnownPackTable {
     }
 
     /// Every registry with its elements, for cross-checks against a consumer's
-    /// deserializers (see pomme-client's `azalea_compat`).
+    /// deserializers (see pomme-client's `wire_tests`).
     pub fn registries(
         &self,
     ) -> impl Iterator<Item = (&str, impl Iterator<Item = (&str, &serde_json::Value)>)> {

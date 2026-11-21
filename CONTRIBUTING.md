@@ -42,7 +42,7 @@ server. See [tests/ingame/README.md](tests/ingame/README.md).
 ## Development Guidelines
 
 - **The toolchain is pinned** in `rust-toolchain.toml` (a nightly: rustfmt's
-  options, SteelMC's pin, and simdnbt's and azalea's unstable feature gates).
+  options, SteelMC's pin, and simdnbt's unstable feature gates).
   Never override it locally; when it has to move, bump SteelMC first
 - No unnecessary comments. Code should be self-explanatory
 - No DRY violations. Don't duplicate logic, extract shared helpers

@@ -10,7 +10,7 @@ pomme-auth/           # Microsoft sign-in
 pomme-install/        # Downloads a version's assets and Pomme's own releases
 pomme-protocol/       # Per-version protocol data and wire encoding
 pomme-dirs/           # The data folder layout
-pomme-block/          # Data-free stand-in for azalea-block; block tables are Pomme's own
+pomme-block/          # The block state id type; block tables are Pomme's own
 pomme-singleplayer/   # Runs SteelMC in-process as the integrated server
 pomme-gpu-allocator/  # Vendored fork of the gpu-allocator crate
 third_party/SteelMC/  # SteelMC submodule

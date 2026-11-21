@@ -158,7 +158,7 @@ pub(super) fn transcode_chat_type(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) ->
 /// `player_info_update`: per entry, per action bit, the display name
 /// (bit 5, last) is the one component; every earlier action's payload
 /// copies (order per the 1.20.2 `ClientboundPlayerInfoUpdatePacket`, whose
-/// first six actions match azalea's).
+/// first six actions match 26.2's).
 pub(super) fn transcode_player_info(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
     let actions = read_u8(cur)?;
     out.push(actions);

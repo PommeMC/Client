@@ -9,7 +9,7 @@ use pomme_item::components::{
     BlockItemStateProperties, ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion,
     MapColor, PotionContents,
 };
-use pomme_registry::Registry as AzaleaRegistry;
+use pomme_registry::Registry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 

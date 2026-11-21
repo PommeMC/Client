@@ -10,10 +10,8 @@ members = [
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-registry",
-    "pomme-registry/azalea-compat",
     "pomme-text",
     "pomme-item",
-    "pomme-inventory",
     "pomme-dirs",
     "pomme-protocol",
     "pomme-singleplayer",
@@ -45,7 +43,7 @@ glam = "0.34"
 # client
 pyronyx = "=0.5.1"
 regex = "1"
-# Secure chat. rsa, sha1 and sha2 match the versions azalea-crypto pins.
+# Secure chat.
 chrono = { version = "0.4.44", features = ["serde"] }
 rand = "0.10.2"
 rsa = "0.10.0-rc.18"
@@ -53,31 +51,6 @@ sha1 = "0.11"
 sha2 = "0.11"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-
-# azalea lags crates.io releases; pin the head of its merged 26.2 PR
-# (azalea-rs/azalea#332) from git, since that branch was deleted.
-# azalea-block is replaced by the pomme-block shim (pomme owns block data),
-# azalea-registry by pomme-registry under that name (its `azalea-compat`
-# crate), and azalea-inventory by the pomme-inventory fork, which only
-# azalea-entity and the test-only azalea-protocol still need; the second
-# patch table substitutes them under the azalea git workspace's own path
-# dependencies too.
-[patch.crates-io]
-azalea-buf = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-protocol = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-crypto = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-auth = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-entity = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-block = { path = "pomme-block" }
-azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
-azalea-registry = { path = "pomme-registry/azalea-compat" }
-azalea-inventory = { path = "pomme-inventory" }
-
-[patch."https://github.com/azalea-rs/azalea"]
-azalea-block = { path = "pomme-block" }
-azalea-registry = { path = "pomme-registry/azalea-compat" }
-azalea-inventory = { path = "pomme-inventory" }
 
 [profile.dev]
 opt-level = 1

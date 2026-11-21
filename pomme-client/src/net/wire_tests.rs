@@ -1,7 +1,6 @@
 //! Tests of the client's wire code: one per translation rewriter, and the
 //! client's own encoders and raw handlers against bytes the game encoded
 //! (`pomme_protocol::vanilla_fixtures`).
-// TODO: rename this file; nothing in it uses azalea any more.
 
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};

@@ -1,84 +1,64 @@
 #![doc = include_str!("../README.md")]
 
-mod behavior;
-pub mod block_state;
-pub mod blocks;
-pub mod fluid_state;
-pub mod properties;
-mod range;
+use std::fmt::{self, Debug};
 
-use core::fmt::Debug;
-use std::any::Any;
-use std::collections::HashMap;
-use std::str::FromStr;
-
-pub use behavior::BlockBehavior;
-// re-exported for convenience
-pub use block_state::BlockState;
-use pomme_registry::builtin::BlockKind;
-pub use range::BlockStates;
-
-/// A trait that's implemented on block structs.
-///
-/// See the [azalea_block documentation](crate) for details.
-pub trait BlockTrait: Debug + Any {
-    fn behavior(&self) -> BlockBehavior;
-    /// Get the Minecraft string ID for this block.
-    ///
-    /// For example, `stone` or `grass_block`.
-    fn id(&self) -> &'static str;
-    /// Convert the block struct to a [`BlockState`].
-    ///
-    /// This is a lossless conversion, as [`BlockState`] also contains state
-    /// data.
-    fn as_block_state(&self) -> BlockState;
-    /// Convert the block struct to a [`BlockKind`].
-    ///
-    /// This is a lossy conversion, as [`BlockKind`] doesn't contain any state
-    /// data.
-    fn as_block_kind(&self) -> BlockKind;
-    #[deprecated = "renamed to as_block_kind"]
-    #[doc(hidden)]
-    fn as_registry_block(&self) -> BlockKind {
-        self.as_block_kind()
-    }
-
-    /// Returns a map of property names on this block to their values as
-    /// strings.
-    ///
-    /// Consider using [`Self::get_property`] if you only need a single
-    /// property.
-    fn property_map(&self) -> HashMap<&'static str, &'static str>;
-    /// Get a property's value as a string by its name, or `None` if the block
-    /// has no property with that name.
-    ///
-    /// To get all properties, you may use [`Self::property_map`].
-    ///
-    /// To set a property, use [`Self::set_property`].
-    fn get_property(&self, name: &str) -> Option<&'static str>;
-    /// Update a property on this block, with the name and value being strings.
-    ///
-    /// Returns `Ok(())`, if the property name and value are valid, otherwise it
-    /// returns `Err(InvalidPropertyError)`.
-    ///
-    /// To get a property, use [`Self::get_property`].
-    fn set_property(&mut self, name: &str, new_value: &str) -> Result<(), InvalidPropertyError>;
+/// A block state id: one number per combination of a block and its property
+/// values, in the order the connection's version numbers them.
+#[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
+pub struct BlockState {
+    id: u16,
 }
 
-#[derive(Debug)]
-pub struct InvalidPropertyError;
+impl BlockState {
+    /// Plain air, which is state 0 in every version; cave and void air have
+    /// ids of their own.
+    pub const AIR: BlockState = BlockState { id: 0 };
 
-impl dyn BlockTrait {
-    pub fn downcast_ref<T: BlockTrait>(&self) -> Option<&T> {
-        (self as &dyn Any).downcast_ref::<T>()
+    /// Whether this is plain air.
+    #[inline]
+    pub fn is_air(&self) -> bool {
+        *self == Self::AIR
+    }
+
+    /// The id, in the numbering of the version it was read from.
+    #[inline]
+    pub const fn id(&self) -> u16 {
+        self.id
     }
 }
 
-pub trait Property: FromStr {
-    type Value;
+impl TryFrom<u32> for BlockState {
+    type Error = ();
 
-    fn try_from_block_state(state: BlockState) -> Option<Self::Value>;
+    /// Fails for an id past `u16::MAX`, which would otherwise wrap onto
+    /// another state.
+    fn try_from(state_id: u32) -> Result<Self, Self::Error> {
+        u16::try_from(state_id)
+            .map(|id| BlockState { id })
+            .map_err(|_| ())
+    }
+}
 
-    /// Convert the value of the property to a string, like "x" or "true".
-    fn to_static_str(&self) -> &'static str;
+impl From<BlockState> for u32 {
+    fn from(value: BlockState) -> Self {
+        value.id as u32
+    }
+}
+
+impl Debug for BlockState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlockState(id: {})", self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_past_the_range_are_refused() {
+        assert_eq!(BlockState::try_from(0u32), Ok(BlockState::AIR));
+        assert!(BlockState::try_from(u32::from(u16::MAX)).is_ok());
+        assert!(BlockState::try_from(u32::from(u16::MAX) + 1).is_err());
+    }
 }

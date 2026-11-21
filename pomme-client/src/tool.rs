@@ -364,8 +364,8 @@ fn wire_blocks(blocks: &HolderSet<BlockKind, Identifier>, protocol: i32) -> Tool
                     if protocol == NATIVE.protocol {
                         block_name(kind)
                     } else {
-                        // azalea decoded the raw id as a native BlockKind;
-                        // map it through that protocol's block registry.
+                        // The raw id was read as a native BlockKind; map it
+                        // through that protocol's block registry.
                         BlockStateTable::for_protocol(protocol)
                             .registry_name(kind.to_u32())
                             .map(str::to_owned)

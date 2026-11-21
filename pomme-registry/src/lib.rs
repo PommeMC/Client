@@ -11,8 +11,6 @@
 #[macro_use]
 mod macros;
 
-#[cfg(feature = "azalea")]
-mod azalea;
 pub mod builtin;
 pub mod data;
 pub mod identifier;

@@ -99,9 +99,7 @@ Pomme is licensed under the [GNU General Public License v3.0 or later](./LICENSE
 `pomme-singleplayer` links [SteelMC](./third_party/SteelMC) and is therefore
 AGPL-3.0-or-later. The [allocator crate](./pomme-gpu-allocator) is MIT, a port
 of the [gpu-allocator crate](https://github.com/Traverse-Research/gpu-allocator)
-by Traverse Research, and [pomme-block](./pomme-block) and
-[pomme-inventory](./pomme-inventory), which stand in for
-[azalea](https://github.com/azalea-rs/azalea) crates, are likewise MIT. See
+by Traverse Research. See
 [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) for the other third-party code.
 
 Pomme is not affiliated with or endorsed by Mojang Studios or Microsoft.

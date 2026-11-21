@@ -134,12 +134,10 @@ License: MIT.
 
 ## azalea-rs/azalea
 
-`pomme-block` is a data-free shim patched in place of azalea-block, keeping its
-public types so the rest of azalea compiles while block semantics come from
-Pomme's own per-version tables. `pomme-inventory` is a fork of
-azalea-inventory, patched in the same way for the azalea crates that depend on
-it; the client itself no longer uses it. Other azalea crates remain
-dependencies.
+`pomme-block`'s `BlockState`, a block state id, began as azalea-block's type of
+the same name. The crate is distributed under Pomme's own licence, with
+azalea's notice kept below for the code that came from it. No azalea crate is a
+dependency.
 
 Source: <https://github.com/azalea-rs/azalea>
 
