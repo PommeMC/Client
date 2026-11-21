@@ -141,6 +141,11 @@ macro_rules! consumable {
     };
 }
 
+/// `SwingAnimation.STREAM_CODEC` (SwingAnimation.java:26): a type and a
+/// duration. 26.2's `swing_animation` and the two components 26.3 split it
+/// into all use it.
+static SWING_ANIMATION: Shape = Struct(&[VarInt, VarInt]);
+
 /// `TrimPattern.STREAM_CODEC` (TrimPattern.java:30).
 static TRIM_PATTERN: Shape = Holder(&Struct(&[IDENTIFIER, TEXT, Bool]));
 
@@ -438,7 +443,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
         ]),
     ),
     // SwingAnimation.java:26
-    ("swing_animation", Struct(&[VarInt, VarInt])),
+    ("swing_animation", Ref(&SWING_ANIMATION)),
     ("dyed_color", Int),
     ("map_color", Int),
     ("map_decorations", Compound),
@@ -594,8 +599,8 @@ static COMPONENTS_26_3: &[(&str, Shape)] = &[
         ]),
     ),
     // SwingAnimation.java:26
-    ("attack_animation", Struct(&[VarInt, VarInt])),
-    ("interact_animation", Struct(&[VarInt, VarInt])),
+    ("attack_animation", Ref(&SWING_ANIMATION)),
+    ("interact_animation", Ref(&SWING_ANIMATION)),
     // BlockTransformer.java:66, a registry holder.
     ("block_transformer", VarInt),
     // VillagerFood.java:24
@@ -660,8 +665,9 @@ pub struct ItemCodec {
     registries: &'static RegistryTable,
     components: Vec<&'static Shape>,
     entity_data: &'static [Serializer],
-    /// Rewrites of this version's changed components into the previous
-    /// version's layout, by component name.
+    /// Rewrites of this version's components into the layout of the version
+    /// it is translated to, for those laid out differently there, by
+    /// component name.
     conversions: &'static [(&'static str, Conversion)],
     air: u32,
 }
@@ -685,11 +691,11 @@ impl ItemCodec {
                     match EMBEDDED[index].version.name {
                         // 26.1's layouts are 26.2's; the one component it
                         // lacks (`sulfur_cube_content`) isn't in its table.
-                        "26.1" | "26.2" => (&[COMPONENTS_26_2], SERIALIZERS_26_2, &[][..]),
+                        "26.1" | "26.2" => (&[COMPONENTS_26_2], SERIALIZERS_26_2, TO_26_3),
                         "26.3" => (
                             &[COMPONENTS_26_3, COMPONENTS_26_2],
                             SERIALIZERS_26_3,
-                            CONVERSIONS_26_3,
+                            TO_26_2,
                         ),
                         _ => return None,
                     };
@@ -1113,20 +1119,26 @@ impl Translator<'_> {
                 self.component(r, id, depth)?
             };
             if let Some((target, value)) = translated {
-                write_varint(&mut added.1, target);
-                if delimited {
-                    write_varint(&mut added.1, value.len() as u32);
+                for target in [Some(target), self.split_twin(id)].into_iter().flatten() {
+                    write_varint(&mut added.1, target);
+                    if delimited {
+                        write_varint(&mut added.1, value.len() as u32);
+                    }
+                    added.1.extend_from_slice(&value);
+                    added.0 += 1;
                 }
-                added.1.extend_from_slice(&value);
-                added.0 += 1;
             }
         }
         let mut removed = (0, Vec::new());
         for _ in 0..removed_count {
             let id = r.varint()?;
             self.from.component(r, id)?;
-            if let Some(id) = self.remaps.remap(ClientRegistry::DataComponentType, id) {
-                write_varint(&mut removed.1, id);
+            let target = self.remaps.remap(ClientRegistry::DataComponentType, id);
+            for target in [target, target.and(self.split_twin(id))]
+                .into_iter()
+                .flatten()
+            {
+                write_varint(&mut removed.1, target);
                 removed.0 += 1;
             }
         }
@@ -1169,6 +1181,24 @@ impl Translator<'_> {
             None => self.value(r, &mut value, shape, depth + 1)? && same_layout,
         };
         Ok(target.filter(|_| carried).map(|target| (target, value)))
+    }
+
+    /// The target's second component for source component `id`, when the
+    /// target split it in two: 26.3 made `swing_animation` both
+    /// `attack_animation`, which the remap gives, and `interact_animation`
+    /// with the same value (`SwingAnimationComponentSplitFix`).
+    fn split_twin(&self, id: u32) -> Option<u32> {
+        let name = self
+            .from
+            .registries
+            .name_of(ClientRegistry::DataComponentType, id)?;
+        (name == "swing_animation")
+            .then(|| {
+                self.to
+                    .registries
+                    .id_of(ClientRegistry::DataComponentType, "interact_animation")
+            })
+            .flatten()
     }
 
     /// The source version's conversion for component `id`, when its layout
@@ -1322,30 +1352,72 @@ impl Translator<'_> {
     }
 }
 
-/// Rewrites one component value from a version's layout into the previous
-/// version's; `false` when it can't be represented there. The value is
-/// consumed either way.
+/// Rewrites one component value from a version's layout into another's;
+/// `false` when it can't be represented there. The value is consumed either
+/// way.
 type Conversion = fn(&Translator, &mut Reader, &mut Vec<u8>, u32) -> DecodeResult<bool>;
 
 /// 26.3's changed components in 26.2's layouts.
-static CONVERSIONS_26_3: &[(&str, Conversion)] = &[
-    ("consumable", consumable_26_2),
+static TO_26_2: &[(&str, Conversion)] = &[
+    ("consumable", |t, r, out, depth| {
+        consumable(t, r, out, depth, consume_effects_26_2)
+    }),
     ("death_protection", consume_effects_26_2),
-    ("trim", trim_26_2),
+    ("trim", |t, r, out, depth| {
+        trim(t, r, out, depth, trim_material_26_2)
+    }),
     ("provides_trim_material", trim_material_26_2),
-    ("instrument", instrument_26_2),
+    // Dropping 26.3's `durabilityDamage` (Instrument.java:29).
+    ("instrument", |t, r, out, depth| {
+        instrument(t, r, out, depth, |r, _| r.varint().map(drop))
+    }),
     ("pot_decorations", pot_decorations_26_2),
+    ("attack_animation", swing_animation),
 ];
 
-/// `consumable`: only a `teleport_randomly` effect changed.
-fn consumable_26_2(
+/// The same components of 26.2 and 26.1 in 26.3's layouts.
+static TO_26_3: &[(&str, Conversion)] = &[
+    ("consumable", |t, r, out, depth| {
+        consumable(t, r, out, depth, consume_effects_26_3)
+    }),
+    ("death_protection", consume_effects_26_3),
+    ("trim", |t, r, out, depth| {
+        trim(t, r, out, depth, trim_material_26_3)
+    }),
+    ("provides_trim_material", trim_material_26_3),
+    // 26.3's `durabilityDamage`, as zero.
+    ("instrument", |t, r, out, depth| {
+        instrument(t, r, out, depth, |_, out| {
+            write_varint(out, 0);
+            Ok(())
+        })
+    }),
+    ("pot_decorations", pot_decorations_26_3),
+    ("swing_animation", swing_animation),
+];
+
+/// 26.2's `swing_animation` and 26.3's `attack_animation`, one layout under
+/// two names.
+fn swing_animation(
     t: &Translator,
     r: &mut Reader,
     out: &mut Vec<u8>,
     depth: u32,
 ) -> DecodeResult<bool> {
+    t.value(r, out, &SWING_ANIMATION, depth)
+}
+
+/// `consumable`: only its effects differ between versions, rewritten by
+/// `effects`.
+fn consumable(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+    effects: Conversion,
+) -> DecodeResult<bool> {
     let head = t.value(r, out, &CONSUMABLE_HEAD, depth)?;
-    Ok(consume_effects_26_2(t, r, out, depth)? && head)
+    Ok(effects(t, r, out, depth)? && head)
 }
 
 /// A list of consume effects, dropping 26.3's `directionalParticles` from
@@ -1356,7 +1428,39 @@ fn consume_effects_26_2(
     out: &mut Vec<u8>,
     depth: u32,
 ) -> DecodeResult<bool> {
-    let ByRegistry(registry, arms) = &CONSUME_EFFECT_26_3 else {
+    consume_effects(t, r, out, depth, |r, out| {
+        out.extend_from_slice(r.bytes(4)?); // diameter
+        r.bool()?;
+        Ok(())
+    })
+}
+
+/// A list of consume effects, giving `teleport_randomly` 26.3's
+/// `directionalParticles` as false: a 26.2 server sends no particle event
+/// for the teleport.
+fn consume_effects_26_3(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    consume_effects(t, r, out, depth, |r, out| {
+        out.extend_from_slice(r.bytes(4)?); // diameter
+        out.push(0);
+        Ok(())
+    })
+}
+
+/// A list of consume effects with each `teleport_randomly` rewritten by
+/// `teleport_randomly`, the one effect whose layout differs.
+fn consume_effects(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+    teleport_randomly: fn(&mut Reader, &mut Vec<u8>) -> DecodeResult<()>,
+) -> DecodeResult<bool> {
+    let ByRegistry(registry, arms) = &CONSUME_EFFECT else {
         unreachable!("consume effects dispatch by type");
     };
     let effects = r.len(UNBOUNDED)?;
@@ -1373,8 +1477,7 @@ fn consume_effects_26_2(
         write_varint(out, target.unwrap_or(0));
         carried &= target.is_some();
         if name == "teleport_randomly" {
-            out.extend_from_slice(r.bytes(4)?); // diameter
-            r.bool()?;
+            teleport_randomly(r, out)?;
             continue;
         }
         let arm = arms
@@ -1387,11 +1490,41 @@ fn consume_effects_26_2(
     Ok(carried)
 }
 
-/// `trim`: the material, then the pattern (unchanged).
-fn trim_26_2(t: &Translator, r: &mut Reader, out: &mut Vec<u8>, depth: u32) -> DecodeResult<bool> {
-    let material = trim_material_26_2(t, r, out, depth)?;
+/// `trim`: the material, rewritten by `material`, then the pattern
+/// (unchanged).
+fn trim(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+    material: Conversion,
+) -> DecodeResult<bool> {
+    let material = material(t, r, out, depth)?;
     let pattern = t.value(r, out, &TRIM_PATTERN, depth)?;
     Ok(material && pattern)
+}
+
+/// A trim material holder; an inline one's asset group becomes the palette
+/// id of its base suffix (`trim/<suffix>`, TrimMaterials.java:75). The
+/// group's per-equipment overrides have no place in 26.3's layout.
+fn trim_material_26_3(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    depth: u32,
+) -> DecodeResult<bool> {
+    let holder = r.varint()?;
+    write_varint(out, holder);
+    if holder != 0 {
+        return Ok(true);
+    }
+    let suffix = r.utf(MAX_STRING_LENGTH)?;
+    crate::wire::write_utf(out, &format!("minecraft:trim/{suffix}"));
+    for _ in 0..r.len(UNBOUNDED)? {
+        r.identifier()?;
+        r.utf(MAX_STRING_LENGTH)?;
+    }
+    t.value(r, out, &TEXT, depth)
 }
 
 /// The trim materials whose 26.2 asset group swaps in a darker texture on
@@ -1425,13 +1558,14 @@ fn trim_material_26_2(
     t.value(r, out, &TEXT, depth)
 }
 
-/// An instrument holder; an inline one drops 26.3's `durabilityDamage`
-/// (Instrument.java:29).
-fn instrument_26_2(
+/// An instrument holder; `durability_damage` rewrites the one field an
+/// inline one differs by between versions, which sits after the range.
+fn instrument(
     t: &Translator,
     r: &mut Reader,
     out: &mut Vec<u8>,
     depth: u32,
+    durability_damage: fn(&mut Reader, &mut Vec<u8>) -> DecodeResult<()>,
 ) -> DecodeResult<bool> {
     let holder = r.varint()?;
     write_varint(out, holder);
@@ -1440,9 +1574,43 @@ fn instrument_26_2(
     }
     let mut carried = t.value(r, out, &SOUND, depth)?;
     out.extend_from_slice(r.bytes(8)?); // use duration, range
-    r.varint()?;
+    durability_damage(r, out)?;
     carried &= t.value(r, out, &TEXT, depth)?;
     Ok(carried)
+}
+
+/// `pot_decorations`: 26.2's list of up to four item ids (back, left, right,
+/// front) as 26.3's four optional templates of one item each. A brick, a
+/// missing side and an item 26.3 lacks are all absent, as in 26.2's
+/// `PotDecorations.getItem`.
+fn pot_decorations_26_3(
+    t: &Translator,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    _depth: u32,
+) -> DecodeResult<bool> {
+    let brick = t.from.registries.id_of(ClientRegistry::Item, "brick");
+    let sides = r.len(4)?;
+    for side in 0..4 {
+        let item = if side < sides {
+            let id = r.varint()?;
+            Some(id)
+                .filter(|id| Some(*id) != brick)
+                .and_then(|id| t.remaps.remap(ClientRegistry::Item, id))
+        } else {
+            None
+        };
+        match item {
+            Some(item) => {
+                out.push(1);
+                write_varint(out, item);
+                // One of the item, with an empty patch.
+                out.extend([1, 0, 0]);
+            }
+            None => out.push(0),
+        }
+    }
+    Ok(true)
 }
 
 /// `pot_decorations`: 26.3's four optional templates (back, left, right,
@@ -1972,11 +2140,11 @@ pub(crate) mod tests {
 
     const PROTOCOL_26_3: i32 = 777;
 
-    fn codec_26_3() -> &'static ItemCodec {
+    pub(crate) fn codec_26_3() -> &'static ItemCodec {
         ItemCodec::for_protocol(PROTOCOL_26_3).expect("26.3 item grammar")
     }
 
-    fn id_26_3(registry: ClientRegistry, name: &str) -> u32 {
+    pub(crate) fn id_26_3(registry: ClientRegistry, name: &str) -> u32 {
         codec_26_3()
             .registries()
             .id_of(registry, name)
@@ -2116,7 +2284,7 @@ pub(crate) mod tests {
             .0;
         let mut out = Vec::new();
         let mut r = Reader::new(&wire);
-        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        let remaps = RegistryRemaps::from_native(PROTOCOL_26_2).unwrap();
         codec_26_3()
             .translate_stack(&mut r, &mut out, codec(), remaps)
             .unwrap();
@@ -2154,7 +2322,7 @@ pub(crate) mod tests {
             .var(0)
             .0;
         let mut out = Vec::new();
-        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        let remaps = RegistryRemaps::from_native(PROTOCOL_26_2).unwrap();
         codec_26_3()
             .translate_stack(&mut Reader::new(&wire), &mut out, codec(), remaps)
             .unwrap();
@@ -2168,15 +2336,10 @@ pub(crate) mod tests {
 
     /// Translates a one-component 26.3 patch and returns the 26.2 patch.
     fn translate_component_26_3(name: &str, value: Wire) -> Vec<u8> {
-        let wire = Wire::default()
-            .var(1)
-            .var(0)
-            .var(component_26_3(name))
-            .bytes(&value.0)
-            .0;
+        let wire = one_component_26_3(name, value);
         let mut r = Reader::new(&wire);
         let mut out = Vec::new();
-        let remaps = RegistryRemaps::to_native(PROTOCOL_26_3).unwrap();
+        let remaps = RegistryRemaps::from_native(PROTOCOL_26_2).unwrap();
         codec_26_3()
             .translate_patch(&mut r, &mut out, codec(), remaps)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -2295,6 +2458,129 @@ pub(crate) mod tests {
                     .var(brick)
                     .var(brick)
             )
+        );
+    }
+
+    /// Translates a one-component 26.2 patch and returns the 26.3 patch,
+    /// empty when the component is dropped.
+    fn translate_component_26_2(name: &str, value: Wire) -> Vec<u8> {
+        let wire = Wire::default().patch(name, value).0;
+        let mut r = Reader::new(&wire);
+        let mut out = Vec::new();
+        let remaps = RegistryRemaps::to_native(PROTOCOL_26_2).unwrap();
+        codec()
+            .translate_patch(&mut r, &mut out, codec_26_3(), remaps)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.ensure_eof(), Ok(()), "{name} left bytes");
+        codec_26_3()
+            .read_patch(&mut Reader::new(&out), 0)
+            .unwrap_or_else(|e| panic!("{name} as 26.3: {e}"));
+        out
+    }
+
+    /// A 26.3 patch adding just `name` with `value`.
+    fn one_component_26_3(name: &str, value: Wire) -> Vec<u8> {
+        Wire::default()
+            .var(1)
+            .var(0)
+            .var(component_26_3(name))
+            .bytes(&value.0)
+            .0
+    }
+
+    /// 26.2's layouts arrive in 26.3's: `teleport_randomly` with its particle
+    /// flag off, an inline trim material as a palette id, an inline
+    /// instrument with no durability damage, and pot sides as four optional
+    /// templates. `swing_animation` becomes both components 26.3 split it
+    /// into, and `map_color`, which 26.3 dropped, is left out.
+    #[test]
+    fn converts_26_2_changed_components_to_26_3_layouts() {
+        let teleport = |codec_id: u32| {
+            Wire::default()
+                .f32(1.6)
+                .var(1)
+                .var(1)
+                .bool(true)
+                .var(1)
+                .var(codec_id)
+                .f32(16.0)
+        };
+        let teleport_26_2 = id(ClientRegistry::ConsumeEffectType, "teleport_randomly");
+        let teleport_26_3 = id_26_3(ClientRegistry::ConsumeEffectType, "teleport_randomly");
+        assert_eq!(
+            translate_component_26_2("consumable", teleport(teleport_26_2)),
+            one_component_26_3("consumable", teleport(teleport_26_3).bool(false))
+        );
+
+        let gold_26_2 = Wire::default()
+            .var(0)
+            .str("gold")
+            .var(1)
+            .str("minecraft:gold")
+            .str("gold_darker")
+            .text()
+            .var(1);
+        let gold_26_3 = Wire::default()
+            .var(0)
+            .str("minecraft:trim/gold")
+            .text()
+            .var(1);
+        assert_eq!(
+            translate_component_26_2("trim", gold_26_2),
+            one_component_26_3("trim", gold_26_3)
+        );
+
+        let instrument = |damage: Option<u32>| {
+            let w = Wire::default().var(0).var(1).f32(7.0).f32(256.0);
+            match damage {
+                Some(damage) => w.var(damage),
+                None => w,
+            }
+            .text()
+        };
+        assert_eq!(
+            translate_component_26_2("instrument", instrument(None)),
+            one_component_26_3("instrument", instrument(Some(0)))
+        );
+
+        // A diamond at the back, a brick on the left and nothing after it.
+        let pot = Wire::default()
+            .var(2)
+            .var(item("diamond"))
+            .var(item("brick"));
+        assert_eq!(
+            translate_component_26_2("pot_decorations", pot),
+            one_component_26_3(
+                "pot_decorations",
+                Wire::default()
+                    .bool(true)
+                    .var(item_26_3("diamond"))
+                    .var(1)
+                    .var(0)
+                    .var(0)
+                    .bool(false)
+                    .bool(false)
+                    .bool(false)
+            )
+        );
+
+        // A stab of ten ticks.
+        assert_eq!(
+            translate_component_26_2("swing_animation", Wire::default().var(2).var(10)),
+            Wire::default()
+                .var(2)
+                .var(0)
+                .var(component_26_3("attack_animation"))
+                .var(2)
+                .var(10)
+                .var(component_26_3("interact_animation"))
+                .var(2)
+                .var(10)
+                .0
+        );
+        assert_eq!(
+            translate_component_26_2("map_color", Wire::default().i32(0x46402e)),
+            Wire::default().var(0).var(0).0
         );
     }
 }

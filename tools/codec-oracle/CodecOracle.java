@@ -1630,6 +1630,7 @@ public final class CodecOracle {
         data(values, EntityDataSerializers.RESOLVABLE_PROFILE,
                 net.minecraft.world.item.component.ResolvableProfile.createUnresolved("Steve"));
         data(values, EntityDataSerializers.HUMANOID_ARM, net.minecraft.world.entity.HumanoidArm.RIGHT);
+        data(values, EntityDataSerializers.DYE_COLOR, net.minecraft.world.item.DyeColor.RED);
         for (SynchedEntityData.DataValue<?> value : values) {
             if (EntityDataSerializers.getSerializedId(value.serializer()) != value.id()) {
                 throw new IllegalStateException("serializer " + value.id() + " is out of order");
