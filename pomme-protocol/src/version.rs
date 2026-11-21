@@ -44,7 +44,7 @@ pub const LATEST: ProtocolVersion = VERSIONS[0];
 /// The version the client speaks natively. Every other listed version is
 /// joined by translating its wire to and from this layout, whether it is
 /// older or newer.
-pub const NATIVE: ProtocolVersion = v("26.2", 776);
+pub const NATIVE: ProtocolVersion = v("26.3", 777);
 
 /// A version with embedded protocol data — the one place a version's
 /// generated tables get wired in. `version` names the reference dir the
@@ -62,14 +62,14 @@ pub(crate) struct EmbeddedVersion {
 
 pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
     EmbeddedVersion {
-        version: v("26.3", 777),
+        version: NATIVE,
         packets: include_str!("data/protocol-26.3.json"),
         registries: include_str!("data/registries-26.3.json"),
         entity_serializers: include_str!("data/entity-serializers-26.3.json"),
         known_packs: Some(include_str!("data/known-packs-26.3.json")),
     },
     EmbeddedVersion {
-        version: NATIVE,
+        version: v("26.2", 776),
         packets: include_str!("data/protocol-26.2.json"),
         registries: include_str!("data/registries-26.2.json"),
         entity_serializers: include_str!("data/entity-serializers-26.2.json"),

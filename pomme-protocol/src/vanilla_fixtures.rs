@@ -27,7 +27,7 @@ fn fixtures() -> &'static Fixtures {
     static FIXTURES: OnceLock<Fixtures> = OnceLock::new();
     FIXTURES.get_or_init(|| {
         let fixtures: Fixtures =
-            serde_json::from_str(include_str!("data/codec-fixtures-26.2.json"))
+            serde_json::from_str(include_str!("data/codec-fixtures-26.3.json"))
                 .expect("codec fixtures parse");
         assert_eq!(
             fixtures.version,
