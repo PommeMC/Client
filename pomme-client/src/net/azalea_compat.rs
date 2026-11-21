@@ -5778,193 +5778,6 @@ fn advancements_match_azalea() {
     }
 }
 
-/// Every player-state packet azalea encodes reads back through pomme's
-/// layouts with the same values.
-#[test]
-fn player_packets_match_azalea() {
-    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
-    use azalea_inventory::components::AttributeModifier;
-    use azalea_protocol::packets::game::c_game_event::EventType;
-    use azalea_protocol::packets::game::c_player_abilities::PlayerAbilitiesFlags;
-    use azalea_protocol::packets::game::*;
-    use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
-    use pomme_registry::Registry;
-    use pomme_registry::builtin::{Attribute, MobEffect};
-
-    let decode = |name, packet| decode_azalea(name, packet, player::read);
-    let cases = [
-        (
-            "set_health",
-            ClientboundGamePacket::SetHealth(c_set_health::ClientboundSetHealth {
-                health: 15.5,
-                food: 18,
-                saturation: 2.0,
-            }),
-            PlayerPacket::Health {
-                health: 15.5,
-                food: 18,
-                saturation: 2.0,
-            },
-        ),
-        (
-            "set_experience",
-            ClientboundGamePacket::SetExperience(c_set_experience::ClientboundSetExperience {
-                experience_progress: 0.25,
-                experience_level: 30,
-                total_experience: 1395,
-            }),
-            PlayerPacket::Experience {
-                progress: 0.25,
-                level: 30,
-                total: 1395,
-            },
-        ),
-        (
-            "update_attributes",
-            ClientboundGamePacket::UpdateAttributes(
-                c_update_attributes::ClientboundUpdateAttributes {
-                    entity_id: MinecraftEntityId(9),
-                    values: vec![c_update_attributes::AttributeSnapshot {
-                        attribute: Attribute::MaxHealth,
-                        base: 20.0,
-                        modifiers: vec![AttributeModifier {
-                            id: Identifier::new("minecraft:test"),
-                            amount: 4.0,
-                            operation: AttributeModifierOperation::AddMultipliedTotal,
-                        }],
-                    }],
-                },
-            ),
-            PlayerPacket::Attributes {
-                entity: 9,
-                snapshots: vec![AttributeSnapshot {
-                    attribute: Attribute::MaxHealth.to_u32(),
-                    base: 20.0,
-                    modifiers: vec![player::AttributeModifier {
-                        id: "minecraft:test".into(),
-                        amount: 4.0,
-                        operation: 2,
-                    }],
-                }],
-            },
-        ),
-        (
-            "remove_mob_effect",
-            ClientboundGamePacket::RemoveMobEffect(
-                c_remove_mob_effect::ClientboundRemoveMobEffect {
-                    entity_id: MinecraftEntityId(1),
-                    effect: MobEffect::Speed,
-                },
-            ),
-            PlayerPacket::RemoveEffect {
-                entity: 1,
-                effect: MobEffect::Speed.to_u32(),
-            },
-        ),
-        (
-            "set_held_slot",
-            ClientboundGamePacket::SetHeldSlot(c_set_held_slot::ClientboundSetHeldSlot { slot: 4 }),
-            PlayerPacket::HeldSlot { slot: 4 },
-        ),
-        (
-            "player_abilities",
-            ClientboundGamePacket::PlayerAbilities(
-                c_player_abilities::ClientboundPlayerAbilities {
-                    flags: PlayerAbilitiesFlags {
-                        invulnerable: false,
-                        flying: true,
-                        can_fly: true,
-                        instant_break: false,
-                    },
-                    flying_speed: 0.05,
-                    walking_speed: 0.1,
-                },
-            ),
-            PlayerPacket::Abilities {
-                flags: player::ABILITY_FLYING | player::ABILITY_CAN_FLY,
-                flying_speed: 0.05,
-                walking_speed: 0.1,
-            },
-        ),
-        (
-            "game_event",
-            ClientboundGamePacket::GameEvent(c_game_event::ClientboundGameEvent {
-                event: EventType::ThunderLevelChange,
-                param: 0.5,
-            }),
-            PlayerPacket::GameEvent {
-                event: 8,
-                param: 0.5,
-            },
-        ),
-    ];
-    for (name, packet, expected) in cases {
-        assert_eq!(decode(name, packet), expected, "{name}");
-    }
-
-    // azalea keeps its effect flags type private, so read the same vanilla
-    // bytes with both: amplifier 1, 200 ticks, ambient + icon.
-    let mut raw = Vec::new();
-    wire::write_varint(
-        &mut raw,
-        table_id(Phase::Game, Direction::Clientbound, "update_mob_effect"),
-    );
-    wire::write_varint(&mut raw, 1);
-    wire::write_varint(&mut raw, MobEffect::Speed.to_u32());
-    raw.extend([
-        1,
-        0xC8,
-        0x01,
-        player::EFFECT_AMBIENT | player::EFFECT_SHOW_ICON,
-    ]);
-    let Ok(ClientboundGamePacket::UpdateMobEffect(azalea)) =
-        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
-            &mut std::io::Cursor::new(&raw[..]),
-        )
-    else {
-        panic!("azalea reads update_mob_effect");
-    };
-    let mut r = pomme_protocol::codec::Reader::new(&raw);
-    r.varint().unwrap();
-    let Some(Ok(PlayerPacket::UpdateEffect {
-        entity,
-        effect,
-        amplifier,
-        duration,
-        flags,
-    })) = player::read("update_mob_effect", &mut r)
-    else {
-        panic!("pomme reads update_mob_effect");
-    };
-    assert_eq!(entity, azalea.entity_id.0);
-    assert_eq!(effect, azalea.mob_effect.to_u32());
-    assert_eq!(
-        (amplifier, duration),
-        (azalea.data.amplifier, azalea.data.duration)
-    );
-    assert_eq!(
-        flags & player::EFFECT_AMBIENT != 0,
-        azalea.data.flags.ambient
-    );
-    assert_eq!(
-        flags & player::EFFECT_SHOW_ICON != 0,
-        azalea.data.flags.show_icon
-    );
-
-    let PlayerPacket::CombatKill { player: 3, message } = decode(
-        "player_combat_kill",
-        ClientboundGamePacket::PlayerCombatKill(
-            c_player_combat_kill::ClientboundPlayerCombatKill {
-                player_id: MinecraftEntityId(3),
-                message: "Tester fell".into(),
-            },
-        ),
-    ) else {
-        panic!("player_combat_kill");
-    };
-    assert_eq!(plain(&message), "Tester fell");
-}
-
 /// `packet` as azalea encodes it, decoded by pomme's `read` for `name`.
 fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>) -> P {
     read_native_frame(
@@ -5972,243 +5785,6 @@ fn decode_azalea<P>(name: &str, packet: ClientboundGamePacket, read: RawRead<P>)
         name,
         read,
     )
-}
-
-#[test]
-fn block_packets_match_azalea() {
-    use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
-    use azalea_protocol::packets::game::*;
-    use pomme_block::BlockState;
-    use pomme_protocol::block::{self, BlockPacket};
-    use pomme_registry::Registry;
-    use pomme_registry::builtin::{BlockEntityKind, BlockKind};
-
-    let decode = |name, packet| decode_azalea(name, packet, block::read);
-    let pos = BlockPos::new(-3, -60, 4);
-    let state = BlockState::try_from(129u32).unwrap();
-    let mut compound = simdnbt::owned::NbtCompound::new();
-    compound.insert("d", 5);
-    let cases = [
-        (
-            "block_update",
-            ClientboundGamePacket::BlockUpdate(c_block_update::ClientboundBlockUpdate {
-                pos,
-                block_state: state,
-            }),
-            BlockPacket::Update {
-                pos: (-3, -60, 4),
-                state: 129,
-            },
-        ),
-        (
-            "section_blocks_update",
-            ClientboundGamePacket::SectionBlocksUpdate(
-                c_section_blocks_update::ClientboundSectionBlocksUpdate {
-                    section_pos: ChunkSectionPos::new(-1, -4, 2),
-                    states: vec![c_section_blocks_update::BlockStateWithPosition {
-                        pos: ChunkSectionBlockPos::new(15, 3, 0),
-                        state,
-                    }],
-                },
-            ),
-            BlockPacket::SectionUpdate {
-                updates: vec![((-1, -61, 32), 129)],
-            },
-        ),
-        (
-            "block_changed_ack",
-            ClientboundGamePacket::BlockChangedAck(
-                c_block_changed_ack::ClientboundBlockChangedAck { seq: 17 },
-            ),
-            BlockPacket::ChangedAck { seq: 17 },
-        ),
-        (
-            "block_event",
-            ClientboundGamePacket::BlockEvent(c_block_event::ClientboundBlockEvent {
-                pos,
-                action_id: 1,
-                action_parameter: 2,
-                block: BlockKind::Chest,
-            }),
-            BlockPacket::Event {
-                pos: (-3, -60, 4),
-                action: 1,
-                param: 2,
-                block: BlockKind::Chest.to_u32(),
-            },
-        ),
-        (
-            "block_entity_data",
-            ClientboundGamePacket::BlockEntityData(
-                c_block_entity_data::ClientboundBlockEntityData {
-                    pos,
-                    block_entity_type: BlockEntityKind::Sign,
-                    tag: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new("", compound)),
-                },
-            ),
-            BlockPacket::EntityData {
-                pos: (-3, -60, 4),
-                kind: BlockEntityKind::Sign.to_u32(),
-                tag: [10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into(),
-            },
-        ),
-        (
-            "level_event",
-            ClientboundGamePacket::LevelEvent(c_level_event::ClientboundLevelEvent {
-                event_type: 2001,
-                pos,
-                data: 129,
-                global_event: true,
-            }),
-            BlockPacket::LevelEvent {
-                event: 2001,
-                pos: (-3, -60, 4),
-                data: 129,
-                global: true,
-            },
-        ),
-    ];
-    for (name, packet, expected) in cases {
-        assert_eq!(decode(name, packet), expected, "{name}");
-    }
-}
-
-#[test]
-fn chunk_packets_match_azalea() {
-    use std::sync::Arc;
-
-    use azalea_core::bitset::BitSet;
-    use azalea_core::heightmap_kind::HeightmapKind;
-    use azalea_core::position::ChunkPos;
-    use azalea_protocol::packets::game::*;
-    use pomme_protocol::chunk::{BlockEntityInfo, ChunkBiomes, LightData};
-    use pomme_registry::Registry;
-    use pomme_registry::builtin::BlockEntityKind;
-
-    let decode = |name, packet| decode_azalea(name, packet, chunk::read);
-    let light_data = || c_light_update::ClientboundLightUpdatePacketData {
-        sky_y_mask: BitSet::from(vec![0b101u64, 1]),
-        block_y_mask: BitSet::from(vec![0b10u64]),
-        empty_sky_y_mask: BitSet::from(Vec::<u64>::new()),
-        empty_block_y_mask: BitSet::from(vec![1u64 << 40]),
-        sky_updates: Arc::new(vec![vec![7; 2048].into_boxed_slice()].into()),
-        block_updates: Arc::new(Box::new([])),
-    };
-    let light = LightData {
-        sky_y_mask: vec![0b101, 1],
-        block_y_mask: vec![0b10],
-        empty_sky_y_mask: vec![],
-        empty_block_y_mask: vec![1 << 40],
-        sky_updates: vec![vec![7; 2048].into()],
-        block_updates: vec![],
-    };
-    let mut compound = simdnbt::owned::NbtCompound::new();
-    compound.insert("d", 5);
-    let cases = [
-        (
-            "level_chunk_with_light",
-            ClientboundGamePacket::LevelChunkWithLight(
-                c_level_chunk_with_light::ClientboundLevelChunkWithLight {
-                    x: 3,
-                    z: -2,
-                    chunk_data: c_level_chunk_with_light::ClientboundLevelChunkPacketData {
-                        heightmaps: vec![
-                            (HeightmapKind::WorldSurface, vec![7].into()),
-                            (HeightmapKind::MotionBlocking, vec![8, 9].into()),
-                        ],
-                        data: Arc::new(vec![1, 2, 3].into()),
-                        block_entities: vec![c_level_chunk_with_light::BlockEntity {
-                            packed_xz: 0x59,
-                            y: (-64i16) as u16,
-                            kind: BlockEntityKind::Sign,
-                            data: simdnbt::owned::Nbt::Some(simdnbt::owned::BaseNbt::new(
-                                "", compound,
-                            )),
-                        }],
-                    },
-                    light_data: light_data(),
-                },
-            ),
-            ChunkPacket::Level {
-                x: 3,
-                z: -2,
-                heightmaps: vec![(1, vec![7].into()), (4, vec![8, 9].into())],
-                sections: vec![1, 2, 3].into(),
-                block_entities: vec![BlockEntityInfo {
-                    packed_xz: 0x59,
-                    y: -64,
-                    kind: BlockEntityKind::Sign.to_u32(),
-                    tag: Some([10, 3, 0, 1, b'd', 0, 0, 0, 5, 0].into()),
-                }],
-                light: light.clone(),
-            },
-        ),
-        (
-            "light_update",
-            ClientboundGamePacket::LightUpdate(c_light_update::ClientboundLightUpdate {
-                x: -5,
-                z: 6,
-                light_data: light_data(),
-            }),
-            ChunkPacket::Light { x: -5, z: 6, light },
-        ),
-        (
-            "forget_level_chunk",
-            ClientboundGamePacket::ForgetLevelChunk(
-                // A positive x: azalea's `ChunkPos` writer sign-extends x
-                // over the z half (vanilla masks it, `ChunkPos.pack`); its
-                // reader is right, and pomme's own fixture covers negatives.
-                c_forget_level_chunk::ClientboundForgetLevelChunk {
-                    pos: ChunkPos::new(3, -7),
-                },
-            ),
-            ChunkPacket::Forget { x: 3, z: -7 },
-        ),
-        (
-            "chunks_biomes",
-            ClientboundGamePacket::ChunksBiomes(c_chunks_biomes::ClientboundChunksBiomes {
-                // A positive x, as for `forget_level_chunk` above.
-                chunk_biome_data: vec![c_chunks_biomes::ChunkBiomeData {
-                    pos: ChunkPos::new(3, -7),
-                    buffer: vec![1, 2, 3],
-                }],
-            }),
-            ChunkPacket::Biomes(vec![ChunkBiomes {
-                x: 3,
-                z: -7,
-                data: vec![1, 2, 3].into(),
-            }]),
-        ),
-        (
-            "chunk_batch_start",
-            ClientboundGamePacket::ChunkBatchStart(c_chunk_batch_start::ClientboundChunkBatchStart),
-            ChunkPacket::BatchStart,
-        ),
-        (
-            "chunk_batch_finished",
-            ClientboundGamePacket::ChunkBatchFinished(
-                c_chunk_batch_finished::ClientboundChunkBatchFinished { batch_size: 64 },
-            ),
-            ChunkPacket::BatchFinished { size: 64 },
-        ),
-        (
-            "set_chunk_cache_center",
-            ClientboundGamePacket::SetChunkCacheCenter(
-                c_set_chunk_cache_center::ClientboundSetChunkCacheCenter { x: -1, z: 9 },
-            ),
-            ChunkPacket::CacheCenter { x: -1, z: 9 },
-        ),
-        (
-            "set_chunk_cache_radius",
-            ClientboundGamePacket::SetChunkCacheRadius(
-                c_set_chunk_cache_radius::ClientboundSetChunkCacheRadius { radius: 12 },
-            ),
-            ChunkPacket::CacheRadius { radius: 12 },
-        ),
-    ];
-    for (name, packet, expected) in cases {
-        assert_eq!(decode(name, packet), expected, "{name}");
-    }
 }
 
 #[test]
@@ -7088,48 +6664,33 @@ fn reconnect_resets_translation_dimensions() {
     );
 }
 
-/// azalea's encoders for the packets pomme now decodes itself land as the
-/// same events through pomme's raw handlers.
+/// The game's own frames for the packets pomme decodes itself land as events
+/// through pomme's raw handlers.
 #[test]
-fn azalea_encoded_player_and_world_packets_read_in_pomme() {
-    use azalea_protocol::packets::game::{
-        c_move_vehicle, c_open_sign_editor, c_resource_pack_pop, c_resource_pack_push,
-        c_set_camera, c_waypoint,
-    };
-
+fn player_and_world_fixtures_land_as_events() {
     use crate::net::NetworkEvent;
 
-    let read = |packet: ClientboundGamePacket| {
-        let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let read = |name: &str, case: &str| {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (took, _) = crate::net::handler::handle_raw_for_test(
-            &frame,
+            &fixture_frame(name, case),
             crate::world::block::BlockStateTable::native(),
             &tx,
         );
-        assert!(took, "{packet:?}");
+        assert!(took, "{case}");
         rx.try_iter().next().expect("an event")
     };
 
-    let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    let id = uuid::Uuid::from_u128(pomme_protocol::vanilla_fixtures::ORACLE_ID);
     assert!(matches!(
-        read(ClientboundGamePacket::SetCamera(
-            c_set_camera::ClientboundSetCamera {
-                camera_id: MinecraftEntityId(300),
-            }
-        )),
+        read("set_camera", "set_camera/other"),
         NetworkEvent::SetCamera { id: 300 }
     ));
     let NetworkEvent::MoveVehicle {
         position,
         y_rot_deg,
         x_rot_deg,
-    } = read(ClientboundGamePacket::MoveVehicle(
-        c_move_vehicle::ClientboundMoveVehicle {
-            pos: azalea_core::position::Vec3::new(1.5, 64.0, -2.25),
-            look_direction: azalea_entity::LookDirection::new(90.0, -10.0),
-        },
-    ))
+    } = read("move_vehicle", "move_vehicle/clientbound")
     else {
         panic!("expected move_vehicle");
     };
@@ -7137,12 +6698,9 @@ fn azalea_encoded_player_and_world_packets_read_in_pomme() {
         (position, y_rot_deg, x_rot_deg),
         (glam::DVec3::new(1.5, 64.0, -2.25), 90.0, -10.0)
     );
-    let NetworkEvent::OpenSignEditor { pos, is_front_text } = read(
-        ClientboundGamePacket::OpenSignEditor(c_open_sign_editor::ClientboundOpenSignEditor {
-            pos: azalea_core::position::BlockPos::new(-12, 70, 345),
-            is_front_text: false,
-        }),
-    ) else {
+    let NetworkEvent::OpenSignEditor { pos, is_front_text } =
+        read("open_sign_editor", "open_sign_editor/back")
+    else {
         panic!("expected open_sign_editor");
     };
     assert_eq!(
@@ -7151,47 +6709,25 @@ fn azalea_encoded_player_and_world_packets_read_in_pomme() {
     );
     let NetworkEvent::ResourcePackPush {
         id: pushed, url, ..
-    } = read(ClientboundGamePacket::ResourcePackPush(
-        c_resource_pack_push::ClientboundResourcePackPush {
-            id,
-            url: "https://example.com/pack.zip".into(),
-            hash: String::new(),
-            required: true,
-            prompt: None,
-        },
-    ))
+    } = read("resource_pack_push", "resource_pack_push/prompt")
     else {
         panic!("expected resource_pack_push");
     };
     assert_eq!((pushed, url.as_str()), (id, "https://example.com/pack.zip"));
     assert!(matches!(
-        read(ClientboundGamePacket::ResourcePackPop(
-            c_resource_pack_pop::ClientboundResourcePackPop { id: Some(id) }
-        )),
-        NetworkEvent::ResourcePackPop { id: Some(popped) } if popped == id
+        read("resource_pack_pop", "resource_pack_pop/all"),
+        NetworkEvent::ResourcePackPop { id: None }
     ));
     let NetworkEvent::Waypoint {
         operation,
         waypoint,
-    } = read(ClientboundGamePacket::Waypoint(
-        c_waypoint::ClientboundWaypoint {
-            operation: c_waypoint::WaypointOperation::Update,
-            waypoint: c_waypoint::TrackedWaypoint {
-                identifier: c_waypoint::WaypointIdentifier::Uuid(id),
-                icon: c_waypoint::WaypointIcon {
-                    style: Identifier::new("minecraft:bowtie"),
-                    color: Some(azalea_core::color::RgbColor::new(0x12, 0xab, 0x34)),
-                },
-                data: c_waypoint::WaypointData::Chunk { x: -3, z: 7 },
-            },
-        },
-    ))
+    } = read("waypoint", "waypoint/track_position")
     else {
         panic!("expected waypoint");
     };
     assert_eq!(
         operation,
-        pomme_protocol::waypoint::WaypointOperation::Update
+        pomme_protocol::waypoint::WaypointOperation::Track
     );
     assert_eq!(
         waypoint,
@@ -7199,7 +6735,11 @@ fn azalea_encoded_player_and_world_packets_read_in_pomme() {
             id: pomme_protocol::waypoint::WaypointId::Uuid(id.as_u128()),
             style: "minecraft:bowtie".into(),
             color: Some([0x12, 0xab, 0x34]),
-            data: pomme_protocol::waypoint::WaypointData::Chunk { x: -3, z: 7 },
+            data: pomme_protocol::waypoint::WaypointData::Position {
+                x: 1,
+                y: -64,
+                z: 300,
+            },
         }
     );
 }

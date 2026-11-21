@@ -49,7 +49,7 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<ResourcePackPacke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vanilla_fixtures::case;
+    use crate::vanilla_fixtures::{ORACLE_ID, case};
 
     fn decode(name: &str, bytes: &[u8]) -> ResourcePackPacket {
         let mut r = Reader::new(bytes);
@@ -70,7 +70,7 @@ mod tests {
         else {
             panic!("expected a push");
         };
-        assert_eq!(id, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+        assert_eq!(id, ORACLE_ID);
         assert_eq!(url, "https://example.com/pack.zip");
         assert_eq!(hash, "0123456789abcdef0123456789abcdef01234567");
         assert!(required);
@@ -78,6 +78,12 @@ mod tests {
         assert_eq!(
             decode("resource_pack_pop", &case("resource_pack_pop/all")),
             ResourcePackPacket::Pop { id: None }
+        );
+        assert_eq!(
+            decode("resource_pack_pop", &case("resource_pack_pop/one")),
+            ResourcePackPacket::Pop {
+                id: Some(ORACLE_ID)
+            }
         );
     }
 

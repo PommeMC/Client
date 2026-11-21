@@ -15,6 +15,7 @@ import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.ints.IntList;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
@@ -57,36 +58,61 @@ import net.minecraft.network.protocol.common.ClientboundShowDialogPacket;
 import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundAnimatePacket;
+import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
+import net.minecraft.network.protocol.game.ClientboundChunkBatchStartPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
+import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
+import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
 import net.minecraft.network.protocol.game.ClientboundHurtAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData;
+import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerCombatKillPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
+import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderLerpSizePacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderSizePacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDelayPacket;
 import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDistancePacket;
+import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
+import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
+import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
+import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
+import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
+import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
+import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
+import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundChangeGameModePacket;
@@ -147,6 +173,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.waypoints.Waypoint;
 import net.minecraft.world.waypoints.WaypointStyleAssets;
@@ -193,6 +220,7 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.MAP_DECORATION_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.PARTICLE_TYPE,
+                net.minecraft.core.registries.BuiltInRegistries.BLOCK,
                 net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION,
                 builtIn(Registries.DAMAGE_TYPE),
                 builtIn(Registries.CAT_VARIANT), builtIn(Registries.CAT_SOUND_VARIANT),
@@ -253,6 +281,8 @@ public final class CodecOracle {
                         "0123456789abcdef0123456789abcdef01234567", true, Optional.of(Component.literal("Please"))));
         encode("resource_pack_pop/all", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
                 new ClientboundResourcePackPopPacket(Optional.empty()));
+        encode("resource_pack_pop/one", ClientboundResourcePackPopPacket.STREAM_CODEC::encode,
+                new ClientboundResourcePackPopPacket(Optional.of(waypointId)));
         Holder<Dialog> serverLinks = dialogs.getOrThrow(Dialogs.SERVER_LINKS);
         encode("show_dialog/reference", ClientboundShowDialogPacket.STREAM_CODEC::encode,
                 new ClientboundShowDialogPacket(serverLinks));
@@ -262,6 +292,9 @@ public final class CodecOracle {
         serverbound();
         entities();
         entityData();
+        player();
+        blocks();
+        chunks();
         Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
         blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
         blockTags.put(Identifier.withDefaultNamespace("empty"), IntList.of());
@@ -283,13 +316,15 @@ public final class CodecOracle {
         idsOf(ids, "banner_pattern", bannerPatterns);
         // The entries `entities` and `entityData` send, out of registries too large to list whole.
         for (String entry : List.of("damage_type/mob_attack", "entity_type/zombie", "villager_type/swamp",
-                "villager_profession/farmer", "item/stone")) {
+                "villager_profession/farmer", "item/stone", "attribute/max_health", "mob_effect/haste",
+                "block/chest", "block_entity_type/sign")) {
             String[] parts = entry.split("/");
             Identifier name = Identifier.withDefaultNamespace(parts[1]);
             Registry<?> registry = registries.lookupOrThrow(ResourceKey.createRegistryKey(
                     Identifier.withDefaultNamespace(parts[0])));
             ids.addProperty(parts[0] + "/" + name, idOf(registry, name));
         }
+        ids.addProperty("block_state/minecraft:chest", Block.getId(chest()));
         out.add("registry_ids", ids);
         JsonObject sizes = new JsonObject();
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
@@ -1012,6 +1047,115 @@ public final class CodecOracle {
                 ClientboundSetPassengersPacket.STREAM_CODEC::encode,
                 withFields(ClientboundSetPassengersPacket.class,
                         Map.of("vehicle", 7, "passengers", new int[] {8, 9})));
+    }
+
+    /// The player-state packets pomme reads (`pomme-protocol/src/player.rs`).
+    private static void player() throws Exception {
+        encode("set_health/hungry", ClientboundSetHealthPacket.STREAM_CODEC::encode,
+                new ClientboundSetHealthPacket(15.5f, 18, 2.0f));
+        encode("set_experience/level_30", ClientboundSetExperiencePacket.STREAM_CODEC::encode,
+                new ClientboundSetExperiencePacket(0.25f, 1395, 30));
+        encode("update_attributes/max_health", ClientboundUpdateAttributesPacket.STREAM_CODEC::encode,
+                withFields(ClientboundUpdateAttributesPacket.class, Map.of("entityId", 9, "attributes", List.of(
+                        new ClientboundUpdateAttributesPacket.AttributeSnapshot(
+                                net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH, 20.0, List.of(
+                                        new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+                                                Identifier.withDefaultNamespace("test"), 4.0,
+                                                net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation
+                                                        .ADD_MULTIPLIED_TOTAL)))))));
+        // Ambient, no particles, an icon.
+        encode("update_mob_effect/haste", ClientboundUpdateMobEffectPacket.STREAM_CODEC::encode,
+                new ClientboundUpdateMobEffectPacket(1, new net.minecraft.world.effect.MobEffectInstance(
+                        net.minecraft.world.effect.MobEffects.HASTE, 200, 1, true, false, true), false));
+        encode("remove_mob_effect/haste", ClientboundRemoveMobEffectPacket.STREAM_CODEC::encode,
+                new ClientboundRemoveMobEffectPacket(1, net.minecraft.world.effect.MobEffects.HASTE));
+        encode("set_held_slot/fifth", ClientboundSetHeldSlotPacket.STREAM_CODEC::encode,
+                new ClientboundSetHeldSlotPacket(4));
+        net.minecraft.world.entity.player.Abilities abilities = new net.minecraft.world.entity.player.Abilities();
+        abilities.flying = true;
+        abilities.mayfly = true;
+        encode("player_abilities/flying", ClientboundPlayerAbilitiesPacket.STREAM_CODEC::encode,
+                new ClientboundPlayerAbilitiesPacket(abilities));
+        encode("game_event/thunder", ClientboundGameEventPacket.STREAM_CODEC::encode,
+                new ClientboundGameEventPacket(ClientboundGameEventPacket.THUNDER_LEVEL_CHANGE, 0.5f));
+        encode("player_combat_kill/fell", ClientboundPlayerCombatKillPacket.STREAM_CODEC::encode,
+                new ClientboundPlayerCombatKillPacket(3, Component.literal("Tester fell")));
+        encode("set_camera/other", ClientboundSetCameraPacket.STREAM_CODEC::encode,
+                withFields(ClientboundSetCameraPacket.class, Map.of("cameraId", 300)));
+    }
+
+    private static BlockState chest() {
+        return net.minecraft.world.level.block.Blocks.CHEST.defaultBlockState();
+    }
+
+    /// The block packets pomme reads (`pomme-protocol/src/block.rs`).
+    private static void blocks() throws Exception {
+        BlockPos pos = new BlockPos(-3, -60, 4);
+        encode("block_update/chest", ClientboundBlockUpdatePacket.STREAM_CODEC::encode,
+                new ClientboundBlockUpdatePacket(pos, chest()));
+        // One block of section (-1, -4, 2), at (15, 3, 0) inside it.
+        encode("section_blocks_update/one", ClientboundSectionBlocksUpdatePacket.STREAM_CODEC::encode,
+                withFields(ClientboundSectionBlocksUpdatePacket.class, Map.of(
+                        "sectionPos", net.minecraft.core.SectionPos.of(-1, -4, 2),
+                        "positions", new short[] {(short) (15 << 8 | 0 << 4 | 3)},
+                        "states", new BlockState[] {chest()})));
+        encode("block_changed_ack/seventeen", ClientboundBlockChangedAckPacket.STREAM_CODEC::encode,
+                new ClientboundBlockChangedAckPacket(17));
+        encode("block_event/chest_lid", ClientboundBlockEventPacket.STREAM_CODEC::encode,
+                new ClientboundBlockEventPacket(pos, net.minecraft.world.level.block.Blocks.CHEST, 1, 2));
+        encode("block_entity_data/sign", ClientboundBlockEntityDataPacket.STREAM_CODEC::encode,
+                withFields(ClientboundBlockEntityDataPacket.class, Map.of("pos", pos,
+                        "type", net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN, "tag", d5())));
+        encode("level_event/global", ClientboundLevelEventPacket.STREAM_CODEC::encode,
+                new ClientboundLevelEventPacket(2001, pos, 129, true));
+    }
+
+    /// The compound `{d: 5}`.
+    private static net.minecraft.nbt.CompoundTag d5() {
+        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+        tag.putInt("d", 5);
+        return tag;
+    }
+
+    /// The chunk packets pomme reads (`pomme-protocol/src/chunk.rs`). A chunk
+    /// packet is only built from a loaded chunk and its light engine, so
+    /// these set its parts directly.
+    private static void chunks() throws Exception {
+        BitSet none = new BitSet();
+        byte[] sky = new byte[2048];
+        java.util.Arrays.fill(sky, (byte) 7);
+        ClientboundLightUpdatePacketData light = withFields(ClientboundLightUpdatePacketData.class, Map.of(
+                "skyYMask", BitSet.valueOf(new long[] {0b101L, 1L}),
+                "blockYMask", BitSet.valueOf(new long[] {0b10L}),
+                "emptySkyYMask", none,
+                "emptyBlockYMask", BitSet.valueOf(new long[] {1L << 40}),
+                "skyUpdates", List.of(sky),
+                "blockUpdates", List.of()));
+        Map<Heightmap.Types, long[]> heightmaps =
+                new java.util.EnumMap<>(Heightmap.Types.class);
+        heightmaps.put(Heightmap.Types.WORLD_SURFACE, new long[] {7L});
+        heightmaps.put(Heightmap.Types.MOTION_BLOCKING, new long[] {8L, 9L});
+        Object blockEntity = withFields(Class.forName(ClientboundLevelChunkPacketData.class.getName()
+                + "$BlockEntityInfo"), Map.of("packedXZ", 0x59, "y", -64,
+                        "type", net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN, "tag", d5()));
+        encode("level_chunk_with_light/small", ClientboundLevelChunkWithLightPacket.STREAM_CODEC::encode,
+                withFields(ClientboundLevelChunkWithLightPacket.class, Map.of("x", 3, "z", -2,
+                        "chunkData", withFields(ClientboundLevelChunkPacketData.class, Map.of(
+                                "heightmaps", heightmaps, "buffer", new byte[] {1, 2, 3},
+                                "blockEntitiesData", List.of(blockEntity))),
+                        "lightData", light)));
+        encode("light_update/sky", ClientboundLightUpdatePacket.STREAM_CODEC::encode,
+                withFields(ClientboundLightUpdatePacket.class, Map.of("x", -5, "z", 6, "lightData", light)));
+        encode("forget_level_chunk/negative_x", ClientboundForgetLevelChunkPacket.STREAM_CODEC::encode,
+                new ClientboundForgetLevelChunkPacket(new ChunkPos(-3, 7)));
+        encode("chunk_batch_start/empty", ClientboundChunkBatchStartPacket.STREAM_CODEC::encode,
+                ClientboundChunkBatchStartPacket.INSTANCE);
+        encode("chunk_batch_finished/sixty_four", ClientboundChunkBatchFinishedPacket.STREAM_CODEC::encode,
+                new ClientboundChunkBatchFinishedPacket(64));
+        encode("set_chunk_cache_center/negative_x", ClientboundSetChunkCacheCenterPacket.STREAM_CODEC::encode,
+                new ClientboundSetChunkCacheCenterPacket(-1, 9));
+        encode("set_chunk_cache_radius/twelve", ClientboundSetChunkCacheRadiusPacket.STREAM_CODEC::encode,
+                new ClientboundSetChunkCacheRadiusPacket(12));
     }
 
     /// An instance of `type` whose constructor is skipped, with `fields` set.

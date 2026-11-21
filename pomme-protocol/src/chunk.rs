@@ -353,4 +353,61 @@ mod tests {
         assert_eq!(mixed.get(2, 0, 0), 2);
         assert_eq!(mixed.get(3, 0, 0), 0);
     }
+
+    /// Vanilla's own encoding of the other chunk packets
+    /// (`CodecOracle.chunks`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{D5_TAG, assert_decoded, registry_id};
+
+        let light = LightData {
+            sky_y_mask: vec![0b101, 1],
+            block_y_mask: vec![0b10],
+            empty_sky_y_mask: vec![],
+            empty_block_y_mask: vec![1 << 40],
+            sky_updates: vec![vec![7; 2048].into()],
+            block_updates: vec![],
+        };
+        let cases = [
+            (
+                "level_chunk_with_light/small",
+                ChunkPacket::Level {
+                    x: 3,
+                    z: -2,
+                    // `Heightmap.Types` WORLD_SURFACE and MOTION_BLOCKING.
+                    heightmaps: vec![(1, vec![7].into()), (4, vec![8, 9].into())],
+                    sections: vec![1, 2, 3].into(),
+                    block_entities: vec![BlockEntityInfo {
+                        packed_xz: 0x59,
+                        y: -64,
+                        kind: registry_id("block_entity_type", "minecraft:sign"),
+                        tag: Some(D5_TAG.into()),
+                    }],
+                    light: light.clone(),
+                },
+            ),
+            (
+                "light_update/sky",
+                ChunkPacket::Light { x: -5, z: 6, light },
+            ),
+            (
+                "forget_level_chunk/negative_x",
+                ChunkPacket::Forget { x: -3, z: 7 },
+            ),
+            ("chunk_batch_start/empty", ChunkPacket::BatchStart),
+            (
+                "chunk_batch_finished/sixty_four",
+                ChunkPacket::BatchFinished { size: 64 },
+            ),
+            (
+                "set_chunk_cache_center/negative_x",
+                ChunkPacket::CacheCenter { x: -1, z: 9 },
+            ),
+            (
+                "set_chunk_cache_radius/twelve",
+                ChunkPacket::CacheRadius { radius: 12 },
+            ),
+        ];
+        assert_decoded(read, cases);
+    }
 }

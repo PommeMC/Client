@@ -222,4 +222,57 @@ mod tests {
                 .is_err()
         );
     }
+
+    /// Vanilla's own encoding of the block packets (`CodecOracle.blocks`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{D5_TAG, assert_decoded, registry_id};
+
+        let pos = (-3, -60, 4);
+        let chest = registry_id("block_state", "minecraft:chest");
+        let cases = [
+            (
+                "block_update/chest",
+                BlockPacket::Update { pos, state: chest },
+            ),
+            (
+                // (15, 3, 0) inside section (-1, -4, 2).
+                "section_blocks_update/one",
+                BlockPacket::SectionUpdate {
+                    updates: vec![((-1, -61, 32), chest)],
+                },
+            ),
+            (
+                "block_changed_ack/seventeen",
+                BlockPacket::ChangedAck { seq: 17 },
+            ),
+            (
+                "block_event/chest_lid",
+                BlockPacket::Event {
+                    pos,
+                    action: 1,
+                    param: 2,
+                    block: registry_id("block", "minecraft:chest"),
+                },
+            ),
+            (
+                "block_entity_data/sign",
+                BlockPacket::EntityData {
+                    pos,
+                    kind: registry_id("block_entity_type", "minecraft:sign"),
+                    tag: D5_TAG.into(),
+                },
+            ),
+            (
+                "level_event/global",
+                BlockPacket::LevelEvent {
+                    event: 2001,
+                    pos,
+                    data: 129,
+                    global: true,
+                },
+            ),
+        ];
+        assert_decoded(read, cases);
+    }
 }
