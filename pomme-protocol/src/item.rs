@@ -650,18 +650,6 @@ static COMPONENTS_1_21_11: &[(&str, Shape)] = &[
     ("container", List(256, &OptionalStack)),
 ];
 
-macro_rules! layer_fields {
-    ($field:ident) => {{
-        let mut fields = [LAYERS[0].$field; LAYERS.len()];
-        let mut i = 0;
-        while i < LAYERS.len() {
-            fields[i] = LAYERS[i].$field;
-            i += 1;
-        }
-        fields
-    }};
-}
-
 /// `ResolvableProfile.STREAM_CODEC` through 1.21.8 (ResolvableProfile.java:45),
 /// which is the later layout's partial profile with no skin patch.
 static PROFILE_1_21_8: Shape = Struct(&[
@@ -969,19 +957,13 @@ pub struct ItemCodec {
     registries: &'static RegistryTable,
     components: Vec<&'static Shape>,
     entity_data: &'static [Serializer],
-    /// Rewrites of this version's components into the native layout, for
-    /// those the generic conversion can't carry, by component name; tables
-    /// searched in order.
-    up: &'static [Conversions],
-    /// The reverse: native components into this version's layout, by this
-    /// version's component name.
-    down: &'static [Conversions],
+    /// This version's layer and every later one, whose conversions carry
+    /// what the generic one can't, searched in order; empty for 26.3.
+    layers: &'static [Layer],
     air: u32,
 }
 
 type Conversions = &'static [(&'static str, Conversion)];
-
-const NO_CONVERSIONS: &[Conversions] = &[];
 
 /// What one or more versions before 26.3 lay out differently from the next
 /// entry's: the shapes, and the conversions the generic one can't do. A
@@ -989,8 +971,13 @@ const NO_CONVERSIONS: &[Conversions] = &[];
 /// a layer lists only what changed.
 struct Layer {
     versions: &'static [&'static str],
-    shapes: &'static [(&'static str, Shape)],
+    /// A reference to the table itself, never a copy of it: two grammars
+    /// carry a component unchanged only when they reach the same shape.
+    shapes: &'static &'static [(&'static str, Shape)],
+    /// This version's components into the native layout, by its name for
+    /// the component.
     up: Conversions,
+    /// Native components into this version's layout, by the same name.
     down: Conversions,
     /// Its entity-data serializers, for the versions whose entity data is
     /// read through the grammar.
@@ -998,45 +985,45 @@ struct Layer {
 }
 
 /// Oldest first.
-const LAYERS: [Layer; 8] = [
+static LAYERS: [Layer; 8] = [
     Layer {
         versions: &["1.20.6"],
-        shapes: COMPONENTS_1_20_6,
+        shapes: &COMPONENTS_1_20_6,
         up: FROM_1_20_6,
         down: TO_1_20_6,
         entity_data: &[],
     },
     Layer {
         versions: &["1.21.1"],
-        shapes: COMPONENTS_1_21_1,
+        shapes: &COMPONENTS_1_21_1,
         up: FROM_1_21_1,
         down: TO_1_21_1,
         entity_data: &[],
     },
     Layer {
         versions: &["1.21.3"],
-        shapes: COMPONENTS_1_21_3,
+        shapes: &COMPONENTS_1_21_3,
         up: FROM_1_21_3,
         down: TO_1_21_3,
         entity_data: &[],
     },
     Layer {
         versions: &["1.21.4"],
-        shapes: COMPONENTS_1_21_4,
+        shapes: &COMPONENTS_1_21_4,
         up: FROM_1_21_4,
         down: TO_1_21_4,
         entity_data: &[],
     },
     Layer {
         versions: &["1.21.5"],
-        shapes: COMPONENTS_1_21_5,
+        shapes: &COMPONENTS_1_21_5,
         up: &[],
         down: &[],
         entity_data: &[],
     },
     Layer {
         versions: &["1.21.6", "1.21.8"],
-        shapes: COMPONENTS_1_21_8,
+        shapes: &COMPONENTS_1_21_8,
         up: FROM_1_21_8,
         down: TO_1_21_8,
         entity_data: &[],
@@ -1044,7 +1031,7 @@ const LAYERS: [Layer; 8] = [
     // 1.21.10 only has fewer components than 1.21.11.
     Layer {
         versions: &["1.21.10", "1.21.11"],
-        shapes: COMPONENTS_1_21_11,
+        shapes: &COMPONENTS_1_21_11,
         up: FROM_1_21_11,
         down: TO_1_21_11,
         entity_data: &[],
@@ -1053,17 +1040,12 @@ const LAYERS: [Layer; 8] = [
     // (`sulfur_cube_content`) isn't in its table.
     Layer {
         versions: &["26.1", "26.2"],
-        shapes: COMPONENTS_26_2,
+        shapes: &COMPONENTS_26_2,
         up: TO_26_3,
         down: TO_26_2,
         entity_data: SERIALIZERS_26_2,
     },
 ];
-
-/// [`LAYERS`]' fields as the slices a grammar keeps a suffix of.
-static SHAPES: [&[(&str, Shape)]; LAYERS.len()] = layer_fields!(shapes);
-static UP: [Conversions; LAYERS.len()] = layer_fields!(up);
-static DOWN: [Conversions; LAYERS.len()] = layer_fields!(down);
 
 impl ItemCodec {
     /// The native version's grammar.
@@ -1081,26 +1063,25 @@ impl ItemCodec {
         CODECS[index]
             .get_or_init(|| {
                 let name = EMBEDDED[index].version.name;
-                let (shapes, entity_data, up, down): (&[_], &[Serializer], _, _) = if name == "26.3"
-                {
-                    (
-                        &[COMPONENTS_26_3, COMPONENTS_26_2],
-                        SERIALIZERS_26_3,
-                        NO_CONVERSIONS,
-                        NO_CONVERSIONS,
-                    )
-                } else {
-                    let layer = LAYERS.iter().position(|l| l.versions.contains(&name))?;
-                    (
-                        &SHAPES[layer..],
-                        LAYERS[layer].entity_data,
-                        &UP[layer..],
-                        &DOWN[layer..],
-                    )
-                };
+                let (shapes, entity_data, layers): (Vec<_>, &[Serializer], &[Layer]) =
+                    if name == "26.3" {
+                        (
+                            vec![COMPONENTS_26_3, COMPONENTS_26_2],
+                            SERIALIZERS_26_3,
+                            &[],
+                        )
+                    } else {
+                        let layer = LAYERS.iter().position(|l| l.versions.contains(&name))?;
+                        let layers = &LAYERS[layer..];
+                        (
+                            layers.iter().map(|l| *l.shapes).collect(),
+                            layers[0].entity_data,
+                            layers,
+                        )
+                    };
                 let mut codec =
-                    Self::new(RegistryTable::for_protocol(protocol)?, shapes, entity_data)?;
-                (codec.up, codec.down) = (up, down);
+                    Self::new(RegistryTable::for_protocol(protocol)?, &shapes, entity_data)?;
+                codec.layers = layers;
                 Some(codec)
             })
             .as_ref()
@@ -1128,8 +1109,7 @@ impl ItemCodec {
             registries,
             components,
             entity_data,
-            up: &[],
-            down: &[],
+            layers: &[],
             air,
         })
     }
@@ -1629,20 +1609,22 @@ impl Translator<'_> {
     }
 
     /// The named conversion for source component `id`, whose target id is
-    /// `target`. The tables belong to the non-native side, and are keyed by
+    /// `target`. The layers belong to the non-native side, and are keyed by
     /// its name for the component.
     fn conversion(&self, id: u32, target: u32) -> Option<Conversion> {
-        let (codec, tables, id) = if std::ptr::eq(self.to, ItemCodec::native()) {
-            (self.from, self.from.up, id)
+        let up = std::ptr::eq(self.to, ItemCodec::native());
+        let (codec, id) = if up {
+            (self.from, id)
         } else {
-            (self.to, self.to.down, target)
+            (self.to, target)
         };
         let name = codec
             .registries
             .name_of(ClientRegistry::DataComponentType, id)?;
-        tables
+        codec
+            .layers
             .iter()
-            .flat_map(|table| table.iter())
+            .flat_map(|layer| if up { layer.up } else { layer.down })
             .find(|(n, _)| *n == name)
             .map(|(_, convert)| *convert)
     }
@@ -4114,6 +4096,35 @@ pub(crate) mod tests {
         assert_eq!(
             translate_older(p, true, &one_older_component(p, "attribute_modifiers", old)),
             one_component_26_3("attribute_modifiers", later)
+        );
+    }
+
+    /// A component two versions lay out alike is carried as it is: both
+    /// grammars must reach the very same shape for it, whatever layers they
+    /// are built from.
+    #[test]
+    fn unchanged_components_share_their_shape_across_grammars() {
+        let shape = |codec: &ItemCodec, name: &str| {
+            let id = codec
+                .registries()
+                .id_of(ClientRegistry::DataComponentType, name)
+                .unwrap();
+            codec.component_shape(id).unwrap() as *const Shape
+        };
+        for name in ["use_remainder", "bundle_contents", "can_break", "food"] {
+            assert_eq!(shape(codec(), name), shape(codec_26_3(), name), "{name}");
+        }
+        // The same through a stack of layers, for one 1.21.11 left alone.
+        assert_eq!(
+            shape(older(PROTOCOL_1_21_11), "food"),
+            shape(codec_26_3(), "food")
+        );
+        assert_eq!(
+            translate_component_26_2("use_remainder", Wire::default().template("bowl", 1)),
+            one_component_26_3(
+                "use_remainder",
+                Wire::default().var(item_26_3("bowl")).var(1).var(0).var(0)
+            )
         );
     }
 }
