@@ -51,6 +51,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
+import net.minecraft.core.PositionAndRotation;
 import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -187,10 +188,11 @@ import net.minecraft.network.protocol.game.ServerboundRenameItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSelectBundleItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket;
-import net.minecraft.network.protocol.game.ServerboundSwingPacket;
+import net.minecraft.network.protocol.game.ServerboundPunchPacket;
 import net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
+import net.minecraft.network.protocol.game.VecDelta;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -211,6 +213,7 @@ import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.PositionMoveRotation;
+import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.Relative;
 import net.minecraft.world.entity.animal.armadillo.Armadillo;
 import net.minecraft.world.entity.animal.golem.CopperGolemState;
@@ -226,6 +229,7 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.WeatheringCopper;
+import net.minecraft.world.level.block.entity.SignTextSlot;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
@@ -323,15 +327,17 @@ public final class CodecOracle {
                         new EntityDataAccessor<>(18, EntityDataSerializers.ARMADILLO_STATE),
                         Armadillo.ArmadilloState.UNROLLING))));
         encode("move_vehicle", ServerboundMoveVehiclePacket.STREAM_CODEC::encode,
-                new ServerboundMoveVehiclePacket(new Vec3(1.5, 64.0, -2.25), 90.0f, 10.0f, true));
+                new ServerboundMoveVehiclePacket(
+                        PositionAndRotation.of(new Vec3(1.5, 64.0, -2.25), 90.0f, 10.0f), true));
         encode("paddle_boat", ServerboundPaddleBoatPacket.STREAM_CODEC::encode,
                 new ServerboundPaddleBoatPacket(true, false));
         encode("cooldown/shield", ClientboundCooldownPacket.STREAM_CODEC::encode,
                 new ClientboundCooldownPacket(Identifier.withDefaultNamespace("shield"), 100));
         encode("move_vehicle/clientbound", ClientboundMoveVehiclePacket.STREAM_CODEC::encode,
-                new ClientboundMoveVehiclePacket(new Vec3(1.5, 64.0, -2.25), 90.0f, -10.0f));
+                new ClientboundMoveVehiclePacket(
+                        PositionAndRotation.of(new Vec3(1.5, 64.0, -2.25), 90.0f, -10.0f)));
         encode("open_sign_editor/back", ClientboundOpenSignEditorPacket.STREAM_CODEC::encode,
-                new ClientboundOpenSignEditorPacket(new BlockPos(-12, 70, 345), false));
+                new ClientboundOpenSignEditorPacket(new BlockPos(-12, 70, 345), SignTextSlot.BACK));
         UUID waypointId = new UUID(0x0123456789abcdefL, 0xfedcba9876543210L);
         Waypoint.Icon icon = new Waypoint.Icon();
         icon.style = WaypointStyleAssets.BOWTIE;
@@ -568,9 +574,9 @@ public final class CodecOracle {
         LastSeenMessages.Update seen = new LastSeenMessages.Update(3, BitSet.valueOf(new long[] {0x080005L}),
                 (byte) 0x42);
         encode("serverbound/chat", ServerboundChatPacket.STREAM_CODEC::encode,
-                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, signature(9), seen));
+                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, Optional.of(signature(9)), seen));
         encode("serverbound/chat_unsigned", ServerboundChatPacket.STREAM_CODEC::encode,
-                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, null, seen));
+                new ServerboundChatPacket("hi", Instant.ofEpochMilli(5), -6L, Optional.empty(), seen));
         encode("serverbound/chat_command", ServerboundChatCommandPacket.STREAM_CODEC::encode,
                 new ServerboundChatCommandPacket("help"));
         encode("serverbound/chat_command_signed", ServerboundChatCommandSignedPacket.STREAM_CODEC::encode,
@@ -590,7 +596,7 @@ public final class CodecOracle {
                         net.minecraft.world.inventory.RecipeBookType.BLAST_FURNACE, true, false));
         encode("serverbound/accept_teleportation",
                 ServerboundAcceptTeleportationPacket.STREAM_CODEC::encode,
-                new ServerboundAcceptTeleportationPacket(300));
+                new ServerboundAcceptTeleportationPacket(300, 1.5, 64.0, -2.25, 90.0f, -10.0f));
         encode("serverbound/bundle_item_selected",
                 ServerboundSelectBundleItemPacket.STREAM_CODEC::encode,
                 new ServerboundSelectBundleItemPacket(36, -1));
@@ -700,11 +706,8 @@ public final class CodecOracle {
                 new ServerboundSetCarriedItemPacket(8));
         encode("serverbound/sign_update",
                 ServerboundSignUpdatePacket.STREAM_CODEC::encode,
-                new ServerboundSignUpdatePacket(pos, false, "one", "", "thrée", "4"));
-        encode("serverbound/swing",
-                ServerboundSwingPacket.STREAM_CODEC::encode,
-                new ServerboundSwingPacket(
-                        net.minecraft.world.InteractionHand.OFF_HAND));
+                new ServerboundSignUpdatePacket(pos, List.of("one", "", "thrée", "4"), SignTextSlot.BACK));
+        encode("serverbound/punch", ServerboundPunchPacket.STREAM_CODEC::encode, new ServerboundPunchPacket());
         encode("serverbound/teleport_to_entity",
                 ServerboundTeleportToEntityPacket.STREAM_CODEC::encode,
                 new ServerboundTeleportToEntityPacket(uuid));
@@ -767,9 +770,10 @@ public final class CodecOracle {
         Holder<DimensionType> overworld = dimensionTypes.getOrThrow(BuiltinDimensionTypes.OVERWORLD);
         Holder<DimensionType> nether = dimensionTypes.getOrThrow(BuiltinDimensionTypes.NETHER);
         CommonPlayerSpawnInfo spawn = new CommonPlayerSpawnInfo(
-                overworld, Level.OVERWORLD, 42L, GameType.CREATIVE, null, false, true, Optional.empty(), 4, 63);
+                overworld, Level.OVERWORLD, 42L, GameType.CREATIVE, Optional.empty(), false, true, Optional.empty(),
+                4, 63);
         CommonPlayerSpawnInfo died = new CommonPlayerSpawnInfo(
-                nether, Level.NETHER, -7L, GameType.SURVIVAL, GameType.ADVENTURE, true, false,
+                nether, Level.NETHER, -7L, GameType.SURVIVAL, Optional.of(GameType.ADVENTURE), true, false,
                 Optional.of(GlobalPos.of(Level.NETHER, new BlockPos(5, 70, -3))), 0, 32);
         Set<ResourceKey<Level>> levels = new LinkedHashSet<>(List.of(Level.OVERWORLD, Level.NETHER, Level.END));
 
@@ -855,7 +859,7 @@ public final class CodecOracle {
      */
     private static <T> Registry<T> builtIn(ResourceKey<? extends Registry<T>> key) {
         MappedRegistry<T> registry = new MappedRegistry<>(key, Lifecycle.stable());
-        VanillaRegistries.createLookup().lookupOrThrow(key).listElements()
+        VanillaRegistries.createWorldLookup().lookupOrThrow(key).listElements()
                 .sorted(Comparator.comparing(entry -> entry.key().identifier().toString()))
                 .forEach(entry -> registry.register(entry.key(), entry.value(), RegistrationInfo.BUILT_IN));
         return registry.freeze();
@@ -903,8 +907,6 @@ public final class CodecOracle {
     private static void components(Registry<net.minecraft.world.item.enchantment.Enchantment> enchantments) {
         component("dyed_color", net.minecraft.core.component.DataComponents.DYED_COLOR,
                 new net.minecraft.world.item.component.DyedItemColor(0x123456));
-        component("map_color", net.minecraft.core.component.DataComponents.MAP_COLOR,
-                new net.minecraft.world.item.component.MapItemColor(0x46402e));
         component("unbreakable", net.minecraft.core.component.DataComponents.UNBREAKABLE,
                 net.minecraft.util.Unit.INSTANCE);
         component("custom_name", net.minecraft.core.component.DataComponents.CUSTOM_NAME,
@@ -952,8 +954,7 @@ public final class CodecOracle {
         component("trim", net.minecraft.core.component.DataComponents.TRIM,
                 new net.minecraft.world.item.equipment.trim.ArmorTrim(
                         Holder.direct(new net.minecraft.world.item.equipment.trim.TrimMaterial(
-                                net.minecraft.world.item.equipment.trim.MaterialAssetGroup.create("test"),
-                                Component.literal("Test Material"))),
+                                Identifier.withDefaultNamespace("test"), Component.literal("Test Material"))),
                         Holder.direct(new TrimPattern(Identifier.withDefaultNamespace("test"),
                                 Component.literal("Test Trim"), true))));
         net.minecraft.nbt.CompoundTag bee = new net.minecraft.nbt.CompoundTag();
@@ -1011,9 +1012,6 @@ public final class CodecOracle {
         component("piercing_weapon", net.minecraft.core.component.DataComponents.PIERCING_WEAPON,
                 new net.minecraft.world.item.component.PiercingWeapon(false, true,
                         java.util.Optional.of(net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC), java.util.Optional.empty()));
-        component("swing_animation", net.minecraft.core.component.DataComponents.SWING_ANIMATION,
-                new net.minecraft.world.item.component.SwingAnimation(
-                        net.minecraft.world.item.SwingAnimationType.STAB, 10));
         component("repairable", net.minecraft.core.component.DataComponents.REPAIRABLE,
                 new net.minecraft.world.item.enchantment.Repairable(net.minecraft.core.HolderSet.direct(
                         net.minecraft.world.item.Items.DIAMOND.builtInRegistryHolder(),
@@ -1028,7 +1026,7 @@ public final class CodecOracle {
                         sword));
         component("death_protection", net.minecraft.core.component.DataComponents.DEATH_PROTECTION,
                 new net.minecraft.world.item.component.DeathProtection(List.of(
-                        new net.minecraft.world.item.consume_effects.TeleportRandomlyConsumeEffect(8.0f),
+                        new net.minecraft.world.item.consume_effects.TeleportRandomlyConsumeEffect(8.0f, false),
                         net.minecraft.world.item.consume_effects.ClearAllStatusEffectsConsumeEffect.INSTANCE)));
         component("suspicious_stew_effects", net.minecraft.core.component.DataComponents.SUSPICIOUS_STEW_EFFECTS,
                 new net.minecraft.world.item.component.SuspiciousStewEffects(List.of(
@@ -1138,25 +1136,24 @@ public final class CodecOracle {
     private static void entities() throws Exception {
         Vec3 position = new Vec3(1.5, -60.0, 3.25);
         Vec3 movement = new Vec3(0.5, 0.25, -0.75);
+        VecDelta delta = new VecDelta.Linear((short) 4096, (short) -2048, (short) 1);
         encode("add_entity/zombie", ClientboundAddEntityPacket.STREAM_CODEC::encode,
                 new ClientboundAddEntityPacket(7, new UUID(0L, 42L),
                         position.x, position.y, position.z, -90.0f, 45.0f,
                         net.minecraft.world.entity.EntityTypes.ZOMBIE, 5, movement, 22.5));
         encode("move_entity_pos/on_ground",
                 ClientboundMoveEntityPacket.Pos.STREAM_CODEC::encode,
-                new ClientboundMoveEntityPacket.Pos(
-                        7, (short) 4096, (short) -2048, (short) 1, true));
+                new ClientboundMoveEntityPacket.Pos(7, delta, true));
         encode("move_entity_pos_rot/airborne",
                 ClientboundMoveEntityPacket.PosRot.STREAM_CODEC::encode,
-                new ClientboundMoveEntityPacket.PosRot(
-                        7, (short) 4096, (short) -2048, (short) 1, (byte) 64, (byte) -32, false));
+                new ClientboundMoveEntityPacket.PosRot(7, delta, (byte) 64, (byte) -32, false));
         encode("move_entity_rot/on_ground",
                 ClientboundMoveEntityPacket.Rot.STREAM_CODEC::encode,
                 new ClientboundMoveEntityPacket.Rot(7, (byte) 64, (byte) -32, true));
         encode("entity_position_sync/on_ground",
                 ClientboundEntityPositionSyncPacket.STREAM_CODEC::encode,
                 new ClientboundEntityPositionSyncPacket(
-                        7, new PositionMoveRotation(position, movement, 45.0f, -10.0f), true));
+                        7, PositionPath.of(position), 45.0f, -10.0f, true));
         encode("set_entity_motion/fast",
                 ClientboundSetEntityMotionPacket.STREAM_CODEC::encode,
                 new ClientboundSetEntityMotionPacket(7, new Vec3(6.0, -1.0, 0.0)));
@@ -1281,8 +1278,9 @@ public final class CodecOracle {
         heightmaps.put(Heightmap.Types.WORLD_SURFACE, new long[] {7L});
         heightmaps.put(Heightmap.Types.MOTION_BLOCKING, new long[] {8L, 9L});
         Object blockEntity = withFields(Class.forName(ClientboundLevelChunkPacketData.class.getName()
-                + "$BlockEntityInfo"), Map.of("packedXZ", 0x59, "y", -64,
-                        "type", net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN, "tag", d5()));
+                + "$BlockEntityInfo"), Map.of("packedXZ", (byte) 0x59, "y", (short) -64,
+                        "type", net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN,
+                        "tag", Optional.of(d5())));
         encode("level_chunk_with_light/small", ClientboundLevelChunkWithLightPacket.STREAM_CODEC::encode,
                 withFields(ClientboundLevelChunkWithLightPacket.class, Map.of("x", 3, "z", -2,
                         "chunkData", withFields(ClientboundLevelChunkPacketData.class, Map.of(
@@ -1343,7 +1341,6 @@ public final class CodecOracle {
                 Optional.of(new net.minecraft.core.ClientAsset.ResourceTexture(
                         Identifier.withDefaultNamespace("block/stone"))),
                 AdvancementType.GOAL, true, false, false);
-        display.setLocation(1.5f, -2.0f);
         // A granted criterion is stamped with the time it was granted, so
         // these are built with a fixed one, in a map that keeps its order.
         Map<String, CriterionProgress> criteria = new LinkedHashMap<>();
@@ -1353,17 +1350,19 @@ public final class CodecOracle {
         progress.setAccessible(true);
         encode("update_advancements/root_and_child", ClientboundUpdateAdvancementsPacket.STREAM_CODEC::encode,
                 new ClientboundUpdateAdvancementsPacket(true, List.of(
-                        advancement(root, Optional.empty(), Optional.of(display), List.of(List.of("a"))),
+                        advancement(root, Optional.empty(), Optional.of(display), List.of(List.of("a")), 1.5f),
                         advancement(Identifier.withDefaultNamespace("story/child"), Optional.of(root),
-                                Optional.empty(), List.of(List.of("a", "b"), List.of("c")))),
+                                Optional.empty(), List.of(List.of("a", "b"), List.of("c")), 3.0f)),
                         Set.of(Identifier.withDefaultNamespace("old")),
                         Map.of(root, progress.newInstance(criteria)), true));
     }
 
-    private static AdvancementHolder advancement(Identifier id, Optional<Identifier> parent,
-            Optional<DisplayInfo> display, List<List<String>> requirements) {
-        return new AdvancementHolder(id, new Advancement(parent, display, AdvancementRewards.EMPTY, Map.of(),
-                new AdvancementRequirements(requirements), false));
+    /// An advancement at `x` across its screen and two rows up.
+    private static ClientboundUpdateAdvancementsPacket.PositionedAdvancement advancement(Identifier id,
+            Optional<Identifier> parent, Optional<DisplayInfo> display, List<List<String>> requirements, float x) {
+        return new ClientboundUpdateAdvancementsPacket.PositionedAdvancement(new AdvancementHolder(id,
+                new Advancement(parent, display, AdvancementRewards.EMPTY, Map.of(),
+                        new AdvancementRequirements(requirements), false)), x, -2.0f);
     }
 
     /// The title, tab list and boss bar packets (`pomme-protocol/src/hud.rs`).
@@ -1535,10 +1534,24 @@ public final class CodecOracle {
                 new ClientboundStopSoundPacket(null, null));
     }
 
-    /// An instance of `type` whose constructor is skipped, with `fields` set.
-    /// The fields are final: a JDK that stops reflection from writing those
-    /// needs another way to build these packets.
+    /// An instance of `type` with `fields` set, for a packet the game only
+    /// builds from a live world. A record goes through its canonical
+    /// constructor, every component given; any other class skips its
+    /// constructor and has its final fields written, which a later JDK may
+    /// stop reflection from doing.
     private static <P> P withFields(Class<P> type, Map<String, Object> fields) throws Exception {
+        if (type.isRecord()) {
+            java.lang.reflect.RecordComponent[] components = type.getRecordComponents();
+            Class<?>[] types = new Class<?>[components.length];
+            Object[] values = new Object[components.length];
+            for (int i = 0; i < components.length; i++) {
+                types[i] = components[i].getType();
+                values[i] = fields.get(components[i].getName());
+            }
+            var constructor = type.getDeclaredConstructor(types);
+            constructor.setAccessible(true);
+            return constructor.newInstance(values);
+        }
         java.lang.reflect.Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
         theUnsafe.setAccessible(true);
         P packet = type.cast(((sun.misc.Unsafe) theUnsafe.get(null)).allocateInstance(type));
