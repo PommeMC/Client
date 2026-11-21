@@ -58,6 +58,11 @@ import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.numbers.BlankFormat;
+import net.minecraft.network.chat.numbers.FixedFormat;
+import net.minecraft.network.chat.numbers.NumberFormat;
+import net.minecraft.network.chat.numbers.StyledFormat;
 import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
 import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
@@ -71,9 +76,11 @@ import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchStartPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
+import net.minecraft.network.protocol.game.ClientboundClearTitlesPacket;
 import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
@@ -99,10 +106,13 @@ import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerCombatKillPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
+import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
@@ -115,16 +125,27 @@ import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
 import net.minecraft.network.protocol.game.ClientboundSetCursorItemPacket;
+import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
 import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
+import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerInventoryPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
+import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
+import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
+import net.minecraft.network.protocol.game.ClientboundStopSoundPacket;
+import net.minecraft.network.protocol.game.ClientboundTabListPacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
@@ -168,7 +189,11 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.dialog.Dialog;
 import net.minecraft.server.dialog.Dialogs;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.BossEvent;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
@@ -197,6 +222,13 @@ import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.scores.DisplaySlot;
+import net.minecraft.world.scores.Objective;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
+import net.minecraft.world.scores.Team;
+import net.minecraft.world.scores.TeamColor;
+import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 import net.minecraft.world.waypoints.Waypoint;
 import net.minecraft.world.waypoints.WaypointStyleAssets;
 
@@ -244,6 +276,7 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.PARTICLE_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.BLOCK,
                 net.minecraft.core.registries.BuiltInRegistries.MENU,
+                net.minecraft.core.registries.BuiltInRegistries.NUMBER_FORMAT_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION,
                 builtIn(Registries.DAMAGE_TYPE),
                 builtIn(Registries.CAT_VARIANT), builtIn(Registries.CAT_SOUND_VARIANT),
@@ -319,6 +352,10 @@ public final class CodecOracle {
         blocks();
         chunks();
         containers();
+        hud();
+        scoreboard();
+        playerList();
+        sounds();
         advancements();
         Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
         blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
@@ -343,7 +380,7 @@ public final class CodecOracle {
         for (String entry : List.of("damage_type/mob_attack", "entity_type/zombie", "villager_type/swamp",
                 "villager_profession/farmer", "item/stone", "attribute/max_health", "mob_effect/haste",
                 "block/chest", "block_entity_type/sign",
-                "menu/generic_9x3")) {
+                "menu/generic_9x3", "sound_event/entity.generic.explode")) {
             String[] parts = entry.split("/");
             Identifier name = Identifier.withDefaultNamespace(parts[1]);
             Registry<?> registry = registries.lookupOrThrow(ResourceKey.createRegistryKey(
@@ -413,13 +450,10 @@ public final class CodecOracle {
                 new net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket(Component.literal("Kicked")));
         encode("login/clientbound/hello", net.minecraft.network.protocol.login.ClientboundHelloPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.login.ClientboundHelloPacket("server", new byte[] {1, 2, 3}, new byte[] {4, 5, 6, 7}, true));
-        var properties = new com.mojang.authlib.properties.PropertyMap(
-                com.google.common.collect.ImmutableMultimap.of("textures",
-                        new com.mojang.authlib.properties.Property("textures", "value", "signature")));
         encode("login/clientbound/login_finished",
                 net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket.STREAM_CODEC::encode,
                 new net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket(
-                        new com.mojang.authlib.GameProfile(uuid, "Player", properties),
+                        new com.mojang.authlib.GameProfile(uuid, "Player", textures("value", "signature")),
                         new UUID(0x1032547698badcfeL, 0xefcdab8967452301L)));
         encode("login/clientbound/login_compression",
                 net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket.STREAM_CODEC::encode,
@@ -1245,6 +1279,161 @@ public final class CodecOracle {
             Optional<DisplayInfo> display, List<List<String>> requirements) {
         return new AdvancementHolder(id, new Advancement(parent, display, AdvancementRewards.EMPTY, Map.of(),
                 new AdvancementRequirements(requirements), false));
+    }
+
+    /// The title, tab list and boss bar packets (`pomme-protocol/src/hud.rs`).
+    private static void hud() {
+        encode("set_title_text/hello", ClientboundSetTitleTextPacket.STREAM_CODEC::encode,
+                new ClientboundSetTitleTextPacket(Component.literal("Hello")));
+        encode("set_subtitle_text/sub", ClientboundSetSubtitleTextPacket.STREAM_CODEC::encode,
+                new ClientboundSetSubtitleTextPacket(Component.literal("sub")));
+        encode("set_titles_animation/slow", ClientboundSetTitlesAnimationPacket.STREAM_CODEC::encode,
+                new ClientboundSetTitlesAnimationPacket(10, 70, 20));
+        encode("clear_titles/reset", ClientboundClearTitlesPacket.STREAM_CODEC::encode,
+                new ClientboundClearTitlesPacket(true));
+        encode("tab_list/both", ClientboundTabListPacket.STREAM_CODEC::encode,
+                new ClientboundTabListPacket(Component.literal("head"), Component.literal("foot")));
+        BossEvent boss = new BossEvent(new UUID(0L, 7L), Component.literal("Boss"), BossEvent.BossBarColor.RED,
+                BossEvent.BossBarOverlay.NOTCHED_10) {};
+        boss.setProgress(0.5f);
+        boss.setDarkenScreen(true).setCreateWorldFog(true);
+        bossEvent("add", ClientboundBossEventPacket.createAddPacket(boss));
+        bossEvent("remove", ClientboundBossEventPacket.createRemovePacket(boss.getId()));
+        bossEvent("progress", ClientboundBossEventPacket.createUpdateProgressPacket(boss));
+        bossEvent("name", ClientboundBossEventPacket.createUpdateNamePacket(boss));
+        bossEvent("style", ClientboundBossEventPacket.createUpdateStylePacket(boss));
+        bossEvent("properties", ClientboundBossEventPacket.createUpdatePropertiesPacket(boss));
+    }
+
+    private static void bossEvent(String operation, ClientboundBossEventPacket packet) {
+        encode("boss_event/" + operation, ClientboundBossEventPacket.STREAM_CODEC::encode, packet);
+    }
+
+    /// The scoreboard packets (`pomme-protocol/src/scoreboard.rs`).
+    private static void scoreboard() {
+        Scoreboard board = new Scoreboard();
+        Objective kills = board.addObjective("kills", ObjectiveCriteria.DUMMY, Component.literal("Kills"),
+                ObjectiveCriteria.RenderType.HEARTS, false, new StyledFormat(Style.EMPTY.withColor(ChatFormatting.RED)));
+        Objective deaths = board.addObjective("deaths", ObjectiveCriteria.DUMMY, Component.literal("Deaths"),
+                ObjectiveCriteria.RenderType.INTEGER, false, null);
+        objective("add_styled", kills, ClientboundSetObjectivePacket.METHOD_ADD);
+        objective("remove", kills, ClientboundSetObjectivePacket.METHOD_REMOVE);
+        objective("change_plain", deaths, ClientboundSetObjectivePacket.METHOD_CHANGE);
+        encode("set_display_objective/sidebar", ClientboundSetDisplayObjectivePacket.STREAM_CODEC::encode,
+                new ClientboundSetDisplayObjectivePacket(DisplaySlot.SIDEBAR, kills));
+        encode("set_display_objective/clear_list", ClientboundSetDisplayObjectivePacket.STREAM_CODEC::encode,
+                new ClientboundSetDisplayObjectivePacket(DisplaySlot.LIST, null));
+        score("plain", 9, Optional.empty(), Optional.empty());
+        score("blank", 9, Optional.empty(), Optional.of(BlankFormat.INSTANCE));
+        score("named_fixed", 5, Optional.of(Component.literal("Hero")),
+                Optional.of(new FixedFormat(Component.literal("x"))));
+        encode("reset_score/all", ClientboundResetScorePacket.STREAM_CODEC::encode,
+                new ClientboundResetScorePacket("Bob", null));
+        encode("reset_score/kills", ClientboundResetScorePacket.STREAM_CODEC::encode,
+                new ClientboundResetScorePacket("Bob", "kills"));
+        PlayerTeam team = board.addPlayerTeam("red");
+        team.setDisplayName(Component.literal("Red"));
+        team.setPlayerPrefix(Component.literal("["));
+        team.setPlayerSuffix(Component.literal("]"));
+        team.setNameTagVisibility(Team.Visibility.HIDE_FOR_OTHER_TEAMS);
+        team.setCollisionRule(Team.CollisionRule.NEVER);
+        team.setColor(Optional.of(TeamColor.RED));
+        team.setAllowFriendlyFire(false);
+        board.addPlayerToTeam("Bob", team);
+        team("add", ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, true));
+        team("remove", ClientboundSetPlayerTeamPacket.createRemovePacket(team));
+        team.setColor(Optional.empty());
+        team("change_uncoloured", ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, false));
+        team("join", ClientboundSetPlayerTeamPacket.createPlayerPacket(team, "Amy",
+                ClientboundSetPlayerTeamPacket.Action.ADD));
+        team("leave", ClientboundSetPlayerTeamPacket.createPlayerPacket(team, "Amy",
+                ClientboundSetPlayerTeamPacket.Action.REMOVE));
+    }
+
+    private static void objective(String name, Objective objective, int method) {
+        encode("set_objective/" + name, ClientboundSetObjectivePacket.STREAM_CODEC::encode,
+                new ClientboundSetObjectivePacket(objective, method));
+    }
+
+    /// Bob's score for `kills`.
+    private static void score(String name, int score, Optional<Component> display, Optional<NumberFormat> format) {
+        encode("set_score/" + name, ClientboundSetScorePacket.STREAM_CODEC::encode,
+                new ClientboundSetScorePacket("Bob", "kills", score, display, format));
+    }
+
+    private static void team(String name, ClientboundSetPlayerTeamPacket packet) {
+        encode("set_player_team/" + name, ClientboundSetPlayerTeamPacket.STREAM_CODEC::encode, packet);
+    }
+
+    /// The player list packets (`pomme-protocol/src/player_info.rs`). An
+    /// update is only built from players on a server, so these set its parts
+    /// directly.
+    private static void playerList() throws Exception {
+        UUID bob = new UUID(0L, 9L);
+        // A real key would differ from run to run; only its bytes are sent.
+        java.security.PublicKey key = new java.security.PublicKey() {
+            @Override
+            public String getAlgorithm() {
+                return "RSA";
+            }
+
+            @Override
+            public String getFormat() {
+                return "X.509";
+            }
+
+            @Override
+            public byte[] getEncoded() {
+                return new byte[] {(byte) 0xAA, (byte) 0xBB};
+            }
+        };
+        var profile = new com.mojang.authlib.GameProfile(bob, "bob", textures("abc", "sig"));
+        var session = new net.minecraft.network.chat.RemoteChatSession.Data(new UUID(0L, 7L),
+                new net.minecraft.world.entity.player.ProfilePublicKey.Data(java.time.Instant.ofEpochMilli(1000), key,
+                        new byte[] {(byte) 0xCC}));
+        playerInfo("every_action", EnumSet.allOf(ClientboundPlayerInfoUpdatePacket.Action.class),
+                new ClientboundPlayerInfoUpdatePacket.Entry(bob, profile, true, 42, GameType.CREATIVE,
+                        Component.literal("Bob"), true, 3, session));
+        playerInfo("cleared_name_and_session",
+                EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.INITIALIZE_CHAT,
+                        ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME),
+                new ClientboundPlayerInfoUpdatePacket.Entry(bob, null, false, 0, GameType.SURVIVAL, null, false,
+                        0, null));
+        encode("player_info_remove/two", ClientboundPlayerInfoRemovePacket.STREAM_CODEC::encode,
+                new ClientboundPlayerInfoRemovePacket(List.of(new UUID(0L, 1L), new UUID(0L, 2L))));
+    }
+
+    /// A profile's properties: a signed `textures`.
+    private static com.mojang.authlib.properties.PropertyMap textures(String value, String signature) {
+        return new com.mojang.authlib.properties.PropertyMap(com.google.common.collect.ImmutableMultimap.of(
+                "textures", new com.mojang.authlib.properties.Property("textures", value, signature)));
+    }
+
+    private static void playerInfo(String name, EnumSet<ClientboundPlayerInfoUpdatePacket.Action> actions,
+            ClientboundPlayerInfoUpdatePacket.Entry entry) throws Exception {
+        encode("player_info_update/" + name, ClientboundPlayerInfoUpdatePacket.STREAM_CODEC::encode,
+                withFields(ClientboundPlayerInfoUpdatePacket.class,
+                        Map.of("actions", actions, "entries", List.of(entry))));
+    }
+
+    /// The sound packets (`pomme-protocol/src/sound.rs`).
+    private static void sounds() throws Exception {
+        Identifier test = Identifier.withDefaultNamespace("test.sound");
+        encode("sound/explode", ClientboundSoundPacket.STREAM_CODEC::encode,
+                new ClientboundSoundPacket(SoundEvents.GENERIC_EXPLODE, SoundSource.BLOCKS, -1.0, 65.0, 2.0, 0.5f,
+                        2.0f, 7L));
+        encode("sound/fixed_range", ClientboundSoundPacket.STREAM_CODEC::encode,
+                new ClientboundSoundPacket(Holder.direct(SoundEvent.createFixedRangeEvent(test, 16.0f)),
+                        SoundSource.MASTER, 0.0, 0.0, 0.0, 1.0f, 1.0f, 0L));
+        // An entity's sound is only built from the entity.
+        encode("sound_entity/direct", ClientboundSoundEntityPacket.STREAM_CODEC::encode,
+                withFields(ClientboundSoundEntityPacket.class, Map.of(
+                        "sound", Holder.direct(SoundEvent.createVariableRangeEvent(test)),
+                        "source", SoundSource.VOICE, "id", 9, "volume", 1.0f, "pitch", 1.0f, "seed", 3L)));
+        encode("stop_sound/music", ClientboundStopSoundPacket.STREAM_CODEC::encode,
+                new ClientboundStopSoundPacket(Identifier.withDefaultNamespace("music.game"), SoundSource.MUSIC));
+        encode("stop_sound/all", ClientboundStopSoundPacket.STREAM_CODEC::encode,
+                new ClientboundStopSoundPacket(null, null));
     }
 
     /// An instance of `type` whose constructor is skipped, with `fields` set.

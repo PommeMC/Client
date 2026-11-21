@@ -390,4 +390,130 @@ mod tests {
         );
         rejects("set_player_team", &[&name[..], &[5]].concat());
     }
+
+    /// Vanilla's own encoding of the scoreboard packets
+    /// (`CodecOracle.scoreboard`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, nbt_string};
+
+        let score = |score, display, number_format| ScoreboardPacket::Score {
+            owner: "Bob".into(),
+            objective: "kills".into(),
+            score,
+            display,
+            number_format,
+        };
+        let team = |method| ScoreboardPacket::Team {
+            name: "red".into(),
+            method,
+        };
+        let parameters = |color| TeamParameters {
+            display_name: nbt_string("Red"),
+            player_prefix: nbt_string("["),
+            player_suffix: nbt_string("]"),
+            // `Visibility.HIDE_FOR_OTHER_TEAMS` and `CollisionRule.NEVER`.
+            name_tag_visibility: 2,
+            collision_rule: 1,
+            color,
+            // Friendly fire off, friendly invisibles seen.
+            options: 2,
+        };
+        // The style `{color: "red"}`.
+        let red: Box<[u8]> = [&[10, 8, 0, 5][..], b"color", &[0, 3], b"red", &[0]]
+            .concat()
+            .into();
+        let cases = [
+            (
+                "set_objective/add_styled",
+                ScoreboardPacket::Objective {
+                    name: "kills".into(),
+                    method: ObjectiveMethod::Add(ObjectiveParameters {
+                        display_name: nbt_string("Kills"),
+                        // `RenderType.HEARTS`.
+                        render_type: 1,
+                        number_format: Some(NumberFormat::Styled(red)),
+                    }),
+                },
+            ),
+            (
+                "set_objective/remove",
+                ScoreboardPacket::Objective {
+                    name: "kills".into(),
+                    method: ObjectiveMethod::Remove,
+                },
+            ),
+            (
+                "set_objective/change_plain",
+                ScoreboardPacket::Objective {
+                    name: "deaths".into(),
+                    method: ObjectiveMethod::Change(ObjectiveParameters {
+                        display_name: nbt_string("Deaths"),
+                        render_type: 0,
+                        number_format: None,
+                    }),
+                },
+            ),
+            (
+                "set_display_objective/sidebar",
+                ScoreboardPacket::Display {
+                    slot: 1,
+                    objective: "kills".into(),
+                },
+            ),
+            (
+                "set_display_objective/clear_list",
+                ScoreboardPacket::Display {
+                    slot: 0,
+                    objective: String::new(),
+                },
+            ),
+            ("set_score/plain", score(9, None, None)),
+            ("set_score/blank", score(9, None, Some(NumberFormat::Blank))),
+            (
+                "set_score/named_fixed",
+                score(
+                    5,
+                    Some(nbt_string("Hero")),
+                    Some(NumberFormat::Fixed(nbt_string("x"))),
+                ),
+            ),
+            (
+                "reset_score/all",
+                ScoreboardPacket::ResetScore {
+                    owner: "Bob".into(),
+                    objective: None,
+                },
+            ),
+            (
+                "reset_score/kills",
+                ScoreboardPacket::ResetScore {
+                    owner: "Bob".into(),
+                    objective: Some("kills".into()),
+                },
+            ),
+            (
+                "set_player_team/add",
+                team(TeamMethod::Add {
+                    // `TeamColor.RED`.
+                    parameters: parameters(Some(12)),
+                    players: vec!["Bob".into()],
+                }),
+            ),
+            ("set_player_team/remove", team(TeamMethod::Remove)),
+            (
+                "set_player_team/change_uncoloured",
+                team(TeamMethod::Change(parameters(None))),
+            ),
+            (
+                "set_player_team/join",
+                team(TeamMethod::Join(vec!["Amy".into()])),
+            ),
+            (
+                "set_player_team/leave",
+                team(TeamMethod::Leave(vec!["Amy".into()])),
+            ),
+        ];
+        assert_decoded(read, cases);
+    }
 }
