@@ -135,7 +135,9 @@ License: MIT.
 ## azalea-rs/azalea
 
 `pomme-block`'s `BlockState`, a block state id, began as azalea-block's type of
-the same name. No azalea crate is a dependency.
+the same name. The crate is distributed under Pomme's own licence, with
+azalea's notice kept below for the code that came from it. No azalea crate is a
+dependency.
 
 Source: <https://github.com/azalea-rs/azalea>
 
