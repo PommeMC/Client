@@ -184,25 +184,29 @@ impl RegistryRemaps {
     /// inbound packets), or `None` for versions without an embedded registry
     /// table. For the native version itself this is an identity map.
     pub fn to_native(protocol: i32) -> Option<&'static RegistryRemaps> {
-        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
-            [const { OnceLock::new() }; EMBEDDED.len()];
-        crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(Self::embedded_table(protocol), RegistryTable::native())
-        })
+        Self::between(protocol, crate::version::NATIVE.protocol)
     }
 
     /// Remaps from the native version's id space to `protocol`'s (for
     /// outbound packets); the mirror of [`Self::to_native`].
     pub fn from_native(protocol: i32) -> Option<&'static RegistryRemaps> {
-        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
-            [const { OnceLock::new() }; EMBEDDED.len()];
-        crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(RegistryTable::native(), Self::embedded_table(protocol))
-        })
+        Self::between(crate::version::NATIVE.protocol, protocol)
     }
 
-    fn embedded_table(protocol: i32) -> &'static RegistryTable {
-        RegistryTable::for_protocol(protocol).expect("embedded registry table")
+    /// Remaps from `from`'s id space to `to`'s, or `None` unless both have
+    /// an embedded registry table.
+    pub fn between(from: i32, to: i32) -> Option<&'static RegistryRemaps> {
+        static REMAPS: [[OnceLock<RegistryRemaps>; EMBEDDED.len()]; EMBEDDED.len()] =
+            [const { [const { OnceLock::new() }; EMBEDDED.len()] }; EMBEDDED.len()];
+        let (from, to) = (
+            crate::version::embedded_index(from)?,
+            crate::version::embedded_index(to)?,
+        );
+        let table = |index: usize| {
+            RegistryTable::for_protocol(EMBEDDED[index].version.protocol)
+                .expect("embedded registry table")
+        };
+        Some(REMAPS[from][to].get_or_init(|| Self::build(table(from), table(to))))
     }
 
     fn build(from: &RegistryTable, to: &RegistryTable) -> Self {
