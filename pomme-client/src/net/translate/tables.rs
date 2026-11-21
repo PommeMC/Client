@@ -35,7 +35,6 @@ impl Translation {
             update_recipes_id: id(Phase::Game, "update_recipes"),
             place_ghost_recipe_id: id(Phase::Game, "place_ghost_recipe"),
             recipe_layout: (protocol >= 768).then_some(RecipeLayout {
-                old_profile: protocol <= 772,
                 item_stack_count_first: protocol <= 774,
                 trim_pattern_display: protocol <= 769,
             }),
@@ -54,7 +53,6 @@ impl Translation {
     pub(super) fn build_rewrites(&self) -> Box<[Option<Rewrite>]> {
         let ids = self.game_ids.as_ref();
         let v775 = self.v775.as_ref();
-        let v777 = ids.and_then(|g| g.v777.as_ref());
         let v767 = ids.and_then(|g| g.v767.as_ref());
         let v765 = ids.and_then(|g| g.v765.as_ref());
         let v764 = ids.and_then(|g| g.v764.as_ref());
@@ -77,20 +75,12 @@ impl Translation {
             if v775.is_some_and(|v| id == v.set_player_team_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_team_775));
             }
-            if v777.is_none()
-                && self.recipe_layout.is_some()
-                && self.recipe_translator(id).is_some()
-            {
+            if self.recipe_layout.is_some() && self.recipe_translator(id).is_some() {
                 slot.get_or_insert(Rewrite::Recipe(self.recipe_translator(id).unwrap()));
             }
             let Some(ids) = ids else { continue };
             if id == ids.set_entity_data_id {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_entity_data));
-            }
-            if ids.items.as_ref().is_some_and(|v| v.rewrite(id).is_some()) {
-                slot.get_or_insert(Rewrite::Item(
-                    ids.items.as_ref().unwrap().rewrite(id).unwrap(),
-                ));
             }
             if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_chunk_774));
@@ -116,26 +106,14 @@ impl Translation {
             if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_explode_772));
             }
-            if v777.is_some_and(|v| id == v.explode_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_explode_777));
-            }
-            if v777.is_some_and(|v| id == v.level_particles_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_particles_777));
+            if ids.remaps_explode && ids.v776.as_ref().is_some_and(|v| id == v.explode_id) {
+                slot.get_or_insert(Rewrite::Context(Self::rewrite_explode_776));
             }
             if id == ids.update_advancements_id {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_advancements));
             }
             if id == ids.commands_id {
                 slot.get_or_insert(Rewrite::Context(Self::rewrite_commands));
-            }
-            if v777.is_some_and(|v| id == v.recipe_book_add_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_recipe_add_777));
-            }
-            if v777.is_some_and(|v| id == v.place_ghost_recipe_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_ghost_recipe_777));
-            }
-            if v777.is_some_and(|v| id == v.update_recipes_id) {
-                slot.get_or_insert(Rewrite::Context(Self::rewrite_recipes_777));
             }
             if ids.v763.as_ref().is_some_and(|v| id == v.respawn_id) {
                 slot.get_or_insert(Rewrite::SessionFrame(translate_respawn_763));
@@ -164,8 +142,7 @@ impl GameIds {
     /// The version-gated frame rewrite dispatching on `id`, if any. Chained
     /// oldest-first: every rewriter targets 26.2 directly, so where two gates
     /// claim a packet the older one subsumes the newer and must win (765's
-    /// respawn over 767's, say). The gate above native comes last; it never
-    /// shares a packet with the older ones.
+    /// respawn over 767's, say).
     pub(super) fn version_rewrite(&self, id: u32) -> Option<FrameRewrite> {
         self.v763
             .as_ref()
@@ -178,7 +155,6 @@ impl GameIds {
             .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v772.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v773.as_ref().and_then(|v| v.rewrite(id)))
-            .or_else(|| self.v777.as_ref().and_then(|v| v.rewrite(id)))
     }
 
     /// Name-matched game-phase id tables between one wire version and the
@@ -199,6 +175,7 @@ impl GameIds {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Game, dir, name);
+        let old_id = |name| required_id(table, Phase::Game, Serverbound, name);
         Some(GameIds {
             inbound,
             outbound,
@@ -211,8 +188,6 @@ impl GameIds {
             update_advancements_id: id(Clientbound, "update_advancements"),
             advancements: AdvancementLayout {
                 icon_count_first: protocol <= 774,
-                old_profile: protocol <= 772,
-                position_after_entry: protocol >= 777,
                 append_show: protocol <= 769,
             },
             wire_registries: RegistryTable::for_protocol(protocol).expect("wire registries"),
@@ -224,7 +199,7 @@ impl GameIds {
                 interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
             }),
             color_particles: protocol >= 766,
-            v777: (protocol >= 777).then(|| Ids777 {
+            v776: (protocol <= 776).then(|| Ids776 {
                 move_entity_pos_id: id(Clientbound, "move_entity_pos"),
                 move_entity_pos_rot_id: id(Clientbound, "move_entity_pos_rot"),
                 move_entity_rot_id: id(Clientbound, "move_entity_rot"),
@@ -233,34 +208,23 @@ impl GameIds {
                 login_id: id(Clientbound, "login"),
                 respawn_id: id(Clientbound, "respawn"),
                 animate_id: id(Clientbound, "animate"),
-                level_particles_id: id(Clientbound, "level_particles"),
+                swing_animation_id: id(Clientbound, "swing_animation"),
                 level_chunk_id: id(Clientbound, "level_chunk_with_light"),
                 light_update_id: id(Clientbound, "light_update"),
                 player_chat_id: id(Clientbound, "player_chat"),
-                recipe_book_add_id: id(Clientbound, "recipe_book_add"),
-                place_ghost_recipe_id: id(Clientbound, "place_ghost_recipe"),
-                update_recipes_id: id(Clientbound, "update_recipes"),
-                swing_animation_old_id: required_id(
-                    table,
-                    Phase::Game,
-                    Clientbound,
-                    "swing_animation",
-                ),
-                swing_id: id(Serverbound, "swing"),
-                punch_old_id: required_id(table, Phase::Game, Serverbound, "punch"),
-                player_action_id: id(Serverbound, "player_action"),
-                player_action_old_id: required_id(table, Phase::Game, Serverbound, "player_action"),
+                level_particles_id: id(Clientbound, "level_particles"),
+                punch_id: id(Serverbound, "punch"),
+                swing_old_id: old_id("swing"),
                 accept_teleportation_id: id(Serverbound, "accept_teleportation"),
-                accept_teleportation_old_id: required_id(
-                    table,
-                    Phase::Game,
-                    Serverbound,
-                    "accept_teleportation",
-                ),
-                move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
+                accept_teleportation_old_id: old_id("accept_teleportation"),
+                move_player_pos_rot_old_id: old_id("move_player_pos_rot"),
+                player_action_id: id(Serverbound, "player_action"),
+                player_action_old_id: old_id("player_action"),
                 sign_update_id: id(Serverbound, "sign_update"),
-                sign_update_old_id: required_id(table, Phase::Game, Serverbound, "sign_update"),
+                sign_update_old_id: old_id("sign_update"),
             }),
+            sized_particle_payloads: protocol >= 776,
+            remaps_explode: protocol == 776,
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
                 codec,
                 container_set_content_id: id(Clientbound, "container_set_content"),

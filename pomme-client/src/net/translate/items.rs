@@ -1,47 +1,6 @@
 use super::*;
 
-/// Remaps one entity-data item stack (count, item id, component patch) into
-/// the native registry space; an item the native version lacks becomes an
-/// empty stack. `Some(false)` means a patch [`translate_component_patch`]
-/// can't walk: it and the rest of the list copy verbatim after the remapped
-/// head, or the list ends at the emptied stack. `None` means a malformed
-/// head; nothing is written.
-/// TODO: the verbatim patch keeps wire-space component-type ids.
-pub(super) fn translate_item_stack(
-    cur: &mut Cursor<&[u8]>,
-    out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
-) -> Option<bool> {
-    let count_at = cur.position() as usize;
-    let count = var_i32(cur)?;
-    let count_end = cur.position() as usize;
-    if count <= 0 {
-        out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
-        return Some(true);
-    }
-    let item = var_u32(cur)?;
-    let patch_at = cur.position() as usize;
-    let mut patch = Vec::new();
-    let walked = translate_component_patch(cur, &mut patch, remaps, old_profile).is_some();
-    let Some(native) = remaps.remap(ClientRegistry::Item, item) else {
-        wire::write_varint(out, 0);
-        if !walked {
-            out.push(0xFF);
-        }
-        return Some(walked);
-    };
-    out.extend_from_slice(&cur.get_ref()[count_at..count_end]);
-    wire::write_varint(out, native);
-    if walked {
-        out.extend_from_slice(&patch);
-    } else {
-        out.extend_from_slice(&cur.get_ref()[patch_at..]);
-    }
-    Some(walked)
-}
-
-/// An `item_stack` display's stack, written as 26.2's `ItemStackTemplate`
+/// An `item_stack` display's stack, written as an `ItemStackTemplate`
 /// (item id, count, patch). Through 1.21.11 the display wrapped a non-empty
 /// `ItemStack`, which leads with the count instead.
 pub(super) fn translate_item_stack_template(
@@ -52,7 +11,16 @@ pub(super) fn translate_item_stack_template(
     let (item, count) = read_item_and_count(cur, ctx.layout.item_stack_count_first)?;
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
     wire::write_varint(out, count as u32);
-    translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
+    ctx.items.patch(cur, out)
+}
+
+impl Translation {
+    /// The wire version's item grammar in this translation's ids, when it
+    /// has one.
+    pub(super) fn item_grammar(&self) -> Option<Items<'_>> {
+        let items = self.game_ids.as_ref()?.items.as_ref()?;
+        Some(items.items(self.to_native))
+    }
 }
 
 /// The item and count leading a non-empty `ItemStack` (`count_first`) or an
@@ -69,52 +37,6 @@ pub(super) fn read_item_and_count(
         let item = var_u32(cur)?;
         Some((item, var_i32(cur).filter(|&count| count != 0)?))
     }
-}
-
-/// Remaps an item stack's component patch into the native registry space.
-/// `old_profile` marks the pre-1.21.9 `profile` component layout (see
-/// [`translate_old_profile`]). `None` means a component payload the walker
-/// doesn't know (or a malformed patch).
-pub(super) fn translate_component_patch(
-    cur: &mut Cursor<&[u8]>,
-    out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-    old_profile: bool,
-) -> Option<()> {
-    let added_at = cur.position() as usize;
-    let added = var_u32(cur)?;
-    out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
-    let removed_at = cur.position() as usize;
-    let removed = var_u32(cur)?;
-    out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
-    for _ in 0..added {
-        let component = var_u32(cur)?;
-        let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
-        wire::write_varint(out, native);
-        let value_at = cur.position() as usize;
-        match native {
-            COMPONENT_MAP_ID => {
-                varint_span(cur)?;
-            }
-            COMPONENT_PROFILE if old_profile => {
-                translate_old_profile(cur, out)?;
-                continue;
-            }
-            COMPONENT_PROFILE => {
-                Reader::on_cursor(cur, Profile::read).ok()?;
-            }
-            _ => return None,
-        }
-        out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
-    }
-    for _ in 0..removed {
-        let component = var_u32(cur)?;
-        wire::write_varint(
-            out,
-            remaps.remap(ClientRegistry::DataComponentType, component)?,
-        );
-    }
-    Some(())
 }
 
 impl ItemIds {
@@ -354,19 +276,4 @@ pub(super) fn translate_merchant_offers(
         out.extend_from_slice(&body);
         Some(())
     })
-}
-
-/// Copies a 26.3 component patch into native ids through 26.3's item
-/// grammar, dropping components the native version lacks or lays out
-/// differently.
-pub(super) fn copy_component_patch(
-    cur: &mut Cursor<&[u8]>,
-    out: &mut Vec<u8>,
-    remaps: &RegistryRemaps,
-) -> Option<()> {
-    let items = Items {
-        codec: ItemCodec::for_protocol(777)?,
-        remaps,
-    };
-    items.patch(cur, out)
 }

@@ -12,8 +12,8 @@ const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
 /// All versions the client can be launched as, newest first. Snapshot
 /// protocol numbers encode as `(1 << 30) | snapshot_counter`.
 pub const VERSIONS: &[ProtocolVersion] = &[
-    v("26.3", 777),
     NATIVE,
+    v("26.2", 776),
     v("26.1.2", 775),
     v("26.1.1", 775),
     v("26.1", 775),
@@ -44,7 +44,7 @@ pub const LATEST: ProtocolVersion = VERSIONS[0];
 /// The version the client speaks natively. Every other listed version is
 /// joined by translating its wire to and from this layout, whether it is
 /// older or newer.
-pub const NATIVE: ProtocolVersion = v("26.2", 776);
+pub const NATIVE: ProtocolVersion = v("26.3", 777);
 
 /// A version with embedded protocol data — the one place a version's
 /// generated tables get wired in. `version` names the reference dir the
@@ -62,14 +62,14 @@ pub(crate) struct EmbeddedVersion {
 
 pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
     EmbeddedVersion {
-        version: v("26.3", 777),
+        version: NATIVE,
         packets: include_str!("data/protocol-26.3.json"),
         registries: include_str!("data/registries-26.3.json"),
         entity_serializers: include_str!("data/entity-serializers-26.3.json"),
         known_packs: Some(include_str!("data/known-packs-26.3.json")),
     },
     EmbeddedVersion {
-        version: NATIVE,
+        version: v("26.2", 776),
         packets: include_str!("data/protocol-26.2.json"),
         registries: include_str!("data/registries-26.2.json"),
         entity_serializers: include_str!("data/entity-serializers-26.2.json"),
@@ -188,7 +188,7 @@ pub(crate) fn embedded_get<T>(
 /// embedded tables but no entry here (the staging state while its
 /// translation is built) pings with the right version but stays un-joinable.
 pub const TRANSLATED: &[i32] = &[
-    777, 775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
+    776, 775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
 ];
 
 /// Whether a server speaking `protocol` can be joined: the native version,
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn lookups() {
-        assert_eq!(NATIVE.protocol, 776);
+        assert_eq!(NATIVE.protocol, 777);
         assert_eq!(ProtocolVersion::from_name(NATIVE.name), Some(NATIVE));
         assert_eq!(ProtocolVersion::from_name("26.3").unwrap().protocol, 777);
         assert_eq!(ProtocolVersion::from_protocol(777).unwrap().name, "26.3");

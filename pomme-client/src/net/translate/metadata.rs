@@ -77,18 +77,12 @@ pub(super) fn translate_entity_data(
                 items.items(remaps).stack(&mut cur, &mut out)?;
                 continue;
             }
-            let walked = if ids.v765.is_some() {
-                translate_item_765(&mut cur, &mut out, ids.v763.is_some()).map(|()| true)
-            } else {
-                translate_item_stack(&mut cur, &mut out, remaps, ids.v772.is_some())
-            };
-            if walked == Some(true) {
+            // Without a grammar the version predates components (1.20.4).
+            if translate_item_765(&mut cur, &mut out, ids.v763.is_some()).is_some() {
                 continue;
             }
             tracing::debug!("Copying entity data tail verbatim past an item stack");
-            if walked.is_none() {
-                out.extend_from_slice(&payload[value_at..]);
-            }
+            out.extend_from_slice(&payload[value_at..]);
             return Some(out);
         }
         if new == 16 || new == 17 {
@@ -108,32 +102,14 @@ pub(super) fn translate_entity_data(
     Some(out)
 }
 
-/// Rewrites a pre-1.21.9 `profile` component value (optional name, optional
-/// uuid, property map) into 26.2's `ResolvableProfile`: an either bool
-/// picking full/partial profile — the old triple matches the partial arm
-/// byte for byte — plus a skin patch, empty here (four absent optionals).
-pub(super) fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    let value_at = cur.position() as usize;
-    skip_optional(cur, skip_utf)?; // name
-    skip_optional(cur, |c| advance(c, 16))?; // uuid
-    let properties = var_u32(cur)?;
-    for _ in 0..properties {
-        skip_utf(cur)?; // property name
-        skip_utf(cur)?; // value
-        skip_optional(cur, skip_utf)?; // signature
-    }
-    out.push(0); // either: the partial-profile arm
-    out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
-    out.extend_from_slice(&[0; 4]); // empty PlayerSkin.Patch
-    Some(())
-}
-
 /// Advances past one entity-data value of the given native-version
 /// serializer (the caller remaps first). `Some(false)` means the value (and
 /// thus anything after it) can't be walked; `None` means the data is
 /// malformed.
 pub(super) fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
-    let Some(serializer) = pomme_protocol::entity_data::SERIALIZERS_26_2.get(serializer as usize)
+    let Some(serializer) = ItemCodec::native()
+        .entity_data_serializers()
+        .get(serializer as usize)
     else {
         return Some(false);
     };
@@ -141,7 +117,7 @@ pub(super) fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> O
 }
 
 /// Rewrites one particle (or, with `list`, a counted particle list):
-/// each type id is remapped into 26.2's space, a color payload
+/// each type id is remapped into the native space, a color payload
 /// (`entity_effect`/`tinted_leaves`, an ARGB int on wire versions that have
 /// it) is copied through, and payload-less particles pass bare. `None` (a
 /// particle 26.2 dropped, or a payload the walker can't rewrite) fails the
@@ -175,11 +151,11 @@ pub(super) fn translate_particles(
                 out.extend_from_slice(&cur.get_ref()[color_at..cur.position() as usize]);
             }
             n if PAYLOAD_PARTICLES.contains(&n) => {
-                if ids.v777.is_none() {
+                if !ids.sized_particle_payloads {
                     tracing::debug!("Dropping a packet with an untranslatable {n} particle");
                     return None;
                 }
-                copy_particle_payload(cur, out, n, remaps)?;
+                copy_particle_payload(cur, out, n, ids, remaps)?;
             }
             _ => {}
         }
@@ -187,15 +163,15 @@ pub(super) fn translate_particles(
     Some(())
 }
 
-/// Copies one 26.3 particle payload through (`net/minecraft/core/particles`
-/// option codecs, byte-identical to 26.2's): block states stay in wire space
-/// like every block id pomme reads, and an `item`'s ids are remapped. `None`
-/// for a payload that can't be sized (an item component the native version
-/// lacks).
+/// Copies one 26.2 particle payload through (`net/minecraft/core/particles`
+/// option codecs, byte-identical to 26.3's): block states stay in wire space
+/// like every block id pomme reads, and an `item` goes through the wire
+/// version's item grammar. `None` for a payload that can't be sized.
 pub(super) fn copy_particle_payload(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     name: &str,
+    ids: &GameIds,
     remaps: &RegistryRemaps,
 ) -> Option<()> {
     let at = cur.position() as usize;
@@ -227,7 +203,7 @@ pub(super) fn copy_particle_payload(
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
             let count = varint_span(cur)?;
             out.extend_from_slice(&cur.get_ref()[count]);
-            return copy_component_patch(cur, out, remaps);
+            return ids.items.as_ref()?.items(remaps).patch(cur, out);
         }
         _ => return None,
     }

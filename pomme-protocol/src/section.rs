@@ -511,7 +511,7 @@ mod tests {
             container.get_and_set(x, y, z, i + 1, block_states());
         }
         assert_eq!(container.palette, Palette::Global);
-        assert_eq!(container.storage.bits, 15);
+        assert_eq!(container.storage.bits, ceil_log2(block_states()));
         for i in 0..300u32 {
             let (x, y, z) = (i % 16, i / 256, (i / 16) % 16);
             assert_eq!(container.get(x, y, z), i + 1);

@@ -165,10 +165,18 @@ pub struct RegistryRemaps {
 /// Entry renames name-matching can't bridge, applied both directions
 /// (26.x renamed the chain item to iron_chain, 1.20.3 renamed the grass
 /// block/item to short_grass, 26.2 the color argument type to team_color).
+/// 26.3 split the swing_animation component into attack_animation and
+/// interact_animation; the first stands for it here, and the item grammar
+/// adds the second.
 const RENAMED: &[(ClientRegistry, &str, &str)] = &[
     (ClientRegistry::Item, "chain", "iron_chain"),
     (ClientRegistry::Item, "grass", "short_grass"),
     (ClientRegistry::CommandArgumentType, "color", "team_color"),
+    (
+        ClientRegistry::DataComponentType,
+        "swing_animation",
+        "attack_animation",
+    ),
 ];
 
 impl RegistryRemaps {
@@ -176,25 +184,29 @@ impl RegistryRemaps {
     /// inbound packets), or `None` for versions without an embedded registry
     /// table. For the native version itself this is an identity map.
     pub fn to_native(protocol: i32) -> Option<&'static RegistryRemaps> {
-        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
-            [const { OnceLock::new() }; EMBEDDED.len()];
-        crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(Self::embedded_table(protocol), RegistryTable::native())
-        })
+        Self::between(protocol, crate::version::NATIVE.protocol)
     }
 
     /// Remaps from the native version's id space to `protocol`'s (for
     /// outbound packets); the mirror of [`Self::to_native`].
     pub fn from_native(protocol: i32) -> Option<&'static RegistryRemaps> {
-        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
-            [const { OnceLock::new() }; EMBEDDED.len()];
-        crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(RegistryTable::native(), Self::embedded_table(protocol))
-        })
+        Self::between(crate::version::NATIVE.protocol, protocol)
     }
 
-    fn embedded_table(protocol: i32) -> &'static RegistryTable {
-        RegistryTable::for_protocol(protocol).expect("embedded registry table")
+    /// Remaps from `from`'s id space to `to`'s, or `None` unless both have
+    /// an embedded registry table.
+    pub fn between(from: i32, to: i32) -> Option<&'static RegistryRemaps> {
+        static REMAPS: [[OnceLock<RegistryRemaps>; EMBEDDED.len()]; EMBEDDED.len()] =
+            [const { [const { OnceLock::new() }; EMBEDDED.len()] }; EMBEDDED.len()];
+        let (from, to) = (
+            crate::version::embedded_index(from)?,
+            crate::version::embedded_index(to)?,
+        );
+        let table = |index: usize| {
+            RegistryTable::for_protocol(EMBEDDED[index].version.protocol)
+                .expect("embedded registry table")
+        };
+        Some(REMAPS[from][to].get_or_init(|| Self::build(table(from), table(to))))
     }
 
     fn build(from: &RegistryTable, to: &RegistryTable) -> Self {
@@ -348,80 +360,74 @@ mod tests {
         }
     }
 
-    /// Anchor checks against the 26.3 -> 26.2 registry diff, the first remap
-    /// from a version newer than native (spot-checked by hand against the two
-    /// data-generator reports). Entries 26.3 added have no native id; ids
-    /// below each insertion are stable.
+    /// Anchor checks against the 26.2 -> 26.3 registry diff (spot-checked by
+    /// hand against the two data-generator reports). Every 26.2 entry but
+    /// `map_color` has a 26.3 id; the entries 26.3 added have none going
+    /// back, and ids below each insertion are stable.
     #[test]
-    fn remap_26_3_anchors() {
-        let (r, from, to) = setup(777);
+    fn remap_26_2_anchors() {
+        let (r, from, to) = setup(776);
+        let back = RegistryRemaps::from_native(776).unwrap();
 
         // cushion was inserted at entity id 33, the poplar boats at 106.
-        assert_eq!(
-            from.name_of(ClientRegistry::EntityType, 33),
-            Some("cushion")
-        );
+        assert_eq!(to.name_of(ClientRegistry::EntityType, 33), Some("cushion"));
         assert_eq!(r.remap(ClientRegistry::EntityType, 32), Some(32));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 34), Some(33));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 160), Some(157));
-        assert_unmapped(r, from, ClientRegistry::EntityType, "cushion");
+        assert_eq!(r.remap(ClientRegistry::EntityType, 33), Some(34));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 157), Some(160));
+        assert_unmapped(back, to, ClientRegistry::EntityType, "cushion");
 
         // Items diverge at poplar_planks (72).
         assert_eq!(r.remap(ClientRegistry::Item, 71), Some(71));
-        assert_unmapped(r, from, ClientRegistry::Item, "poplar_planks");
-        assert_eq!(r.remap(ClientRegistry::Item, 73), Some(72));
-        assert_eq!(r.remap(ClientRegistry::Item, 1657), Some(1536));
+        assert_unmapped(back, to, ClientRegistry::Item, "poplar_planks");
+        assert_eq!(r.remap(ClientRegistry::Item, 72), Some(73));
+        assert_eq!(r.remap(ClientRegistry::Item, 1536), Some(1657));
 
         // The three poplar leaf particles sit where tinted_leaves was (43).
         assert_eq!(r.remap(ClientRegistry::ParticleType, 42), Some(42));
-        assert_unmapped(r, from, ClientRegistry::ParticleType, "red_poplar_leaves");
-        assert_eq!(r.remap(ClientRegistry::ParticleType, 46), Some(43));
+        assert_unmapped(back, to, ClientRegistry::ParticleType, "red_poplar_leaves");
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 43), Some(46));
 
-        // 26.3 replaced swing_animation (26.2's 40) with attack_animation and
-        // interact_animation, inserted block_transformer and villager_food at
-        // 43 and compostable, cooking_fuel, brewing_fuel and mob_visibility
-        // after break_sound, dropped map_color (26.2's 45), and appended
-        // provides_pottery_pattern through cushion/color, so component ids
-        // diverge from 40.
-        assert_eq!(
-            to.name_of(ClientRegistry::DataComponentType, 40),
-            Some("swing_animation")
-        );
+        // 26.3 split swing_animation (26.2's 40) into attack_animation, which
+        // stands for it, and interact_animation, inserted block_transformer
+        // and villager_food at 43 and compostable, cooking_fuel, brewing_fuel
+        // and mob_visibility after break_sound, dropped map_color (26.2's
+        // 45), and appended provides_pottery_pattern through cushion/color,
+        // so component ids diverge from 41.
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 39), Some(39));
-        assert_unmapped(
-            r,
-            from,
-            ClientRegistry::DataComponentType,
-            "attack_animation",
-        );
-        for (wire, native, name) in [
-            (42, 41, "additional_trade_cost"),
-            (45, 42, "stored_enchantments"),
-            (48, 46, "map_id"),
-            (72, 70, "profile"),
-            (116, 110, "shulker/color"),
+        for (wire, native, name, native_name) in [
+            (40, 40, "swing_animation", "attack_animation"),
+            (41, 42, "additional_trade_cost", "additional_trade_cost"),
+            (42, 45, "stored_enchantments", "stored_enchantments"),
+            (46, 48, "map_id", "map_id"),
+            (70, 72, "profile", "profile"),
+            (110, 116, "shulker/color", "shulker/color"),
         ] {
             assert_eq!(
                 from.name_of(ClientRegistry::DataComponentType, wire),
                 Some(name)
             );
             assert_eq!(
+                to.name_of(ClientRegistry::DataComponentType, native),
+                Some(native_name)
+            );
+            assert_eq!(
                 r.remap(ClientRegistry::DataComponentType, wire),
                 Some(native)
             );
         }
+        assert_unmapped(r, from, ClientRegistry::DataComponentType, "map_color");
         assert_unmapped(
-            RegistryRemaps::from_native(from.version().protocol).unwrap(),
+            back,
             to,
             ClientRegistry::DataComponentType,
-            "map_color",
+            "interact_animation",
         );
 
         // Four cushion sounds were inserted at 492; the other 19 are appended.
         assert_eq!(r.remap(ClientRegistry::SoundEvent, 491), Some(491));
-        assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.cushion.break");
-        assert_eq!(r.remap(ClientRegistry::SoundEvent, 496), Some(492));
-        assert_eq!(r.remap(ClientRegistry::SoundEvent, 1990), None);
+        assert_unmapped(back, to, ClientRegistry::SoundEvent, "entity.cushion.break");
+        assert_eq!(r.remap(ClientRegistry::SoundEvent, 492), Some(496));
+        assert_eq!(back.remap(ClientRegistry::SoundEvent, 1990), None);
 
         for reg in [
             ClientRegistry::Attribute,
@@ -449,8 +455,8 @@ mod tests {
             from.name_of(ClientRegistry::EntityType, 130),
             Some("tadpole")
         );
-        assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(129));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(131));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(132));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(134));
 
         assert_bed_unmapped(r, from);
 
@@ -484,8 +490,8 @@ mod tests {
             from.name_of(ClientRegistry::EntityType, 130),
             Some("tadpole")
         );
-        assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(129));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(131));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(132));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(134));
 
         assert_bed_unmapped(r, from);
 
@@ -501,7 +507,7 @@ mod tests {
             Some("stored_enchantments")
         );
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 40), Some(40));
-        assert_eq!(r.remap(ClientRegistry::DataComponentType, 41), Some(42));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 41), Some(45));
 
         assert_round_trips(r, from, to);
     }
@@ -515,7 +521,7 @@ mod tests {
         let (r, from, to) = setup(773);
 
         assert_pre_1_21_11_anchors(r, from);
-        assert_eq!(r.remap(ClientRegistry::EntityType, 127), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 127), Some(134)); // tadpole
         assert_bed_unmapped(r, from);
 
         assert_round_trips(r, from, to);
@@ -531,7 +537,7 @@ mod tests {
         let (r, from, to) = setup(772);
 
         assert_pre_1_21_11_anchors(r, from);
-        assert_eq!(r.remap(ClientRegistry::EntityType, 125), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 125), Some(134)); // tadpole
         assert_bed_unmapped(r, from);
 
         assert_chain_remapped(r, from);
@@ -567,7 +573,7 @@ mod tests {
             from.name_of(ClientRegistry::Item, 1256),
             Some("music_disc_mall")
         );
-        assert_eq!(r.remap(ClientRegistry::Item, 1256), Some(1348));
+        assert_eq!(r.remap(ClientRegistry::Item, 1256), Some(1469));
 
         assert_round_trips(r, from, to);
     }
@@ -582,7 +588,7 @@ mod tests {
         let (r, from, to) = setup(770);
 
         assert_pre_1_21_11_anchors(r, from);
-        assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(134)); // tadpole
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
         for sound in ["block.sand.wind", "entity.leash_knot.break"] {
@@ -604,7 +610,7 @@ mod tests {
         let (r, from, to) = setup(769);
 
         assert_pre_1_21_11_anchors(r, from);
-        assert_eq!(r.remap(ClientRegistry::EntityType, 123), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 123), Some(134)); // tadpole
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
@@ -625,7 +631,7 @@ mod tests {
         let (r, from, to) = setup(768);
 
         assert_pre_1_21_11_anchors(r, from);
-        assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(134)); // tadpole
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
@@ -651,7 +657,7 @@ mod tests {
 
         assert_eq!(from.name_of(ClientRegistry::EntityType, 15), Some("cat"));
         assert_eq!(r.remap(ClientRegistry::EntityType, 15), Some(21));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 104), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 104), Some(134)); // tadpole
 
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
@@ -700,14 +706,14 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(23));
 
         assert_eq!(from.name_of(ClientRegistry::Item, 173), Some("grass"));
-        assert_eq!(to.name_of(ClientRegistry::Item, 229), Some("short_grass"));
-        assert_eq!(r.remap(ClientRegistry::Item, 173), Some(229));
+        assert_eq!(to.name_of(ClientRegistry::Item, 238), Some("short_grass"));
+        assert_eq!(r.remap(ClientRegistry::Item, 173), Some(238));
         assert_eq!(r.remap(ClientRegistry::Item, 1), Some(1)); // stone
 
         assert_eq!(from.name_of(ClientRegistry::EntityType, 11), Some("cat"));
         assert_eq!(r.remap(ClientRegistry::EntityType, 11), Some(21));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 99), Some(131)); // tadpole
-        assert_eq!(r.remap(ClientRegistry::ParticleType, 48), Some(66)); // poof
+        assert_eq!(r.remap(ClientRegistry::EntityType, 99), Some(134)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 48), Some(69)); // poof
 
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
@@ -746,7 +752,7 @@ mod tests {
 
         assert_eq!(from.name_of(ClientRegistry::EntityType, 12), Some("cat"));
         assert_eq!(r.remap(ClientRegistry::EntityType, 12), Some(21));
-        assert_eq!(r.remap(ClientRegistry::EntityType, 100), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::EntityType, 100), Some(134)); // tadpole
 
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);

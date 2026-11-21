@@ -83,7 +83,6 @@ pub fn value_of(kind: DataComponentKind, bytes: &[u8], names: &dyn Names) -> Opt
         Damage,
         Unbreakable,
         DyedColor,
-        MapColor,
         Rarity,
         Dye,
         CustomName,
@@ -350,6 +349,7 @@ mod tests {
             }
             nth!(
                 BannerPatternKind,
+                BlockTransformer,
                 CatSoundVariant,
                 CatVariant,
                 ChickenSoundVariant,
@@ -357,6 +357,7 @@ mod tests {
                 CowSoundVariant,
                 CowVariant,
                 DamageKind,
+                DecoratedPotPattern,
                 Enchantment,
                 FrogVariant,
                 Instrument,
@@ -384,7 +385,7 @@ mod tests {
             assert_eq!(value.hash().as_i32(), expected, "{item}'s {kind}");
             kinds.insert(kind);
         }
-        assert_eq!(kinds.len(), 59);
+        assert_eq!(kinds.len(), 69);
     }
 
     /// The codec oracle's registries, of which the fixtures use an entry each.
@@ -418,7 +419,6 @@ mod tests {
             ("equippable", "equippable"),
             ("firework_explosion", "firework_explosion"),
             ("lore", "lore"),
-            ("map_color", "map_color"),
             ("potion_contents", "potion_contents"),
             ("profile", "profile"),
             ("tooltip_display", "tooltip_display"),
@@ -439,7 +439,8 @@ mod tests {
             ("weapon", "weapon"),
             ("attack_range", "attack_range"),
             ("piercing_weapon", "piercing_weapon"),
-            ("swing_animation", "swing_animation"),
+            ("attack_animation", "attack_animation"),
+            ("interact_animation", "interact_animation"),
             ("repairable", "repairable"),
             ("use_remainder", "use_remainder"),
             ("death_protection", "death_protection"),
@@ -522,7 +523,6 @@ mod tests {
         use pomme_registry::{Holder, Identifier};
 
         assert_eq!(fixture::<DyedColor>("dyed_color").rgb, 0x12_34_56);
-        assert_eq!(fixture::<MapColor>("map_color").color, 0x46_40_2e);
         fixture::<Unbreakable>("unbreakable");
 
         let name = fixture::<CustomName>("custom_name")
@@ -638,8 +638,7 @@ mod tests {
         else {
             panic!("an inline material and pattern, got {trim:?}");
         };
-        assert_eq!(material.assets.base_suffix, "test");
-        assert!(material.assets.overrides.is_empty());
+        assert_eq!(material.palette_id.to_string(), "minecraft:test");
         assert_eq!(plain(&material.description), "Test Material");
         assert_eq!(pattern.asset_id.to_string(), "minecraft:test");
         assert_eq!(plain(&pattern.description), "Test Trim");
@@ -683,7 +682,6 @@ mod tests {
 
         round_trips(&Unbreakable);
         round_trips(&DyedColor { rgb: 0x12_34_56 });
-        round_trips(&MapColor { color: -1 });
         round_trips(&CustomName {
             name: Text::literal("Excalibur"),
         });

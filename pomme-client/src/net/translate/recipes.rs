@@ -1,6 +1,15 @@
 use super::*;
 
 impl Translation {
+    /// What the recipe rewrites need, on a version with recipe displays.
+    pub(super) fn recipe_ctx(&self) -> Option<RecipeCtx<'_>> {
+        Some(RecipeCtx {
+            remaps: self.to_native,
+            layout: self.recipe_layout?,
+            items: self.item_grammar()?,
+        })
+    }
+
     pub(super) fn recipe_translator(&self, id: u32) -> Option<RecipeTranslator> {
         if id == self.recipe_book_add_id {
             Some(translate_recipe_book_add)
@@ -144,8 +153,8 @@ pub(super) fn translate_slot_display(
     let source = var_u32(cur)?;
     let display = ctx.remaps.remap(ClientRegistry::SlotDisplay, source)?;
     if display == SMITHING_TRIM_DISPLAY && ctx.layout.trim_pattern_display {
-        // 26.2 can't name a trim pattern by its template item, so keep the
-        // untrimmed base: the nearest display it can carry.
+        // No later version names a trim pattern by its template item, so keep the
+        // untrimmed base: the nearest display the native version can carry.
         nested(cur, out)?;
         let mut discarded = Vec::new();
         nested(cur, &mut discarded)?; // material
@@ -172,7 +181,12 @@ pub(super) fn translate_slot_display(
             Some(())
         }
         5 => translate_item_stack_template(cur, out, ctx),
-        6 => copy_utf(cur, out), // tag resource location
+        6 => {
+            // tag: 26.3 reads a `HolderSet`, whose named form is a zero
+            // ahead of the tag id every older version sent.
+            out.push(0);
+            copy_utf(cur, out)
+        }
         7 | 9 => {
             // dyed (dye, target), with_remainder (input, remainder)
             nested(cur, out)?;

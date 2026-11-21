@@ -895,9 +895,8 @@ async fn game_loop(
             // server on a bounded pipe can deadlock; split the writer out.
             tokio::select! {
                 Some(out) = outbound_rx.recv() => {
-                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)? {
-                        write_game_frame(&mut conn.writer, translation, frame).await?;
-                    }
+                    write_outbound(&mut conn.writer, out, translation, &mut chat, &shared_tree)
+                        .await?;
                     continue;
                 }
                 Some(key_pair) = key_pair_rx.recv() => {
@@ -973,10 +972,8 @@ async fn game_loop(
                 // miss this ack; the next login resets the tracker anyway.
                 send_ordered(event_tx, NetworkEvent::Reconfiguring);
                 while let Ok(out) = outbound_rx.try_recv() {
-                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)?
-                    {
-                        write_game_frame(&mut conn.writer, translation, frame).await?;
-                    }
+                    write_outbound(&mut conn.writer, out, translation, &mut chat, &shared_tree)
+                        .await?;
                 }
                 if let Some(frame) = chat.flush_ack() {
                     write_game_frame(&mut conn.writer, translation, frame).await?;
@@ -1038,7 +1035,28 @@ async fn game_loop(
 pub(super) const START_CONFIGURATION: super::RawRead<()> =
     |name, _| (name == "start_configuration").then_some(Ok(()));
 
-/// The frame one queued outbound item writes, if any.
+/// Writes what one queued outbound item sends, if anything.
+async fn write_outbound(
+    writer: &mut RawWriter,
+    out: Outbound,
+    translation: Option<&super::translate::TranslationSession>,
+    chat: &mut ChatSender,
+    tree: &crate::net::commands::SharedCommandTree,
+) -> Result<(), ConnectionError> {
+    if let Outbound::UseSwing(hand) = out {
+        // Already the wire version's frame: the native one has no such packet.
+        if let Some(frame) = translation.and_then(|t| t.use_swing_frame(hand)) {
+            writer.write(&frame).await?;
+        }
+        return Ok(());
+    }
+    if let Some(frame) = outbound_frame(out, translation, chat, tree)? {
+        write_game_frame(writer, translation, frame).await?;
+    }
+    Ok(())
+}
+
+/// The native-layout frame one queued outbound item writes, if any.
 fn outbound_frame(
     out: Outbound,
     translation: Option<&super::translate::TranslationSession>,
@@ -1065,6 +1083,7 @@ fn outbound_frame(
             None
         }
         Outbound::ChatMark(mark) => chat.mark(*mark),
+        Outbound::UseSwing(_) => None,
         Outbound::CustomClick { id, payload } => {
             custom_click_frame(Phase::Game, &id, payload.as_ref())
         }

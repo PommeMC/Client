@@ -32,7 +32,7 @@ just ingame-server                         # prints the port; offline mode
 just android-install                       # builds the APK and installs it
 just android-push-assets                   # optional: copy a desktop install's assets
                                            # instead of downloading them
-just android-config --version 26.2 --username Tester \
+just android-config --version 26.3 --username Tester \
     --quick-access-multiplayer 10.0.2.2:<port>
 just android-run
 just android-log                           # logcat, filtered to pomme

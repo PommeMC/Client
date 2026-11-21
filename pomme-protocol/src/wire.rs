@@ -31,7 +31,7 @@ pub fn encode_attack(entity_id: i32) -> Vec<u8> {
     buf
 }
 
-/// Vanilla 26.2 `ServerboundPickItemFromBlockPacket`: packed BlockPos then
+/// Vanilla 26.3 `ServerboundPickItemFromBlockPacket`: packed BlockPos then
 /// whether Ctrl requested block-entity/component data.
 pub fn encode_pick_item_from_block(x: i32, y: i32, z: i32, include_data: bool) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -50,7 +50,7 @@ pub fn write_block_pos(buf: &mut Vec<u8>, (x, y, z): (i32, i32, i32)) {
     buf.extend_from_slice(&packed.to_be_bytes());
 }
 
-/// Vanilla 26.2 `ServerboundPickItemFromEntityPacket`: entity VarInt then
+/// Vanilla 26.3 `ServerboundPickItemFromEntityPacket`: entity VarInt then
 /// the Ctrl/include-data flag.
 pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -60,7 +60,7 @@ pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u
     buf
 }
 
-/// Vanilla 26.2 `ServerboundPlaceRecipePacket`: container id, recipe display
+/// Vanilla 26.3 `ServerboundPlaceRecipePacket`: container id, recipe display
 /// id, then whether Shift requested the maximum craftable amount.
 pub fn encode_place_recipe(
     container_id: i32,
@@ -85,7 +85,7 @@ pub enum RecipeBookType {
     Smoker = 3,
 }
 
-/// Vanilla 26.2 `ServerboundRecipeBookChangeSettingsPacket`.
+/// Vanilla 26.3 `ServerboundRecipeBookChangeSettingsPacket`.
 pub fn encode_recipe_book_change_settings(
     kind: RecipeBookType,
     open: bool,
@@ -99,7 +99,7 @@ pub fn encode_recipe_book_change_settings(
     buf
 }
 
-/// Vanilla 26.2 `ServerboundRecipeBookSeenRecipePacket`.
+/// Vanilla 26.3 `ServerboundRecipeBookSeenRecipePacket`.
 pub fn encode_recipe_book_seen_recipe(recipe_display_id: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("recipe_book_seen_recipe"));
@@ -329,13 +329,13 @@ mod tests {
 
     #[test]
     fn recipe_book_packet_layouts() {
-        // Packet ids come from the native 26.2 serverbound table.
+        // Packet ids come from the native 26.3 serverbound table.
         assert_eq!(encode_place_recipe(7, 300, true), [0x27, 7, 0xac, 0x02, 1]);
         assert_eq!(
             encode_recipe_book_change_settings(RecipeBookType::BlastFurnace, true, false),
-            [0x2e, 2, 1, 0]
+            [0x2f, 2, 1, 0]
         );
-        assert_eq!(encode_recipe_book_seen_recipe(300), [0x2f, 0xac, 0x02]);
+        assert_eq!(encode_recipe_book_seen_recipe(300), [0x30, 0xac, 0x02]);
     }
 
     /// The vectors vanilla's encoder wrote into the entity fixtures

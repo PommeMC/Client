@@ -8,9 +8,10 @@ use pomme_registry::builtin::{
     BlockEntityKind, DataComponentKind, EntityKind, ItemKind, MobEffect, VillagerKind,
 };
 use pomme_registry::data::{
-    BannerPatternKind, CatSoundVariant, CatVariant, ChickenSoundVariant, ChickenVariant,
-    CowSoundVariant, CowVariant, DamageKind, FrogVariant, Instrument, JukeboxSong, PaintingVariant,
-    PigSoundVariant, PigVariant, WolfSoundVariant, WolfVariant, ZombieNautilusVariant,
+    BannerPatternKind, BlockTransformer, CatSoundVariant, CatVariant, ChickenSoundVariant,
+    ChickenVariant, CowSoundVariant, CowVariant, DamageKind, DecoratedPotPattern, FrogVariant,
+    Instrument, JukeboxSong, PaintingVariant, PigSoundVariant, PigVariant, WolfSoundVariant,
+    WolfVariant, ZombieNautilusVariant,
 };
 use pomme_registry::{DataRegistry, Identifier};
 
@@ -69,7 +70,7 @@ fn filterable(
 ) -> DecodeResult<Option<Value>> {
     let raw = read(r)?;
     let filtered = r.optional(&read)?;
-    let Some(filtered) = filtered.map_or(Some(None), |filtered| filtered.map(Some)) else {
+    let Some(filtered) = optional_form(filtered) else {
         return Ok(None);
     };
     Ok(raw.map(|raw| {
@@ -78,6 +79,33 @@ fn filterable(
             .optional("filtered", filtered)
             .build()
     }))
+}
+
+/// `ResolvableInt.CODEC` and `ResolvableFloat.CODEC`: a constant, read by
+/// `constant`, or the key of a provider that gives one.
+fn resolvable(
+    r: &mut Reader,
+    constant: impl FnOnce(&mut Reader) -> DecodeResult<Value>,
+) -> DecodeResult<Value> {
+    if r.bool()? {
+        constant(r)
+    } else {
+        Ok(Value::identifier(&identifier(r)?))
+    }
+}
+
+fn resolvable_int(r: &mut Reader) -> DecodeResult<Value> {
+    resolvable(r, |r| Ok(Value::Int(r.i32()?)))
+}
+
+fn resolvable_float(r: &mut Reader) -> DecodeResult<Value> {
+    resolvable(r, |r| Ok(Value::Float(r.f32()?)))
+}
+
+/// An optional part's form, when it is absent or has one: `None` only for a
+/// part that is there with something this has no form for.
+fn optional_form(part: Option<Option<Value>>) -> Option<Option<Value>> {
+    part.map_or(Some(None), |form| form.map(Some))
 }
 
 /// A string of at most `max` bytes, for [`filterable`].
@@ -111,8 +139,9 @@ fn read(kind: DataComponentKind, r: &mut Reader, names: &dyn Names) -> DecodeRes
         Kind::EnchantmentGlintOverride => Value::Bool(r.bool()?),
         Kind::PotionDurationScale => Value::Float(r.f32()?),
         // `Unit.CODEC`.
-        Kind::Glider => Record::new().build(),
+        Kind::Glider | Kind::Waxed => Record::new().build(),
         Kind::BaseColor
+        | Kind::CushionColor
         | Kind::WolfCollar
         | Kind::CatCollar
         | Kind::SheepColor
@@ -194,7 +223,7 @@ fn read(kind: DataComponentKind, r: &mut Reader, names: &dyn Names) -> DecodeRes
             .optional("sound", r.optional(sound)?.as_ref().map(sound_value))
             .optional("hit_sound", r.optional(sound)?.as_ref().map(sound_value))
             .build(),
-        Kind::SwingAnimation => {
+        Kind::AttackAnimation | Kind::InteractAnimation => {
             // `SwingAnimationType`, and `SwingAnimation.DEFAULT`'s whack.
             let kind = match r.varint()? {
                 1 => "whack",
@@ -237,7 +266,15 @@ fn read(kind: DataComponentKind, r: &mut Reader, names: &dyn Names) -> DecodeRes
                 .build()
         }
         Kind::PotDecorations => {
-            Value::list(r.list(4, registry::<ItemKind>)?.iter().map(entry_value))
+            let mut record = Record::new();
+            for side in ["back", "left", "right", "front"] {
+                match r.optional(template)? {
+                    Some(Some(item)) => record = record.field(side, item),
+                    Some(None) => return Ok(None),
+                    None => {}
+                }
+            }
+            record.build()
         }
         Kind::Container => {
             // `ItemContainerContents.asSlots`: each filled slot with its
@@ -358,6 +395,49 @@ fn read(kind: DataComponentKind, r: &mut Reader, names: &dyn Names) -> DecodeRes
         | Kind::DebugStickState
         | Kind::Recipes
         | Kind::ContainerLoot => return nbt(r),
+        Kind::Compostable => Record::new().field("layers", resolvable_int(r)?).build(),
+        Kind::CookingFuel => Record::new()
+            .field("burn_time", resolvable_int(r)?)
+            .field("speed_multiplier", resolvable_float(r)?)
+            .build(),
+        Kind::BrewingFuel => Record::new()
+            .field("uses", resolvable_int(r)?)
+            .field("speed_multiplier", resolvable_float(r)?)
+            .build(),
+        Kind::VillagerFood => Record::new()
+            .field("nutrition", Value::Int(r.var_i32()?))
+            .build(),
+        Kind::MobVisibility => Record::new()
+            .field(
+                "targeting_entity_types",
+                entries_value(&holder_set::<EntityKind>(r)?),
+            )
+            .field("visibility", Value::Float(r.f32()?))
+            .build(),
+        Kind::BlockTransformer => return data_entry::<BlockTransformer>(r, names),
+        Kind::ProvidesPotteryPattern => return data_entry::<DecoratedPotPattern>(r, names),
+        Kind::SignTextFront | Kind::SignTextBack => {
+            let lines = |r: &mut Reader| -> DecodeResult<Option<Value>> {
+                let lines = [(); 4].map(|()| Text::read(r).map(|line| line.value()));
+                let lines: DecodeResult<Vec<_>> = lines.into_iter().collect();
+                Ok(Value::try_list(lines?))
+            };
+            let messages = lines(r)?;
+            let filtered = r.optional(lines)?;
+            let color = DyeColor::read_id(r)?.name_value();
+            let glowing = r.bool()?;
+            let (Some(messages), Some(filtered)) = (messages, optional_form(filtered)) else {
+                return Ok(None);
+            };
+            // `optionalAlwaysPresentFieldOf`: the colour and the flag are
+            // written even at their defaults.
+            Record::new()
+                .field("messages", messages)
+                .optional("filtered_messages", filtered)
+                .field("color", color)
+                .field("has_glowing_text", Value::Bool(glowing))
+                .build()
+        }
         _ => return Ok(None),
     }))
 }

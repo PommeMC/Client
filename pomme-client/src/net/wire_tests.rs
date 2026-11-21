@@ -163,6 +163,11 @@ fn game_frame(direction: Direction, name: &str, case: &str) -> Vec<u8> {
 
 /// The event pomme's raw handler sends for fixture `case` of packet `name`.
 fn fixture_event(name: &str, case: &str) -> crate::net::NetworkEvent {
+    fixture_events(name, case).next().expect("an event")
+}
+
+/// Every event the raw handler sends for the fixture, which it must take.
+fn fixture_events(name: &str, case: &str) -> impl Iterator<Item = crate::net::NetworkEvent> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (took, _) = crate::net::handler::handle_raw_for_test(
         &fixture_frame(name, case),
@@ -170,7 +175,7 @@ fn fixture_event(name: &str, case: &str) -> crate::net::NetworkEvent {
         &tx,
     );
     assert!(took, "{case}");
-    rx.try_iter().next().expect("an event")
+    rx.into_iter()
 }
 
 /// Translates a hand-built old-version game frame and decodes the result
@@ -183,7 +188,7 @@ fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<
 }
 
 /// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
-/// A native 26.2 game frame for packet `name`, decoded with `read`.
+/// A native game frame for packet `name`, decoded with `read`.
 fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     read_frame(Phase::Game, frame, name, read)
 }
@@ -270,11 +275,11 @@ fn translate_login_finished_26_1() {
 #[test]
 fn translate_game_login_26_1() {
     let mut native = fixture_frame("login", "login/fresh");
-    // A 26.1 frame is the same bytes without the online_mode bool, which
-    // sits right before the trailing enforces_secure_chat bool.
+    // A 26.1 frame is 26.2's bytes without the online_mode bool, which sits
+    // right before the trailing enforces_secure_chat bool.
+    let mut old = frame_26_2(Direction::Clientbound, "login", "login/fresh");
+    old.remove(old.len() - 2);
     let online_mode = native.len() - 2;
-    let mut old = native.clone();
-    old.remove(online_mode);
 
     let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
@@ -297,7 +302,7 @@ fn translate_set_player_team_26_1() {
     let suffix: &[u8] = &[8, 0, 1, b'S'];
 
     let mut old = Vec::new();
-    old.push(team_id as u8);
+    old.push(old_id(775, Direction::Clientbound, "set_player_team") as u8);
     old.extend_from_slice(&[4, b'c', b'r', b'e', b'w']); // name
     old.push(2); // method: change (parameters, no player list)
     old.extend_from_slice(display);
@@ -335,7 +340,7 @@ fn translate_set_player_team_26_1_reset_color() {
     let component: &[u8] = &[8, 0, 1, b'x'];
 
     let mut old = Vec::new();
-    old.push(team_id as u8);
+    old.push(old_id(775, Direction::Clientbound, "set_player_team") as u8);
     old.extend_from_slice(&[1, b'a']); // name
     old.push(0); // method: add (parameters + player list)
     old.extend_from_slice(component);
@@ -418,16 +423,16 @@ fn registry_table_matches_the_registry_enums() {
     assert_eq!(mismatches, []);
 }
 
-/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
-/// numbering (ids past the sulfur_cube insertion shift by one); the remap
+/// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.3's
+/// numbering (later insertions shift it); the remap
 /// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
     use pomme_registry::Registry;
     use pomme_registry::builtin::EntityKind;
 
-    // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
-    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
+    // 26.1 tadpole is id 130, which 26.3 numbers as squid.
+    assert_eq!(EntityKind::from_u32(130), Some(EntityKind::Squid));
     let native =
         translation_for(775).remap_to_native(pomme_protocol::ClientRegistry::EntityType, 130);
     assert_eq!(
@@ -436,48 +441,43 @@ fn remap_add_entity_26_1() {
     );
 }
 
-/// A creative stack's component values can't be rewritten on a version
-/// without an item grammar, so a patch touching a component that version
-/// numbers differently is cleared wholesale outbound; unshifted ones survive.
+/// A creative stack reaches an older server in that version's ids: a
+/// component it numbers differently is renumbered, not dropped.
 #[test]
-fn strip_creative_components_774() {
+fn creative_slot_components_are_renumbered_774() {
     use pomme_protocol::item::{ComponentPatch, ItemStack};
     use pomme_protocol::serverbound::GamePacket;
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let component = |name| {
-        registry_id(
-            RegistryTable::native(),
-            ClientRegistry::DataComponentType,
-            name,
-        )
-    };
-    let remap = |name| {
-        let mut packet = GamePacket::SetCreativeModeSlot {
-            slot: 36,
-            stack: Some(ItemStack {
-                item: registry_id(RegistryTable::native(), ClientRegistry::Item, "stone"),
-                count: 1,
-                patch: ComponentPatch {
-                    added: Vec::new(),
-                    removed: vec![component(name)],
-                },
-            }),
-        };
-        translation_for(774).remap_outbound(&mut packet);
-        let GamePacket::SetCreativeModeSlot { stack, .. } = packet else {
-            unreachable!()
-        };
-        stack.expect("stack cleared").patch
-    };
-
-    // max_stack_size is numbered the same in 1.21.11: kept.
-    assert_eq!(
-        remap("max_stack_size").removed,
-        [component("max_stack_size")]
+    let id = |table, registry, name| registry_id(table, registry, name);
+    let (native, old) = (
+        RegistryTable::native(),
+        RegistryTable::for_protocol(774).unwrap(),
     );
-    // lock is shifted in 1.21.11: the patch is cleared.
-    assert_eq!(remap("lock"), ComponentPatch::default());
+    let lock = ClientRegistry::DataComponentType;
+    assert_ne!(id(native, lock, "lock"), id(old, lock, "lock"));
+
+    let packet = GamePacket::SetCreativeModeSlot {
+        slot: 36,
+        stack: Some(ItemStack {
+            item: id(native, ClientRegistry::Item, "stone"),
+            count: 1,
+            patch: ComponentPatch {
+                added: Vec::new(),
+                removed: vec![id(native, lock, "lock")],
+            },
+        }),
+    };
+    let mut expected = vec![old_id(774, Direction::Serverbound, "set_creative_mode_slot") as u8];
+    expected.extend(36i16.to_be_bytes());
+    expected.push(1); // count
+    wire::write_varint(&mut expected, id(old, ClientRegistry::Item, "stone"));
+    expected.extend([0, 1]); // none added, one removed
+    wire::write_varint(&mut expected, id(old, lock, "lock"));
+    assert_eq!(
+        translation_for(774).translate_outbound_game_frame(packet.encode()),
+        [expected]
+    );
 }
 
 /// 1.20.5 to 1.21.4 read a creative stack's component values without the
@@ -588,11 +588,10 @@ fn translate_empty_entity_particles_774() {
     assert_eq!(entity_data_bytes(774, &values), values);
 }
 
-/// A stack component the walker doesn't know falls back to the verbatim-tail
-/// copy instead of dropping the packet. `damage` (id 3 in both 774 and the
-/// native registry, varint payload) keeps the verbatim bytes decodable.
+/// An entity-data stack goes through the wire version's item grammar, with
+/// its components.
 #[test]
-fn translate_entity_item_stack_fallback_774() {
+fn translate_entity_item_stack_774() {
     // index 5, serializer 7 (item stack): count 1, item 1, 1 added
     // component, 0 removed, component 3 (damage) = 7.
     let entries = entity_data_entries(774, &[5, 7, 1, 1, 1, 0, 3, 7]);
@@ -600,28 +599,6 @@ fn translate_entity_item_stack_fallback_774() {
         panic!("wrong value");
     };
     assert_eq!(stack.patch.added, [(3, Box::from([7u8]))]);
-}
-
-/// `translate_item_stack`'s component ids against the native registry table.
-#[test]
-fn component_id_anchors() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let table = RegistryTable::native();
-    assert_eq!(
-        table.name_of(
-            ClientRegistry::DataComponentType,
-            super::translate::COMPONENT_MAP_ID
-        ),
-        Some("map_id")
-    );
-    assert_eq!(
-        table.name_of(
-            ClientRegistry::DataComponentType,
-            super::translate::COMPONENT_PROFILE
-        ),
-        Some("profile")
-    );
 }
 
 /// A `level_chunk_with_light` at chunk (3, -2) with no heightmaps, holding
@@ -741,7 +718,7 @@ fn translate_interact_774() {
     assert_eq!(frames[1], [interact, 42, 0, 1, 1]);
 }
 
-/// 26.2-only serverbound packets with no 1.21.11 equivalent are suppressed
+/// Newer serverbound packets with no 1.21.11 equivalent are suppressed
 /// rather than sent under a wrong id.
 #[test]
 fn suppress_unknown_outbound_774() {
@@ -762,12 +739,7 @@ fn suppress_unknown_outbound_774() {
 /// (`swing` is 60 on 1.21.11, 63 on 26.2).
 #[test]
 fn remap_outbound_ids_774() {
-    let mut frame = Vec::new();
-    wire::write_varint(
-        &mut frame,
-        table_id(Phase::Game, Direction::Serverbound, "swing"),
-    );
-    frame.push(0); // main hand
+    let frame = game_frame(Direction::Serverbound, "punch", "serverbound/punch");
     let frames = translation_for(774).translate_outbound_game_frame(frame);
     assert_eq!(
         frames,
@@ -894,8 +866,8 @@ fn translate_entity_data_particles_772() {
 }
 
 /// A 1.21.8 `profile` item component (61 there; bare optional name/uuid +
-/// properties) is rewrapped into 26.2's `ResolvableProfile` partial arm
-/// with an empty skin patch (see `translate_old_profile`).
+/// properties) is rewrapped into the later `ResolvableProfile` partial arm
+/// with an empty skin patch.
 #[test]
 fn translate_entity_item_profile_772() {
     use pomme_item::components::{Component, Profile, ProfileContents};
@@ -928,18 +900,6 @@ const VELOCITY_772: [f64; 3] = [0.25, -0.5, 0.0];
 fn write_velocity_shorts(out: &mut Vec<u8>) {
     for c in VELOCITY_772 {
         out.extend_from_slice(&((c * 8000.0) as i16).to_be_bytes());
-    }
-}
-
-fn write_doubles(out: &mut Vec<u8>, values: impl IntoIterator<Item = f64>) {
-    for v in values {
-        out.extend_from_slice(&v.to_be_bytes());
-    }
-}
-
-fn write_floats(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
-    for v in values {
-        out.extend_from_slice(&v.to_be_bytes());
     }
 }
 
@@ -1065,9 +1025,7 @@ fn translate_set_default_spawn_772() {
 
 /// 1.21.9 inserted `radius`/`blockCount` after the explosion center and
 /// appended a block-particle list; the particle and sound ids between them
-/// are remapped into 26.2's space (a 1.21.8 server sends `explosion` 22 and
-/// the `entity.generic.explode` holder 615 + 1; 26.2 numbers them 30 and
-/// 699).
+/// are remapped into the native space, by name.
 #[test]
 fn translate_explode_772() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
@@ -1113,6 +1071,7 @@ fn translate_explode_772() {
         sound_id(native_table, "entity.generic.explode") + 1,
     );
     expected.push(0); // no block particles
+    expected.push(1); // plays its sound
     assert_eq!(&translated[..], &expected[..]);
 }
 
@@ -1422,25 +1381,50 @@ fn level_particles_fields() -> Vec<u8> {
     fields
 }
 
+/// The `explosion` particle's id on `protocol`'s wire.
+fn explosion_particle(protocol: i32) -> u32 {
+    registry_id(
+        pomme_protocol::RegistryTable::for_protocol(protocol).unwrap(),
+        pomme_protocol::ClientRegistry::ParticleType,
+        "explosion",
+    )
+}
+
+/// What [`level_particles_fields`] with the limiter overridden and an
+/// `explosion` particle come out as: the particle first, one speed per axis,
+/// a varint count and the default randomization.
+fn level_particles_native() -> Vec<u8> {
+    let fields = level_particles_fields();
+    let (placement, tail) = fields.split_at(36);
+    let speed = &tail[..4];
+    let mut native = Vec::new();
+    wire::write_varint(
+        &mut native,
+        explosion_particle(pomme_protocol::version::NATIVE.protocol),
+    );
+    native.extend_from_slice(&[1, 0]); // override limiter, always show
+    native.extend_from_slice(placement);
+    native.extend([speed, speed, speed].concat());
+    native.extend_from_slice(&[7, 0]); // count, randomization
+    native
+}
+
 /// 1.21.4 inserted `alwaysShow` after `overrideLimiter`; the shim
 /// synthesizes false for 1.21.3-and-older frames.
 #[test]
 fn translate_level_particles_768() {
-    let mut fields = level_particles_fields();
-    wire::write_varint(&mut fields, 30); // particle (26.2 id space)
-
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(768, Direction::Clientbound, "level_particles"),
     );
     old.push(1); // override limiter
-    old.extend_from_slice(&fields);
+    old.extend_from_slice(&level_particles_fields());
+    wire::write_varint(&mut old, explosion_particle(768));
 
     assert_eq!(
         translate_to_payload(768, old, "level_particles"),
-        // The override limiter, then `alwaysShow`.
-        [&[1, 0][..], &fields].concat()
+        level_particles_native()
     );
 }
 
@@ -1554,12 +1538,9 @@ fn translate_teleport_entity_767() {
         translate_and_read(767, old, "entity_position_sync", entity::read),
         EntityPacket::PositionSync {
             id: 9,
-            values: entity::PositionMoveRotation {
-                position: DVec3::new(1.0, 70.0, 2.0),
-                delta: DVec3::ZERO,
-                y_rot: 90.0,
-                x_rot: 0.0,
-            },
+            path: entity::PositionPath::Linear(DVec3::new(1.0, 70.0, 2.0)),
+            y_rot: 90.0,
+            x_rot: 0.0,
             on_ground: true,
         }
     );
@@ -2004,75 +1985,6 @@ fn translate_merchant_offers_765() {
     assert_eq!(translate_to_payload(765, old, "merchant_offers"), native);
 }
 
-/// An offer whose second cost 26.2 lacks is left out, not shown cheaper;
-/// the offers around it remap and keep their order.
-#[test]
-fn translate_merchant_offers_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let wire_item = |name| {
-        registry_id(
-            RegistryTable::for_protocol(777).unwrap(),
-            ClientRegistry::Item,
-            name,
-        )
-    };
-    let native_item = |name| registry_id(RegistryTable::native(), ClientRegistry::Item, name);
-    let offer = |old: &mut Vec<u8>, emerald: u32, base: u32, second: Option<u32>| {
-        wire::write_varint(old, base);
-        old.extend_from_slice(&[2, 0]); // count, no component predicates
-        old.push(1); // result: one
-        wire::write_varint(old, emerald);
-        old.extend_from_slice(&[0, 0]); // no components
-        old.push(u8::from(second.is_some()));
-        if let Some(second) = second {
-            wire::write_varint(old, second);
-            old.extend_from_slice(&[1, 0]);
-        }
-        old.push(0); // out of stock
-        for n in [0i32, 12, 2, 0] {
-            old.extend_from_slice(&n.to_be_bytes()); // uses, maxUses, xp, special
-        }
-        old.extend_from_slice(&0.05f32.to_be_bytes()); // price multiplier
-        old.extend_from_slice(&0i32.to_be_bytes()); // demand
-    };
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "merchant_offers"),
-    );
-    wire::write_varint(&mut old, 1); // container id
-    wire::write_varint(&mut old, 3); // offers
-    let emerald = wire_item("emerald");
-    offer(&mut old, emerald, wire_item("diamond"), None);
-    offer(
-        &mut old,
-        emerald,
-        wire_item("diamond"),
-        Some(wire_item("poplar_planks")),
-    );
-    offer(
-        &mut old,
-        emerald,
-        wire_item("bread"),
-        Some(wire_item("diamond")),
-    );
-    let tail = [2, 30, 1, 1]; // villager level and xp, show progress, can restock
-    old.extend_from_slice(&tail);
-
-    let mut native = vec![1, 2]; // container id, the two offers left
-    let emerald = native_item("emerald");
-    offer(&mut native, emerald, native_item("diamond"), None);
-    offer(
-        &mut native,
-        emerald,
-        native_item("bread"),
-        Some(native_item("diamond")),
-    );
-    native.extend_from_slice(&tail);
-    assert_eq!(translate_to_payload(777, old, "merchant_offers"), native);
-}
-
 /// 1.20.5 widened `update_mob_effect`'s amplifier from a byte to a varint
 /// and dropped the trailing factor-data NBT.
 #[test]
@@ -2141,25 +2053,22 @@ fn translate_update_attributes_765() {
     );
 }
 
-/// 1.20.4 `level_particles` led with the particle type id; it moves to
-/// just before the payload and `alwaysShow` is synthesized.
+/// 1.20.4 `level_particles` led with the particle type id, as 26.3 does
+/// again, and lacked `alwaysShow`, which is synthesized.
 #[test]
 fn translate_level_particles_765() {
-    let fields = level_particles_fields();
-
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(765, Direction::Clientbound, "level_particles"),
     );
-    wire::write_varint(&mut old, 30); // particle (26.2 id space)
+    wire::write_varint(&mut old, explosion_particle(765));
     old.push(1); // override limiter
-    old.extend_from_slice(&fields);
+    old.extend_from_slice(&level_particles_fields());
 
     assert_eq!(
         translate_to_payload(765, old, "level_particles"),
-        // The override limiter and `alwaysShow` first, the particle last.
-        [&[1, 0][..], &fields, &[30]].concat()
+        level_particles_native()
     );
 }
 
@@ -2224,51 +2133,6 @@ fn entity_data_item(
     };
     let stack = stack.as_ref()?;
     Some(pomme_registry::builtin::ItemKind::from_u32(stack.item).expect("a native item"))
-}
-
-/// `translate_entity_data` already remaps item stacks, so the read must not
-/// remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
-#[test]
-fn entity_data_item_remaps_once_777() {
-    // index 8, item_stack serializer, count 1, 26.3 oak_log (varint 163),
-    // empty patch
-    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
-    assert_eq!(
-        entity_data_item(&entries[0]),
-        Some(pomme_registry::builtin::ItemKind::OakLog)
-    );
-}
-
-/// A component the stack walker can't size (`damage`, id 3 in both 26.3 and
-/// 26.2) takes the verbatim-tail fallback, which must still remap the item.
-#[test]
-fn entity_data_item_with_components_remaps_once_777() {
-    // oak_log with one added component (damage 5), none removed
-    let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
-    assert_eq!(
-        entity_data_item(&entries[0]),
-        Some(pomme_registry::builtin::ItemKind::OakLog)
-    );
-}
-
-/// An item 26.2 lacks (26.3 `poplar_log`, 172) empties the stack; a walkable
-/// one keeps the entries after it.
-#[test]
-fn entity_data_unmapped_item_empties_777() {
-    // poplar_log (varint 172), empty patch; then index 9, int serializer, 7
-    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 0, 0, 9, 1, 7]);
-    assert_eq!(entity_data_item(&entries[0]), None);
-    assert_eq!(entries.len(), 2);
-}
-
-/// 26.3's item grammar sizes an unmapped item's components (`damage`, 5), so
-/// the stack empties and the list carries on past it.
-#[test]
-fn entity_data_unmapped_item_with_components_keeps_the_list_777() {
-    let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
-    assert_eq!(entity_data_item(&entries[0]), None);
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[1].index, 9);
 }
 
 /// `translate_item_765` leaves the wire item id, so the read must still remap
@@ -2407,53 +2271,6 @@ fn translate_container_set_slot_775() {
     );
 }
 
-/// 26.3's item and component ids shift past 26.2's; a slot holding a dyed
-/// diamond lands in native ids, decoded by pomme's own container reader.
-#[test]
-fn translate_container_set_slot_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let wire_table = RegistryTable::for_protocol(777).unwrap();
-    let native_table = RegistryTable::native();
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "container_set_slot"),
-    );
-    old.extend_from_slice(&[0, 4]); // container, state id
-    old.extend_from_slice(&36i16.to_be_bytes());
-    old.push(1); // count
-    wire::write_varint(
-        &mut old,
-        registry_id(wire_table, ClientRegistry::Item, "diamond"),
-    );
-    old.extend_from_slice(&[1, 0]); // one added, none removed
-    wire::write_varint(
-        &mut old,
-        registry_id(wire_table, ClientRegistry::DataComponentType, "dyed_color"),
-    );
-    old.extend_from_slice(&0x123456i32.to_be_bytes());
-
-    let mut item = pomme_stack(pomme_registry::builtin::ItemKind::Diamond, 1).unwrap();
-    item.patch.added.push((
-        registry_id(
-            native_table,
-            ClientRegistry::DataComponentType,
-            "dyed_color",
-        ),
-        0x123456i32.to_be_bytes().into(),
-    ));
-    assert_eq!(
-        translate_and_read(777, old, "container_set_slot", container::read),
-        ContainerPacket::Slot {
-            container_id: 0,
-            state_id: 4,
-            slot: 36,
-            item: Some(item)
-        }
-    );
-}
-
 /// 765's single-NBT `registry_data` splits into per-registry frames whose
 /// entries reorder by their explicit ids (wire order is the id space); the
 /// captured dimension-type order then keys the 765 spawn-info rewrites,
@@ -2555,14 +2372,14 @@ fn translate_game_login_765() {
     assert!(!p.enforces_secure_chat);
 }
 
-/// Config ids remap by name at 765 and 26.2-only packets suppress
+/// Config ids remap by name at 765 and newer-only packets suppress
 /// (`select_known_packs` predates the known-packs handshake).
 #[test]
 fn translate_config_ids_765() {
     let t = translation_for(765);
     assert!(t.translates_config());
-    assert!(translation_for(767).translates_config());
-    assert!(!translation_for(768).translates_config());
+    // 26.3 inserted `post_effects`, shifting every later clientbound id.
+    assert!(translation_for(776).translates_config());
     assert!(!translation_for(763).translates_config());
 
     // Inbound finish_configuration lands on its 26.2 id.
@@ -3709,398 +3526,11 @@ fn only_the_core_pack_is_claimed() {
     assert_eq!(known_packs, offered[..1]);
 }
 
-/// 26.3's clientbound insertions shift ids, and the layouts 26.2 rewrote
-/// for older versions (`login_finished`, `set_player_team`, `set_time`)
-/// pass through untouched above it.
-#[test]
-fn translate_passthrough_777() {
-    let t = translation_for(777);
-    let native_config = |name| {
-        PacketTable::native()
-            .id(Phase::Configuration, Direction::Clientbound, name)
-            .unwrap()
-    };
-    assert_eq!(
-        old_id(777, Direction::Clientbound, "respawn"),
-        table_id(Phase::Game, Direction::Clientbound, "respawn") + 2
-    );
-    assert_eq!(
-        config_id(777, Direction::Clientbound, "store_cookie"),
-        native_config("store_cookie") + 1
-    );
-
-    let mut login_finished = Vec::new();
-    wire::write_varint(&mut login_finished, login_id(777, "login_finished"));
-    login_finished.extend_from_slice(&[1, 2, 3]);
-    assert_eq!(
-        &t.translate_login_frame(login_finished.clone().into_boxed_slice())[..],
-        &login_finished[..]
-    );
-
-    for name in ["set_player_team", "set_time"] {
-        let mut old = Vec::new();
-        wire::write_varint(&mut old, old_id(777, Direction::Clientbound, name));
-        old.extend_from_slice(&[0xAA; 5]);
-        let mut expected = Vec::new();
-        wire::write_varint(
-            &mut expected,
-            table_id(Phase::Game, Direction::Clientbound, name),
-        );
-        expected.extend_from_slice(&[0xAA; 5]);
-        assert_eq!(
-            &t.translate_game_frame(old.into_boxed_slice()).unwrap()[..],
-            &expected[..],
-            "{name}"
-        );
-    }
-
-    let mut post_effects = Vec::new();
-    wire::write_varint(
-        &mut post_effects,
-        config_id(777, Direction::Clientbound, "post_effects"),
-    );
-    post_effects.push(0);
-    assert!(
-        t.translate_config_frame(post_effects.into_boxed_slice())
-            .is_empty()
-    );
-    let mut cookie = Vec::new();
-    wire::write_varint(
-        &mut cookie,
-        config_id(777, Direction::Clientbound, "store_cookie"),
-    );
-    cookie.push(7);
-    let mut expected = Vec::new();
-    wire::write_varint(&mut expected, native_config("store_cookie"));
-    expected.push(7);
-    assert_eq!(
-        t.translate_config_frame(cookie.into_boxed_slice()),
-        vec![expected.into_boxed_slice()]
-    );
-}
-
-/// 26.3's `move_entity_pos*` pack onGround and a step count into a
-/// `properties` varint and carry a `VecDelta` (`ClientboundMoveEntityPacket`
-/// and `VecDelta` in the 26.3 reference): a plain short triple maps byte
-/// for byte, stepped ones collapse to the summed displacement, and
-/// `move_entity_rot` moved onGround ahead of the rotation bytes.
-#[test]
-fn translate_move_entity_777() {
-    let shorts = |out: &mut Vec<u8>, d: [i16; 3]| {
-        for c in d {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
-    };
-    let head = |name, properties| {
-        let mut old = Vec::new();
-        wire::write_varint(&mut old, old_id(777, Direction::Clientbound, name));
-        wire::write_varint(&mut old, 7);
-        wire::write_varint(&mut old, properties);
-        old
-    };
-    // 26.2's layout: the entity, the delta, then onGround.
-    let pos = |delta, on_ground| {
-        let mut native = vec![7];
-        shorts(&mut native, delta);
-        native.push(on_ground);
-        native
-    };
-
-    let mut old = head("move_entity_pos", 1);
-    shorts(&mut old, [100, -200, 300]);
-    assert_eq!(
-        translate_to_payload(777, old, "move_entity_pos"),
-        pos([100, -200, 300], 1)
-    );
-
-    // Two steps (properties = 2 << 1 | onGround) summing to the same delta.
-    let mut old = head("move_entity_pos", (2 << 1) | 1);
-    for (ticks, d) in [(1, [40, -50, 100]), (2, [60, -150, 200])] {
-        wire::write_varint(&mut old, ticks);
-        shorts(&mut old, d);
-    }
-    assert_eq!(
-        translate_to_payload(777, old, "move_entity_pos"),
-        pos([100, -200, 300], 1)
-    );
-
-    let rotation = [10, (-20i8) as u8];
-    let mut old = head("move_entity_pos_rot", 0);
-    shorts(&mut old, [100, -200, 300]);
-    old.extend_from_slice(&rotation);
-    let mut native = vec![7];
-    shorts(&mut native, [100, -200, 300]);
-    native.extend_from_slice(&rotation);
-    native.push(0);
-    assert_eq!(
-        translate_to_payload(777, old, "move_entity_pos_rot"),
-        native
-    );
-
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "move_entity_rot"),
-    );
-    wire::write_varint(&mut old, 7);
-    old.push(1);
-    old.extend_from_slice(&rotation);
-    assert_eq!(
-        translate_to_payload(777, old, "move_entity_rot"),
-        [7, rotation[0], rotation[1], 1]
-    );
-
-    // A summed displacement past the short range saturates.
-    let mut old = head("move_entity_pos", 2 << 1);
-    for _ in 0..2 {
-        wire::write_varint(&mut old, 1);
-        shorts(&mut old, [30000, 0, -30000]);
-    }
-    assert_eq!(
-        translate_to_payload(777, old, "move_entity_pos"),
-        pos([i16::MAX, 0, i16::MIN], 0)
-    );
-}
-
-/// 26.3's `entity_position_sync` carries a `PositionPath` (`PositionPath`
-/// in the 26.3 reference: a tagged `Vec3`, or a counted `Vec3` + tick offset
-/// list ending at the last step) and no delta.
-#[test]
-fn translate_entity_position_sync_777() {
-    let finish = |old: &mut Vec<u8>| {
-        write_floats(old, [90.0, -10.0]);
-        old.push(1);
-    };
-    let head = || {
-        let mut old = Vec::new();
-        wire::write_varint(
-            &mut old,
-            old_id(777, Direction::Clientbound, "entity_position_sync"),
-        );
-        wire::write_varint(&mut old, 9);
-        old
-    };
-
-    let mut linear = head();
-    wire::write_varint(&mut linear, 0);
-    write_doubles(&mut linear, [1.0, 65.0, -2.0]);
-    finish(&mut linear);
-    let mut stepped = head();
-    wire::write_varint(&mut stepped, 1);
-    wire::write_varint(&mut stepped, 2);
-    write_doubles(&mut stepped, [0.0, 64.0, 0.0]);
-    wire::write_varint(&mut stepped, 1);
-    write_doubles(&mut stepped, [1.0, 65.0, -2.0]);
-    wire::write_varint(&mut stepped, 2);
-    finish(&mut stepped);
-    for old in [linear, stepped] {
-        assert_eq!(
-            translate_and_read(777, old, "entity_position_sync", entity::read),
-            EntityPacket::PositionSync {
-                id: 9,
-                values: entity::PositionMoveRotation {
-                    position: DVec3::new(1.0, 65.0, -2.0),
-                    delta: DVec3::ZERO,
-                    y_rot: 90.0,
-                    x_rot: -10.0,
-                },
-                on_ground: true,
-            }
-        );
-    }
-}
-
-/// 26.3's `explode` appends a `playSound` bool; its particle and sound ids
-/// (the weighted block-particle list's too) are remapped into native space,
-/// block states staying in wire space.
-#[test]
-fn translate_explode_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let particle_id = |table, name| registry_id(table, ClientRegistry::ParticleType, name);
-    let sound_id = |table, name| registry_id(table, ClientRegistry::SoundEvent, name);
-    let old_table = RegistryTable::for_protocol(777).unwrap();
-    let native_table = RegistryTable::native();
-    let build = |id, table, play_sound: Option<u8>| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        write_doubles(&mut out, [1.0, 65.0, -2.0]);
-        out.extend_from_slice(&4f32.to_be_bytes()); // radius
-        out.extend_from_slice(&12i32.to_be_bytes()); // block count
-        out.push(0); // no knockback
-        wire::write_varint(&mut out, particle_id(table, "explosion"));
-        wire::write_varint(&mut out, sound_id(table, "entity.generic.explode") + 1);
-        wire::write_varint(&mut out, 1); // one block particle
-        wire::write_varint(&mut out, particle_id(table, "block"));
-        wire::write_varint(&mut out, 27); // a wire-space block state
-        out.extend_from_slice(&1f32.to_be_bytes()); // scaling
-        out.extend_from_slice(&0.5f32.to_be_bytes()); // speed
-        wire::write_varint(&mut out, 3); // weight
-        out.extend(play_sound);
-        out
-    };
-    assert_ne!(
-        sound_id(old_table, "entity.generic.explode"),
-        sound_id(native_table, "entity.generic.explode")
-    );
-    let old = build(
-        old_id(777, Direction::Clientbound, "explode"),
-        old_table,
-        Some(1),
-    );
-    let translated = translation_for(777)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let expected = build(
-        table_id(Phase::Game, Direction::Clientbound, "explode"),
-        native_table,
-        None,
-    );
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// 26.3's `CommonPlayerSpawnInfo` sends `previousGameType` as an optional
-/// varint (0 = none, else id + 1) where 26.2 reads a signed byte; it sits
-/// a fixed distance from the end of `login` and `respawn`.
-#[test]
-fn translate_spawn_info_777() {
-    // The byte precedes debug/flat/death/portal/sea level and the packet's
-    // own trailer (two bools, or the data-to-keep byte); the respawn
-    // fixture's death location is 29 bytes longer than none.
-    for (name, fixture, from_end) in [
-        ("login", "login/fresh", 8),
-        ("respawn", "respawn/keep_all", 7 + 29),
-    ] {
-        // (its 26.2 byte, its 26.3 byte): none, survival, creative
-        for (native_byte, wire_byte) in [(0xFF, 0), (0, 1), (1, 2)] {
-            let mut native = fixture_frame(name, fixture);
-            let at = native.len() - from_end;
-            native[at] = native_byte;
-            let mut old = native.clone();
-            old[at] = wire_byte;
-            old[0] = old_id(777, Direction::Clientbound, name) as u8;
-            let translated = translation_for(777)
-                .translate_game_frame(old.into_boxed_slice())
-                .unwrap();
-            assert_eq!(&translated[..], &native[..], "{name}");
-        }
-    }
-}
-
-/// 26.3 renumbered `animate` (wake up 0, critical hit 1, magic critical hit
-/// 2) and moved the swings to `swing_animation`, rewritten back onto
-/// `animate` by hand; a `none` animation drops.
-#[test]
-fn translate_animate_777() {
-    // `ClientboundAnimatePacket`'s 26.2 actions.
-    const SWING_MAIN_HAND: u8 = 0;
-    const WAKE_UP: u8 = 2;
-    const SWING_OFF_HAND: u8 = 3;
-    const CRITICAL_HIT: u8 = 4;
-    const MAGIC_CRITICAL_HIT: u8 = 5;
-
-    let animate = |old: Vec<u8>| translate_and_read(777, old, "animate", entity::read);
-    for (wire, action) in [(0, WAKE_UP), (1, CRITICAL_HIT), (2, MAGIC_CRITICAL_HIT)] {
-        let mut old = Vec::new();
-        wire::write_varint(&mut old, old_id(777, Direction::Clientbound, "animate"));
-        wire::write_varint(&mut old, 7);
-        old.push(wire);
-        assert_eq!(animate(old), EntityPacket::Animate { id: 7, action });
-    }
-    let swing = |hand, kind| {
-        let mut old = Vec::new();
-        wire::write_varint(
-            &mut old,
-            old_id(777, Direction::Clientbound, "swing_animation"),
-        );
-        wire::write_varint(&mut old, 7);
-        wire::write_varint(&mut old, hand);
-        wire::write_varint(&mut old, kind);
-        wire::write_varint(&mut old, 6); // duration
-        old
-    };
-    for (hand, action) in [(0, SWING_MAIN_HAND), (1, SWING_OFF_HAND)] {
-        assert_eq!(
-            animate(swing(hand, 1)),
-            EntityPacket::Animate { id: 7, action }
-        );
-    }
-    let none = swing(0, 0).into_boxed_slice();
-    assert!(translation_for(777).translate_game_frame(none).is_none());
-}
-
-/// 26.3's `level_particles` leads with the particle, splits `maxSpeed` per
-/// axis, sends `count` as a varint and appends a randomization type. The
-/// particle keeps its wire-space id and payload (sized per option codec:
-/// none, a block state, dust's color + scale, an item template with a
-/// component patch).
-#[test]
-fn translate_level_particles_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let old_table = RegistryTable::for_protocol(777).unwrap();
-    let particle = |name| registry_id(old_table, ClientRegistry::ParticleType, name);
-    let body = |out: &mut Vec<u8>| {
-        out.extend_from_slice(&[1, 0]); // override limiter, always show
-        write_doubles(out, [1.0, 65.0, -2.0]);
-        write_floats(out, [0.5, 0.25, 0.125]);
-    };
-    let build = |particle: &[u8]| {
-        let mut old = Vec::new();
-        wire::write_varint(
-            &mut old,
-            old_id(777, Direction::Clientbound, "level_particles"),
-        );
-        old.extend_from_slice(particle);
-        body(&mut old);
-        write_floats(&mut old, [0.1, 0.2, 0.3]);
-        wire::write_varint(&mut old, 12); // count
-        wire::write_varint(&mut old, 0); // default randomization
-        old
-    };
-    let expect = |particle: &[u8]| {
-        let mut expected = Vec::new();
-        wire::write_varint(
-            &mut expected,
-            table_id(Phase::Game, Direction::Clientbound, "level_particles"),
-        );
-        body(&mut expected);
-        expected.extend_from_slice(&0.1f32.to_be_bytes());
-        expected.extend_from_slice(&12i32.to_be_bytes());
-        expected.extend_from_slice(particle);
-        expected
-    };
-
-    let mut flame = Vec::new();
-    wire::write_varint(&mut flame, particle("flame"));
-    let mut block = Vec::new();
-    wire::write_varint(&mut block, particle("block"));
-    wire::write_varint(&mut block, 27);
-    let mut dust = Vec::new();
-    wire::write_varint(&mut dust, particle("dust"));
-    dust.extend_from_slice(&0xFF0000i32.to_be_bytes());
-    dust.extend_from_slice(&1f32.to_be_bytes());
-    // stone, one, then a patch adding custom_name (numbered alike on both)
-    // as the NBT string "hi".
-    let mut item = Vec::new();
-    wire::write_varint(&mut item, particle("item"));
-    item.extend_from_slice(&[1, 1, 1, 0]);
-    wire::write_varint(
-        &mut item,
-        registry_id(old_table, ClientRegistry::DataComponentType, "custom_name"),
-    );
-    item.extend_from_slice(&[8, 0, 2, b'h', b'i']);
-    for p in [flame, block, dust, item] {
-        let translated = translation_for(777)
-            .translate_game_frame(build(&p).into_boxed_slice())
-            .unwrap();
-        assert_eq!(&translated[..], &expect(&p)[..]);
-    }
-}
-
 /// One `update_advancements` entry as protocol `protocol` lays it out: a
 /// display whose icon is `item` (a name in that version's registry) unless
-/// `item` is `None`, one requirement, and the screen position (1.5, -2).
+/// `item` is `None`, one requirement, and the screen position: (1.5, -2)
+/// with a display, the origin without one, which is all an older version's
+/// displayless entry can come out as.
 fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
@@ -4127,7 +3557,12 @@ fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
         out.push(2); // goal
         out.extend_from_slice(&2i32.to_be_bytes()); // show toast, no background
     }
-    let position = [1.5f32.to_be_bytes(), (-2.0f32).to_be_bytes()].concat();
+    let position = if item.is_some() {
+        [1.5f32, -2.0]
+    } else {
+        [0.0; 2]
+    };
+    let position = position.map(f32::to_be_bytes).concat();
     // 26.3 sends the position after the entry, display or not.
     if item.is_some() && protocol < 777 {
         out.extend_from_slice(&position);
@@ -4158,8 +3593,8 @@ fn advancements_frame(protocol: i32, id: u32, entries: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Every translated version's `update_advancements` lands as the frame a
-/// 26.2 server sends: the icon an `ItemStackTemplate` in native ids, the
-/// position inside the display, `showAdvancements` set.
+/// 26.3 server sends: the icon an `ItemStackTemplate` in native ids, the
+/// position after the entry, `showAdvancements` set.
 #[test]
 fn translate_update_advancements_to_native() {
     let native_id = table_id(Phase::Game, Direction::Clientbound, "update_advancements");
@@ -4169,13 +3604,12 @@ fn translate_update_advancements_to_native() {
             advancement_entry(protocol, "minecraft:story/mine_stone", None),
         ]
     };
-    // 26.1's frame is the native one but for its ids.
     let expected = advancements_frame(
-        775,
+        pomme_protocol::version::NATIVE.protocol,
         native_id,
         &entries(pomme_protocol::version::NATIVE.protocol),
     );
-    for protocol in [766, 769, 772, 774, 775, 777] {
+    for protocol in [766, 769, 772, 774, 775, 776] {
         let old = advancements_frame(
             protocol,
             old_id(protocol, Direction::Clientbound, "update_advancements"),
@@ -4194,397 +3628,6 @@ fn translate_update_advancements_to_native() {
     let display = update.added[0].1.display.as_ref().unwrap();
     assert_eq!(display.icon_item.as_deref(), Some("wooden_pickaxe"));
     assert!(update.added[1].1.display.is_none());
-}
-
-/// An icon the native version lacks (26.3 `poplar_log`) takes its display
-/// with it; the entry and the ones after it stay.
-#[test]
-fn advancement_with_unmapped_icon_loses_its_display_777() {
-    let old = advancements_frame(
-        777,
-        old_id(777, Direction::Clientbound, "update_advancements"),
-        &[
-            advancement_entry(777, "minecraft:a", Some("poplar_log")),
-            advancement_entry(777, "minecraft:b", Some("stone")),
-        ],
-    );
-    let translated = translation_for(777)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let expected = advancements_frame(
-        775,
-        table_id(Phase::Game, Direction::Clientbound, "update_advancements"),
-        &[
-            advancement_entry(
-                pomme_protocol::version::NATIVE.protocol,
-                "minecraft:a",
-                None,
-            ),
-            advancement_entry(
-                pomme_protocol::version::NATIVE.protocol,
-                "minecraft:b",
-                Some("stone"),
-            ),
-        ],
-    );
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// 26.3 appended the `dye_color` serializer (43); an entry using it drops
-/// and the rest of the list survives.
-#[test]
-fn translate_entity_data_777() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 7);
-    old.extend_from_slice(&[0, 0, 5]); // index 0, byte, value
-    old.extend_from_slice(&[12, 43, 3]); // index 12, dye_color, red
-    old.extend_from_slice(&[1, 1, 9]); // index 1, int, value
-    old.push(0xFF);
-    let translated = translation_for(777)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let mut expected = Vec::new();
-    wire::write_varint(
-        &mut expected,
-        table_id(Phase::Game, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut expected, 7);
-    expected.extend_from_slice(&[0, 0, 5, 1, 1, 9, 0xFF]);
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// Outbound on 26.3: `swing` becomes the payload-less, main-hand-only
-/// `punch`; `player_action` actions after the first shift up by one;
-/// `sign_update` carries its text side last; and `accept_teleportation`
-/// takes the pose of the `move_player_pos_rot` following it, which 26.3 no
-/// longer sends.
-#[test]
-fn translate_outbound_777() {
-    let t = translation_for(777);
-    assert!(t.translates_outbound());
-    let sb = |name| table_id(Phase::Game, Direction::Serverbound, name);
-    let old_sb = |name| old_id(777, Direction::Serverbound, name);
-    let frame = |id, payload: &[u8]| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.extend_from_slice(payload);
-        out
-    };
-
-    assert_eq!(
-        t.translate_outbound_game_frame(frame(sb("swing"), &[0])),
-        vec![frame(old_sb("punch"), &[])]
-    );
-    assert!(
-        t.translate_outbound_game_frame(frame(sb("swing"), &[1]))
-            .is_empty()
-    );
-
-    let rest = [0, 0, 0, 0, 0, 0, 0, 0, 1, 5]; // block pos, direction, sequence
-    for (action, wire_action) in [(0, 0), (2, 3), (6, 7)] {
-        let mut payload = vec![action];
-        payload.extend_from_slice(&rest);
-        let mut expected = vec![wire_action];
-        expected.extend_from_slice(&rest);
-        assert_eq!(
-            t.translate_outbound_game_frame(frame(sb("player_action"), &payload)),
-            vec![frame(old_sb("player_action"), &expected)]
-        );
-    }
-
-    // The text side moves from before the four lines to after them.
-    let (sign_pos, lines) = ([0, 0, 0, 0, 0, 0, 0, 9], [2, b'h', b'i', 0, 0, 0]);
-    for front in [0, 1] {
-        let native = [&sign_pos[..], &[front], &lines].concat();
-        let wire = [&sign_pos[..], &lines, &[front]].concat();
-        assert_eq!(
-            t.translate_outbound_game_frame(frame(sb("sign_update"), &native)),
-            vec![frame(old_sb("sign_update"), &wire)]
-        );
-    }
-
-    // The accept is held back and folded into the PosRot sent right after
-    // it, which carries the applied pose; a later PosRot is an ordinary move.
-    let mut accept = Vec::new();
-    wire::write_varint(&mut accept, 9);
-    assert!(
-        t.translate_outbound_game_frame(frame(sb("accept_teleportation"), &accept))
-            .is_empty()
-    );
-    let mut pose = Vec::new();
-    write_doubles(&mut pose, [11.0, 22.0, 33.0]);
-    write_floats(&mut pose, [4.0, 5.0]);
-    let mut pos_rot = pose.clone();
-    pos_rot.push(0); // flags
-    let mut expected = Vec::new();
-    wire::write_varint(&mut expected, 9);
-    expected.extend_from_slice(&pose);
-    assert_eq!(
-        t.translate_outbound_game_frame(frame(sb("move_player_pos_rot"), &pos_rot)),
-        vec![frame(old_sb("accept_teleportation"), &expected)]
-    );
-    assert_eq!(
-        t.translate_outbound_game_frame(frame(sb("move_player_pos_rot"), &pos_rot)),
-        vec![frame(old_sb("move_player_pos_rot"), &pos_rot)]
-    );
-
-    assert!(!t.reports_use_swings());
-    assert!(translation_for(775).reports_use_swings());
-}
-
-/// 26.3 writes light masks with `ByteBufCodecs.BIT_SET` (a varint byte
-/// count, `BitSet.toByteArray`'s little-endian bytes) where 26.2 reads a
-/// long array; the rest of the light data and the chunk data are unchanged.
-#[test]
-fn translate_light_777() {
-    // (26.3 byte form, 26.2 long form) per mask: empty, 3 bytes, 9 bytes.
-    let masks: [(Vec<u8>, Vec<u8>); 4] = [
-        (vec![0], vec![0]),
-        (vec![3, 1, 2, 3], {
-            let mut v = vec![1];
-            v.extend_from_slice(&0x03_02_01u64.to_be_bytes());
-            v
-        }),
-        (vec![9, 1, 2, 3, 4, 5, 6, 7, 8, 9], {
-            let mut v = vec![2];
-            v.extend_from_slice(&0x08_07_06_05_04_03_02_01u64.to_be_bytes());
-            v.extend_from_slice(&9u64.to_be_bytes());
-            v
-        }),
-        (vec![1, 0x80], {
-            let mut v = vec![1];
-            v.extend_from_slice(&0x80u64.to_be_bytes());
-            v
-        }),
-    ];
-    let light = |wire: bool| {
-        let mut out = Vec::new();
-        for (bytes, longs) in &masks {
-            out.extend_from_slice(if wire { bytes } else { longs });
-        }
-        out.push(1); // one sky section
-        wire::write_varint(&mut out, 2048);
-        out.extend_from_slice(&[0x5A; 2048]);
-        out.push(0); // no block sections
-        out
-    };
-
-    let update = |id, wire| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        wire::write_varint(&mut out, 3); // x
-        wire::write_varint(&mut out, -4i32 as u32); // z
-        out.extend_from_slice(&light(wire));
-        out
-    };
-    let translated = translation_for(777)
-        .translate_game_frame(
-            update(old_id(777, Direction::Clientbound, "light_update"), true).into_boxed_slice(),
-        )
-        .unwrap();
-    let expected = update(
-        table_id(Phase::Game, Direction::Clientbound, "light_update"),
-        false,
-    );
-    assert_eq!(&translated[..], &expected[..]);
-    let ChunkPacket::Light {
-        light: light_data, ..
-    } = translate_and_read(
-        777,
-        update(old_id(777, Direction::Clientbound, "light_update"), true),
-        "light_update",
-        chunk::read,
-    )
-    else {
-        panic!("wrong packet");
-    };
-    assert_eq!(light_data.sky_updates.len(), 1);
-
-    let chunk = |id, wire| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.extend_from_slice(&3i32.to_be_bytes());
-        out.extend_from_slice(&(-4i32).to_be_bytes());
-        out.push(0); // no heightmaps
-        out.extend_from_slice(&[2, 0xAB, 0xCD]); // section buffer
-        out.push(1); // one block entity
-        out.extend_from_slice(&[0x12, 0, 64, 7]); // packed xz, y, type
-        out.extend_from_slice(&[10, 0]); // empty compound
-        out.extend_from_slice(&light(wire));
-        out
-    };
-    let translated = translation_for(777)
-        .translate_game_frame(
-            chunk(
-                old_id(777, Direction::Clientbound, "level_chunk_with_light"),
-                true,
-            )
-            .into_boxed_slice(),
-        )
-        .unwrap();
-    let expected = chunk(
-        table_id(
-            Phase::Game,
-            Direction::Clientbound,
-            "level_chunk_with_light",
-        ),
-        false,
-    );
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// 26.3's `player_chat` sends a `PARTIALLY_FILTERED` mask as a
-/// `ByteBufCodecs.BIT_SET`; the body around it (`SignedMessageBody.Packed`,
-/// the optional unsigned content, `ChatType.Bound`) is unchanged.
-#[test]
-fn translate_player_chat_777() {
-    let chat = |id, mask: &[u8]| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.push(1); // global index
-        out.extend_from_slice(&[0x11; 16]); // sender
-        out.push(0); // index
-        out.push(0); // no signature
-        out.extend_from_slice(&[2, b'h', b'i']); // content
-        out.extend_from_slice(&[0; 16]); // timestamp, salt
-        out.push(2); // two last-seen entries
-        out.push(3); // cached id 2
-        out.push(0); // a full signature
-        out.extend_from_slice(&[0x22; 256]);
-        out.push(0); // no unsigned content
-        out.push(2); // partially filtered
-        out.extend_from_slice(mask);
-        out.push(1); // chat type 0
-        out.extend_from_slice(&[8, 0, 2, b'm', b'e']); // name
-        out.push(0); // no target
-        out
-    };
-    let mut longs = vec![1];
-    longs.extend_from_slice(&0x0105u64.to_be_bytes());
-    let translated = translation_for(777)
-        .translate_game_frame(
-            chat(
-                old_id(777, Direction::Clientbound, "player_chat"),
-                &[2, 5, 1],
-            )
-            .into_boxed_slice(),
-        )
-        .unwrap();
-    let expected = chat(
-        table_id(Phase::Game, Direction::Clientbound, "player_chat"),
-        &longs,
-    );
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// A 26.3 component whose value layout changed (`pot_decorations` became
-/// four optional item templates) is sized by 26.3's item grammar, so the
-/// particle carrying it still arrives.
-#[test]
-fn translate_changed_component_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let old_table = RegistryTable::for_protocol(777).unwrap();
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "level_particles"),
-    );
-    wire::write_varint(
-        &mut old,
-        registry_id(old_table, ClientRegistry::ParticleType, "item"),
-    );
-    old.extend_from_slice(&[1, 1, 1, 0]); // stone, one, a patch adding one
-    wire::write_varint(
-        &mut old,
-        registry_id(
-            old_table,
-            ClientRegistry::DataComponentType,
-            "pot_decorations",
-        ),
-    );
-    old.extend_from_slice(&[0; 4]); // four absent sides
-    old.extend_from_slice(&[1, 0]);
-    write_doubles(&mut old, [1.0, 65.0, -2.0]);
-    write_floats(&mut old, [0.0; 6]);
-    old.extend_from_slice(&[1, 0]); // count, randomization
-    // Pomme reads only the particle's type, so its payload passes through.
-    assert!(
-        translation_for(777)
-            .translate_game_frame(old.into_boxed_slice())
-            .is_some()
-    );
-}
-
-/// 26.3 inserted five singleton argument types (`ArgumentTypeInfos`): shared
-/// parsers remap by name with their properties copied, and a 26.3-only one
-/// becomes the parser 26.2 sent for it (`/place feature` read a
-/// `resource_key` over configured features).
-#[test]
-fn translate_commands_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let old_table = RegistryTable::for_protocol(777).unwrap();
-    let old_parser = |name| registry_id(old_table, ClientRegistry::CommandArgumentType, name);
-    let native_parser = |name| {
-        registry_id(
-            RegistryTable::native(),
-            ClientRegistry::CommandArgumentType,
-            name,
-        )
-    };
-    let tree = |id, feature: &[u8], uuid: u32, integer: u32| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.push(5); // five nodes
-        out.extend_from_slice(&[0, 2, 1, 4]); // root -> place, n
-        out.extend_from_slice(&[1, 2, 2, 3, 5, b'p', b'l', b'a', b'c', b'e']);
-        out.extend_from_slice(&[2 | 0x04, 0, 1, b'f']);
-        out.extend_from_slice(feature);
-        out.extend_from_slice(&[2 | 0x04, 0, 1, b'u']);
-        wire::write_varint(&mut out, uuid);
-        out.extend_from_slice(&[2 | 0x04 | 0x10, 0, 1, b'n']);
-        wire::write_varint(&mut out, integer);
-        out.push(0x03); // min and max
-        out.extend_from_slice(&1i32.to_be_bytes());
-        out.extend_from_slice(&9i32.to_be_bytes());
-        let suggestions = b"minecraft:ask_server";
-        out.push(suggestions.len() as u8);
-        out.extend_from_slice(suggestions);
-        out.push(0); // root
-        out
-    };
-    let mut old_feature = Vec::new();
-    wire::write_varint(&mut old_feature, old_parser("feature"));
-    let mut native_feature = Vec::new();
-    wire::write_varint(&mut native_feature, native_parser("resource_key"));
-    let registry = b"minecraft:worldgen/configured_feature";
-    native_feature.push(registry.len() as u8);
-    native_feature.extend_from_slice(registry);
-
-    let old = tree(
-        old_id(777, Direction::Clientbound, "commands"),
-        &old_feature,
-        old_parser("uuid"),
-        old_parser("brigadier:integer"),
-    );
-    let translated = translation_for(777)
-        .translate_game_frame(old.clone().into_boxed_slice())
-        .unwrap();
-    let expected = tree(
-        table_id(Phase::Game, Direction::Clientbound, "commands"),
-        &native_feature,
-        native_parser("uuid"),
-        native_parser("brigadier:integer"),
-    );
-    assert_ne!(old_parser("uuid"), native_parser("uuid"));
-    assert_eq!(&translated[..], &expected[..]);
-    let p = translate_and_read(777, old, "commands", pomme_protocol::commands::read);
-    assert_eq!(p.nodes.len(), 5);
 }
 
 /// A pre-1.20.5 `server_data` frame: `motd`, no icon, then `tail`.
@@ -4691,66 +3734,6 @@ fn translate_commands_763() {
     assert_eq!(&translated[..], &expected[..]);
     let p = translate_and_read(763, old, "commands", pomme_protocol::commands::read);
     assert_eq!(p.nodes.len(), 3);
-}
-
-/// 26.3's `tag` slot display carries a `HolderSet`: a named tag becomes the
-/// tag id 26.2 sent, and a direct item list (every ingredient on 26.3,
-/// `Ingredient.display()`) the `composite` of `item` displays 26.2 sent.
-#[test]
-fn translate_recipe_display_777() {
-    use pomme_protocol::{ClientRegistry, RegistryTable};
-
-    let slot = |name| registry_id(RegistryTable::native(), ClientRegistry::SlotDisplay, name) as u8;
-    let recipe =
-        |name| registry_id(RegistryTable::native(), ClientRegistry::RecipeDisplay, name) as u8;
-    let tag = b"minecraft:planks";
-    let ghost = |id, input: &[u8], station: &[u8]| {
-        let mut out = Vec::new();
-        wire::write_varint(&mut out, id);
-        out.push(1); // container
-        out.push(recipe("stonecutter"));
-        out.extend_from_slice(input);
-        out.extend_from_slice(&[slot("item"), 3]); // result
-        out.extend_from_slice(station);
-        out
-    };
-    let named = |prefix: &[u8]| {
-        let mut out = prefix.to_vec();
-        out.push(tag.len() as u8);
-        out.extend_from_slice(tag);
-        out
-    };
-    let old = ghost(
-        old_id(777, Direction::Clientbound, "place_ghost_recipe"),
-        &[slot("tag"), 3, 5, 7], // direct set of two items
-        &named(&[slot("tag"), 0]),
-    );
-    let translated = translation_for(777)
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    let expected = ghost(
-        table_id(Phase::Game, Direction::Clientbound, "place_ghost_recipe"),
-        &[slot("composite"), 2, slot("item"), 5, slot("item"), 7],
-        &named(&[slot("tag")]),
-    );
-    assert_eq!(&translated[..], &expected[..]);
-}
-
-/// The level-load gate's `LEVEL_CHUNKS_LOAD_START` (game event 13, unchanged
-/// in 26.3's `ClientboundGameEventPacket`) reaches the handler on a 777 wire.
-#[test]
-fn translate_game_event_777() {
-    let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id(777, Direction::Clientbound, "game_event"));
-    old.push(13);
-    old.extend_from_slice(&0f32.to_be_bytes());
-    assert_eq!(
-        translate_and_read(777, old, "game_event", player::read),
-        PlayerPacket::GameEvent {
-            event: 13,
-            param: 0.0,
-        }
-    );
 }
 
 /// The game's own `update_advancements` reads as the advancements, the removal
@@ -4972,6 +3955,36 @@ fn player_and_world_fixtures_land_as_events() {
     );
 }
 
+/// The game's own `level_particles` reads past its particle's options to the
+/// fields after them, and a particle pomme draws nothing for is taken
+/// without an event.
+#[test]
+fn level_particles_fixtures_read() {
+    use crate::net::NetworkEvent;
+
+    let NetworkEvent::LevelParticles {
+        kind: crate::particle::ServerParticleKind::EndRod,
+        override_limiter: true,
+        pos,
+        x_dist,
+        y_dist,
+        z_dist,
+        max_speed,
+        count: 7,
+    } = fixture_event("level_particles", "level_particles/end_rod")
+    else {
+        panic!("expected end rod particles");
+    };
+    assert_eq!(pos, DVec3::new(1.5, 64.0, -2.25));
+    assert_eq!((x_dist, y_dist, z_dist, max_speed), (0.5, 0.25, 0.125, 0.1));
+
+    assert!(
+        fixture_events("level_particles", "level_particles/dust")
+            .next()
+            .is_none()
+    );
+}
+
 /// The game's own command tree lands as an event through pomme's raw handler.
 #[test]
 fn commands_fixture_lands_as_an_event() {
@@ -4980,4 +3993,114 @@ fn commands_fixture_lands_as_an_event() {
         panic!("expected a command tree");
     };
     assert_eq!(tree.root_child_names(), ["tp", "say", "give", "alias"]);
+}
+
+/// A 26.2 server's packets come out as 26.3 encodes the same values: each
+/// case is the game's own bytes on both sides.
+#[test]
+fn upgrades_26_2_layouts_to_the_games_26_3_bytes() {
+    let t = translation_for(776);
+    for case in [
+        "move_entity_pos/on_ground",
+        "move_entity_pos_rot/airborne",
+        "move_entity_rot/on_ground",
+        "entity_position_sync/on_ground",
+        "login/fresh",
+        "login/after_death",
+        "respawn/keep_all",
+        "animate/wake_up",
+        "level_chunk_with_light/small",
+        "light_update/sky",
+    ] {
+        let name = case.split('/').next().unwrap();
+        assert_eq!(
+            t.translate_game_frame(frame_26_2(Direction::Clientbound, name, case).into())
+                .as_deref(),
+            Some(&fixture_frame(name, case)[..]),
+            "{case}"
+        );
+    }
+}
+
+/// Packet `name`'s 26.2 id, then the payload 26.2 encoded for `case`.
+fn frame_26_2(direction: Direction, name: &str, case: &str) -> Vec<u8> {
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, old_id(776, direction, name));
+    frame.extend(pomme_protocol::vanilla_fixtures::case_26_2(case));
+    frame
+}
+
+/// A 26.2 advancement's position moves from its display to after the entry.
+/// The child has no display, so 26.2 never sent the position 26.3's fixture
+/// gives it, and it reads as the origin.
+#[test]
+fn upgrades_26_2_advancement_positions() {
+    let (name, case) = ("update_advancements", "update_advancements/root_and_child");
+    let mut expected = fixture_frame(name, case);
+    let child_position = [3.0f32.to_be_bytes(), (-2.0f32).to_be_bytes()].concat();
+    let at = expected
+        .windows(8)
+        .position(|w| w == child_position)
+        .expect("the child's position");
+    expected[at..at + 8].fill(0);
+    assert_eq!(
+        translation_for(776)
+            .translate_game_frame(frame_26_2(Direction::Clientbound, name, case).into())
+            .as_deref(),
+        Some(&expected[..])
+    );
+}
+
+/// What a 26.3 client sends reaches a 26.2 server as 26.2 encodes the same
+/// values: each case is the game's own bytes on both sides.
+#[test]
+fn lowers_26_3_serverbound_layouts_to_the_games_26_2_bytes() {
+    let t = translation_for(776);
+    let old = |name: &str, payload: &[u8]| {
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, old_id(776, Direction::Serverbound, name));
+        frame.extend_from_slice(payload);
+        frame
+    };
+    let old_case =
+        |name: &str| frame_26_2(Direction::Serverbound, name, &format!("serverbound/{name}"));
+    let sent = |name: &str| {
+        let case = format!("serverbound/{name}");
+        t.translate_outbound_game_frame(game_frame(Direction::Serverbound, name, &case))
+    };
+
+    assert_eq!(sent("sign_update"), [old_case("sign_update")]);
+    assert_eq!(sent("player_action"), [old_case("player_action")]);
+    // An attack's punch is a main-hand swing.
+    assert_eq!(sent("punch"), [old("swing", &[0])]);
+
+    // The accepted pose follows the accept as a position-and-rotation
+    // packet, neither on the ground nor against a wall.
+    let accept = pomme_protocol::vanilla_fixtures::case("serverbound/accept_teleportation");
+    let old_accept =
+        pomme_protocol::vanilla_fixtures::case_26_2("serverbound/accept_teleportation");
+    let mut pose = accept[old_accept.len()..].to_vec();
+    pose.push(0);
+    assert_eq!(
+        sent("accept_teleportation"),
+        [
+            old("accept_teleportation", &old_accept),
+            old("move_player_pos_rot", &pose)
+        ]
+    );
+
+    // CHANGE_DESTROY_DIRECTION has no 26.2 form.
+    let mut change = Vec::new();
+    wire::write_varint(
+        &mut change,
+        table_id(Phase::Game, Direction::Serverbound, "player_action"),
+    );
+    change.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(t.translate_outbound_game_frame(change).is_empty());
+
+    // A use swing is the hand's swing packet, and nothing on 26.3.
+    assert_eq!(
+        t.use_swing_frame(pomme_protocol::serverbound::InteractionHand::OffHand),
+        Some(old_case("swing"))
+    );
 }

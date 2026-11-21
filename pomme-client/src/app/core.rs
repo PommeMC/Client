@@ -708,16 +708,13 @@ impl GameState {
             }
         }
 
-        // Vanilla `handleMovePlayer` acks and echoes the pose even
-        // when mounted (a 26.3 wire folds the two).
-        connection
-            .packet_tx
-            .send(GamePacket::AcceptTeleportation { id: id as i32 });
-        connection.packet_tx.send(GamePacket::MovePlayerPosRot {
-            pos: self.player.position.into(),
+        // Vanilla `handleMovePlayer` accepts with the pose it took, even
+        // when mounted, and sends no move packet after it.
+        connection.packet_tx.send(GamePacket::AcceptTeleportation {
+            id: id as i32,
+            position: self.player.position.into(),
             y_rot: self.player.look_dir.y_rot_deg(),
             x_rot: self.player.look_dir.x_rot_deg(),
-            flags: Default::default(),
         });
         self.interaction.on_teleport();
         correction.is_some()

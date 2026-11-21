@@ -265,7 +265,7 @@ fn parse_slot_display(cur: &mut Cursor<&[u8]>, depth: usize) -> Result<SlotDispl
         }),
         4 => Ok(SlotDisplay::Item(read_item_id(cur)?)),
         5 => Ok(SlotDisplay::ItemStack(parse_item_stack_template(cur)?)),
-        6 => Ok(SlotDisplay::Tag(read_identifier(cur)?)),
+        6 => Ok(SlotDisplay::Tag(parse_item_holder_set(cur)?)),
         7 => Ok(SlotDisplay::Dyed {
             dye: nested(cur)?,
             target: nested(cur)?,
@@ -308,25 +308,31 @@ fn parse_trim_pattern(cur: &mut Cursor<&[u8]>) -> Result<TrimPatternHolder, Stri
 }
 
 fn parse_ingredient(cur: &mut Cursor<&[u8]>) -> Result<Ingredient, String> {
+    let ingredient = parse_item_holder_set(cur)?;
+    if let Ingredient::Items(items) = &ingredient {
+        // Vanilla `Ingredient`'s constructor rejects both.
+        if items.is_empty() {
+            return Err("ingredient can't be empty".to_owned());
+        }
+        if items.contains(&ItemKind::Air.to_u32()) {
+            return Err("ingredient can't contain air".to_owned());
+        }
+    }
+    Ok(ingredient)
+}
+
+/// `ByteBufCodecs.holderSet(Registries.ITEM)`: 0 and a tag id, or the item
+/// count + 1 and that many item ids.
+fn parse_item_holder_set(cur: &mut Cursor<&[u8]>) -> Result<Ingredient, String> {
     let encoded = read_var_u32(cur)?;
     if encoded == 0 {
         return Ok(Ingredient::Tag(read_identifier(cur)?));
     }
-    let count = usize::try_from(encoded - 1).map_err(|_| "ingredient too large".to_owned())?;
+    let count = usize::try_from(encoded - 1).map_err(|_| "item set too large".to_owned())?;
     if count > MAX_COLLECTION {
-        return Err(format!(
-            "ingredient item count {count} exceeds {MAX_COLLECTION}"
-        ));
+        return Err(format!("item set count {count} exceeds {MAX_COLLECTION}"));
     }
-    let items = read_n(cur, count, read_item_id)?;
-    // Vanilla `Ingredient`'s constructor rejects both.
-    if items.is_empty() {
-        return Err("ingredient can't be empty".to_owned());
-    }
-    if items.contains(&ItemKind::Air.to_u32()) {
-        return Err("ingredient can't contain air".to_owned());
-    }
-    Ok(Ingredient::Items(items))
+    Ok(Ingredient::Items(read_n(cur, count, read_item_id)?))
 }
 
 fn toast_entry(display: &RecipeDisplay) -> RecipeToastEntry {

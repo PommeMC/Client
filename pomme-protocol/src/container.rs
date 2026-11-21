@@ -128,7 +128,7 @@ fn stack(r: &mut Reader) -> DecodeResult<Option<ItemStack>> {
 mod tests {
     use super::*;
     use crate::ClientRegistry;
-    use crate::item::tests::id;
+    use crate::item::tests::id_26_3 as id;
     use crate::wire::write_varint;
 
     fn decode(name: &str, bytes: &[u8]) -> ContainerPacket {

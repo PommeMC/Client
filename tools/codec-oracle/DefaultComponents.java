@@ -8,9 +8,11 @@ import java.nio.file.Path;
 import com.mojang.serialization.Lifecycle;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import net.minecraft.SharedConstants;
@@ -60,11 +62,21 @@ public final class DefaultComponents {
         }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
-        HolderLookup.Provider lookup = VanillaRegistries.createLookup();
+        HolderLookup.Provider lookup = VanillaRegistries.createWorldLookup();
         RegistryAccess builtIn = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+        // Of the data pack's registries, only those a server sends: a
+        // component can name no other, and some of the rest hold equal
+        // entries, which a registry refuses.
+        Set<ResourceKey<?>> sent = new HashSet<>();
+        net.minecraft.resources.RegistryDataLoader.SYNCHRONIZED_REGISTRIES.forEach(data -> sent.add(data.key()));
         List<Registry<?>> all = new ArrayList<>();
-        lookup.listRegistryKeys().forEach(key -> all.add(builtIn.lookup(key).isPresent()
-                ? builtIn.lookupOrThrow(key) : inIdentifierOrder(lookup, key)));
+        lookup.listRegistryKeys().forEach(key -> {
+            if (builtIn.lookup(key).isPresent()) {
+                all.add(builtIn.lookupOrThrow(key));
+            } else if (sent.contains(key)) {
+                all.add(inIdentifierOrder(lookup, key));
+            }
+        });
         RegistryAccess withDataPack = new RegistryAccess.ImmutableRegistryAccess(all);
 
         Map<Item, DataComponentMap> components = new LinkedHashMap<>();

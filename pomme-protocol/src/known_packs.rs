@@ -150,11 +150,11 @@ mod tests {
                 })
             );
         }
-        // 26.3 and the native 26.2.
+        // The native 26.3 and 26.2.
         assert_eq!(tables, 2);
     }
 
-    /// 26.3 synchronizes three registries 26.2 doesn't
+    /// 26.3 synchronizes three registries 26.2 didn't
     /// (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`).
     #[test]
     fn a_table_carries_the_registries_its_version_synchronizes() {
@@ -166,10 +166,13 @@ mod tests {
                 "minecraft:flower_plain",
             ),
         ];
-        let newer = KnownPackTable::for_protocol(777).expect("26.3 table");
+        let older = KnownPackTable::for_protocol(776).expect("26.2 table");
         for (registry, id) in added {
-            assert!(newer.element(registry, id).is_some(), "{registry}/{id}");
-            assert!(KnownPackTable::native().element(registry, id).is_none());
+            assert!(
+                KnownPackTable::native().element(registry, id).is_some(),
+                "{registry}/{id}"
+            );
+            assert!(older.element(registry, id).is_none());
         }
     }
 
@@ -228,9 +231,9 @@ mod tests {
 
     #[test]
     fn every_synchronized_registry_is_present() {
-        // `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` for 26.2.
-        let expected: [(&str, usize); 29] = [
-            ("worldgen/biome", 66),
+        // `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` for 26.3.
+        let expected: [(&str, usize); 32] = [
+            ("worldgen/biome", 67),
             ("chat_type", 7),
             ("trim_pattern", 18),
             ("trim_material", 11),
@@ -259,6 +262,9 @@ mod tests {
             ("dialog", 3),
             ("world_clock", 2),
             ("timeline", 4),
+            ("decorated_pot_pattern", 23),
+            ("block_transformer", 3),
+            ("worldgen/block_state_provider", 8),
         ];
         let table = KnownPackTable::native();
         assert_eq!(table.registries().count(), expected.len());

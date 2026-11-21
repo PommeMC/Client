@@ -1,6 +1,6 @@
 # In-game tests
 
-Scripted tests that run a real client against a local vanilla server (26.2,
+Scripted tests that run a real client against a local vanilla server (26.3,
 the native version, unless you pick others), for
 behaviour unit tests can't reach: items arriving with their components,
 inventory clicks, entity data, advancements, and what ends up on screen.
@@ -53,7 +53,7 @@ options.
 
 Each script writes `report.json`, its screenshots and the client's output
 (`client.log`) to `target/ingame/<version>/<script>/`, e.g.
-`target/ingame/26.2/entities/data/`. The run fails if any script does.
+`target/ingame/26.3/entities/data/`. The run fails if any script does.
 
 A script whose commands don't exist on older servers (item component syntax
 like `stone[custom_name=...]` is 1.20.5+) declares the versions it's valid on,
@@ -272,7 +272,7 @@ the first free hotbar slot, 36.
 
 ```sh
 just ingame-server    # prints the port
-just client-dev --features test-harness -- --version 26.2 --username Tester \
+just client-dev --features test-harness -- --version 26.3 --username Tester \
     --quick-access-multiplayer 127.0.0.1:<server port> --harness-port 25599
 ```
 

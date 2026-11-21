@@ -108,11 +108,6 @@ color_component!(
     DyedColor,
     rgb
 );
-color_component!(
-    /// Vanilla `MapItemColor`: the tint of a filled map's markings.
-    MapColor,
-    color
-);
 
 id_enum!(
     /// Vanilla `Rarity`, which colours an item's name.

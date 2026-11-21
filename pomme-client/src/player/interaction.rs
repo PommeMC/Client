@@ -397,7 +397,7 @@ impl InteractionState {
     /// An attack or mining swing, always reported to the server.
     fn swing(&mut self, sender: &PacketSender) {
         self.start_swing(InteractionHand::MainHand);
-        send_swing(sender, InteractionHand::MainHand);
+        sender.send(GamePacket::Punch);
     }
 
     /// A swing from using an item or entity; see [`send_use_swing`].
@@ -2260,16 +2260,10 @@ fn send_action(
     });
 }
 
-/// Reports a swing from using an item, block or entity where the wire
-/// version does (`Translation::reports_use_swings`).
+/// A swing from using an item, block or entity, which 26.3 leaves to the
+/// server: it swings on handling the use. An older server is told.
 pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
-    if crate::net::translate::active().is_none_or(|t| t.reports_use_swings()) {
-        send_swing(sender, hand);
-    }
-}
-
-pub(crate) fn send_swing(sender: &PacketSender, hand: InteractionHand) {
-    sender.send(GamePacket::Swing { hand });
+    sender.use_swing(hand);
 }
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.

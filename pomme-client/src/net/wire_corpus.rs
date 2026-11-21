@@ -36,7 +36,7 @@ const KNOWN_GAPS: &[Gap] = &[
     gap("1.20.1", "1.20.4", "update_advancements", "old-form icons"),
     gap("1.20.1", "1.20.2", "server_data", "never read"),
     gap("1.20.1", "1.20.1", "update_enabled_features", "never read"),
-    gap("26.3", "26.3", "post_effects", "no native equivalent"),
+    gap("26.3", "26.3", "post_effects", "never read"),
 ];
 
 struct Gap {

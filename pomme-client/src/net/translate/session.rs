@@ -9,8 +9,6 @@ pub(super) struct SessionState {
     /// the previous list (as `config_sequence` keeps the previous
     /// `RegistryHolder`).
     pub(super) dimension_types: Vec<String>,
-    /// A 26.3 accept held until the following position-and-rotation packet.
-    pub(super) pending_accept: Option<u32>,
 }
 
 /// Connection-owned state paired with shared immutable protocol tables.
@@ -58,10 +56,8 @@ impl TranslationSession {
             .translate_game_frame_with_state(raw, &mut self.state.lock().unwrap())
     }
 
-    /// Translates an outbound frame and retains any deferred teleport
-    /// acceptance.
+    /// Translates an outbound game frame into the wire version's frames.
     pub fn translate_outbound_game_frame(&self, frame: Vec<u8>) -> Vec<Vec<u8>> {
-        self.tables
-            .translate_outbound_game_frame_with_state(frame, &mut self.state.lock().unwrap())
+        self.tables.translate_outbound_game_frame(frame)
     }
 }

@@ -250,7 +250,7 @@ impl ItemCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::tests::{codec, id};
+    use crate::item::tests::{codec_26_3 as codec, id_26_3 as id};
     use crate::registries::ClientRegistry;
     use crate::wire::write_varint;
 
@@ -342,7 +342,7 @@ mod tests {
             (37, Value::Int(3)),
             (38, Value::Int(2)),
         ];
-        let expected: Vec<DataValue> = (0..SERIALIZERS_26_2.len() as u8)
+        let expected: Vec<DataValue> = (0..SERIALIZERS_26_3.len() as u8)
             .map(|index| DataValue {
                 index,
                 value: read
@@ -488,7 +488,7 @@ mod tests {
     fn rejects_unknown_serializers_and_truncation() {
         let err = |bytes: &[u8]| read(bytes).map_err(|e| e.what);
         assert_eq!(
-            err(&frame(&[(0, 43, &[])])),
+            err(&frame(&[(0, SERIALIZERS_26_3.len() as u32, &[])])),
             Err("unknown entity data serializer")
         );
         assert_eq!(err(&[0, 3, 0x3F]), Err("truncated"));

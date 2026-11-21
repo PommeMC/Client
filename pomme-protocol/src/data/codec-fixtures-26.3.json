@@ -1,0 +1,1535 @@
+{
+  "version": "26.3",
+  "protocol": 777,
+  "packets": {
+    "handshake": {
+      "serverbound": [
+        "intention"
+      ],
+      "clientbound": []
+    },
+    "status": {
+      "serverbound": [
+        "status_request",
+        "ping_request"
+      ],
+      "clientbound": [
+        "status_response",
+        "pong_response"
+      ]
+    },
+    "login": {
+      "serverbound": [
+        "hello",
+        "key",
+        "custom_query_answer",
+        "login_acknowledged",
+        "cookie_response"
+      ],
+      "clientbound": [
+        "login_disconnect",
+        "hello",
+        "login_finished",
+        "login_compression",
+        "custom_query",
+        "cookie_request"
+      ]
+    },
+    "configuration": {
+      "serverbound": [
+        "client_information",
+        "cookie_response",
+        "custom_payload",
+        "finish_configuration",
+        "keep_alive",
+        "pong",
+        "resource_pack",
+        "select_known_packs",
+        "custom_click_action",
+        "accept_code_of_conduct"
+      ],
+      "clientbound": [
+        "cookie_request",
+        "custom_payload",
+        "disconnect",
+        "finish_configuration",
+        "keep_alive",
+        "ping",
+        "reset_chat",
+        "registry_data",
+        "resource_pack_pop",
+        "resource_pack_push",
+        "post_effects",
+        "store_cookie",
+        "transfer",
+        "update_enabled_features",
+        "update_tags",
+        "select_known_packs",
+        "custom_report_details",
+        "server_links",
+        "clear_dialog",
+        "show_dialog",
+        "code_of_conduct"
+      ]
+    },
+    "game": {
+      "serverbound": [
+        "accept_teleportation",
+        "attack",
+        "block_entity_tag_query",
+        "bundle_item_selected",
+        "change_difficulty",
+        "change_game_mode",
+        "chat_ack",
+        "chat_command",
+        "chat_command_signed",
+        "chat",
+        "chat_session_update",
+        "chunk_batch_received",
+        "client_command",
+        "client_tick_end",
+        "client_information",
+        "command_suggestion",
+        "configuration_acknowledged",
+        "container_button_click",
+        "container_click",
+        "container_close",
+        "container_slot_state_changed",
+        "cookie_response",
+        "custom_payload",
+        "debug_subscription_request",
+        "edit_book",
+        "entity_tag_query",
+        "interact",
+        "jigsaw_generate",
+        "keep_alive",
+        "lock_difficulty",
+        "move_player_pos",
+        "move_player_pos_rot",
+        "move_player_rot",
+        "move_player_status_only",
+        "move_vehicle",
+        "paddle_boat",
+        "pick_item_from_block",
+        "pick_item_from_entity",
+        "ping_request",
+        "place_recipe",
+        "player_abilities",
+        "player_action",
+        "player_command",
+        "player_input",
+        "player_loaded",
+        "pong",
+        "punch",
+        "recipe_book_change_settings",
+        "recipe_book_seen_recipe",
+        "rename_item",
+        "resource_pack",
+        "seen_advancements",
+        "select_trade",
+        "set_beacon",
+        "set_carried_item",
+        "set_command_block",
+        "set_command_minecart",
+        "set_creative_mode_slot",
+        "set_game_rule",
+        "set_jigsaw_block",
+        "set_structure_block",
+        "set_test_block",
+        "sign_update",
+        "spectator_action",
+        "teleport_to_entity",
+        "test_instance_block_action",
+        "use_item_on",
+        "use_item",
+        "custom_click_action"
+      ],
+      "clientbound": [
+        "bundle_delimiter",
+        "add_entity",
+        "animate",
+        "award_stats",
+        "block_changed_ack",
+        "block_destruction",
+        "block_entity_data",
+        "block_event",
+        "block_update",
+        "boss_event",
+        "change_difficulty",
+        "chunk_batch_finished",
+        "chunk_batch_start",
+        "chunks_biomes",
+        "clear_titles",
+        "command_suggestions",
+        "commands",
+        "container_close",
+        "container_set_content",
+        "container_set_data",
+        "container_set_slot",
+        "cookie_request",
+        "cooldown",
+        "custom_chat_completions",
+        "custom_payload",
+        "damage_event",
+        "debug/block_value",
+        "debug/chunk_value",
+        "debug/entity_value",
+        "debug/event",
+        "debug_sample",
+        "delete_chat",
+        "disconnect",
+        "disguised_chat",
+        "entity_event",
+        "entity_position_sync",
+        "explode",
+        "add_transient_block",
+        "forget_level_chunk",
+        "game_event",
+        "game_rule_values",
+        "game_test_highlight_pos",
+        "mount_screen_open",
+        "hurt_animation",
+        "initialize_border",
+        "keep_alive",
+        "level_chunk_with_light",
+        "level_event",
+        "level_particles",
+        "light_update",
+        "login",
+        "low_disk_space_warning",
+        "map_item_data",
+        "merchant_offers",
+        "move_entity_pos",
+        "move_entity_pos_rot",
+        "move_minecart_along_track",
+        "move_entity_rot",
+        "move_vehicle",
+        "open_book",
+        "open_screen",
+        "open_sign_editor",
+        "ping",
+        "pong_response",
+        "place_ghost_recipe",
+        "player_abilities",
+        "player_chat",
+        "player_combat_end",
+        "player_combat_enter",
+        "player_combat_kill",
+        "player_info_remove",
+        "player_info_update",
+        "player_look_at",
+        "player_position",
+        "player_rotation",
+        "recipe_book_add",
+        "recipe_book_remove",
+        "recipe_book_settings",
+        "remove_entities",
+        "remove_mob_effect",
+        "reset_score",
+        "resource_pack_pop",
+        "resource_pack_push",
+        "post_effects",
+        "respawn",
+        "rotate_head",
+        "section_blocks_update",
+        "select_advancements_tab",
+        "server_data",
+        "set_action_bar_text",
+        "set_border_center",
+        "set_border_lerp_size",
+        "set_border_size",
+        "set_border_warning_delay",
+        "set_border_warning_distance",
+        "set_camera",
+        "set_chunk_cache_center",
+        "set_chunk_cache_radius",
+        "set_cursor_item",
+        "set_default_spawn_position",
+        "set_display_objective",
+        "set_entity_data",
+        "set_entity_link",
+        "set_entity_motion",
+        "set_equipment",
+        "set_experience",
+        "set_health",
+        "set_held_slot",
+        "set_objective",
+        "set_passengers",
+        "set_player_inventory",
+        "set_player_team",
+        "set_score",
+        "set_simulation_distance",
+        "set_subtitle_text",
+        "set_time",
+        "set_title_text",
+        "set_titles_animation",
+        "sound_entity",
+        "sound",
+        "start_configuration",
+        "stop_sound",
+        "store_cookie",
+        "swing_animation",
+        "system_chat",
+        "tab_list",
+        "tag_query",
+        "take_item_entity",
+        "teleport_entity",
+        "test_instance_block_status",
+        "ticking_state",
+        "ticking_step",
+        "transfer",
+        "update_advancements",
+        "update_attributes",
+        "update_mob_effect",
+        "update_recipes",
+        "update_tags",
+        "projectile_power",
+        "custom_report_details",
+        "server_links",
+        "waypoint",
+        "clear_dialog",
+        "show_dialog"
+      ]
+    }
+  },
+  "entity_dimensions": {
+    "minecraft:acacia_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:acacia_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:allay": [
+      0.35,
+      0.6,
+      0.36
+    ],
+    "minecraft:area_effect_cloud": [
+      6.0,
+      0.5,
+      0.425
+    ],
+    "minecraft:armadillo": [
+      0.7,
+      0.65,
+      0.26
+    ],
+    "minecraft:armor_stand": [
+      0.5,
+      1.975,
+      1.7775
+    ],
+    "minecraft:arrow": [
+      0.5,
+      0.5,
+      0.13
+    ],
+    "minecraft:axolotl": [
+      0.75,
+      0.42,
+      0.2751
+    ],
+    "minecraft:bamboo_chest_raft": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:bamboo_raft": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:bat": [
+      0.5,
+      0.9,
+      0.45
+    ],
+    "minecraft:bee": [
+      0.55,
+      0.5,
+      0.3
+    ],
+    "minecraft:birch_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:birch_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:blaze": [
+      0.6,
+      1.8,
+      1.53
+    ],
+    "minecraft:block_display": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:bogged": [
+      0.6,
+      1.99,
+      1.74
+    ],
+    "minecraft:breeze": [
+      0.6,
+      1.77,
+      1.3452
+    ],
+    "minecraft:breeze_wind_charge": [
+      0.3125,
+      0.3125,
+      0.0
+    ],
+    "minecraft:camel": [
+      1.7,
+      2.375,
+      2.275
+    ],
+    "minecraft:camel_husk": [
+      1.7,
+      2.375,
+      2.275
+    ],
+    "minecraft:cat": [
+      0.6,
+      0.7,
+      0.35
+    ],
+    "minecraft:cave_spider": [
+      0.7,
+      0.5,
+      0.45
+    ],
+    "minecraft:cherry_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:cherry_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:chest_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:chicken": [
+      0.4,
+      0.7,
+      0.644
+    ],
+    "minecraft:cod": [
+      0.5,
+      0.3,
+      0.195
+    ],
+    "minecraft:copper_golem": [
+      0.49,
+      0.98,
+      0.8125
+    ],
+    "minecraft:command_block_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:cow": [
+      0.9,
+      1.4,
+      1.3
+    ],
+    "minecraft:creaking": [
+      0.9,
+      2.7,
+      2.3
+    ],
+    "minecraft:creeper": [
+      0.6,
+      1.7,
+      1.445
+    ],
+    "minecraft:cushion": [
+      1.0,
+      0.25,
+      0.2125
+    ],
+    "minecraft:dark_oak_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:dark_oak_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:dolphin": [
+      0.9,
+      0.6,
+      0.3
+    ],
+    "minecraft:donkey": [
+      1.3964844,
+      1.5,
+      1.425
+    ],
+    "minecraft:dragon_fireball": [
+      1.0,
+      1.0,
+      0.85
+    ],
+    "minecraft:drowned": [
+      0.6,
+      1.95,
+      1.74
+    ],
+    "minecraft:egg": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:elder_guardian": [
+      1.9975,
+      1.9975,
+      0.99875
+    ],
+    "minecraft:enderman": [
+      0.6,
+      2.9,
+      2.55
+    ],
+    "minecraft:endermite": [
+      0.4,
+      0.3,
+      0.13
+    ],
+    "minecraft:ender_dragon": [
+      16.0,
+      8.0,
+      6.8
+    ],
+    "minecraft:ender_pearl": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:end_crystal": [
+      2.0,
+      2.0,
+      1.7
+    ],
+    "minecraft:evoker": [
+      0.6,
+      1.95,
+      1.6575
+    ],
+    "minecraft:evoker_fangs": [
+      0.5,
+      0.8,
+      0.68
+    ],
+    "minecraft:experience_bottle": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:experience_orb": [
+      0.5,
+      0.5,
+      0.425
+    ],
+    "minecraft:eye_of_ender": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:falling_block": [
+      0.98,
+      0.98,
+      0.83300006
+    ],
+    "minecraft:fireball": [
+      1.0,
+      1.0,
+      0.85
+    ],
+    "minecraft:firework_rocket": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:fox": [
+      0.6,
+      0.7,
+      0.4
+    ],
+    "minecraft:frog": [
+      0.5,
+      0.5,
+      0.425
+    ],
+    "minecraft:furnace_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:ghast": [
+      4.0,
+      4.0,
+      2.6
+    ],
+    "minecraft:happy_ghast": [
+      4.0,
+      4.0,
+      2.6
+    ],
+    "minecraft:giant": [
+      3.6,
+      12.0,
+      10.44
+    ],
+    "minecraft:glow_item_frame": [
+      0.5,
+      0.5,
+      0.0
+    ],
+    "minecraft:glow_squid": [
+      0.8,
+      0.8,
+      0.4
+    ],
+    "minecraft:goat": [
+      0.9,
+      1.3,
+      1.105
+    ],
+    "minecraft:guardian": [
+      0.85,
+      0.85,
+      0.425
+    ],
+    "minecraft:hoglin": [
+      1.3964844,
+      1.4,
+      1.19
+    ],
+    "minecraft:hopper_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:horse": [
+      1.3964844,
+      1.6,
+      1.52
+    ],
+    "minecraft:husk": [
+      0.6,
+      1.95,
+      1.74
+    ],
+    "minecraft:illusioner": [
+      0.6,
+      1.95,
+      1.6575
+    ],
+    "minecraft:interaction": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:iron_golem": [
+      1.4,
+      2.7,
+      2.295
+    ],
+    "minecraft:item": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:item_display": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:item_frame": [
+      0.5,
+      0.5,
+      0.0
+    ],
+    "minecraft:jungle_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:jungle_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:leash_knot": [
+      0.375,
+      0.5,
+      0.0625
+    ],
+    "minecraft:lightning_bolt": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:llama": [
+      0.9,
+      1.87,
+      1.7765
+    ],
+    "minecraft:llama_spit": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:magma_cube": [
+      0.52,
+      0.52,
+      0.325
+    ],
+    "minecraft:mangrove_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:mangrove_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:mannequin": [
+      0.6,
+      1.8,
+      1.62
+    ],
+    "minecraft:marker": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:mooshroom": [
+      0.9,
+      1.4,
+      1.3
+    ],
+    "minecraft:mule": [
+      1.3964844,
+      1.6,
+      1.52
+    ],
+    "minecraft:nautilus": [
+      0.875,
+      0.95,
+      0.2751
+    ],
+    "minecraft:oak_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:oak_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:ocelot": [
+      0.6,
+      0.7,
+      0.595
+    ],
+    "minecraft:ominous_item_spawner": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:painting": [
+      0.5,
+      0.5,
+      0.425
+    ],
+    "minecraft:pale_oak_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:pale_oak_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:panda": [
+      1.3,
+      1.25,
+      1.0625
+    ],
+    "minecraft:parched": [
+      0.6,
+      1.99,
+      1.74
+    ],
+    "minecraft:parrot": [
+      0.5,
+      0.9,
+      0.54
+    ],
+    "minecraft:phantom": [
+      0.9,
+      0.5,
+      0.175
+    ],
+    "minecraft:pig": [
+      0.9,
+      0.9,
+      0.765
+    ],
+    "minecraft:piglin": [
+      0.6,
+      1.95,
+      1.79
+    ],
+    "minecraft:piglin_brute": [
+      0.6,
+      1.95,
+      1.79
+    ],
+    "minecraft:pillager": [
+      0.6,
+      1.95,
+      1.6575
+    ],
+    "minecraft:polar_bear": [
+      1.4,
+      1.4,
+      1.19
+    ],
+    "minecraft:poplar_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:poplar_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:splash_potion": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:lingering_potion": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:pufferfish": [
+      0.7,
+      0.7,
+      0.455
+    ],
+    "minecraft:rabbit": [
+      0.49,
+      0.6,
+      0.59
+    ],
+    "minecraft:ravager": [
+      1.95,
+      2.2,
+      1.8700001
+    ],
+    "minecraft:salmon": [
+      0.7,
+      0.4,
+      0.26
+    ],
+    "minecraft:sheep": [
+      0.9,
+      1.3,
+      1.235
+    ],
+    "minecraft:shulker": [
+      1.0,
+      1.0,
+      0.5
+    ],
+    "minecraft:shulker_bullet": [
+      0.3125,
+      0.3125,
+      0.265625
+    ],
+    "minecraft:silverfish": [
+      0.4,
+      0.3,
+      0.13
+    ],
+    "minecraft:skeleton": [
+      0.6,
+      1.99,
+      1.74
+    ],
+    "minecraft:skeleton_horse": [
+      1.3964844,
+      1.6,
+      1.52
+    ],
+    "minecraft:slime": [
+      0.52,
+      0.52,
+      0.325
+    ],
+    "minecraft:small_fireball": [
+      0.3125,
+      0.3125,
+      0.265625
+    ],
+    "minecraft:sniffer": [
+      1.9,
+      1.75,
+      1.05
+    ],
+    "minecraft:snowball": [
+      0.25,
+      0.25,
+      0.2125
+    ],
+    "minecraft:snow_golem": [
+      0.7,
+      1.9,
+      1.7
+    ],
+    "minecraft:spawner_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:spectral_arrow": [
+      0.5,
+      0.5,
+      0.13
+    ],
+    "minecraft:spider": [
+      1.4,
+      0.9,
+      0.65
+    ],
+    "minecraft:spruce_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:spruce_chest_boat": [
+      1.375,
+      0.5625,
+      0.5625
+    ],
+    "minecraft:squid": [
+      0.8,
+      0.8,
+      0.4
+    ],
+    "minecraft:stray": [
+      0.6,
+      1.99,
+      1.74
+    ],
+    "minecraft:strider": [
+      0.9,
+      1.7,
+      1.445
+    ],
+    "minecraft:sulfur_cube": [
+      0.49,
+      0.49,
+      0.175
+    ],
+    "minecraft:tadpole": [
+      0.4,
+      0.3,
+      0.19500001
+    ],
+    "minecraft:text_display": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "minecraft:tnt": [
+      0.98,
+      0.98,
+      0.15
+    ],
+    "minecraft:tnt_minecart": [
+      0.98,
+      0.7,
+      0.595
+    ],
+    "minecraft:trader_llama": [
+      0.9,
+      1.87,
+      1.7765
+    ],
+    "minecraft:trident": [
+      0.5,
+      0.5,
+      0.13
+    ],
+    "minecraft:tropical_fish": [
+      0.5,
+      0.4,
+      0.26
+    ],
+    "minecraft:turtle": [
+      1.2,
+      0.4,
+      0.34
+    ],
+    "minecraft:vex": [
+      0.4,
+      0.8,
+      0.51875
+    ],
+    "minecraft:villager": [
+      0.6,
+      1.95,
+      1.62
+    ],
+    "minecraft:vindicator": [
+      0.6,
+      1.95,
+      1.6575
+    ],
+    "minecraft:wandering_trader": [
+      0.6,
+      1.95,
+      1.62
+    ],
+    "minecraft:warden": [
+      0.9,
+      2.9,
+      2.4650002
+    ],
+    "minecraft:wind_charge": [
+      0.3125,
+      0.3125,
+      0.0
+    ],
+    "minecraft:witch": [
+      0.6,
+      1.95,
+      1.62
+    ],
+    "minecraft:wither": [
+      0.9,
+      3.5,
+      2.9750001
+    ],
+    "minecraft:wither_skeleton": [
+      0.7,
+      2.4,
+      2.1
+    ],
+    "minecraft:wither_skull": [
+      0.3125,
+      0.3125,
+      0.265625
+    ],
+    "minecraft:wolf": [
+      0.6,
+      0.85,
+      0.68
+    ],
+    "minecraft:zoglin": [
+      1.3964844,
+      1.4,
+      1.19
+    ],
+    "minecraft:zombie": [
+      0.6,
+      1.95,
+      1.74
+    ],
+    "minecraft:zombie_horse": [
+      1.3964844,
+      1.6,
+      1.52
+    ],
+    "minecraft:zombie_nautilus": [
+      0.875,
+      0.95,
+      0.2751
+    ],
+    "minecraft:zombie_villager": [
+      0.6,
+      1.95,
+      1.74
+    ],
+    "minecraft:zombified_piglin": [
+      0.6,
+      1.95,
+      1.79
+    ],
+    "minecraft:player": [
+      0.6,
+      1.8,
+      1.62
+    ],
+    "minecraft:fishing_bobber": [
+      0.25,
+      0.25,
+      0.2125
+    ]
+  },
+  "registry_ids": {
+    "dimension_type/minecraft:overworld": 0,
+    "dimension_type/minecraft:overworld_caves": 1,
+    "dimension_type/minecraft:the_end": 2,
+    "dimension_type/minecraft:the_nether": 3,
+    "world_clock/minecraft:overworld": 0,
+    "world_clock/minecraft:the_end": 1,
+    "dialog/minecraft:custom_options": 0,
+    "dialog/minecraft:quick_actions": 1,
+    "dialog/minecraft:server_links": 2,
+    "enchantment/minecraft:aqua_affinity": 0,
+    "enchantment/minecraft:bane_of_arthropods": 1,
+    "enchantment/minecraft:binding_curse": 2,
+    "enchantment/minecraft:blast_protection": 3,
+    "enchantment/minecraft:breach": 4,
+    "enchantment/minecraft:channeling": 5,
+    "enchantment/minecraft:density": 6,
+    "enchantment/minecraft:depth_strider": 7,
+    "enchantment/minecraft:efficiency": 8,
+    "enchantment/minecraft:feather_falling": 9,
+    "enchantment/minecraft:fire_aspect": 10,
+    "enchantment/minecraft:fire_protection": 11,
+    "enchantment/minecraft:flame": 12,
+    "enchantment/minecraft:fortune": 13,
+    "enchantment/minecraft:frost_walker": 14,
+    "enchantment/minecraft:impaling": 15,
+    "enchantment/minecraft:infinity": 16,
+    "enchantment/minecraft:knockback": 17,
+    "enchantment/minecraft:looting": 18,
+    "enchantment/minecraft:loyalty": 19,
+    "enchantment/minecraft:luck_of_the_sea": 20,
+    "enchantment/minecraft:lunge": 21,
+    "enchantment/minecraft:lure": 22,
+    "enchantment/minecraft:mending": 23,
+    "enchantment/minecraft:multishot": 24,
+    "enchantment/minecraft:piercing": 25,
+    "enchantment/minecraft:power": 26,
+    "enchantment/minecraft:projectile_protection": 27,
+    "enchantment/minecraft:protection": 28,
+    "enchantment/minecraft:punch": 29,
+    "enchantment/minecraft:quick_charge": 30,
+    "enchantment/minecraft:respiration": 31,
+    "enchantment/minecraft:riptide": 32,
+    "enchantment/minecraft:sharpness": 33,
+    "enchantment/minecraft:silk_touch": 34,
+    "enchantment/minecraft:smite": 35,
+    "enchantment/minecraft:soul_speed": 36,
+    "enchantment/minecraft:sweeping_edge": 37,
+    "enchantment/minecraft:swift_sneak": 38,
+    "enchantment/minecraft:thorns": 39,
+    "enchantment/minecraft:unbreaking": 40,
+    "enchantment/minecraft:vanishing_curse": 41,
+    "enchantment/minecraft:wind_burst": 42,
+    "banner_pattern/minecraft:base": 0,
+    "banner_pattern/minecraft:border": 1,
+    "banner_pattern/minecraft:bricks": 2,
+    "banner_pattern/minecraft:circle": 3,
+    "banner_pattern/minecraft:creeper": 4,
+    "banner_pattern/minecraft:cross": 5,
+    "banner_pattern/minecraft:curly_border": 6,
+    "banner_pattern/minecraft:diagonal_left": 7,
+    "banner_pattern/minecraft:diagonal_right": 8,
+    "banner_pattern/minecraft:diagonal_up_left": 9,
+    "banner_pattern/minecraft:diagonal_up_right": 10,
+    "banner_pattern/minecraft:flow": 11,
+    "banner_pattern/minecraft:flower": 12,
+    "banner_pattern/minecraft:globe": 13,
+    "banner_pattern/minecraft:gradient": 14,
+    "banner_pattern/minecraft:gradient_up": 15,
+    "banner_pattern/minecraft:guster": 16,
+    "banner_pattern/minecraft:half_horizontal": 17,
+    "banner_pattern/minecraft:half_horizontal_bottom": 18,
+    "banner_pattern/minecraft:half_vertical": 19,
+    "banner_pattern/minecraft:half_vertical_right": 20,
+    "banner_pattern/minecraft:mojang": 21,
+    "banner_pattern/minecraft:piglin": 22,
+    "banner_pattern/minecraft:rhombus": 23,
+    "banner_pattern/minecraft:skull": 24,
+    "banner_pattern/minecraft:small_stripes": 25,
+    "banner_pattern/minecraft:square_bottom_left": 26,
+    "banner_pattern/minecraft:square_bottom_right": 27,
+    "banner_pattern/minecraft:square_top_left": 28,
+    "banner_pattern/minecraft:square_top_right": 29,
+    "banner_pattern/minecraft:straight_cross": 30,
+    "banner_pattern/minecraft:stripe_bottom": 31,
+    "banner_pattern/minecraft:stripe_center": 32,
+    "banner_pattern/minecraft:stripe_downleft": 33,
+    "banner_pattern/minecraft:stripe_downright": 34,
+    "banner_pattern/minecraft:stripe_left": 35,
+    "banner_pattern/minecraft:stripe_middle": 36,
+    "banner_pattern/minecraft:stripe_right": 37,
+    "banner_pattern/minecraft:stripe_top": 38,
+    "banner_pattern/minecraft:triangle_bottom": 39,
+    "banner_pattern/minecraft:triangle_top": 40,
+    "banner_pattern/minecraft:triangles_bottom": 41,
+    "banner_pattern/minecraft:triangles_top": 42,
+    "damage_type/minecraft:mob_attack": 28,
+    "entity_type/minecraft:zombie": 154,
+    "villager_type/minecraft:swamp": 5,
+    "villager_profession/minecraft:farmer": 5,
+    "item/minecraft:stone": 1,
+    "attribute/minecraft:max_health": 23,
+    "mob_effect/minecraft:haste": 2,
+    "block/minecraft:chest": 245,
+    "block_entity_type/minecraft:sign": 7,
+    "menu/minecraft:generic_9x3": 2,
+    "sound_event/minecraft:entity.generic.explode": 703,
+    "block_state/minecraft:chest": 5544
+  },
+  "registry_sizes": {
+    "block_state": 35723,
+    "worldgen/biome": 67,
+    "cat_variant": 11,
+    "chicken_variant": 3,
+    "cow_variant": 3,
+    "wolf_variant": 9
+  },
+  "cases": {
+    "add_entity/zombie": "070000000000000000000000000000002a9a013ff8000000000000c04e000000000000400a000000000000f9ff20013ffec0201005",
+    "animate/wake_up": "0700",
+    "block_changed_ack/seventeen": "11",
+    "block_entity_data/sign": "ffffff4000004fc4070a030001640000000500",
+    "block_event/chest_lid": "ffffff4000004fc40102f501",
+    "block_update/chest": "ffffff4000004fc4a82b",
+    "border/center": "3ff8000000000000c004000000000000",
+    "border/initialize": "3ff8000000000000c004000000000000404e0000000000004034000000000000ac02e8070728",
+    "border/lerp_size": "404e0000000000004034000000000000ac02",
+    "border/size": "4034000000000000",
+    "border/warning_delay": "28",
+    "border/warning_distance": "07",
+    "boss_event/add": "0000000000000000000000000000000700080004426f73733f000000020205",
+    "boss_event/name": "0000000000000000000000000000000703080004426f7373",
+    "boss_event/progress": "00000000000000000000000000000007023f000000",
+    "boss_event/properties": "000000000000000000000000000000070505",
+    "boss_event/remove": "0000000000000000000000000000000701",
+    "boss_event/style": "00000000000000000000000000000007040202",
+    "chunk_batch_finished/sixty_four": "40",
+    "chunk_batch_start/empty": "",
+    "chunk_section/empty": "0000000000000029",
+    "chunk_section/global": "100003c31000040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c100c800c700c600c500cc00cb00ca00c900d000cf00ce00cd00d400d300d200d100d800d700d600d500dc00db00da00d900e000df00de00dd00e400e300e200e100e800e700e600e500ec00eb00ea00e900f000ef00ee00ed00f400f300f200f100f800f700f600f500fc00fb00fa00f9010000ff00fe00fd01040103010201010108010701060105010c010b010a01090110010f010e010d01140113011201110118011701160115011c011b011a01190120011f011e011d01240123012201210128012701260125012c012b012a012900040003000200010008000700060005000c000b000a00090010000f000e000d00140013001200110018001700160015001c001b001a00190020001f001e001d00240023002200210028002700260025002c002b002a00290030002f002e002d00340033003200310038003700360035003c003b003a00390040003f003e003d00440043004200410048004700460045004c004b004a00490050004f004e004d00540053005200510058005700560055005c005b005a00590060005f005e005d00640063006200610068006700660065006c006b006a00690070006f006e006d00740073007200710078007700760075007c007b007a00790080007f007e007d00840083008200810088008700860085008c008b008a00890090008f008e008d00940093009200910098009700960095009c009b009a009900a0009f009e009d00a400a300a200a100a800a700a600a500ac00ab00aa00a900b000af00ae00ad00b400b300b200b100b800b700b600b500bc00bb00ba00b900c000bf00be00bd00c400c300c200c107080e18284060808011203c70d182c509060a1018202009920f1c3460b142440704060808026488900d182c509101c305020200992224078e0000000000000003",
+    "chunk_section/hashmap": "1000000005150102030405060708090a0b0c0d0e0f00101112131405a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a418820018820a4e51839ac0839ac5a928398a40398a418820a4e510a4e51839ac5a92805a928398a41882000000000000839ac01022900ffffffffffffffff",
+    "chunk_section/linear": "1000000004040001020313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213212132132132132132321321321321321313213213213213210204002901028e38e38e38e38e3838e38e38e38e38e3",
+    "chunks_biomes/two_columns": "02fffffff9000000031800290204002901028e38e38e38e38e3838e38e38e38e38e300000000ffffffff00",
+    "clear_titles/reset": "01",
+    "commands/tree": "0f00040102030401010502747021010603736179010107046769766509000105616c6961730201080674617267657406011600076d65737361676514146d696e6563726166743a61736b5f736572766572020109046974656d2f0e6d696e6563726166743a6974656d060003706f730a02010a05636f756e740303000000010000004002010b057363616c650202400400000000000002010c04776f7264050202010d0564656c61792b0000000102010e07686f6c646572731f0106000269643d00",
+    "component/attack_animation": "020a",
+    "component/attack_range": "3f800000408000004000000040c000003f0000003f400000",
+    "component/attribute_modifiers": "01010b6d696e6563726166743a614004000000000000010602080006537475726479",
+    "component/axolotl_variant": "04",
+    "component/banner_patterns": "010505",
+    "component/base_color": "0e",
+    "component/bees": "010b0a0300034167650000000700050a",
+    "component/block_entity_data": "010a0400045365656400000000000000090100044e6f41490100",
+    "component/break_sound": "00106d696e6563726166743a637573746f6d0141000000",
+    "component/bucket_entity_data": "0a0400045365656400000000000000090100044e6f41490100",
+    "component/bundle_of_components": "019a08010101030513",
+    "component/container": "0300019a080101010305130137030000",
+    "component/container_loot": "0a04000473656564000000000000000b08000a6c6f6f745f7461626c6500106d696e6563726166743a637573746f6d00",
+    "component/custom_data": "0a0300056c6576656c0000000300",
+    "component/custom_model_data": "013fc000000201000101610100ff0000",
+    "component/custom_name": "0a080005636f6c6f720004676f6c64080004746578740009457863616c6962757200",
+    "component/death_protection": "0203410000000002",
+    "component/dyed_color": "00123456",
+    "component/enchantable": "0f",
+    "component/enchantment_glint_override": "01",
+    "component/enchantments": "012105",
+    "component/entity_data": "650a0400045365656400000000000000090100044e6f41490100",
+    "component/equippable": "0400106d696e6563726166743a637573746f6d01418000000000000101010000a80b",
+    "component/firework_explosion": "0202000000010000000201000000030100",
+    "component/fireworks": "0201040100000005000001",
+    "component/fox_variant": "01",
+    "component/horse_variant": "06",
+    "component/interact_animation": "020a",
+    "component/item_model": "106d696e6563726166743a637573746f6d",
+    "component/item_name": "0a09000565787472610a00000001090004776974680a00000002080000000178000800047465787400017901000a6f62667573636174656401000800097472616e736c6174650005622e6b65790008000474657874000161010004626f6c64010a000b686f7665725f6576656e74080006616374696f6e000973686f775f746578740a000576616c756501000a756e6465726c696e65640108000474657874000374697000000100066974616c69630000",
+    "component/kinetic_negative_zero": "0a00000000800000003f8000000000",
+    "component/llama_variant": "03",
+    "component/lodestone_tracker": "01146d696e6563726166743a7468655f6e6574686572ffffff400000c04600",
+    "component/lore": "0208000546697273740a080005636f6c6f7200037265640800047465787400065365636f6e6400",
+    "component/map_decorations": "0a0a000473706f74050008726f746174696f6e42b40000060001783ff80000000000000600017ac00000000000000008000474797065000f6d696e6563726166743a7265645f780000",
+    "component/map_id": "07",
+    "component/mooshroom_variant": "01",
+    "component/note_block_sound": "106d696e6563726166743a637573746f6d",
+    "component/ominous_bottle_amplifier": "02",
+    "component/parrot_variant": "03",
+    "component/piercing_weapon": "0001014700",
+    "component/potion_contents": "010f0100123456010001c801000101000106637573746f6d",
+    "component/potion_duration_scale": "3f000000",
+    "component/profile": "0001055374657665000000000000",
+    "component/rabbit_variant": "63",
+    "component/repair_cost": "03",
+    "component/repairable": "03f407a408",
+    "component/salmon_size": "02",
+    "component/sprite_name": "0a010003686174000a0006706c617965720800046e616d65000553746576650000",
+    "component/sulfur_cube_content": "d506020000",
+    "component/suspicious_stew_effects": "020ea0011607",
+    "component/tooltip_display": "0102030b",
+    "component/tooltip_style": "106d696e6563726166743a637573746f6d",
+    "component/trim": "000e6d696e6563726166743a7465737408000d54657374204d6174657269616c000e6d696e6563726166743a7465737408000954657374205472696d01",
+    "component/tropical_fish_pattern": "810a",
+    "component/unbreakable": "",
+    "component/use_cooldown": "3fc00000010f6d696e6563726166743a706561726c",
+    "component/use_remainder": "9a08010101030513",
+    "component/villager_variant": "00",
+    "component/weapon": "023fc00000",
+    "component/writable_book_content": "02036f6e65000374776f010132",
+    "component/written_book_content": "055469746c650006417574686f7202010a08000474657874000470616765010004626f6c6401000001",
+    "component_hash/attack_animation": "8069ea55",
+    "component_hash/attack_range": "0f32c723",
+    "component_hash/attribute_modifiers": "4b8ce37f",
+    "component_hash/axolotl_variant": "0be62a35",
+    "component_hash/banner_patterns": "3e83c804",
+    "component_hash/base_color": "8c6452aa",
+    "component_hash/bees": "abc6dc65",
+    "component_hash/block_entity_data": "fcd60f5f",
+    "component_hash/break_sound": "de74fbf9",
+    "component_hash/bucket_entity_data": "b5d0f116",
+    "component_hash/bundle_of_components": "60a20a91",
+    "component_hash/container": "f59e1b71",
+    "component_hash/container_loot": "64bb9bed",
+    "component_hash/custom_data": "57a17e40",
+    "component_hash/custom_model_data": "8622a9a7",
+    "component_hash/custom_name": "5c0f98d8",
+    "component_hash/death_protection": "492b1fa5",
+    "component_hash/dyed_color": "112a62e7",
+    "component_hash/enchantable": "f41c6ed1",
+    "component_hash/enchantment_glint_override": "c336cec2",
+    "component_hash/enchantments": "66a963ef",
+    "component_hash/entity_data": "a907bd0d",
+    "component_hash/equippable": "12cfb686",
+    "component_hash/firework_explosion": "13885ed1",
+    "component_hash/fireworks": "dd542d51",
+    "component_hash/fox_variant": "a5e7ce50",
+    "component_hash/horse_variant": "ebe1f848",
+    "component_hash/interact_animation": "8069ea55",
+    "component_hash/item_model": "53b9a7ba",
+    "component_hash/item_name": "162b7b4e",
+    "component_hash/kinetic_negative_zero": "ca4625cd",
+    "component_hash/llama_variant": "d4a9b9c1",
+    "component_hash/lodestone_tracker": "40e2b79a",
+    "component_hash/lore": "61b92103",
+    "component_hash/map_decorations": "a096381b",
+    "component_hash/map_id": "9915c56e",
+    "component_hash/mooshroom_variant": "dfb5bc23",
+    "component_hash/note_block_sound": "53b9a7ba",
+    "component_hash/ominous_bottle_amplifier": "3f725e25",
+    "component_hash/parrot_variant": "c5660cbb",
+    "component_hash/piercing_weapon": "91eb99ca",
+    "component_hash/potion_contents": "f098e1d5",
+    "component_hash/potion_duration_scale": "9ec7d769",
+    "component_hash/profile": "faa80f98",
+    "component_hash/rabbit_variant": "608d1f34",
+    "component_hash/repair_cost": "e237f49d",
+    "component_hash/repairable": "85be0021",
+    "component_hash/salmon_size": "cb28839f",
+    "component_hash/sprite_name": "9a671d7e",
+    "component_hash/sulfur_cube_content": "9bc537c6",
+    "component_hash/suspicious_stew_effects": "5ea05433",
+    "component_hash/tooltip_display": "796dc4ca",
+    "component_hash/tooltip_style": "53b9a7ba",
+    "component_hash/trim": "051e74d4",
+    "component_hash/tropical_fish_pattern": "53287599",
+    "component_hash/unbreakable": "c574b4c8",
+    "component_hash/use_cooldown": "778ccc9c",
+    "component_hash/use_remainder": "9dcc26a1",
+    "component_hash/villager_variant": "6f51e5cf",
+    "component_hash/weapon": "35712ceb",
+    "component_hash/writable_book_content": "a3d65bad",
+    "component_hash/written_book_content": "635d7c45",
+    "configuration/clientbound/cookie_request": "116d696e6563726166743a73657373696f6e",
+    "configuration/clientbound/finish_configuration": "",
+    "configuration/clientbound/registry_data": "186d696e6563726166743a64696d656e73696f6e5f7479706502136d696e6563726166743a6f766572776f726c64010a0300066865696768740000018000146d696e6563726166743a7468655f6e657468657200",
+    "configuration/clientbound/select_known_packs": "01096d696e65637261667404636f72650432362e32",
+    "configuration/serverbound/cookie_response": "116d696e6563726166743a73657373696f6e0103010203",
+    "configuration/serverbound/finish_configuration": "",
+    "configuration/serverbound/select_known_packs": "01096d696e65637261667404636f72650432362e32",
+    "container_close/third": "03",
+    "container_set_content/two_slots": "02070203f40700000001010000",
+    "container_set_data/furnace": "03000100c8",
+    "container_set_slot/hotbar": "0004002402ab080000",
+    "cooldown/shield": "106d696e6563726166743a736869656c6464",
+    "damage_event/mob_attack": "071c0400013ff8000000000000c04e000000000000400a000000000000",
+    "disconnect/styled": "0a080005636f6c6f72000372656408000474657874000362796500",
+    "entity_event/death": "0000012c22",
+    "entity_position_sync/on_ground": "07003ff8000000000000c04e000000000000400a00000000000042340000c120000001",
+    "entity_position_sync/stepped": "0701023fe00000000000003fd0000000000000bfe8000000000000013ff8000000000000c04e000000000000400a0000000000000342340000c120000000",
+    "forget_level_chunk/negative_x": "00000007fffffffd",
+    "game_event/thunder": "083f000000",
+    "handshake/intention": "880610706c61792e6578616d706c652e6f726763dd02",
+    "hurt_animation/behind": "0743070000",
+    "keep_alive/negative": "fffffffffffffffe",
+    "level_chunk_with_light/small": "00000003fffffffe0201010000000000000007040200000000000000080000000000000009030102030159ffc0070a0300016400000005000905000000000000000101020006000000000001018010070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070700",
+    "level_event/global": "000007d1ffffff4000004fc40000008101",
+    "level_particles/dust": "1500ff00004000000000003ff80000000000004050000000000000c0020000000000003f0000003e8000003e0000003dcccccd3dcccccd3dcccccd0300",
+    "level_particles/end_rod": "1b01003ff80000000000004050000000000000c0020000000000003f0000003e8000003e0000003dcccccd3e4ccccd3e99999a0700",
+    "light_update/sky": "fbffffff0f060905000000000000000101020006000000000001018010070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070700",
+    "login/after_death": "ffffffff0101146d696e6563726166743a7468655f6e657468657200020201000103146d696e6563726166743a7468655f6e6574686572fffffffffffffff90003010001146d696e6563726166743a7468655f6e65746865720000017fffffd04600200001",
+    "login/clientbound/cookie_request": "116d696e6563726166743a73657373696f6e",
+    "login/clientbound/custom_query": "ac020f6d696e6563726166743a7175657279",
+    "login/clientbound/hello": "0673657276657203010203040405060701",
+    "login/clientbound/login_compression": "8002",
+    "login/clientbound/login_disconnect": "08224b69636b656422",
+    "login/clientbound/login_finished": "0123456789abcdeffedcba987654321006506c61796572010874657874757265730576616c756501097369676e61747572651032547698badcfeefcdab8967452301",
+    "login/fresh": "000000070003136d696e6563726166743a6f766572776f726c64146d696e6563726166743a7468655f6e6574686572116d696e6563726166743a7468655f656e64140a0800010000136d696e6563726166743a6f766572776f726c64000000000000002a0100000100043f0100",
+    "login/serverbound/cookie_response": "116d696e6563726166743a73657373696f6e0103010203",
+    "login/serverbound/custom_query_answer": "ac0200",
+    "login/serverbound/hello": "06506c617965720123456789abcdeffedcba9876543210",
+    "login/serverbound/key": "03010203020405",
+    "login/serverbound/login_acknowledged": "",
+    "move_entity_pos/on_ground": "07011000f8000001",
+    "move_entity_pos/stepped": "070401100000000000030000f8000001",
+    "move_entity_pos_rot/airborne": "07001000f800000140e0",
+    "move_entity_rot/on_ground": "070140e0",
+    "move_vehicle": "3ff80000000000004050000000000000c00200000000000042b400004120000001",
+    "move_vehicle/clientbound": "3ff80000000000004050000000000000c00200000000000042b40000c1200000",
+    "open_screen/chest": "03020800054368657374",
+    "open_sign_editor/back": "fffffd000015904600",
+    "paddle_boat": "0100",
+    "ping/negative": "fffffffb",
+    "player_abilities/flying": "063d4ccccd3dcccccd",
+    "player_combat_kill/fell": "0308000b5465737465722066656c6c",
+    "player_info_remove/two": "020000000000000000000000000000000100000000000000000000000000000002",
+    "player_info_update/cleared_name_and_session": "2201000000000000000000000000000000090000",
+    "player_info_update/every_action": "ff010000000000000000000000000000000903626f6201087465787475726573036162630103736967010000000000000000000000000000000700000000000003e802aabb01cc01012a01080003426f620301",
+    "player_position/mixed_relative": "033ff80000000000004050000000000000c00000000000000000000000000000003fe0000000000000000000000000000042b400004120000000000112",
+    "player_rotation/relative_yaw": "4234000001c1f0000000",
+    "remove_entities/two": "020507",
+    "remove_mob_effect/haste": "0102",
+    "reset_score/all": "03426f6200",
+    "reset_score/kills": "03426f6201056b696c6c73",
+    "resource_pack_pop/all": "00",
+    "resource_pack_pop/one": "010123456789abcdeffedcba9876543210",
+    "resource_pack_push/prompt": "0123456789abcdeffedcba98765432101c68747470733a2f2f6578616d706c652e636f6d2f7061636b2e7a697028303132333435363738396162636465663031323334353637383961626364656630313233343536370101080006506c65617365",
+    "respawn/keep_all": "03146d696e6563726166743a7468655f6e6574686572fffffffffffffff90003010001146d696e6563726166743a7468655f6e65746865720000017fffffd046002003",
+    "rotate_head/left": "07a0",
+    "section_blocks_update/one": "fffffc00002ffffc01839eea0a",
+    "serverbound/accept_teleportation": "ac023ff80000000000004050000000000000c00200000000000042b40000c1200000",
+    "serverbound/bundle_item_selected": "24ffffffff0f",
+    "serverbound/change_game_mode": "03",
+    "serverbound/chat": "0268690000000000000005fffffffffffffffa01090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090305000842",
+    "serverbound/chat_ack": "ac02",
+    "serverbound/chat_command": "0468656c70",
+    "serverbound/chat_command_signed": "086d736720612068690000000000000007000000000000000801076d657373616765040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040305000842",
+    "serverbound/chat_session_update": "0000000000000000000000000000000700000000000004d20201020103",
+    "serverbound/chat_unsigned": "0268690000000000000005fffffffffffffffa000305000842",
+    "serverbound/chunk_batch_received": "41480000",
+    "serverbound/client_command": "01",
+    "serverbound/client_information": "05656e5f67620c01017f00000102",
+    "serverbound/client_tick_end": "",
+    "serverbound/command_suggestion": "070c2f676976652040732073746f",
+    "serverbound/configuration_acknowledged": "",
+    "serverbound/container_button_click": "03c801",
+    "serverbound/container_click": "03ac02fc190104010005019a0801010312345678010600",
+    "serverbound/container_close": "03",
+    "serverbound/container_slot_state_changed": "080301",
+    "serverbound/custom_payload": "0f6d696e6563726166743a6272616e6405706f6d6d65",
+    "serverbound/keep_alive": "fffffffffffffffe",
+    "serverbound/move_player_pos": "3ff80000000000004050000000000000c00200000000000001",
+    "serverbound/move_player_pos_rot": "3ff80000000000004050000000000000c00200000000000042b40000c120000002",
+    "serverbound/move_player_rot": "42b40000c120000003",
+    "serverbound/move_player_status_only": "00",
+    "serverbound/player_abilities": "02",
+    "serverbound/player_action": "03fffffd000015904604ac02",
+    "serverbound/player_command": "ac020364",
+    "serverbound/player_input": "59",
+    "serverbound/player_loaded": "",
+    "serverbound/pong": "fffffffb",
+    "serverbound/punch": "",
+    "serverbound/recipe_book_change_settings": "020100",
+    "serverbound/rename_item": "055374696e67",
+    "serverbound/resource_pack": "0123456789abcdeffedcba987654321006",
+    "serverbound/set_carried_item": "0008",
+    "serverbound/sign_update": "fffffd0000159046036f6e650006746872c3a965013400",
+    "serverbound/teleport_to_entity": "0123456789abcdeffedcba9876543210",
+    "serverbound/use_item": "00ac0242b40000c1200000",
+    "serverbound/use_item_on": "01fffffd0000159046013f4000003f8000003f0000000100ac02",
+    "set_camera/other": "ac02",
+    "set_chunk_cache_center/negative_x": "ffffffff0f09",
+    "set_chunk_cache_radius/twelve": "0c",
+    "set_cursor_item/stone": "40010000",
+    "set_display_objective/clear_list": "0000",
+    "set_display_objective/sidebar": "01056b696c6c73",
+    "set_entity_data/armadillo_state": "07122403ff",
+    "set_entity_data/copper_golem": "07102602112503ff",
+    "set_entity_data/every_serializer": "2a0000050101ac0202027f03033fc00000040402686905050800026869060601080002686907070201000008080109093f80000040000000404000000a0afffffd00001590460b0b01fffffd00001590460c0c020d0d01000000000000000700000000000000070e0e010f0f00101027111102271500ff00003f800000121205050313130514140215150a1616011717021818011919081a1a061b1b021c1c021d1d021e1e021f1f01202001212101136d696e6563726166743a6f766572776f726c64fffffd000015904622223323230524240325250326260227273f800000400000004040000028280000000000000000000000003f800000292900010553746576650000000000002a2a012b2b0eff",
+    "set_entity_data/sniffer_state": "07122305ff",
+    "set_entity_motion/fast": "07f6ff7ffed55701",
+    "set_equipment/sword_and_bare_head": "0980018b0800000500",
+    "set_experience/level_30": "3e8000001ef30a",
+    "set_health/hungry": "417800001240000000",
+    "set_held_slot/fifth": "04",
+    "set_objective/add_styled": "056b696c6c73000800054b696c6c730101010a080005636f6c6f72000372656400",
+    "set_objective/change_plain": "06646561746873020800064465617468730000",
+    "set_objective/remove": "056b696c6c7301",
+    "set_passengers/two": "07020809",
+    "set_player_inventory/offhand": "2801a60b0000",
+    "set_player_team/add": "03726564000800035265640800015b0800015d0201010c020103426f62",
+    "set_player_team/change_uncoloured": "03726564020800035265640800015b0800015d02010002",
+    "set_player_team/join": "03726564030103416d79",
+    "set_player_team/leave": "03726564040103416d79",
+    "set_player_team/remove": "0372656401",
+    "set_score/blank": "03426f62056b696c6c7309000100",
+    "set_score/named_fixed": "03426f62056b696c6c7305010800044865726f010208000178",
+    "set_score/plain": "03426f62056b696c6c73090000",
+    "set_simulation_distance/twelve": "0c",
+    "set_subtitle_text/sub": "080003737562",
+    "set_time/two_clocks": "0000000000002ee00200f02e3f0000003f80000001ac020000000000000000",
+    "set_title_text/hello": "08000548656c6c6f",
+    "set_titles_animation/slow": "0000000a0000004600000014",
+    "show_dialog/inline": "000a0a000e65787465726e616c5f7469746c650800097472616e736c61746500116d656e752e7365727665725f6c696e6b730003000c627574746f6e5f776964746800000136030007636f6c756d6e73000000010a000b657869745f616374696f6e0300057769647468000000c80a00056c6162656c0800097472616e736c61746500086775692e6261636b00000a00057469746c650800097472616e736c61746500176d656e752e7365727665725f6c696e6b732e7469746c65000800047479706500166d696e6563726166743a7365727665725f6c696e6b7300",
+    "show_dialog/reference": "03",
+    "sound/explode": "c00504fffffff800000208000000103f000000400000000000000000000007",
+    "sound/fixed_range": "00146d696e6563726166743a746573742e736f756e640141800000000000000000000000000000003f8000003f8000000000000000000000",
+    "sound_entity/direct": "00146d696e6563726166743a746573742e736f756e640009093f8000003f8000000000000000000003",
+    "status/ping_request": "0123456789abcdef",
+    "status/pong_response": "0123456789abcdef",
+    "status/status_response": "f7017b226465736372697074696f6e223a2241204d696e65637261667420536572766572222c22706c6179657273223a7b226d6178223a32302c226f6e6c696e65223a312c2273616d706c65223a5b7b226964223a2230313233343536372d383961622d636465662d666564632d626139383736353433323130222c226e616d65223a22506c61796572227d5d7d2c2276657273696f6e223a7b226e616d65223a2232362e32222c2270726f746f636f6c223a3737367d2c2266617669636f6e223a22646174613a696d6167652f706e673b6261736536342c41514944222c22656e666f7263657353656375726543686174223a747275657d",
+    "stop_sound/all": "00",
+    "stop_sound/music": "0301146d696e6563726166743a6d757369632e67616d65",
+    "swing_animation/off_hand_stab": "0701020a",
+    "tab_list/both": "08000468656164080004666f6f74",
+    "take_item_entity/three": "090103",
+    "teleport_entity/mixed_relative": "093ff80000000000004050000000000000c00000000000000000000000000000003fe0000000000000000000000000000042b40000412000000000011201",
+    "trim_pattern/direct": "000e6d696e6563726166743a746573740a080005636f6c6f720004676f6c6408000474657874000954657374205472696d0001",
+    "update_advancements/root_and_child": "0102146d696e6563726166743a73746f72792f726f6f74000108000268690800057468657265010100000200000003156d696e6563726166743a626c6f636b2f73746f6e6501010161003fc00000c0000000156d696e6563726166743a73746f72792f6368696c6401146d696e6563726166743a73746f72792f726f6f74000202016101620101630040400000c0000000010d6d696e6563726166743a6f6c6401146d696e6563726166743a73746f72792f726f6f7402016101000000000000000501620001",
+    "update_attributes/max_health": "0901174034000000000000010e6d696e6563726166743a74657374401000000000000002",
+    "update_mob_effect/haste": "010201c80105",
+    "update_tags/two_registries": "020f6d696e6563726166743a626c6f636b020e6d696e6563726166743a6c6f67730201ac020f6d696e6563726166743a656d70747900106d696e6563726166743a6469616c6f6701206d696e6563726166743a70617573655f73637265656e5f6164646974696f6e730102",
+    "waypoint/track_azimuth": "00010123456789abcdeffedcba9876543210116d696e6563726166743a64656661756c7400033fa00000",
+    "waypoint/track_position": "00010123456789abcdeffedcba9876543210106d696e6563726166743a626f777469650112ab340101c0ffffff0fac02",
+    "waypoint/untrack": "01010123456789abcdeffedcba9876543210116d696e6563726166743a64656661756c740000",
+    "waypoint/update_chunk": "02010123456789abcdeffedcba9876543210116d696e6563726166743a64656661756c740002fdffffff0f07"
+  }
+}

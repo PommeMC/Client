@@ -189,8 +189,8 @@ impl Translation {
         translate_explode(id, payload, ids, self.to_native)
     }
 
-    /// Rewrites the explode 777 payload into the native layout.
-    pub(super) fn rewrite_explode_777(
+    /// Remaps the ids in a 26.2 `explode`.
+    pub(super) fn rewrite_explode_776(
         &self,
         id: u32,
         payload: &[u8],
@@ -198,19 +198,7 @@ impl Translation {
     ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
 
-        translate_explode_777(id, payload, ids, self.to_native)
-    }
-
-    /// Rewrites the particles 777 payload into the native layout.
-    pub(super) fn rewrite_particles_777(
-        &self,
-        id: u32,
-        payload: &[u8],
-        _state: &mut SessionState,
-    ) -> Option<Vec<u8>> {
-        let ids = self.game_ids.as_ref()?;
-
-        translate_level_particles_777(id, payload, ids.wire_registries, self.to_native)
+        translate_explode_ids(id, payload, ids, self.to_native)
     }
 
     /// Rewrites the advancements payload into the native layout.
@@ -226,7 +214,7 @@ impl Translation {
             id,
             payload,
             ids.advancements,
-            ids.items.as_ref(),
+            self.item_grammar()?,
             self.to_native,
         )
     }
@@ -241,42 +229,6 @@ impl Translation {
         let ids = self.game_ids.as_ref()?;
 
         translate_commands(id, payload, ids.wire_registries, self.to_native)
-    }
-
-    /// Rewrites the recipe add 777 payload into the native layout.
-    pub(super) fn rewrite_recipe_add_777(
-        &self,
-        id: u32,
-        payload: &[u8],
-        _state: &mut SessionState,
-    ) -> Option<Vec<u8>> {
-        let ids = self.game_ids.as_ref()?;
-
-        translate_recipe_book_add_777(id, payload, ids.wire_registries, self.to_native)
-    }
-
-    /// Rewrites the ghost recipe 777 payload into the native layout.
-    pub(super) fn rewrite_ghost_recipe_777(
-        &self,
-        id: u32,
-        payload: &[u8],
-        _state: &mut SessionState,
-    ) -> Option<Vec<u8>> {
-        let ids = self.game_ids.as_ref()?;
-
-        translate_place_ghost_recipe_777(id, payload, ids.wire_registries, self.to_native)
-    }
-
-    /// Rewrites the recipes 777 payload into the native layout.
-    pub(super) fn rewrite_recipes_777(
-        &self,
-        id: u32,
-        payload: &[u8],
-        _state: &mut SessionState,
-    ) -> Option<Vec<u8>> {
-        let ids = self.game_ids.as_ref()?;
-
-        translate_update_recipes_777(id, payload, ids.wire_registries, self.to_native)
     }
 
     /// Rewrites the teleport 767 payload into the native layout.
@@ -340,7 +292,8 @@ impl Translation {
         raw
     }
 
-    /// Whether configuration frames need translation (767 and older).
+    /// Whether configuration frames need translation: every version with a
+    /// configuration phase, since 26.3 inserted `post_effects` among its ids.
     pub fn translates_config(&self) -> bool {
         self.config_ids.is_some()
     }
@@ -450,11 +403,6 @@ impl Translation {
             let frame = translate_add_player_763(v, &raw[id_end..])?;
             return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
         }
-        if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v777.as_ref())
-            && wire_id == v.swing_animation_old_id
-        {
-            return translate_swing_animation_777(v.animate_id, &raw[id_end..]);
-        }
         let id = match &self.game_ids {
             Some(ids) => {
                 let Some(native) = ids.inbound.get(wire_id as usize).copied().flatten() else {
@@ -466,11 +414,6 @@ impl Translation {
             None => wire_id,
         };
 
-        let v777 = self.game_ids.as_ref().and_then(|g| g.v777.as_ref());
-        if v777.is_some_and(|v| id == v.login_id) {
-            // A new session; an accept held over from the last one is stale.
-            state.pending_accept = None;
-        }
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
         let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
         if v767.is_some_and(|v| v.drops.contains(&id)) {
@@ -505,6 +448,9 @@ impl Translation {
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
         let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
+            if let Some(upgraded) = self.upgrade(id, payload) {
+                return upgraded;
+            }
             if id == wire_id && converted.is_none() {
                 return Some(raw);
             }
@@ -515,15 +461,46 @@ impl Translation {
         };
         let rewritten = rewrite.apply(self, id, payload, state);
         match rewritten {
-            Some(out) => Some(out.into_boxed_slice()),
-            None if v777.is_some_and(|v| id == v.level_particles_id) => {
-                tracing::debug!("Dropping level_particles with an unsizable payload");
-                None
+            Some(out) => {
+                // A rewrite can move the packet to another id.
+                let mut at = 0;
+                let id = wire::read_varint(&out, &mut at)?;
+                self.upgrade(id, &out[at..])
+                    .unwrap_or_else(|| Some(out.into_boxed_slice()))
             }
             None => {
                 tracing::warn!("Dropping unparsable game packet {id}");
                 None
             }
         }
+    }
+
+    /// The last pass, on native packet `id` once the version's own rewrite
+    /// has run: a packet carrying item stacks goes through the wire
+    /// version's item grammar, and one 26.3 laid out anew is lifted from
+    /// 26.2's layout. `None` when neither applies, `Some(None)` when the
+    /// payload doesn't parse.
+    fn upgrade(&self, id: u32, payload: &[u8]) -> Option<Option<Box<[u8]>>> {
+        let ids = self.game_ids.as_ref()?;
+        if let Some(rewrite) = ids.items.as_ref().and_then(|items| items.rewrite(id)) {
+            let translated = rewrite(id, payload, self.item_grammar()?);
+            if translated.is_none() {
+                tracing::warn!("Dropping game packet {id} with an unparsable item stack");
+            }
+            return Some(translated.map(Vec::into_boxed_slice));
+        }
+        let v776 = ids.v776.as_ref()?;
+        if id == v776.level_particles_id {
+            let upgraded = upgrade_level_particles(id, payload, ids, self.to_native);
+            if upgraded.is_none() {
+                tracing::debug!("Dropping level_particles with an untranslatable particle");
+            }
+            return Some(upgraded.map(Vec::into_boxed_slice));
+        }
+        let upgraded = v776.upgrade(id, payload)?;
+        if upgraded.is_none() {
+            tracing::warn!("Dropping game packet {id} with an unparsable 26.2 layout");
+        }
+        Some(upgraded.map(Vec::into_boxed_slice))
     }
 }

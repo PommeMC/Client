@@ -4,7 +4,7 @@
 use std::fmt;
 
 use pomme_protocol::codec::{DecodeResult, Reader};
-use pomme_protocol::wire::{write_utf, write_varint};
+use pomme_protocol::wire::write_varint;
 use pomme_registry::builtin::{Attribute, DataComponentKind, EntityKind, SoundEvent};
 use pomme_registry::data::{Enchantment, TrimMaterial, TrimPattern};
 use pomme_registry::{Holder, HolderSet, Identifier};
@@ -12,7 +12,7 @@ use pomme_registry::{Holder, HolderSet, Identifier};
 use super::Component;
 use super::codec::{
     Sound, Text, data_entry_value, entries_value, entry_value, holder, holder_set, id_enum,
-    identifier, registry, sound, sound_value, string, write_bool, write_holder, write_holder_set,
+    identifier, registry, sound, sound_value, write_bool, write_holder, write_holder_set,
     write_identifier, write_list, write_optional, write_registry, write_sound, write_var_i32,
 };
 use crate::hash::{Names, Record, Value};
@@ -150,18 +150,11 @@ impl Component for Equippable {
     }
 }
 
-/// Vanilla `MaterialAssetGroup`: the texture suffix a trim material uses,
-/// with the equipment assets that take another.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaterialAssetGroup {
-    pub base_suffix: String,
-    pub overrides: Vec<(Identifier, String)>,
-}
-
-/// Vanilla `TrimMaterial` sent in place of a registry entry.
+/// Vanilla `TrimMaterial` sent in place of a registry entry: the palette its
+/// trim is coloured from, and its name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirectTrimMaterial {
-    pub assets: MaterialAssetGroup,
+    pub palette_id: Identifier,
     pub description: Text,
 }
 
@@ -170,13 +163,8 @@ pub type TrimMaterialHolder = Holder<TrimMaterial, DirectTrimMaterial>;
 
 fn trim_material(r: &mut Reader) -> DecodeResult<TrimMaterialHolder> {
     holder(r, |r| {
-        let base_suffix = string(r)?;
-        let overrides = r.list(usize::MAX, |r| Ok((identifier(r)?, string(r)?)))?;
         Ok(DirectTrimMaterial {
-            assets: MaterialAssetGroup {
-                base_suffix,
-                overrides,
-            },
+            palette_id: identifier(r)?,
             description: Text::read(r)?,
         })
     })
@@ -189,16 +177,9 @@ fn trim_material_value(material: &TrimMaterialHolder, names: &dyn Names) -> Opti
         Holder::Reference(entry) => return data_entry_value(entry, names),
         Holder::Direct(direct) => direct,
     };
-    let overrides = &direct.assets.overrides;
     Some(
         Record::new()
-            .field("asset_name", Value::string(&direct.assets.base_suffix))
-            .unless("override_armor_assets", overrides.is_empty(), || {
-                let entries = overrides
-                    .iter()
-                    .map(|(asset, suffix)| (Value::identifier(asset), Value::string(suffix)));
-                Value::Map(entries.collect())
-            })
+            .field("palette_id", Value::identifier(&direct.palette_id))
             .field("description", direct.description.value()?)
             .build(),
     )
@@ -206,11 +187,7 @@ fn trim_material_value(material: &TrimMaterialHolder, names: &dyn Names) -> Opti
 
 fn write_trim_material(buf: &mut Vec<u8>, material: &TrimMaterialHolder) {
     write_holder(buf, material, |buf, direct| {
-        write_utf(buf, &direct.assets.base_suffix);
-        write_list(buf, &direct.assets.overrides, |buf, (asset, suffix)| {
-            write_identifier(buf, asset);
-            write_utf(buf, suffix);
-        });
+        write_identifier(buf, &direct.palette_id);
         direct.description.write(buf);
     });
 }

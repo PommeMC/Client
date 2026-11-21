@@ -1,6 +1,6 @@
 //! Wire translation for non-native protocol versions.
 //!
-//! The client speaks 26.2 natively (`pomme_protocol::version::NATIVE`). When
+//! The client speaks 26.3 natively (`pomme_protocol::version::NATIVE`). When
 //! a connection negotiates a different wire version, inbound frames are
 //! rewritten into the native layout before the client reads them where the
 //! wire format changed, and static-registry ids (which shift between versions)
@@ -10,69 +10,49 @@
 //! each tested version's real join traffic is replayed through them by
 //! `net::wire_corpus`.
 //!
-//! 26.3 -> 26.2 wire changes (the first version above native; its frames
-//! translate down):
-//! - `post_effects` was inserted at configuration clientbound 10 and game
-//!   clientbound 83, `add_transient_block` at 37 and `swing_animation` at 123,
-//!   shifting every later id; serverbound `swing` (63) became the payload-less,
-//!   main-hand-only `punch` (46). `post_effects` and `add_transient_block` have
-//!   no native equivalent and drop through the id map
+//! 26.2 -> 26.3 wire changes. Every version below 26.3 shares 26.2's layout
+//! of these packets once its own rewrites have run, so one pass lifts them
+//! all (`v776`):
+//! - `post_effects`, `add_transient_block` and `swing_animation` are new
+//!   clientbound packets, and serverbound `swing` became the payload-less,
+//!   main-hand-only `punch`; the id map covers the shifts
 //! - `move_entity_pos`/`move_entity_pos_rot` pack onGround and a step count
-//!   into a `properties` varint and carry a `VecDelta` (one short triple, or
-//!   per-step `ticks` + triple), collapsed to the summed displacement;
-//!   `move_entity_rot` moved onGround ahead of the rotation bytes
-//! - `entity_position_sync` replaced the position and delta doubles with a
-//!   `PositionPath` (a `Vec3`, or a counted list of `Vec3` + tick-offset steps
-//!   ending at the last); a zero delta is synthesized
-//! - `level_particles` leads with the particle, splits `maxSpeed` per axis,
-//!   sends `count` as a varint and appends a randomization type; particle
-//!   payloads are sized per option codec (byte-identical to 26.2's), so
-//!   block-state, dust and item particles translate on this version
-//! - `CommonPlayerSpawnInfo` (`login`, `respawn`) sends `previousGameType` as
-//!   an optional varint (0 = none, else id + 1) where 26.2 reads a signed byte
+//!   into a leading `properties` varint ahead of a `VecDelta`; 26.2's one short
+//!   triple is a zero step count. `move_entity_rot` moved onGround ahead of the
+//!   rotation bytes
+//! - `entity_position_sync` carries a `PositionPath` where 26.2 sent the
+//!   position and delta doubles; the position becomes a linear path and the
+//!   delta is dropped
+//! - `CommonPlayerSpawnInfo` (`login`, `respawn`) reads `previousGameType` as
+//!   an optional varint (0 = none, else id + 1) where 26.2 sent a signed byte
 //! - `animate` lost its swing actions to `swing_animation` (`entityId, hand,
-//!   {type, duration}`, rewritten back onto `animate`) and renumbered the rest
-//!   (wake up 0, critical hit 1, magic critical hit 2)
+//!   {type, duration}`) and renumbered the rest (wake up 0, critical hit 1,
+//!   magic critical hit 2); a 26.2 swing becomes a default whack
 //! - `update_advancements` moved each advancement's screen position out of
-//!   `DisplayInfo` to a float pair after the entry; an icon whose item 26.2
-//!   lacks drops its display, so that advancement is tracked but not shown
-//! - `explode` appended a `playSound` bool
-//! - `EntityDataSerializers` appended `dye_color` (43), used only by the
-//!   cushion, whose entity type (like the poplar boats) has no native id
-//! - item ids diverge from 72 and `data_component_type` from 40
-//!   (`swing_animation` and `map_color` removed, thirteen components added),
-//!   and `pot_decorations`, inline trim materials and instruments, and
-//!   `teleport_randomly` changed their value layout. Every item-carrying packet
-//!   (containers, cursor, inventory, equipment, merchant offers, entity data,
-//!   creative slots) goes through 26.3's item grammar (`pomme_protocol::item`),
-//!   which remaps the ids, converts the four changed layouts and drops
-//!   components 26.2 lacks
+//!   `DisplayInfo` to a float pair after the entry; one without a display reads
+//!   as the origin
+//! - `explode` appended a `playSound` bool, true for a 26.2 explosion
 //! - `ByteBufCodecs.BIT_SET` (a byte array) replaced the long-array bitset in
 //!   the light masks (`level_chunk_with_light`, `light_update`) and the
 //!   `player_chat` partial filter mask
-//! - `commands` inserted five singleton argument types (the parser ids are
-//!   remapped by name; the 26.3-only ones become the parser 26.2 sent)
-//! - the `tag` slot display carries a `HolderSet` rather than a tag id, and
-//!   26.3 routes every ingredient through it (`recipe_book_add`,
-//!   `place_ghost_recipe`, `update_recipes`)
-//! - TODO: recipes, stonecutter options and fuels built on an item 26.2 doesn't
-//!   have (poplar wood, wool stairs, cushions) are dropped, and such items
-//!   leave the ingredient lists they appear in
+//! - `swing_animation` and `map_color` left `data_component_type` and thirteen
+//!   components joined it; the item grammar (`pomme_protocol::item`) remaps the
+//!   ids and converts the changed layouts
+//! - `level_particles` leads with the particle, splits `maxSpeed` per axis,
+//!   sends `count` as a varint and appends a randomization type, the default
+//!   one being 26.2's spread
+//! - the `tag` slot display carries a `HolderSet` where 26.2 sent a tag id,
+//!   which is the set's named form behind a zero
+//! - serverbound `swing` became `punch`, sent only for attacks and always the
+//!   main hand; an older server gets a main-hand `swing` for it, and the
+//!   `swing` it expects for each use (`use_swing_frame`), which a 26.3 server
+//!   does itself
+//! - `accept_teleportation` appends the accepted pose, which 26.2 sent as a
+//!   `move_player_pos_rot` right after the accept
 //! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
-//!   which pomme never sends (it only steers the server's new destroy-progress
-//!   level events, 2019/2020, which drop client-side)
-//! - `sign_update` moved the text side from before the four lines to after
-//!   them, as a `SignTextSlot` (0 back, 1 front) where it was a boolean
-//! - `accept_teleportation` appends the accepted pose, and 26.3's
-//!   `handleMovePlayer` no longer follows it with a `move_player_pos_rot` (a
-//!   second position packet in one tick disconnects): the accept is held and
-//!   folded together with the PosRot pomme sends right after it
-//! - `punch` is sent only for attacks; use swings are server-side
-//!   (`reports_use_swings`)
-//! - TODO: 26.3 skips applying a teleport to a passenger and sends
-//!   `ABORT_DESTROY_BLOCK` after one; pomme does neither
-//! - `move_vehicle`, `open_sign_editor`, the chunk sections and the item and
-//!   component-patch codecs are byte-identical
+//!   which has no older form and is not sent
+//! - `sign_update` moved the text side from a boolean before the four lines to
+//!   a `SignTextSlot` (0 back, 1 front) after them
 //!
 //! 26.1 -> 26.2 wire changes:
 //! - login `login_finished` gained a trailing session-id UUID
@@ -109,8 +89,8 @@
 //!   item grammar (1.20.5 to 1.21.11), an icon with a component the patch
 //!   walker can't size drops the packet
 //! - serverbound `attack` split out of `interact`, which now always carries the
-//!   hand and a low-precision hit location; 26.2-only serverbound packets
-//!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
+//!   hand and a low-precision hit location; newer serverbound packets without
+//!   an equivalent (`set_game_rule`, `spectator_action`) are suppressed
 //!
 //! 1.21.10 -> 26.2 wire changes (identical to 1.21.11's — the packet layouts
 //! didn't change between the two — except):
@@ -362,30 +342,19 @@
 //!   `map_item_data`, `update_recipes`, `player_chat`, the chunk framing) was
 //!   refactored without changing its layout
 //!
-//! Known limitation (accepted): an inbound item stack carrying a data
-//! component at/after the first id the versions number differently (26.3:
-//! 40, where 26.3 replaced `swing_animation` with `attack_animation`; 26.1:
-//! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`; 1.21.10 and every older version with a
-//! component registry: 5, where 1.21.11 inserted `use_effects` — so even
-//! `custom_name` and `enchantments` are affected on all of them) decodes under
-//! the wrong 26.2 codec — usually a misparse that skips the packet with a
-//! warning, though a coincidentally parsable layout yields a
-//! silently wrong component. Common survival items only use earlier, unshifted
-//! components. Items nested inside component values (bundles, containers) also
-//! keep their source-version ids. On 26.3 a stack carrying one of the
-//! components whose value layout changed (`pot_decorations`, inline `trim` or
-//! `instrument`, a `teleport_randomly` consume effect) misdecodes the same
-//! way, and recipe displays keep their items in wire space.
+//! Item stacks: every version from 1.20.5 has an item grammar
+//! (`pomme_protocol::item`), which carries each component across in the
+//! other version's ids and layout, in both directions, and drops the ones
+//! the other version can't hold. What a version loses that way is marked
+//! `// TODO:` at its shapes and conversions there.
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
 use glam::DVec3;
-use pomme_item::components::{Component as _, Profile};
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
-use pomme_protocol::serverbound::{GamePacket, HashedStack};
+use pomme_protocol::serverbound::{GamePacket, HashedStack, InteractionHand};
 pub use pomme_protocol::version::joinable;
 use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
@@ -403,7 +372,6 @@ enum Rewrite {
     Context(ContextRewrite),
     Frame(FrameRewrite),
     SessionFrame(fn(u32, &[u8], &SessionState) -> Option<Vec<u8>>),
-    Item(ItemRewrite),
     Recipe(RecipeTranslator),
 }
 
@@ -498,8 +466,16 @@ struct GameIds {
     /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
     /// carry a color int (1.20.5 added it); see [`translate_particles`].
     color_particles: bool,
-    /// The rewrites 26.3 introduced, for wire versions at or above it.
-    v777: Option<Ids777>,
+    /// Whether the wire version's particle payloads are laid out as the
+    /// native ones, so a particle that has one can be sized and carried.
+    sized_particle_payloads: bool,
+    /// Whether `explode`'s particle and sound ids are remapped by
+    /// `rewrite_explode_776`.
+    // TODO: 1.21.9 to 26.1 share the layout and pass their ids unremapped.
+    remaps_explode: bool,
+    /// The layouts 26.3 changed, for wire versions below it; applied after
+    /// every other rewrite (see [`v776`]).
+    v776: Option<Ids776>,
     /// The item-carrying packets, for wire versions with a ported item
     /// grammar.
     items: Option<ItemIds>,
@@ -701,10 +677,9 @@ struct Ids772 {
 /// rewritten frame, `None` when malformed.
 type FrameRewrite = fn(u32, &[u8]) -> Option<Vec<u8>>;
 
-/// Dispatch ids for the frame rewrites 26.3 (the first wire version above
-/// native) needs; `version_rewrite` consults it last, after every older
-/// gate. Native-space unless named `_old_id`.
-struct Ids777 {
+/// Native-space dispatch ids for the packets 26.3 laid out anew, which a
+/// wire version below it has in 26.2's layout.
+struct Ids776 {
     move_entity_pos_id: u32,
     move_entity_pos_rot_id: u32,
     move_entity_rot_id: u32,
@@ -713,22 +688,20 @@ struct Ids777 {
     login_id: u32,
     respawn_id: u32,
     animate_id: u32,
-    level_particles_id: u32,
+    /// Where a 26.2 `animate` swing goes.
+    swing_animation_id: u32,
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
-    recipe_book_add_id: u32,
-    place_ghost_recipe_id: u32,
-    update_recipes_id: u32,
-    /// Rewritten onto `animate` before the id map would drop it.
-    swing_animation_old_id: u32,
-    swing_id: u32,
-    punch_old_id: u32,
-    player_action_id: u32,
-    player_action_old_id: u32,
+    level_particles_id: u32,
+    punch_id: u32,
+    /// The wire's `swing`, which stands in for `punch` and reports use swings.
+    swing_old_id: u32,
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
-    move_player_pos_rot_id: u32,
+    move_player_pos_rot_old_id: u32,
+    player_action_id: u32,
+    player_action_old_id: u32,
     sign_update_id: u32,
     sign_update_old_id: u32,
 }
@@ -775,13 +748,6 @@ const ACTION_INTERACT_AT: u32 = 2;
 /// spawn info.
 const LOGIN_HEAD_763: usize = 5;
 const LOGIN_PREFIX_763: usize = 7;
-
-/// Native-registry component ids whose payloads the stack walker can advance
-/// past (26.2 `DataComponents` registration order; anchored in
-/// `component_id_anchors` in `wire_tests`). Matching happens after the
-/// remap, so one set of ids serves every wire version.
-pub(crate) const COMPONENT_MAP_ID: u32 = 46;
-pub(crate) const COMPONENT_PROFILE: u32 = 70;
 
 /// 26.2 particle names whose options carry a payload after the type id;
 /// every older supported version's payload set is a strict subset of this
@@ -854,8 +820,6 @@ enum SectionPadding {
 /// the registry remap (decompiled 1.21.4 / 1.21.5 / 1.21.11 `SlotDisplay`).
 #[derive(Clone, Copy)]
 struct RecipeLayout {
-    /// Pre-1.21.9 `profile` component layout.
-    old_profile: bool,
     /// Through 1.21.11 an `item_stack` display wraps a non-empty `ItemStack`
     /// (count, item, patch) rather than 26.1's `ItemStackTemplate`.
     item_stack_count_first: bool,
@@ -868,6 +832,8 @@ struct RecipeLayout {
 struct RecipeCtx<'a> {
     remaps: &'a RegistryRemaps,
     layout: RecipeLayout,
+    /// The wire version's item grammar.
+    items: Items<'a>,
 }
 
 type RecipeTranslator = fn(u32, &[u8], RecipeCtx<'_>) -> Option<Vec<u8>>;
@@ -903,8 +869,8 @@ use v772::*;
 
 mod v773;
 
-mod v777;
-use v777::*;
+mod v776;
+use v776::*;
 
 mod v763;
 use v763::*;
