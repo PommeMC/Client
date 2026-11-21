@@ -7,7 +7,7 @@ use pomme_block::BlockState;
 use pomme_item::ItemStackData;
 use pomme_item::components::{
     BlockItemStateProperties, ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion,
-    MapColor, PotionContents,
+    PotionContents,
 };
 use pomme_registry::Registry;
 use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
@@ -576,10 +576,6 @@ fn evaluate_item_tint(
             .and_then(|stack| stack.component::<PotionContents>())
             .map(|contents| potion_contents_color(&contents, default))
             .unwrap_or_else(|| opaque_rgb(default)),
-        model::ItemTintSource::MapColor { default } => stack
-            .and_then(|stack| stack.component::<MapColor>())
-            .map(|color| opaque_rgb(color.color as u32))
-            .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::CustomModelData { index, default } => stack
             .and_then(|stack| stack.component::<CustomModelData>())
             .and_then(|data| data.colors.get(index).copied())
@@ -826,9 +822,6 @@ mod tint_tests {
         );
         for source in [
             model::ItemTintSource::Potion {
-                default: translucent,
-            },
-            model::ItemTintSource::MapColor {
                 default: translucent,
             },
             model::ItemTintSource::CustomModelData {

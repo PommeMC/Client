@@ -761,7 +761,6 @@ pub enum ItemTintSource {
     Dye { default: u32 },
     Firework { default: u32 },
     Potion { default: u32 },
-    MapColor { default: u32 },
     CustomModelData { index: usize, default: u32 },
     Team { default: u32 },
 }
@@ -845,9 +844,6 @@ fn parse_item_tint_sources(
                     default: required_color(value, "default")?,
                 }),
                 "potion" => Ok(ItemTintSource::Potion {
-                    default: required_color(value, "default")?,
-                }),
-                "map_color" => Ok(ItemTintSource::MapColor {
                     default: required_color(value, "default")?,
                 }),
                 "custom_model_data" => {
@@ -3050,13 +3046,12 @@ mod tests {
     }
 
     #[test]
-    fn item_tint_parser_keeps_arbitrary_palette_length_and_all_26_2_codecs() {
+    fn item_tint_parser_keeps_arbitrary_palette_length_and_all_26_3_codecs() {
         let values = vec![
             serde_json::json!({"type": "minecraft:constant", "value": 0x010203}),
             serde_json::json!({"type": "minecraft:dye", "default": 0x111213}),
             serde_json::json!({"type": "minecraft:firework", "default": 0x212223}),
             serde_json::json!({"type": "minecraft:potion", "default": 0x313233}),
-            serde_json::json!({"type": "minecraft:map_color", "default": 0x414243}),
             serde_json::json!({
                 "type": "minecraft:custom_model_data",
                 "index": 7,
