@@ -400,7 +400,7 @@ fn handle_raw_explode(r: &mut Reader, event_tx: &Sender<NetworkEvent>) -> Decode
 
 /// The native version whose explode layout [`handle_raw_explode`] reads.
 #[cfg(test)]
-const RAW_EXPLODE_LAYOUT: (&str, i32) = ("26.2", 776);
+const RAW_EXPLODE_LAYOUT: (&str, i32) = ("26.3", 777);
 
 fn explode_packet_id() -> u32 {
     use pomme_protocol::{Direction, PacketTable, Phase};
@@ -413,9 +413,15 @@ fn explode_packet_id() -> u32 {
     })
 }
 
-/// The wire layout of vanilla `ClientboundLevelParticlesPacket.write`, up to
-/// the particle type id.
+/// `ClientboundLevelParticlesPacket.STREAM_CODEC` (:24): the particle with
+/// its options, the two flags, the position, the spread, a speed per axis,
+/// the count and how the client randomizes them.
+// TODO: only the x speed is used and the randomization type is read past;
+// 26.3 gives each axis its own speed and has two other randomizations.
 fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
+    let particle_at = r.pos();
+    pomme_protocol::item::ItemCodec::native().skip(r, &pomme_protocol::item::PARTICLE)?;
+    let type_id = Reader::new(r.since(particle_at)).varint()?;
     let override_limiter = r.bool()?;
     let _always_show = r.bool()?;
     let pos = r.vec3()?;
@@ -423,9 +429,10 @@ fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
     let y_dist = r.f32()?;
     let z_dist = r.f32()?;
     let max_speed = r.f32()?;
-    // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
-    let count = r.i32()?.max(0) as u32;
-    let type_id = r.varint()?;
+    let _y_max_speed = r.f32()?;
+    let _z_max_speed = r.f32()?;
+    let count = r.varint()?;
+    let _randomization = r.varint()?;
     // Particle ids shift between versions; translate into the native id
     // space (`ServerParticleKind`'s) when speaking an older protocol.
     let type_id = match super::translate::active() {

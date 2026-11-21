@@ -102,6 +102,7 @@ import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
@@ -1543,6 +1544,16 @@ public final class CodecOracle {
                         "source", SoundSource.VOICE, "id", 9, "volume", 1.0f, "pitch", 1.0f, "seed", 3L)));
         encode("stop_sound/music", ClientboundStopSoundPacket.STREAM_CODEC::encode,
                 new ClientboundStopSoundPacket(Identifier.withDefaultNamespace("music.game"), SoundSource.MUSIC));
+        // An end rod with a speed per axis, and a dust, whose options sit
+        // between its type and the rest.
+        encode("level_particles/end_rod", ClientboundLevelParticlesPacket.STREAM_CODEC::encode,
+                new ClientboundLevelParticlesPacket(net.minecraft.core.particles.ParticleTypes.END_ROD, true, false,
+                        1.5, 64.0, -2.25, 0.5f, 0.25f, 0.125f, 0.1f, 0.2f, 0.3f, 7,
+                        ClientboundLevelParticlesPacket.RandomizationType.DEFAULT));
+        encode("level_particles/dust", ClientboundLevelParticlesPacket.STREAM_CODEC::encode,
+                new ClientboundLevelParticlesPacket(
+                        new net.minecraft.core.particles.DustParticleOptions(0xff0000, 2.0f), false, false,
+                        1.5, 64.0, -2.25, 0.5f, 0.25f, 0.125f, 0.1f, 3));
         encode("stop_sound/all", ClientboundStopSoundPacket.STREAM_CODEC::encode,
                 new ClientboundStopSoundPacket(null, null));
     }

@@ -1409,7 +1409,8 @@ mod tests {
             &update,
         );
 
-        for protocol in [763, 765, 766, 769, 770, 776] {
+        // TODO: add 776 once its translation exists.
+        for protocol in [763, 765, 766, 769, 770, 777] {
             let frames = if protocol == pomme_protocol::version::NATIVE.protocol {
                 vec![native.clone()]
             } else {

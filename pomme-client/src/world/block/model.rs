@@ -3062,13 +3062,13 @@ mod tests {
         let tints = parse_tints(&values).unwrap();
         assert_eq!(tints.len(), values.len());
         assert_eq!(
-            tints[5],
+            tints[4],
             ItemTintSource::CustomModelData {
                 index: 7,
                 default: 0x515253
             }
         );
-        assert_eq!(tints[6], ItemTintSource::Team { default: 0x616263 });
+        assert_eq!(tints[5], ItemTintSource::Team { default: 0x616263 });
     }
 
     #[test]

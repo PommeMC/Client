@@ -624,8 +624,10 @@ mod tests {
             BlockStateTable::for_protocol(775).registry_name(raw_old_id),
             Some("calcite")
         );
+        // The same number names another block in the native registry.
         let latest_interpretation = BlockKind::from_u32(raw_old_id).expect("latest block id");
-        assert_eq!(block_name(latest_interpretation), "sulfur");
+        let latest_name = block_name(latest_interpretation);
+        assert_ne!(latest_name, "calcite");
 
         let mut stack = ItemStackData::new(ItemKind::IronPickaxe, 1);
         let wire = WireTool {
@@ -645,7 +647,7 @@ mod tests {
         let tool = stack_tool(&stack, 775).expect("26.1 Tool patch");
         let tags = test_tags();
         assert_eq!(tool.mining_speed("calcite", &tags), 17.0);
-        assert_eq!(tool.mining_speed("sulfur", &tags), 1.0);
+        assert_eq!(tool.mining_speed(&latest_name, &tags), 1.0);
     }
 
     #[test]

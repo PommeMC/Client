@@ -163,6 +163,11 @@ fn game_frame(direction: Direction, name: &str, case: &str) -> Vec<u8> {
 
 /// The event pomme's raw handler sends for fixture `case` of packet `name`.
 fn fixture_event(name: &str, case: &str) -> crate::net::NetworkEvent {
+    fixture_events(name, case).next().expect("an event")
+}
+
+/// Every event the raw handler sends for the fixture, which it must take.
+fn fixture_events(name: &str, case: &str) -> impl Iterator<Item = crate::net::NetworkEvent> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (took, _) = crate::net::handler::handle_raw_for_test(
         &fixture_frame(name, case),
@@ -170,7 +175,7 @@ fn fixture_event(name: &str, case: &str) -> crate::net::NetworkEvent {
         &tx,
     );
     assert!(took, "{case}");
-    rx.try_iter().next().expect("an event")
+    rx.into_iter()
 }
 
 /// Translates a hand-built old-version game frame and decodes the result
@@ -4963,6 +4968,36 @@ fn player_and_world_fixtures_land_as_events() {
                 z: 300,
             },
         }
+    );
+}
+
+/// The game's own `level_particles` reads past its particle's options to the
+/// fields after them, and a particle pomme draws nothing for is taken
+/// without an event.
+#[test]
+fn level_particles_fixtures_read() {
+    use crate::net::NetworkEvent;
+
+    let NetworkEvent::LevelParticles {
+        kind: crate::particle::ServerParticleKind::EndRod,
+        override_limiter: true,
+        pos,
+        x_dist,
+        y_dist,
+        z_dist,
+        max_speed,
+        count: 7,
+    } = fixture_event("level_particles", "level_particles/end_rod")
+    else {
+        panic!("expected end rod particles");
+    };
+    assert_eq!(pos, DVec3::new(1.5, 64.0, -2.25));
+    assert_eq!((x_dist, y_dist, z_dist, max_speed), (0.5, 0.25, 0.125, 0.1));
+
+    assert!(
+        fixture_events("level_particles", "level_particles/dust")
+            .next()
+            .is_none()
     );
 }
 

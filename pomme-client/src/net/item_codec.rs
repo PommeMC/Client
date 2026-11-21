@@ -121,8 +121,8 @@ mod tests {
         stack.map_or(ItemStack::Empty, |stack| ItemStack::from_wire(&stack))
     }
 
-    /// One bread x2 as a vanilla `ItemStackTemplate`.
-    const BREAD_TEMPLATE: [u8; 5] = [0xD5, 0x07, 0x02, 0x00, 0x00];
+    /// One bread x2 as a vanilla `ItemStackTemplate`; bread is item 1067.
+    const BREAD_TEMPLATE: [u8; 5] = [0xAB, 0x08, 0x02, 0x00, 0x00];
 
     #[test]
     fn a_removed_component_reads_as_absent_not_as_its_default() {
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn bundle_entries_are_item_then_count() {
-        assert_eq!(ItemKind::Bread.to_u32(), 981);
+        assert_eq!(ItemKind::Bread.to_u32(), 1067);
         let mut value = vec![1];
         value.extend(BREAD_TEMPLATE);
         let stack = decode(&stack_with(ItemKind::Bundle, "bundle_contents", &value));

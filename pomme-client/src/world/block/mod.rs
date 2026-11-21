@@ -1228,10 +1228,9 @@ mod tests {
     #[test]
     fn chest_states_decode() {
         let block_state_table = BlockStateTable::native();
-        // Oracle from reference/26.2/generated/reports/blocks.json:
-        // chest[type=single,facing=south,waterlogged=false] is id 3994, which
-        // a 26.1 table reads as facing=east.
-        let state = block_state_table.try_state(3994).unwrap();
+        // From reference/26.3/generated/reports/blocks.json:
+        // chest[type=single,facing=south,waterlogged=false] is id 5550.
+        let state = block_state_table.try_state(5550).unwrap();
         assert_eq!(block_state_table.block_state_data(state).id(), "chest");
         let props = block_state_table.block_state_data(state).properties();
         assert_eq!(props.get("facing"), Some("south"));
@@ -1282,7 +1281,9 @@ mod tests {
         let table = BlockStateTable::native();
         let data = |name| table.block_state_data(table.first_state_of(name).unwrap());
         assert_eq!(data("stone").push_reaction(), PushReaction::Normal);
-        assert_eq!(data("obsidian").push_reaction(), PushReaction::Normal);
+        // 26.3 made obsidian's immovability its own push reaction, where
+        // `PistonBaseBlock.isPushable` named the block before.
+        assert_eq!(data("obsidian").push_reaction(), PushReaction::Block);
         assert_eq!(data("poppy").push_reaction(), PushReaction::Destroy);
         assert_eq!(data("barrier").push_reaction(), PushReaction::Block);
         assert_eq!(
@@ -2158,15 +2159,15 @@ mod tests {
     #[test]
     fn placeable_block_follows_the_table_slot() {
         let native = BlockStateTable::native();
-        let newer = BlockStateTable::for_protocol(777);
+        let older = BlockStateTable::for_protocol(776);
         for name in ["obsidian", "blackstone", "redstone_block"] {
-            let [native_state, newer_state] = [native, newer].map(|table| {
+            let [native_state, older_state] = [native, older].map(|table| {
                 let state = table.placeable_block_for_item(name).expect(name);
                 assert_eq!(table.table()[u32::from(state) as usize].id, name);
                 state
             });
             // 26.3's added blocks shift these ids.
-            assert_ne!(native_state, newer_state, "{name}");
+            assert_ne!(native_state, older_state, "{name}");
         }
     }
 }
