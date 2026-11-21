@@ -368,7 +368,7 @@ mod tests {
     /// (`CodecOracle.player`).
     #[test]
     fn matches_vanilla_encoder() {
-        use crate::vanilla_fixtures::{assert_decoded, registry_id};
+        use crate::vanilla_fixtures::{assert_decoded, nbt_string, registry_id};
 
         let haste = registry_id("mob_effect", "minecraft:haste");
         let cases = [
@@ -440,8 +440,7 @@ mod tests {
                 "player_combat_kill/fell",
                 PlayerPacket::CombatKill {
                     player: 3,
-                    // The NBT string "Tester fell".
-                    message: [&[8, 0, 11][..], b"Tester fell"].concat().into(),
+                    message: nbt_string("Tester fell"),
                 },
             ),
             ("set_camera/other", PlayerPacket::Camera { entity: 300 }),

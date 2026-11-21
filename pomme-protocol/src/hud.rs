@@ -229,4 +229,64 @@ mod tests {
         );
         assert!(boss(&[6]).is_err());
     }
+
+    /// Vanilla's own encoding of the HUD packets (`CodecOracle.hud`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, nbt_string};
+
+        let flags = BossFlags {
+            darken_screen: true,
+            play_music: false,
+            create_world_fog: true,
+        };
+        // `BossBarColor.RED` and `BossBarOverlay.NOTCHED_10`.
+        let (color, overlay) = (2, 2);
+        let boss = |op| HudPacket::BossEvent { id: 7, op };
+        let cases = [
+            (
+                "set_title_text/hello",
+                HudPacket::Title(nbt_string("Hello")),
+            ),
+            (
+                "set_subtitle_text/sub",
+                HudPacket::Subtitle(nbt_string("sub")),
+            ),
+            (
+                "set_titles_animation/slow",
+                HudPacket::TitlesAnimation {
+                    fade_in: 10,
+                    stay: 70,
+                    fade_out: 20,
+                },
+            ),
+            (
+                "clear_titles/reset",
+                HudPacket::ClearTitles { reset_times: true },
+            ),
+            (
+                "tab_list/both",
+                HudPacket::TabList {
+                    header: nbt_string("head"),
+                    footer: nbt_string("foot"),
+                },
+            ),
+            (
+                "boss_event/add",
+                boss(BossOp::Add {
+                    name: nbt_string("Boss"),
+                    progress: 0.5,
+                    color,
+                    overlay,
+                    flags,
+                }),
+            ),
+            ("boss_event/remove", boss(BossOp::Remove)),
+            ("boss_event/progress", boss(BossOp::Progress(0.5))),
+            ("boss_event/name", boss(BossOp::Name(nbt_string("Boss")))),
+            ("boss_event/style", boss(BossOp::Style { color, overlay })),
+            ("boss_event/properties", boss(BossOp::Properties(flags))),
+        ];
+        assert_decoded(read, cases);
+    }
 }

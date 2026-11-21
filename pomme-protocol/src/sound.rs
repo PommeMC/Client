@@ -196,4 +196,75 @@ mod tests {
         let both = [&[3, 4][..], &utf("a:b")].concat();
         assert_eq!(decode("stop_sound", &both), stop(Some(4), Some("a:b")));
     }
+
+    /// Vanilla's own encoding of the sound packets (`CodecOracle.sounds`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, registry_id};
+
+        let test = |fixed_range| SoundEvent::Direct {
+            location: "minecraft:test.sound".into(),
+            fixed_range,
+        };
+        let cases = [
+            (
+                "sound/explode",
+                SoundPacket::Sound {
+                    sound: SoundEvent::Registered(registry_id(
+                        "sound_event",
+                        "minecraft:entity.generic.explode",
+                    )),
+                    // `SoundSource.BLOCKS`.
+                    source: 4,
+                    x: -8,
+                    y: 520,
+                    z: 16,
+                    volume: 0.5,
+                    pitch: 2.0,
+                    seed: 7,
+                },
+            ),
+            (
+                "sound/fixed_range",
+                SoundPacket::Sound {
+                    sound: test(Some(16.0)),
+                    source: 0,
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    seed: 0,
+                },
+            ),
+            (
+                "sound_entity/direct",
+                SoundPacket::Entity {
+                    sound: test(None),
+                    // `SoundSource.VOICE`.
+                    source: 9,
+                    entity: 9,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    seed: 3,
+                },
+            ),
+            (
+                "stop_sound/music",
+                SoundPacket::Stop {
+                    // `SoundSource.MUSIC`.
+                    source: Some(1),
+                    name: Some("minecraft:music.game".into()),
+                },
+            ),
+            (
+                "stop_sound/all",
+                SoundPacket::Stop {
+                    source: None,
+                    name: None,
+                },
+            ),
+        ];
+        assert_decoded(read, cases);
+    }
 }

@@ -338,4 +338,61 @@ mod tests {
             PlayerInfoPacket::Remove(vec![1, 2])
         );
     }
+
+    /// Vanilla's own encoding of the player list packets
+    /// (`CodecOracle.playerList`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, nbt_string};
+
+        let cases = [
+            (
+                "player_info_update/every_action",
+                PlayerInfoPacket::Update {
+                    actions: actions(0xFF),
+                    entries: vec![Entry {
+                        profile_id: 9,
+                        name: "bob".into(),
+                        properties: vec![Property {
+                            name: "textures".into(),
+                            value: "abc".into(),
+                            signature: Some("sig".into()),
+                        }],
+                        chat_session: Some(ChatSession {
+                            session_id: 7,
+                            expires_at: 1000,
+                            key: [0xAA, 0xBB].into(),
+                            key_signature: [0xCC].into(),
+                        }),
+                        // `GameType.CREATIVE`.
+                        game_mode: 1,
+                        listed: true,
+                        latency: 42,
+                        display_name: Some(nbt_string("Bob")),
+                        list_order: 3,
+                        show_hat: true,
+                    }],
+                },
+            ),
+            (
+                "player_info_update/cleared_name_and_session",
+                PlayerInfoPacket::Update {
+                    actions: Actions {
+                        initialize_chat: true,
+                        update_display_name: true,
+                        ..Default::default()
+                    },
+                    entries: vec![Entry {
+                        profile_id: 9,
+                        ..Default::default()
+                    }],
+                },
+            ),
+            (
+                "player_info_remove/two",
+                PlayerInfoPacket::Remove(vec![1, 2]),
+            ),
+        ];
+        assert_decoded(read, cases);
+    }
 }
