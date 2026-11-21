@@ -153,6 +153,9 @@ mod tests {
         })
     }
 
+    /// The NBT string "Chest".
+    const CHEST_TITLE: [u8; 8] = [8, 0, 5, b'C', b'h', b'e', b's', b't'];
+
     #[test]
     fn other_packets_are_not_read() {
         assert!(read("block_update", &mut Reader::new(&[])).is_none());
@@ -225,14 +228,13 @@ mod tests {
 
     #[test]
     fn screen_data_and_close() {
-        let title = [8, 0, 5, b'C', b'h', b'e', b's', b't'];
-        let bytes = [&[3, 2][..], &title].concat();
+        let bytes = [&[3, 2][..], &CHEST_TITLE].concat();
         assert_eq!(
             decode("open_screen", &bytes),
             ContainerPacket::OpenScreen {
                 container_id: 3,
                 menu: 2,
-                title: title.into(),
+                title: CHEST_TITLE.into(),
             }
         );
         let data = [&[3][..], &1i16.to_be_bytes(), &(-200i16).to_be_bytes()].concat();
@@ -248,5 +250,75 @@ mod tests {
             decode("container_close", &[3]),
             ContainerPacket::Close { container_id: 3 }
         );
+    }
+
+    /// Vanilla's own encoding of the container packets
+    /// (`CodecOracle.containers`).
+    #[test]
+    fn matches_vanilla_encoder() {
+        use crate::vanilla_fixtures::{assert_decoded, registry_id};
+
+        let cases = [
+            (
+                "open_screen/chest",
+                ContainerPacket::OpenScreen {
+                    container_id: 3,
+                    menu: registry_id("menu", "minecraft:generic_9x3"),
+                    title: CHEST_TITLE.into(),
+                },
+            ),
+            (
+                "container_set_content/two_slots",
+                ContainerPacket::Content {
+                    container_id: 2,
+                    state_id: 7,
+                    items: vec![stack_of("diamond", 3), None],
+                    carried: stack_of("stone", 1),
+                },
+            ),
+            (
+                "container_set_slot/hotbar",
+                ContainerPacket::Slot {
+                    container_id: 0,
+                    state_id: 4,
+                    slot: 36,
+                    item: stack_of("bread", 2),
+                },
+            ),
+            (
+                "container_set_data/furnace",
+                ContainerPacket::Data {
+                    container_id: 3,
+                    id: 1,
+                    value: 200,
+                },
+            ),
+            (
+                "container_close/third",
+                ContainerPacket::Close { container_id: 3 },
+            ),
+            (
+                "set_cursor_item/stone",
+                ContainerPacket::Cursor {
+                    item: stack_of("stone", 64),
+                },
+            ),
+            (
+                "set_player_inventory/offhand",
+                ContainerPacket::PlayerInventory {
+                    slot: 40,
+                    item: stack_of("shield", 1),
+                },
+            ),
+            (
+                "set_equipment/sword_and_bare_head",
+                ContainerPacket::Equipment {
+                    entity: 9,
+                    // `EquipmentSlot` MAINHAND and HEAD.
+                    slots: vec![(0, stack_of("stone_sword", 1)), (5, None)],
+                },
+            ),
+        ];
+        assert_decoded(read, cases);
     }
 }

@@ -9,6 +9,7 @@ import com.mojang.brigadier.tree.CommandNode;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import com.mojang.brigadier.tree.RootCommandNode;
 import com.google.gson.JsonObject;
+import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Lifecycle;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -28,6 +29,14 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 import net.minecraft.ChatFormatting;
+import net.minecraft.advancements.Advancement;
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.advancements.AdvancementProgress;
+import net.minecraft.advancements.AdvancementRequirements;
+import net.minecraft.advancements.AdvancementRewards;
+import net.minecraft.advancements.AdvancementType;
+import net.minecraft.advancements.CriterionProgress;
+import net.minecraft.advancements.DisplayInfo;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.MessageArgument;
 import net.minecraft.commands.arguments.ResourceKeyArgument;
@@ -66,6 +75,10 @@ import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchStartPacket;
 import net.minecraft.network.protocol.game.ClientboundChunksBiomesPacket;
 import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
+import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
+import net.minecraft.network.protocol.game.ClientboundContainerSetDataPacket;
+import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundCooldownPacket;
 import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
@@ -82,6 +95,7 @@ import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
+import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerCombatKillPacket;
@@ -100,17 +114,21 @@ import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDistancePa
 import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
+import net.minecraft.network.protocol.game.ClientboundSetCursorItemPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
 import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerInventoryPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSimulationDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
+import net.minecraft.network.protocol.game.ClientboundUpdateAdvancementsPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
 import net.minecraft.network.protocol.game.CommonPlayerSpawnInfo;
@@ -154,11 +172,15 @@ import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.clock.ClockNetworkState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.Relative;
 import net.minecraft.world.entity.animal.armadillo.Armadillo;
 import net.minecraft.world.entity.animal.golem.CopperGolemState;
 import net.minecraft.world.entity.animal.sniffer.Sniffer;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.item.equipment.trim.TrimPattern;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
@@ -221,6 +243,7 @@ public final class CodecOracle {
                 net.minecraft.core.registries.BuiltInRegistries.MAP_DECORATION_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.PARTICLE_TYPE,
                 net.minecraft.core.registries.BuiltInRegistries.BLOCK,
+                net.minecraft.core.registries.BuiltInRegistries.MENU,
                 net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION,
                 builtIn(Registries.DAMAGE_TYPE),
                 builtIn(Registries.CAT_VARIANT), builtIn(Registries.CAT_SOUND_VARIANT),
@@ -295,6 +318,8 @@ public final class CodecOracle {
         player();
         blocks();
         chunks();
+        containers();
+        advancements();
         Map<Identifier, IntList> blockTags = new LinkedHashMap<>();
         blockTags.put(Identifier.withDefaultNamespace("logs"), IntList.of(1, 300));
         blockTags.put(Identifier.withDefaultNamespace("empty"), IntList.of());
@@ -317,7 +342,8 @@ public final class CodecOracle {
         // The entries `entities` and `entityData` send, out of registries too large to list whole.
         for (String entry : List.of("damage_type/mob_attack", "entity_type/zombie", "villager_type/swamp",
                 "villager_profession/farmer", "item/stone", "attribute/max_health", "mob_effect/haste",
-                "block/chest", "block_entity_type/sign")) {
+                "block/chest", "block_entity_type/sign",
+                "menu/generic_9x3")) {
             String[] parts = entry.split("/");
             Identifier name = Identifier.withDefaultNamespace(parts[1]);
             Registry<?> registry = registries.lookupOrThrow(ResourceKey.createRegistryKey(
@@ -797,7 +823,7 @@ public final class CodecOracle {
                 new net.minecraft.world.item.component.UseCooldown(1.5f,
                         Optional.of(Identifier.withDefaultNamespace("pearl"))));
         component("equippable", net.minecraft.core.component.DataComponents.EQUIPPABLE,
-                net.minecraft.world.item.equipment.Equippable.builder(net.minecraft.world.entity.EquipmentSlot.HEAD)
+                net.minecraft.world.item.equipment.Equippable.builder(EquipmentSlot.HEAD)
                         .setEquipSound(Holder.direct(net.minecraft.sounds.SoundEvent.createFixedRangeEvent(
                                 Identifier.withDefaultNamespace("custom"), 16.0f)))
                         .build());
@@ -1158,6 +1184,69 @@ public final class CodecOracle {
                 new ClientboundSetChunkCacheRadiusPacket(12));
     }
 
+    /// `count` of `item` with no components of its own. A stack reads its
+    /// item's default components, which only a loaded world binds.
+    private static ItemStack stack(Item item, int count) {
+        item.builtInRegistryHolder().bindComponents(net.minecraft.core.component.DataComponentMap.EMPTY);
+        return new ItemStack(item, count);
+    }
+
+    /// The container packets pomme reads (`pomme-protocol/src/container.rs`).
+    private static void containers() {
+        encode("open_screen/chest", ClientboundOpenScreenPacket.STREAM_CODEC::encode,
+                new ClientboundOpenScreenPacket(3, net.minecraft.world.inventory.MenuType.GENERIC_9x3,
+                        Component.literal("Chest")));
+        encode("container_set_content/two_slots", ClientboundContainerSetContentPacket.STREAM_CODEC::encode,
+                new ClientboundContainerSetContentPacket(2, 7,
+                        List.of(stack(Items.DIAMOND, 3), ItemStack.EMPTY), stack(Items.STONE, 1)));
+        encode("container_set_slot/hotbar", ClientboundContainerSetSlotPacket.STREAM_CODEC::encode,
+                new ClientboundContainerSetSlotPacket(0, 4, 36, stack(Items.BREAD, 2)));
+        encode("container_set_data/furnace", ClientboundContainerSetDataPacket.STREAM_CODEC::encode,
+                new ClientboundContainerSetDataPacket(3, 1, 200));
+        encode("container_close/third", ClientboundContainerClosePacket.STREAM_CODEC::encode,
+                new ClientboundContainerClosePacket(3));
+        encode("set_cursor_item/stone", ClientboundSetCursorItemPacket.STREAM_CODEC::encode,
+                new ClientboundSetCursorItemPacket(stack(Items.STONE, 64)));
+        encode("set_player_inventory/offhand", ClientboundSetPlayerInventoryPacket.STREAM_CODEC::encode,
+                new ClientboundSetPlayerInventoryPacket(40, stack(Items.SHIELD, 1)));
+        encode("set_equipment/sword_and_bare_head", ClientboundSetEquipmentPacket.STREAM_CODEC::encode,
+                new ClientboundSetEquipmentPacket(9, List.of(
+                        Pair.of(EquipmentSlot.MAINHAND, stack(Items.STONE_SWORD, 1)),
+                        Pair.of(EquipmentSlot.HEAD, ItemStack.EMPTY))));
+    }
+
+    /// An `update_advancements` (`pomme-client/src/net/advancement_wire.rs`):
+    /// a root with a display, a child without one, a removal and progress.
+    private static void advancements() throws Exception {
+        Identifier root = Identifier.withDefaultNamespace("story/root");
+        DisplayInfo display = new DisplayInfo(new net.minecraft.world.item.ItemStackTemplate(Items.STONE),
+                Component.literal("hi"), Component.literal("there"),
+                Optional.of(new net.minecraft.core.ClientAsset.ResourceTexture(
+                        Identifier.withDefaultNamespace("block/stone"))),
+                AdvancementType.GOAL, true, false, false);
+        display.setLocation(1.5f, -2.0f);
+        // A granted criterion is stamped with the time it was granted, so
+        // these are built with a fixed one, in a map that keeps its order.
+        Map<String, CriterionProgress> criteria = new LinkedHashMap<>();
+        criteria.put("a", new CriterionProgress(java.time.Instant.ofEpochMilli(5)));
+        criteria.put("b", new CriterionProgress());
+        var progress = AdvancementProgress.class.getDeclaredConstructor(Map.class);
+        progress.setAccessible(true);
+        encode("update_advancements/root_and_child", ClientboundUpdateAdvancementsPacket.STREAM_CODEC::encode,
+                new ClientboundUpdateAdvancementsPacket(true, List.of(
+                        advancement(root, Optional.empty(), Optional.of(display), List.of(List.of("a"))),
+                        advancement(Identifier.withDefaultNamespace("story/child"), Optional.of(root),
+                                Optional.empty(), List.of(List.of("a", "b"), List.of("c")))),
+                        Set.of(Identifier.withDefaultNamespace("old")),
+                        Map.of(root, progress.newInstance(criteria)), true));
+    }
+
+    private static AdvancementHolder advancement(Identifier id, Optional<Identifier> parent,
+            Optional<DisplayInfo> display, List<List<String>> requirements) {
+        return new AdvancementHolder(id, new Advancement(parent, display, AdvancementRewards.EMPTY, Map.of(),
+                new AdvancementRequirements(requirements), false));
+    }
+
     /// An instance of `type` whose constructor is skipped, with `fields` set.
     /// The fields are final: a JDK that stops reflection from writing those
     /// needs another way to build these packets.
@@ -1186,11 +1275,7 @@ public final class CodecOracle {
         data(values, EntityDataSerializers.STRING, "hi");
         data(values, EntityDataSerializers.COMPONENT, text);
         data(values, EntityDataSerializers.OPTIONAL_COMPONENT, Optional.of(text));
-        // A stack reads its item's default components, which only a loaded world binds.
-        net.minecraft.world.item.Items.STONE.builtInRegistryHolder()
-                .bindComponents(net.minecraft.core.component.DataComponentMap.EMPTY);
-        data(values, EntityDataSerializers.ITEM_STACK,
-                new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.STONE, 2));
+        data(values, EntityDataSerializers.ITEM_STACK, stack(Items.STONE, 2));
         data(values, EntityDataSerializers.BOOLEAN, true);
         data(values, EntityDataSerializers.ROTATIONS, new net.minecraft.core.Rotations(1.0f, 2.0f, 3.0f));
         data(values, EntityDataSerializers.BLOCK_POS, pos);
