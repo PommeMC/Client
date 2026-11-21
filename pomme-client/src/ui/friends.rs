@@ -157,7 +157,7 @@ pub fn fetch_face(rt: &tokio::runtime::Runtime, uuid: String, faces: &FaceCache)
     }
     let faces = Arc::clone(faces);
     rt.spawn(async move {
-        if let Ok(skin) = crate::renderer::fetch_skin_texture(&uuid).await
+        if let Ok(skin) = crate::player::skin::fetch_skin_texture(&uuid).await
             && let Some(face) = crate::renderer::pipelines::menu_overlay::extract_face_8x8(
                 &skin.pixels,
                 skin.width,

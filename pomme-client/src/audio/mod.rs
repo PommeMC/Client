@@ -665,8 +665,25 @@ impl AudioEngine {
     }
 }
 
-impl Drop for AudioEngine {
-    fn drop(&mut self) {
+impl AudioEngine {
+    /// Starts the engine again from `resources`. The running worker stops
+    /// first: OpenAL's current context belongs to the process, so one made
+    /// current while the old worker still lived would be detached again
+    /// when that worker destroyed its own.
+    pub fn restart(
+        &mut self,
+        resources: &dyn ResourceManager,
+        volumes: [f32; SoundCategory::COUNT],
+    ) {
+        self.restart_with(|| Self::new(resources, volumes));
+    }
+
+    fn restart_with(&mut self, start: impl FnOnce() -> Self) {
+        self.shut_down();
+        *self = start();
+    }
+
+    fn shut_down(&mut self) {
         if let Some(tx) = self.command_tx.take() {
             let _ = tx.send(AudioCommand::Shutdown);
         }
@@ -675,6 +692,12 @@ impl Drop for AudioEngine {
         {
             tracing::warn!("audio worker panicked during shutdown");
         }
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }
 
@@ -1179,6 +1202,15 @@ fn category_gain(volumes: &[f32; SoundCategory::COUNT], category: SoundCategory)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_stops_the_old_worker_before_starting_the_new_one() {
+        let (mut engine, _events, commands) = AudioEngine::for_test();
+        engine.restart_with(|| {
+            assert!(matches!(commands.try_recv(), Ok(AudioCommand::Shutdown)));
+            AudioEngine::silent()
+        });
+    }
 
     #[test]
     fn listener_vectors_match_vanilla_axes() {

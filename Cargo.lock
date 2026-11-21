@@ -3255,9 +3255,9 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -4640,7 +4640,7 @@ dependencies = [
  "image",
  "indexmap",
  "jni",
- "libloading 0.9.0",
+ "libloading 0.9.1",
  "libmimalloc-sys",
  "md-5 0.11.0",
  "mimalloc",
@@ -4939,7 +4939,7 @@ version = "0.5.1+1.4.363"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "989a05a332095d6a9ec3d64e429a9ceaf2337812c6216dbd5128e8441d1fdf37"
 dependencies = [
- "libloading 0.9.0",
+ "libloading 0.9.1",
  "raw-window-handle",
  "raw-window-metal",
 ]

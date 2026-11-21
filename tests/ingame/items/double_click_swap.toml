@@ -1,0 +1,91 @@
+# A click that swaps the carried stack with a slot's, then a second fast
+# click on that slot: the double click gathers nothing, as the slot holds
+# what was swapped in. The server's replies are held back, so only the
+# client's own prediction counts.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear"
+
+[[step]]
+chat = "/item replace entity @s container.9 with minecraft:stick 4"
+
+[[step]]
+chat = "/item replace entity @s hotbar.0 with minecraft:stick 3"
+
+[[step]]
+chat = "/item replace entity @s hotbar.1 with minecraft:cobblestone"
+
+[[step]]
+expect = { slot = 9, item = "stick", count = 4 }
+
+[[step]]
+expect = { slot = 36, item = "stick", count = 3 }
+
+[[step]]
+expect = { slot = 37, item = "cobblestone", count = 1 }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+click = { slot = 37, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 37, item = "air" }
+
+# The first hotbar slot's centre at the harness's 427x240 GUI.
+[[step]]
+cursor = [141, 187]
+
+[[step]]
+hold_packets = true
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { slot = 36, item = "cobblestone", count = 1 }
+timeout_ms = 1
+
+[[step]]
+expect = { slot = 9, item = "stick", count = 4 }
+timeout_ms = 1
+
+[[step]]
+hold_packets = false
+
+[[step]]
+click = { slot = 20, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 20, item = "stick", count = 3 }
+
+[[step]]
+expect = { slot = 9, item = "stick", count = 4 }
+
+[[step]]
+screenshot = "swapped"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear"

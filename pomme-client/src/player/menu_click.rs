@@ -10,7 +10,7 @@ use pomme_item::{ItemStack, ItemStackData};
 use pomme_registry::builtin::ItemKind;
 
 use crate::player::click::{
-    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
+    ClickOperation, PickupAllClick, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
 };
 use crate::player::inventory::{
     ARMOR_END, ARMOR_EQUIPMENT, ARMOR_START, CRAFT_INPUT_START, CRAFT_OUTPUT, MAIN_START, OFFHAND,
@@ -538,7 +538,9 @@ fn apply_op(
             };
             quick_move(kind, menu, s);
         }
-        ClickOperation::PickupAll(_) => pickup_all(kind, menu, cursor),
+        ClickOperation::PickupAll(PickupAllClick { slot }) => {
+            pickup_all(kind, menu, cursor, *slot as usize)
+        }
         ClickOperation::Swap(s) => {
             // Unmappable target (offhand outside the player menu): leave the
             // swap to the server.
@@ -1042,11 +1044,17 @@ fn move_item_stack_to(
     moved
 }
 
-/// Double-click: gather matching items from every slot but the crafting-result
-/// slot onto the cursor up to a full stack, partial stacks first (vanilla
-/// `PICKUP_ALL` + `canTakeItemForPickAll`).
-fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
+/// Double-click on `slot`: gather matching items from every slot but the
+/// crafting-result slot onto the cursor up to a full stack, partial stacks
+/// first (vanilla `PICKUP_ALL` + `canTakeItemForPickAll`), unless `slot`
+/// holds an item: the first click swapped it with the one carried.
+// TODO: vanilla still gathers over an item that `mayPickup` refuses
+// (binding-cursed armor outside creative), which isn't modelled.
+fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack, slot: usize) {
     let ItemStack::Present(carried) = cursor else {
+        return;
+    };
+    let Some(ItemStack::Empty) = menu.get(slot) else {
         return;
     };
     let max = carried.kind.max_stack_size();
@@ -1236,14 +1244,57 @@ mod quick_move_tests {
         }
     }
 
-    /// The menu after shift-clicking slot `s` of `kind` holding `slots`.
-    fn shift_clicked(kind: ContainerKind, slots: &[(usize, ItemStack)], s: usize) -> Menu {
+    /// A `kind` menu holding `slots`.
+    fn menu_with(kind: ContainerKind, slots: &[(usize, ItemStack)]) -> Menu {
         let mut menu = vec![ItemStack::Empty; kind.slot_count()];
         for (slot, stack) in slots {
             menu[*slot] = stack.clone();
         }
+        menu
+    }
+
+    /// The menu after shift-clicking slot `s` of `kind` holding `slots`.
+    fn shift_clicked(kind: ContainerKind, slots: &[(usize, ItemStack)], s: usize) -> Menu {
+        let mut menu = menu_with(kind, slots);
         quick_move(kind, &mut menu, s);
         menu
+    }
+
+    /// The menu and cursor after double-clicking slot `s` of the player
+    /// menu holding `slots`, with `cursor` carried.
+    fn double_clicked(
+        slots: &[(usize, ItemStack)],
+        mut cursor: ItemStack,
+        s: usize,
+    ) -> (Menu, ItemStack) {
+        let kind = ContainerKind::Player;
+        let mut menu = menu_with(kind, slots);
+        pickup_all(kind, &mut menu, &mut cursor, s);
+        (menu, cursor)
+    }
+
+    #[test]
+    fn a_double_click_gathers_only_over_an_empty_slot() {
+        let sticks = |count| ItemStack::new(ItemKind::Stick, count);
+        let rows = [(10, sticks(3)), (11, sticks(4))];
+
+        // Over an empty slot, even one the carried item can't go in.
+        for clicked in [9, 5] {
+            let (menu, cursor) = double_clicked(&rows, sticks(1), clicked);
+            assert_eq!(cursor.count(), 8);
+            assert!(filled(&menu).is_empty());
+        }
+
+        // The first click swapped the sticks with the cobblestone carried.
+        let mut swapped = rows.to_vec();
+        swapped.push((9, ItemStack::new(ItemKind::Cobblestone, 1)));
+        let (menu, cursor) = double_clicked(&swapped, sticks(1), 9);
+        assert_eq!(cursor.count(), 1);
+        assert_eq!(filled(&menu).len(), 3);
+
+        // A click outside the menu.
+        let (_, cursor) = double_clicked(&rows, sticks(1), -999i16 as usize);
+        assert_eq!(cursor.count(), 1);
     }
 
     /// The slots of `menu` that hold something.

@@ -26,6 +26,7 @@ use crate::net::connection::ConnectionHandle;
 use crate::net::{DimensionInfo, NetworkEvent};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
+use crate::player::skin::{self, SkinData};
 use crate::player::tab_list::{PlayerChatValidation, TabList};
 use crate::renderer::Renderer;
 use crate::renderer::chunk::mesh_source::MeshSource;
@@ -71,15 +72,15 @@ enum PlayerSkinSource {
 async fn fetch_skin(
     source: &PlayerSkinSource,
     uuid: Option<uuid::Uuid>,
-) -> Result<crate::renderer::SkinData, String> {
+) -> Result<SkinData, String> {
     match source {
         PlayerSkinSource::Textures(textures) => {
-            crate::renderer::fetch_skin_texture_from_profile_property(textures).await
+            skin::fetch_skin_texture_from_profile_property(textures).await
         }
-        PlayerSkinSource::Name(name) => crate::renderer::fetch_skin_texture_by_name(name).await,
+        PlayerSkinSource::Name(name) => skin::fetch_skin_texture_by_name(name).await,
         PlayerSkinSource::Uuid => {
             let uuid = uuid.unwrap_or_default().to_string().replace('-', "");
-            crate::renderer::fetch_skin_texture(&uuid).await
+            skin::fetch_skin_texture(&uuid).await
         }
     }
 }
@@ -87,7 +88,7 @@ async fn fetch_skin(
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
     source: PlayerSkinSource,
-    result: Result<crate::renderer::SkinData, String>,
+    result: Result<SkinData, String>,
 }
 
 enum HeadState {
@@ -110,7 +111,7 @@ struct HeadEntry {
 
 struct HeadResult {
     profile: HeadProfile,
-    result: Result<crate::renderer::SkinData, String>,
+    result: Result<SkinData, String>,
 }
 
 /// A glyph the text drew: its tile (or an animated sprite's frames), and when
@@ -2189,7 +2190,8 @@ impl AppCore {
         self.set_resource_theme(self.menu.theme());
         self.reload_resources();
         self.menu.pick_splash();
-        self.audio = crate::audio::AudioEngine::new(&self.resources, self.menu.category_volumes());
+        self.audio
+            .restart(&self.resources, self.menu.category_volumes());
         self.complete_resource_selection();
     }
 

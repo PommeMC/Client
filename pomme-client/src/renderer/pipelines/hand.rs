@@ -2,10 +2,11 @@ use glam::camera::rh::proj;
 use glam::{Mat3, Mat4, Vec3};
 
 use crate::player::default_skin;
+use crate::player::skin::SkinData;
 use crate::renderer::chunk::block_lighter::LightLevels;
 use crate::renderer::entity_model::pack_normal;
 use crate::renderer::pipelines::lightmap::Lightmap;
-use crate::renderer::{SkinData, rhi, shader, util};
+use crate::renderer::{rhi, shader, util};
 use crate::resources::ResourceManager;
 use crate::world::block::model::CardinalLightType;
 

@@ -2434,7 +2434,7 @@ impl EntityRenderer {
         &mut self,
         device: &rhi::backend::Device,
         uuid: &uuid::Uuid,
-        skin: &crate::renderer::SkinData,
+        skin: &crate::player::skin::SkinData,
     ) {
         if !self.player_skins.contains_key(uuid) && self.player_skins.len() >= MAX_PLAYER_SKINS {
             tracing::warn!("Player skin cache full; keeping fallback texture for {uuid}");
