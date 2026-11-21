@@ -166,10 +166,12 @@ mod tests {
         assert_eq!(
             bound,
             [
+                "block_transformer",
                 "chicken/variant",
                 "damage_type",
                 "instrument",
                 "jukebox_playable",
+                "provides_pottery_pattern",
                 "provides_trim_material"
             ]
         );

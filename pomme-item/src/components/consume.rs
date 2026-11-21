@@ -297,6 +297,7 @@ pub enum ConsumeEffect {
     ClearAllEffects,
     TeleportRandomly {
         diameter: f32,
+        directional_particles: bool,
     },
     PlaySound {
         sound: Sound,
@@ -314,7 +315,10 @@ impl ConsumeEffect {
                 effects: holder_set(r)?,
             },
             ConsumeEffectKind::ClearAllEffects => Self::ClearAllEffects,
-            ConsumeEffectKind::TeleportRandomly => Self::TeleportRandomly { diameter: r.f32()? },
+            ConsumeEffectKind::TeleportRandomly => Self::TeleportRandomly {
+                diameter: r.f32()?,
+                directional_particles: r.bool()?,
+            },
             ConsumeEffectKind::PlaySound => Self::PlaySound { sound: sound(r)? },
         })
     }
@@ -334,9 +338,13 @@ impl ConsumeEffect {
                 write_holder_set(buf, effects);
             }
             Self::ClearAllEffects => write_registry(buf, &ConsumeEffectKind::ClearAllEffects),
-            Self::TeleportRandomly { diameter } => {
+            Self::TeleportRandomly {
+                diameter,
+                directional_particles,
+            } => {
                 write_registry(buf, &ConsumeEffectKind::TeleportRandomly);
                 write_f32(buf, *diameter);
+                buf.push(u8::from(*directional_particles));
             }
             Self::PlaySound { sound } => {
                 write_registry(buf, &ConsumeEffectKind::PlaySound);
@@ -365,9 +373,16 @@ impl ConsumeEffect {
                 Record::new().field("effects", entries_value(effects)),
             ),
             Self::ClearAllEffects => (ConsumeEffectKind::ClearAllEffects, Record::new()),
-            Self::TeleportRandomly { diameter } => (
+            Self::TeleportRandomly {
+                diameter,
+                directional_particles,
+            } => (
                 ConsumeEffectKind::TeleportRandomly,
-                Record::new().float("diameter", *diameter, 16.0),
+                Record::new().float("diameter", *diameter, 16.0).flag(
+                    "directional_particles",
+                    *directional_particles,
+                    true,
+                ),
             ),
             Self::PlaySound { sound } => (
                 ConsumeEffectKind::PlaySound,

@@ -1012,6 +1012,10 @@ public final class CodecOracle {
         component("piercing_weapon", net.minecraft.core.component.DataComponents.PIERCING_WEAPON,
                 new net.minecraft.world.item.component.PiercingWeapon(false, true,
                         java.util.Optional.of(net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC), java.util.Optional.empty()));
+        var stab = new net.minecraft.world.item.component.SwingAnimation(
+                net.minecraft.world.item.SwingAnimationType.STAB, 10);
+        component("attack_animation", net.minecraft.core.component.DataComponents.ATTACK_ANIMATION, stab);
+        component("interact_animation", net.minecraft.core.component.DataComponents.INTERACT_ANIMATION, stab);
         component("repairable", net.minecraft.core.component.DataComponents.REPAIRABLE,
                 new net.minecraft.world.item.enchantment.Repairable(net.minecraft.core.HolderSet.direct(
                         net.minecraft.world.item.Items.DIAMOND.builtInRegistryHolder(),
