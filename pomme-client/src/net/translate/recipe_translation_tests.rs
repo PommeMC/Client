@@ -32,7 +32,7 @@ fn item_stack_display_reads_count_first_through_1_21_11() {
     // 1.21.11 shapeless display: ingredient item(dripstone 26), result
     // item_stack wrapping ItemStack.STREAM_CODEC (count 4, item 26,
     // empty patch), empty station. 1.21.x slot-display ids: item 2,
-    // item_stack 3; 26.2: item 4, item_stack 5, dripstone 53.
+    // item_stack 3; natively: item 4, item_stack 5, dripstone 53.
     let display = [0, 1, 2, 26, 3, 4, 26, 0, 0, 0];
     assert_eq!(
         translate_display(774, &display).unwrap(),
@@ -60,8 +60,8 @@ fn smithing_trim_keeps_the_pattern_holder_from_1_21_5() {
 
 #[test]
 fn smithing_trim_pattern_display_through_1_21_4_keeps_the_base() {
-    // 1.21.4's pattern is a SlotDisplay (here item 26): 26.2 carries no
-    // equivalent, so the result keeps just the untrimmed base.
+    // 1.21.4's pattern is a SlotDisplay (here item 26): the native display carries
+    // no equivalent, so the result keeps just the untrimmed base.
     let display = [4, 0, 0, 0, 5, 2, 26, 2, 26, 2, 26, 0];
     assert_eq!(
         translate_display(769, &display).unwrap(),
@@ -102,7 +102,7 @@ fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
     );
 
     // One shapeless recipe. In 1.21.11 slot-display id 2 is `item` and
-    // item id 26 is `dripstone_block`; in 26.2 those ids are 4 and 53.
+    // item id 26 is `dripstone_block`; natively those ids are 4 and 53.
     let payload = [
         1, // entries
         5, // recipe display id

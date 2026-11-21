@@ -188,7 +188,7 @@ fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<
 }
 
 /// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
-/// A native 26.2 game frame for packet `name`, decoded with `read`.
+/// A native game frame for packet `name`, decoded with `read`.
 fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     read_frame(Phase::Game, frame, name, read)
 }
@@ -746,7 +746,7 @@ fn translate_interact_774() {
     assert_eq!(frames[1], [interact, 42, 0, 1, 1]);
 }
 
-/// 26.2-only serverbound packets with no 1.21.11 equivalent are suppressed
+/// Newer serverbound packets with no 1.21.11 equivalent are suppressed
 /// rather than sent under a wrong id.
 #[test]
 fn suppress_unknown_outbound_774() {
@@ -1053,9 +1053,7 @@ fn translate_set_default_spawn_772() {
 
 /// 1.21.9 inserted `radius`/`blockCount` after the explosion center and
 /// appended a block-particle list; the particle and sound ids between them
-/// are remapped into 26.2's space (a 1.21.8 server sends `explosion` 22 and
-/// the `entity.generic.explode` holder 615 + 1; 26.2 numbers them 30 and
-/// 699).
+/// are remapped into the native space, by name.
 #[test]
 fn translate_explode_772() {
     use pomme_protocol::{ClientRegistry, RegistryTable};

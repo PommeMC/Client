@@ -97,7 +97,7 @@ pub(super) fn translate_set_default_spawn(id: u32, payload: &[u8]) -> Option<Vec
 /// Rewrites `explode`: 1.21.9 inserted `radius` and `blockCount` after the
 /// center and appended a weighted block-particle list (zero/empty here),
 /// and the particle and sound registry ids between the knockback and the
-/// end are remapped into 26.2's space (vanilla sends
+/// end are remapped into the native space (vanilla sends
 /// `explosion`/`explosion_emitter` and `entity.generic.explode`, all of
 /// which shift).
 pub(super) fn translate_explode(

@@ -89,8 +89,8 @@
 //!   item grammar (1.20.5 to 1.21.11), an icon with a component the patch
 //!   walker can't size drops the packet
 //! - serverbound `attack` split out of `interact`, which now always carries the
-//!   hand and a low-precision hit location; 26.2-only serverbound packets
-//!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
+//!   hand and a low-precision hit location; newer serverbound packets without
+//!   an equivalent (`set_game_rule`, `spectator_action`) are suppressed
 //!
 //! 1.21.10 -> 26.2 wire changes (identical to 1.21.11's — the packet layouts
 //! didn't change between the two — except):

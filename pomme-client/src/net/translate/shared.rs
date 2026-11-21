@@ -564,7 +564,7 @@ pub(super) fn copy_nbt(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()>
 
 /// Copies one `Holder<SoundEvent>` (varint id + 1, or 0 followed by the
 /// inline definition: location string plus an optional fixed range),
-/// remapping a referenced id into 26.2's space.
+/// remapping a referenced id into the native space.
 pub(super) fn translate_sound_holder(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,

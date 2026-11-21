@@ -153,8 +153,8 @@ pub(super) fn translate_slot_display(
     let source = var_u32(cur)?;
     let display = ctx.remaps.remap(ClientRegistry::SlotDisplay, source)?;
     if display == SMITHING_TRIM_DISPLAY && ctx.layout.trim_pattern_display {
-        // 26.2 can't name a trim pattern by its template item, so keep the
-        // untrimmed base: the nearest display it can carry.
+        // No later version names a trim pattern by its template item, so keep the
+        // untrimmed base: the nearest display the native version can carry.
         nested(cur, out)?;
         let mut discarded = Vec::new();
         nested(cur, &mut discarded)?; // material

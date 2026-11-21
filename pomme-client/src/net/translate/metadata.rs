@@ -141,7 +141,7 @@ pub(super) fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> O
 }
 
 /// Rewrites one particle (or, with `list`, a counted particle list):
-/// each type id is remapped into 26.2's space, a color payload
+/// each type id is remapped into the native space, a color payload
 /// (`entity_effect`/`tinted_leaves`, an ARGB int on wire versions that have
 /// it) is copied through, and payload-less particles pass bare. `None` (a
 /// particle 26.2 dropped, or a payload the walker can't rewrite) fails the
