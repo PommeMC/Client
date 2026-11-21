@@ -1604,7 +1604,7 @@ impl Translator<'_> {
         let shape = self.from.component(r, id)?;
         let target = self.remaps.remap(ClientRegistry::DataComponentType, id);
         let target_shape = target.and_then(|target| self.to.component_shape(target));
-        let same_layout = target_shape.is_some_and(|other| std::ptr::eq(shape, other));
+        let same_layout = target_shape.is_some_and(|other| shape.same(other));
         let conversion = target
             .filter(|_| !same_layout)
             .and_then(|target| self.conversion(id, target));
@@ -1673,7 +1673,7 @@ impl Translator<'_> {
         to: &'static Shape,
         depth: u32,
     ) -> DecodeResult<bool> {
-        if std::ptr::eq(from, to) {
+        if from.same(to) {
             return self.value(r, out, from, depth);
         }
         if depth > MAX_DEPTH {
@@ -1751,8 +1751,6 @@ impl Translator<'_> {
                 }
                 named
             }
-            (ItemTemplate, ItemTemplate) => self.template(r, out, depth)?,
-            (TypedComponent, TypedComponent) => self.typed_component(r, out, depth)?,
             // A value that a later version made the left arm of an either.
             (Either(left, right), _) if !matches!(to, Either(..)) => {
                 if r.bool()? {
@@ -1878,7 +1876,6 @@ impl Translator<'_> {
                 }
                 carried
             }
-            _ if from.same_leaf(to) => self.value(r, out, from, depth)?,
             _ => {
                 self.from.walk(r, from, depth)?;
                 false
@@ -2105,15 +2102,48 @@ impl Shape {
         }
     }
 
-    /// Whether two shapes are the same fixed layout with nothing nested to
-    /// compare.
-    fn same_leaf(&self, other: &Shape) -> bool {
+    /// Whether two shapes are one layout, whether they are the same static
+    /// or two copies of it written out separately. Two copies of a form only
+    /// an older version has never are: those exist to be converted.
+    fn same(&self, other: &Shape) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+        let all = |a: &[Shape], b: &[Shape]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same(b))
+        };
+        let arms = |a: &[(&str, Shape)], b: &[(&str, Shape)]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|((name, a), (other, b))| name == other && a.same(b))
+        };
         match (self, other) {
+            (Ref(a), _) => a.same(other),
+            (_, Ref(b)) => self.same(b),
             (Utf(a), Utf(b)) => a == b,
             (RegistryId(a), RegistryId(b)) => a == b,
+            (Optional(a), Optional(b)) | (Holder(a), Holder(b)) => a.same(b),
+            (List(max, a), List(other_max, b)) => max == other_max && a.same(b),
+            (Map(key, value), Map(other_key, other_value)) => {
+                key.same(other_key) && value.same(other_value)
+            }
+            (Either(left, right), Either(other_left, other_right)) => {
+                left.same(other_left) && right.same(other_right)
+            }
+            (RegistryHolder(registry, a), RegistryHolder(other_registry, b)) => {
+                registry == other_registry && a.same(b)
+            }
+            (Struct(a), Struct(b)) | (ById(a), ById(b)) => all(a, b),
+            (ByRegistry(registry, a), ByRegistry(other_registry, b)) => {
+                registry == other_registry && arms(a, b)
+            }
+            (ByRegistryOr(registry, a, rest), ByRegistryOr(other_registry, b, other_rest)) => {
+                registry == other_registry && arms(a, b) && rest.same(other_rest)
+            }
             (
                 Unit | Bool | Int | Long | Float | Double | VarInt | Uuid | Nbt | Compound
-                | HolderSet | TagKey,
+                | HolderSet | TagKey | ItemTemplate | TypedComponent,
                 _,
             ) => std::mem::discriminant(self) == std::mem::discriminant(other),
             _ => false,
@@ -4206,5 +4236,36 @@ pub(crate) mod tests {
     fn a_string_lock_is_dropped_without_failing_the_stack() {
         let lock = one_older_component(767, "lock", Wire::default().bytes(&[8, 0, 1, b'k']));
         assert_eq!(translate_older(767, true, &lock), NO_COMPONENTS);
+    }
+
+    /// Two copies of one layout convert as the same layout, whatever they
+    /// nest, so a layer may restate a shape without losing the component.
+    #[test]
+    fn separate_copies_of_a_layout_are_the_same() {
+        static COPY: Shape = Either(&VarInt, &Struct(&[Bool, ById(&[Unit, Nbt])]));
+        static OTHER: Shape = Either(&VarInt, &Struct(&[Bool, ById(&[Unit, Nbt])]));
+        static DIFFERENT: Shape = Either(&VarInt, &Struct(&[Bool, ById(&[Unit, Compound])]));
+        assert!(!std::ptr::eq(&COPY, &OTHER));
+        assert!(COPY.same(&OTHER));
+        assert!(!COPY.same(&DIFFERENT));
+        // An older-only form is converted, never carried as it is.
+        static OLD: Shape = Stack;
+        static OLD_AGAIN: Shape = Stack;
+        assert!(!OLD.same(&OLD_AGAIN));
+
+        let remaps = RegistryRemaps::to_native(PROTOCOL_26_2).unwrap();
+        let translator = codec().translator(codec_26_3(), remaps);
+        let value = Wire::default()
+            .bool(false)
+            .bool(true)
+            .var(1)
+            .empty_compound()
+            .0;
+        let mut out = Vec::new();
+        let carried = translator
+            .convert(&mut Reader::new(&value), &mut out, &COPY, &OTHER, 0)
+            .unwrap();
+        assert!(carried);
+        assert_eq!(out, value);
     }
 }
