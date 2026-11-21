@@ -1,6 +1,15 @@
 use super::*;
 
 impl Translation {
+    /// What the recipe rewrites need, on a version with recipe displays.
+    pub(super) fn recipe_ctx(&self) -> Option<RecipeCtx<'_>> {
+        Some(RecipeCtx {
+            remaps: self.to_native,
+            layout: self.recipe_layout?,
+            items: self.item_grammar(),
+        })
+    }
+
     pub(super) fn recipe_translator(&self, id: u32) -> Option<RecipeTranslator> {
         if id == self.recipe_book_add_id {
             Some(translate_recipe_book_add)

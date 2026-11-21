@@ -26,7 +26,7 @@ pub(super) fn translate_update_advancements(
     id: u32,
     payload: &[u8],
     layout: AdvancementLayout,
-    items: Option<&ItemIds>,
+    items: Option<Items<'_>>,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -92,15 +92,12 @@ fn translate_icon(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     layout: AdvancementLayout,
-    items: Option<&ItemIds>,
+    items: Option<Items<'_>>,
     remaps: &RegistryRemaps,
 ) -> Option<bool> {
     let (item, count) = read_item_and_count(cur, layout.icon_count_first)?;
     let mut patch = Vec::new();
-    match items {
-        Some(items) => items.items(remaps).patch(cur, &mut patch)?,
-        None => translate_component_patch(cur, &mut patch, remaps, layout.old_profile)?,
-    }
+    translate_patch(cur, &mut patch, items, remaps, layout.old_profile)?;
     let Some(item) = remaps.remap(ClientRegistry::Item, item) else {
         return Some(false);
     };

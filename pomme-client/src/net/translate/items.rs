@@ -52,7 +52,32 @@ pub(super) fn translate_item_stack_template(
     let (item, count) = read_item_and_count(cur, ctx.layout.item_stack_count_first)?;
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
     wire::write_varint(out, count as u32);
-    translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
+    translate_patch(cur, out, ctx.items, ctx.remaps, ctx.layout.old_profile)
+}
+
+impl Translation {
+    /// The wire version's item grammar in this translation's ids, when it
+    /// has one.
+    pub(super) fn item_grammar(&self) -> Option<Items<'_>> {
+        let items = self.game_ids.as_ref()?.items.as_ref()?;
+        Some(items.items(self.to_native))
+    }
+}
+
+/// Rewrites a component patch into native ids and layouts: through the wire
+/// version's item grammar when it has one, else by
+/// [`translate_component_patch`], which walks only a few components.
+pub(super) fn translate_patch(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    items: Option<Items<'_>>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
+    match items {
+        Some(items) => items.patch(cur, out),
+        None => translate_component_patch(cur, out, remaps, old_profile),
+    }
 }
 
 /// The item and count leading a non-empty `ItemStack` (`count_first`) or an

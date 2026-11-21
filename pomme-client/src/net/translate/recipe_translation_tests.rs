@@ -1,21 +1,15 @@
 use super::recipes::translate_recipe_book_add;
 use super::*;
 
-/// The recipe context the live translator uses for `protocol`.
-fn recipe_ctx(protocol: i32) -> (TranslationSession, RecipeLayout) {
-    let translation = TranslationSession::for_protocol(protocol).expect("translated protocol");
-    let layout = translation.recipe_layout.expect("recipe display protocol");
-    (translation, layout)
+fn translation(protocol: i32) -> TranslationSession {
+    TranslationSession::for_protocol(protocol).expect("translated protocol")
 }
 
 /// Translates one `recipe_book_add` entry around `display` (a recipe
 /// display's bytes) for `protocol`; returns the translated display bytes.
 fn translate_display(protocol: i32, display: &[u8]) -> Option<Vec<u8>> {
-    let (translation, layout) = recipe_ctx(protocol);
-    let ctx = RecipeCtx {
-        remaps: translation.to_native,
-        layout,
-    };
+    let translation = translation(protocol);
+    let ctx = translation.recipe_ctx().expect("recipe display protocol");
     let id = required_id(
         PacketTable::native(),
         Phase::Game,
@@ -98,11 +92,8 @@ fn nested_slot_displays_past_the_depth_cap_are_rejected() {
 
 #[test]
 fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
-    let (translation, layout) = recipe_ctx(774);
-    let ctx = RecipeCtx {
-        remaps: translation.to_native,
-        layout,
-    };
+    let translation = translation(774);
+    let ctx = translation.recipe_ctx().expect("recipe display protocol");
     let id = required_id(
         PacketTable::native(),
         Phase::Game,
@@ -201,5 +192,32 @@ fn tag_display_gains_the_holder_set_form() {
     assert_eq!(
         translate_display(776, &display).unwrap(),
         [0, 1, 6, 0, 3, b'a', b':', b'b', 0, 0]
+    );
+}
+
+/// An `item_stack` display's components go through the wire version's item
+/// grammar, so a result that carries one doesn't take the packet with it.
+#[test]
+fn item_stack_display_keeps_its_components() {
+    let wire = RegistryTable::for_protocol(776).unwrap();
+    let native = RegistryTable::native();
+    let id = |table: &RegistryTable, registry, name| table.id_of(registry, name).unwrap() as u8;
+    let display = |table: &RegistryTable| {
+        vec![
+            0, // shapeless
+            0, // no ingredients
+            id(table, ClientRegistry::SlotDisplay, "item_stack"),
+            id(table, ClientRegistry::Item, "stone"),
+            1, // count
+            1, // one added component
+            0, // none removed
+            id(table, ClientRegistry::DataComponentType, "damage"),
+            7,
+            0, // empty station
+        ]
+    };
+    assert_eq!(
+        translate_display(776, &display(wire)),
+        Some(display(native))
     );
 }

@@ -214,7 +214,7 @@ impl Translation {
             id,
             payload,
             ids.advancements,
-            ids.items.as_ref(),
+            self.item_grammar(),
             self.to_native,
         )
     }

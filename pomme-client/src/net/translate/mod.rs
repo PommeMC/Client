@@ -853,6 +853,8 @@ struct RecipeLayout {
 struct RecipeCtx<'a> {
     remaps: &'a RegistryRemaps,
     layout: RecipeLayout,
+    /// The wire version's item grammar, when it has one.
+    items: Option<Items<'a>>,
 }
 
 type RecipeTranslator = fn(u32, &[u8], RecipeCtx<'_>) -> Option<Vec<u8>>;
