@@ -5,6 +5,7 @@ pub mod interaction;
 pub mod inventory;
 pub mod item_cooldowns;
 pub mod menu_click;
+pub mod skin;
 pub mod tab_list;
 
 use glam::{dvec2, dvec3};
