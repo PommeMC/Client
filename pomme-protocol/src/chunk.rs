@@ -1,4 +1,4 @@
-//! Chunk and light packets, as vanilla 26.2 lays them out
+//! Chunk and light packets, as vanilla 26.3 lays them out
 //! (`net/minecraft/network/protocol/game/Clientbound*Packet`). The section
 //! buffer stays opaque here; `section` reads its paletted containers.
 
@@ -174,15 +174,15 @@ fn block_entity(r: &mut Reader) -> DecodeResult<BlockEntityInfo> {
     })
 }
 
-/// ClientboundLightUpdatePacketData.java:51-56
+/// `ClientboundLightUpdatePacketData.STREAM_CODEC` (:25).
 fn light_data(r: &mut Reader) -> DecodeResult<LightData> {
     let layers =
         |r: &mut Reader| r.list(usize::MAX, |r| Ok(r.byte_array(LIGHT_LAYER_BYTES)?.into()));
     Ok(LightData {
-        sky_y_mask: r.long_array()?,
-        block_y_mask: r.long_array()?,
-        empty_sky_y_mask: r.long_array()?,
-        empty_block_y_mask: r.long_array()?,
+        sky_y_mask: r.bit_set()?,
+        block_y_mask: r.bit_set()?,
+        empty_sky_y_mask: r.bit_set()?,
+        empty_block_y_mask: r.bit_set()?,
         sky_updates: layers(r)?,
         block_updates: layers(r)?,
     })
@@ -205,6 +205,20 @@ mod tests {
         for l in longs {
             out.extend(l.to_be_bytes());
         }
+    }
+
+    /// A bit set as `BitSet.toByteArray` gives it: little-endian, without
+    /// trailing zero bytes.
+    fn bit_set(out: &mut Vec<u8>, words: &[u64]) {
+        let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        bytes.truncate(
+            bytes
+                .iter()
+                .rposition(|b| *b != 0)
+                .map_or(0, |last| last + 1),
+        );
+        write_varint(out, bytes.len() as u32);
+        out.extend(bytes);
     }
 
     #[test]
@@ -231,10 +245,10 @@ mod tests {
         bytes.extend([0x59, 0, 64, 2, 10, 0]);
         bytes.extend([0x00, 0xFF, 0xC0, 2, 0]);
         // Sky mask over two longs, empty block mask, one sky layer.
-        long_array(&mut bytes, &[1, 1 << 63]);
-        long_array(&mut bytes, &[]);
-        long_array(&mut bytes, &[]);
-        long_array(&mut bytes, &[2]);
+        bit_set(&mut bytes, &[1, 1 << 63]);
+        bit_set(&mut bytes, &[]);
+        bit_set(&mut bytes, &[]);
+        bit_set(&mut bytes, &[2]);
         write_varint(&mut bytes, 1);
         write_varint(&mut bytes, 2048);
         bytes.extend([0xAB; 2048]);
@@ -281,7 +295,7 @@ mod tests {
 
         let mut bytes = vec![0, 0];
         for _ in 0..4 {
-            long_array(&mut bytes, &[]);
+            bit_set(&mut bytes, &[]);
         }
         write_varint(&mut bytes, 1);
         write_varint(&mut bytes, 2049);

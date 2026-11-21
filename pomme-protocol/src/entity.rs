@@ -1,4 +1,4 @@
-//! The entity lifecycle, movement and event packets, as vanilla 26.2 lays
+//! The entity lifecycle, movement and event packets, as vanilla 26.3 lays
 //! them out (`net/minecraft/network/protocol/game/Clientbound*Packet`).
 
 use glam::DVec3;
@@ -13,6 +13,43 @@ pub struct PositionMoveRotation {
     pub delta: DVec3,
     pub y_rot: f32,
     pub x_rot: f32,
+}
+
+/// `VecDelta`: how far a move packet takes its entity, in one piece or in
+/// steps of so many ticks each.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MoveDelta {
+    Linear(DVec3),
+    Stepped(Vec<(DVec3, u32)>),
+}
+
+impl MoveDelta {
+    /// The whole displacement.
+    pub fn total(&self) -> DVec3 {
+        match self {
+            Self::Linear(delta) => *delta,
+            Self::Stepped(steps) => steps.iter().map(|(delta, _)| *delta).sum(),
+        }
+    }
+}
+
+/// `PositionPath`: where a position sync puts its entity, at once or through
+/// positions each a tick offset apart.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PositionPath {
+    Linear(DVec3),
+    Stepped(Vec<(DVec3, u32)>),
+}
+
+impl PositionPath {
+    /// `PositionPath.endPosition`. A stepped path with no steps cannot be
+    /// built by the game, so it has none.
+    pub fn end(&self) -> Option<DVec3> {
+        match self {
+            Self::Linear(position) => Some(*position),
+            Self::Stepped(steps) => steps.last().map(|(position, _)| *position),
+        }
+    }
 }
 
 /// `Relative.SET_STREAM_CODEC`: which parts of a teleport are relative to
@@ -69,13 +106,15 @@ pub enum EntityPacket {
     /// `move_entity_pos` no rotation (`(y_rot, x_rot)`).
     Move {
         id: i32,
-        delta: Option<DVec3>,
+        delta: Option<MoveDelta>,
         rotation: Option<(f32, f32)>,
         on_ground: bool,
     },
     PositionSync {
         id: i32,
-        values: PositionMoveRotation,
+        path: PositionPath,
+        y_rot: f32,
+        x_rot: f32,
         on_ground: bool,
     },
     Teleport {
@@ -144,11 +183,13 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
         "move_entity_pos" => |r| read_move(r, true, false),
         "move_entity_pos_rot" => |r| read_move(r, true, true),
         "move_entity_rot" => |r| read_move(r, false, true),
-        // ClientboundEntityPositionSyncPacket.java:18
+        // ClientboundEntityPositionSyncPacket.java:17
         "entity_position_sync" => |r| {
             Ok(EntityPacket::PositionSync {
                 id: r.var_i32()?,
-                values: position_move_rotation(r)?,
+                path: position_path(r)?,
+                y_rot: r.f32()?,
+                x_rot: r.f32()?,
                 on_ground: r.bool()?,
             })
         },
@@ -228,12 +269,19 @@ pub fn read(name: &str, r: &mut Reader) -> Option<DecodeResult<EntityPacket>> {
 
 /// `ClientboundMoveEntityPacket.Pos/PosRot/Rot`: shorts of 1/4096 block
 /// (`VecDeltaCodec`), then y and x rotation.
+/// `ClientboundMoveEntityPacket.Pos`, `PosRot` and `Rot` (:101-177): the two
+/// with a position lead with `properties`, on ground in bit 0 and the step
+/// count above it; `Rot` sends on ground as a bool ahead of its angles.
 fn read_move(r: &mut Reader, pos: bool, rot: bool) -> DecodeResult<EntityPacket> {
     let id = r.var_i32()?;
-    let delta = if pos {
-        Some(DVec3::new(delta(r)?, delta(r)?, delta(r)?))
+    let (delta, on_ground) = if pos {
+        let properties = r.varint()?;
+        (
+            Some(move_delta(r, (properties >> 1) as usize)?),
+            properties & 1 != 0,
+        )
     } else {
-        None
+        (None, r.bool()?)
     };
     let rotation = if rot {
         Some((angle(r)?, angle(r)?))
@@ -244,12 +292,40 @@ fn read_move(r: &mut Reader, pos: bool, rot: bool) -> DecodeResult<EntityPacket>
         id,
         delta,
         rotation,
-        on_ground: r.bool()?,
+        on_ground,
     })
 }
 
-fn delta(r: &mut Reader) -> DecodeResult<f64> {
-    Ok(f64::from(r.i16()?) / 4096.0)
+/// `VecDelta.read` (:33-58).
+fn move_delta(r: &mut Reader, steps: usize) -> DecodeResult<MoveDelta> {
+    if steps == 0 {
+        return Ok(MoveDelta::Linear(delta(r)?));
+    }
+    r.len_of(steps.saturating_mul(MIN_BYTES_PER_STEP))?;
+    let steps = (0..steps).map(|_| {
+        let ticks = r.varint()?;
+        Ok((delta(r)?, ticks))
+    });
+    Ok(MoveDelta::Stepped(steps.collect::<DecodeResult<_>>()?))
+}
+
+/// `VecDelta.Stepped.MIN_BYTES_PER_STEP`: a one-byte tick count and three
+/// shorts.
+const MIN_BYTES_PER_STEP: usize = 7;
+
+fn delta(r: &mut Reader) -> DecodeResult<DVec3> {
+    let mut axis = || Ok(f64::from(r.i16()?) / 4096.0);
+    Ok(DVec3::new(axis()?, axis()?, axis()?))
+}
+
+/// `PositionPath.STREAM_CODEC`: a type id, then one position or a list of
+/// steps.
+fn position_path(r: &mut Reader) -> DecodeResult<PositionPath> {
+    Ok(match r.varint()? {
+        1 => PositionPath::Stepped(r.list(usize::MAX, |r| Ok((r.vec3()?, r.varint()?)))?),
+        // `ByIdMap` maps an id out of range to the first type.
+        _ => PositionPath::Linear(r.vec3()?),
+    })
 }
 
 /// `ClientboundDamageEventPacket.readOptionalEntityId`: id + 1, 0 for none.
@@ -335,19 +411,19 @@ mod tests {
     #[test]
     fn moves_carry_their_parts() {
         let shorts = [4096i16, -2048, 1].iter().flat_map(|s| s.to_be_bytes());
-        let mut pos = var(3);
+        // On ground and no steps, then airborne and no steps.
+        let mut pos = [var(3), vec![1]].concat();
         pos.extend(shorts.clone());
-        pos.push(1);
-        let mut pos_rot = var(3);
+        let mut pos_rot = [var(3), vec![0]].concat();
         pos_rot.extend(shorts);
-        pos_rot.extend([0x40, 0xC0, 0]);
-        let rot = [var(3), vec![0x40, 0xC0, 1]].concat();
-        let delta = Some(DVec3::new(1.0, -0.5, 1.0 / 4096.0));
+        pos_rot.extend([0x40, 0xC0]);
+        let rot = [var(3), vec![1, 0x40, 0xC0]].concat();
+        let delta = Some(MoveDelta::Linear(DVec3::new(1.0, -0.5, 1.0 / 4096.0)));
         assert_eq!(
             decode("move_entity_pos", &pos),
             EntityPacket::Move {
                 id: 3,
-                delta,
+                delta: delta.clone(),
                 rotation: None,
                 on_ground: true
             }
@@ -373,25 +449,33 @@ mod tests {
     }
 
     #[test]
-    fn teleport_and_sync_share_position_move_rotation() {
+    fn teleport_and_position_sync() {
         let values = PositionMoveRotation {
             position: DVec3::new(10.0, 64.0, -5.0),
             delta: DVec3::new(0.0, 0.25, 0.0),
             y_rot: 45.0,
             x_rot: -10.0,
         };
-        let mut pmr = vec3(values.position);
-        pmr.extend(vec3(values.delta));
-        pmr.extend(45.0f32.to_be_bytes());
-        pmr.extend((-10.0f32).to_be_bytes());
-        let sync = [var(9), pmr.clone(), vec![1]].concat();
+        let rotation = [45.0f32.to_be_bytes(), (-10.0f32).to_be_bytes()].concat();
+        // A linear path, type 0.
+        let sync = [
+            var(9),
+            vec![0],
+            vec3(values.position),
+            rotation.clone(),
+            vec![1],
+        ]
+        .concat();
+        let pmr = [vec3(values.position), vec3(values.delta), rotation].concat();
         // Relative X and Y_ROT, as a plain int.
         let teleport = [var(9), pmr, 0b1001i32.to_be_bytes().to_vec(), vec![0]].concat();
         assert_eq!(
             decode("entity_position_sync", &sync),
             EntityPacket::PositionSync {
                 id: 9,
-                values,
+                path: PositionPath::Linear(values.position),
+                y_rot: 45.0,
+                x_rot: -10.0,
                 on_ground: true
             }
         );
@@ -564,16 +648,28 @@ mod tests {
         };
         assert!(close(velocity, DVec3::new(6.0, -1.0, 0.0)), "{velocity}");
 
-        let delta = Some(DVec3::new(1.0, -0.5, 1.0 / 4096.0));
+        let delta = Some(MoveDelta::Linear(DVec3::new(1.0, -0.5, 1.0 / 4096.0)));
         let rotation = Some((90.0, -45.0));
         let cases = [
             (
                 "move_entity_pos/on_ground",
                 EntityPacket::Move {
                     id: 7,
-                    delta,
+                    delta: delta.clone(),
                     rotation: None,
                     on_ground: true,
+                },
+            ),
+            (
+                "move_entity_pos/stepped",
+                EntityPacket::Move {
+                    id: 7,
+                    delta: Some(MoveDelta::Stepped(vec![
+                        (DVec3::X, 1),
+                        (DVec3::new(0.0, -0.5, 1.0 / 4096.0), 3),
+                    ])),
+                    rotation: None,
+                    on_ground: false,
                 },
             ),
             (
@@ -598,13 +694,20 @@ mod tests {
                 "entity_position_sync/on_ground",
                 EntityPacket::PositionSync {
                     id: 7,
-                    values: PositionMoveRotation {
-                        position,
-                        delta: movement,
-                        y_rot: 45.0,
-                        x_rot: -10.0,
-                    },
+                    path: PositionPath::Linear(position),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
                     on_ground: true,
+                },
+            ),
+            (
+                "entity_position_sync/stepped",
+                EntityPacket::PositionSync {
+                    id: 7,
+                    path: PositionPath::Stepped(vec![(movement, 1), (position, 3)]),
+                    y_rot: 45.0,
+                    x_rot: -10.0,
+                    on_ground: false,
                 },
             ),
             (

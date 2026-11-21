@@ -280,7 +280,7 @@ mod tests {
     /// `reference/26.2/decompiled/.../GameProtocols.java`.
     #[test]
     fn anchors_26_2() {
-        let t = PacketTable::native();
+        let t = PacketTable::for_protocol(776).unwrap();
         assert_eq!(t.version().protocol, 776);
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), Some(1));
         assert_eq!(
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn anchors_26_3() {
         let t = PacketTable::for_protocol(777).unwrap();
-        let native = PacketTable::native();
+        let older = PacketTable::for_protocol(776).unwrap();
         assert_eq!(t.version().protocol, 777);
         assert_eq!(t.version().name, "26.3");
         let cb = |name| t.id(Phase::Game, Direction::Clientbound, name);
@@ -663,7 +663,7 @@ mod tests {
                     }
                     _ => (Some, 0),
                 };
-                let end = assert_shifted(native, t, phase, dir, shift) + net_added;
+                let end = assert_shifted(older, t, phase, dir, shift) + net_added;
                 assert_eq!(t.name_of(phase, dir, end), None, "{phase:?} {dir:?}");
             }
         }
@@ -697,11 +697,19 @@ mod tests {
         );
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "login"),
-            PacketTable::native().id(Phase::Game, Direction::Clientbound, "login")
+            PacketTable::for_protocol(776).unwrap().id(
+                Phase::Game,
+                Direction::Clientbound,
+                "login"
+            )
         );
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "set_player_team"),
-            PacketTable::native().id(Phase::Game, Direction::Clientbound, "set_player_team")
+            PacketTable::for_protocol(776).unwrap().id(
+                Phase::Game,
+                Direction::Clientbound,
+                "set_player_team"
+            )
         );
     }
 
@@ -1436,7 +1444,7 @@ mod tests {
     /// that changes these means the game version moved.
     #[test]
     fn counts_26_2() {
-        let t = PacketTable::native();
+        let t = PacketTable::for_protocol(776).unwrap();
         let count = |phase, dir| names(t, phase, dir).count();
         use Direction::{Clientbound, Serverbound};
         assert_eq!(count(Phase::Handshake, Serverbound), 1);

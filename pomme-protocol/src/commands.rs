@@ -1,4 +1,4 @@
-//! `commands` (`ClientboundCommandsPacket`) as vanilla 26.2 lays it out: the
+//! `commands` (`ClientboundCommandsPacket`) as vanilla 26.3 lays it out: the
 //! server's Brigadier tree as a flat node list and the root's index.
 
 use crate::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
@@ -102,7 +102,12 @@ pub enum ArgumentType {
     LootTable,
     LootPredicate,
     LootModifier,
+    ContextFloatProvider,
+    ContextIntProvider,
+    SlotSource,
     Dialog,
+    Feature,
+    SwingAnimation,
     Uuid,
 }
 
@@ -280,7 +285,12 @@ fn argument_type(r: &mut Reader) -> DecodeResult<ArgumentType> {
         "loot_table" => A::LootTable,
         "loot_predicate" => A::LootPredicate,
         "loot_modifier" => A::LootModifier,
+        "context_float_provider" => A::ContextFloatProvider,
+        "context_int_provider" => A::ContextIntProvider,
+        "slot_source" => A::SlotSource,
         "dialog" => A::Dialog,
+        "feature" => A::Feature,
+        "swing_animation" => A::SwingAnimation,
         "uuid" => A::Uuid,
         _ => return Err(r.error("command argument type pomme doesn't know")),
     })
@@ -458,7 +468,8 @@ mod tests {
 
     #[test]
     fn an_unknown_argument_type_fails_to_decode() {
-        let bytes = [1, TYPE_ARGUMENT, 0, 1, b'x', 57, 0];
+        let types = RegistryTable::native().names(ClientRegistry::CommandArgumentType);
+        let bytes = [1, TYPE_ARGUMENT, 0, 1, b'x', types.len() as u8, 0];
         assert!(decode(&bytes).is_err());
     }
 

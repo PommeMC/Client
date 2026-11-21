@@ -183,8 +183,23 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// `ByteBufCodecs.BIT_SET`: a byte array holding the set as
+    /// `BitSet.toByteArray` gives it, bit `n` in byte `n / 8`. Returned as
+    /// the set's words, bit `n` in word `n / 64`.
+    pub fn bit_set(&mut self) -> DecodeResult<Vec<u64>> {
+        let bytes = self.byte_array(usize::MAX)?;
+        Ok(bytes
+            .chunks(8)
+            .map(|chunk| {
+                let mut word = [0; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                u64::from_le_bytes(word)
+            })
+            .collect())
+    }
+
     /// `FriendlyByteBuf.readLongArray`: a varint count of at most one long
-    /// per 8 remaining bytes, then big-endian longs. BitSets use this too.
+    /// per 8 remaining bytes, then big-endian longs.
     pub fn long_array(&mut self) -> DecodeResult<Vec<u64>> {
         let n = self.varint()? as usize;
         if n > self.remaining() / 8 {

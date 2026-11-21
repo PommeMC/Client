@@ -1,4 +1,4 @@
-//! The serverbound game packets as vanilla 26.2 lays them out, each encoded
+//! The serverbound game packets as vanilla 26.3 lays them out, each encoded
 //! as its `STREAM_CODEC` writes it.
 
 use glam::DVec3;
@@ -9,8 +9,12 @@ use crate::wire::{write_block_pos, write_utf, write_varint};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GamePacket {
+    /// The teleport's id and the pose the client took from it.
     AcceptTeleportation {
         id: i32,
+        position: DVec3,
+        y_rot: f32,
+        x_rot: f32,
     },
     BundleItemSelected {
         slot: i32,
@@ -106,12 +110,11 @@ pub enum GamePacket {
     },
     SignUpdate {
         pos: (i32, i32, i32),
-        is_front_text: bool,
         lines: [String; 4],
+        is_front_text: bool,
     },
-    Swing {
-        hand: InteractionHand,
-    },
+    /// An attack swing of the main hand.
+    Punch,
     TeleportToEntity {
         uuid: u128,
     },
@@ -198,6 +201,7 @@ pub struct MoveFlags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerAction {
     StartDestroyBlock,
+    ChangeDestroyDirection,
     AbortDestroyBlock,
     StopDestroyBlock,
     DropAllItems,
@@ -308,7 +312,7 @@ impl GamePacket {
             Self::SetCarriedItem { .. } => "set_carried_item",
             Self::SetCreativeModeSlot { .. } => "set_creative_mode_slot",
             Self::SignUpdate { .. } => "sign_update",
-            Self::Swing { .. } => "swing",
+            Self::Punch => "punch",
             Self::TeleportToEntity { .. } => "teleport_to_entity",
             Self::UseItem { .. } => "use_item",
             Self::UseItemOn { .. } => "use_item_on",
@@ -331,7 +335,20 @@ impl GamePacket {
 
     fn write(&self, buf: &mut Vec<u8>) {
         match self {
-            Self::AcceptTeleportation { id } => var_i32(buf, *id),
+            // ServerboundAcceptTeleportationPacket.java:16
+            Self::AcceptTeleportation {
+                id,
+                position,
+                y_rot,
+                x_rot,
+            } => {
+                var_i32(buf, *id);
+                for axis in position.to_array() {
+                    buf.extend(axis.to_be_bytes());
+                }
+                buf.extend(y_rot.to_be_bytes());
+                buf.extend(x_rot.to_be_bytes());
+            }
             Self::BundleItemSelected { slot, index } => {
                 var_i32(buf, *slot);
                 var_i32(buf, *index);
@@ -467,18 +484,20 @@ impl GamePacket {
                 buf.extend(slot.to_be_bytes());
                 crate::item::write_stack(buf, stack.as_ref(), true);
             }
+            // ServerboundSignUpdatePacket.java:23: the four lines without a
+            // count, then the `SignTextSlot` id, 0 for the back.
             Self::SignUpdate {
                 pos,
-                is_front_text,
                 lines,
+                is_front_text,
             } => {
                 write_block_pos(buf, *pos);
-                buf.push(u8::from(*is_front_text));
                 for line in lines {
                     write_utf(buf, line);
                 }
+                buf.push(u8::from(*is_front_text));
             }
-            Self::Swing { hand } => write_varint(buf, *hand as u32),
+            Self::Punch => {}
             Self::TeleportToEntity { uuid } => buf.extend(uuid.to_be_bytes()),
             Self::UseItem {
                 hand,
@@ -579,7 +598,12 @@ mod tests {
         };
         let pos = DVec3::new(1.5, 64.0, -2.25);
         vec![
-            GamePacket::AcceptTeleportation { id: 300 },
+            GamePacket::AcceptTeleportation {
+                id: 300,
+                position: DVec3::new(1.5, 64.0, -2.25),
+                y_rot: 90.0,
+                x_rot: -10.0,
+            },
             GamePacket::BundleItemSelected {
                 slot: 36,
                 index: -1,
@@ -687,12 +711,10 @@ mod tests {
             GamePacket::SetCarriedItem { slot: 8 },
             GamePacket::SignUpdate {
                 pos: POS,
-                is_front_text: false,
                 lines: ["one", "", "thrée", "4"].map(str::to_owned),
+                is_front_text: false,
             },
-            GamePacket::Swing {
-                hand: InteractionHand::OffHand,
-            },
+            GamePacket::Punch,
             GamePacket::TeleportToEntity { uuid: UUID },
             GamePacket::UseItem {
                 hand: InteractionHand::MainHand,

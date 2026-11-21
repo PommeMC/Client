@@ -112,7 +112,7 @@ mod tests {
                 .unwrap()
                 .names()
                 .len(),
-            crate::entity_data::SERIALIZERS_26_2.len(),
+            crate::entity_data::SERIALIZERS_26_3.len(),
         );
     }
 }

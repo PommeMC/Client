@@ -1,5 +1,5 @@
 //! Connection lifecycle packets (join, respawn, keep-alive, teleports, time),
-//! as vanilla 26.2 lays them out
+//! as vanilla 26.3 lays them out
 //! (`net/minecraft/network/protocol/{game,common}/Clientbound*Packet`).
 
 use crate::codec::{DecodeResult, Reader};
@@ -60,8 +60,7 @@ pub struct SpawnInfo {
     pub dimension_type: u32,
     pub dimension: String,
     pub seed: i64,
-    /// `GameType` ids; the previous one is `None` for -1
-    /// (`GameType.byNullableId`).
+    /// `GameType` ids.
     pub game_type: u8,
     pub previous_game_type: Option<u8>,
     pub is_debug: bool,
@@ -156,18 +155,16 @@ fn login(r: &mut Reader) -> DecodeResult<Login> {
     })
 }
 
-/// `CommonPlayerSpawnInfo(RegistryFriendlyByteBuf)`
-/// (CommonPlayerSpawnInfo.java:23).
+/// `CommonPlayerSpawnInfo.STREAM_CODEC` (CommonPlayerSpawnInfo.java:19). The
+/// previous game type is `ByteBufCodecs.OPTIONAL_VAR_INT`: 0 for none, else
+/// the id + 1.
 fn spawn_info(r: &mut Reader) -> DecodeResult<SpawnInfo> {
     Ok(SpawnInfo {
         dimension_type: r.varint()?,
         dimension: r.identifier()?.to_owned(),
         seed: r.i64()?,
-        game_type: r.u8()?,
-        previous_game_type: match r.i8()? {
-            -1 => None,
-            id => Some(id as u8),
-        },
+        game_type: r.varint()? as u8,
+        previous_game_type: r.varint()?.checked_sub(1).map(|id| id as u8),
         is_debug: r.bool()?,
         is_flat: r.bool()?,
         last_death: r.optional(|r| Ok((r.identifier()?.to_owned(), r.block_pos()?)))?,

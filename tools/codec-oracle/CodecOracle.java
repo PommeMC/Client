@@ -1150,6 +1150,15 @@ public final class CodecOracle {
         encode("move_entity_rot/on_ground",
                 ClientboundMoveEntityPacket.Rot.STREAM_CODEC::encode,
                 new ClientboundMoveEntityPacket.Rot(7, (byte) 64, (byte) -32, true));
+        // Two steps, of one tick and then three.
+        encode("move_entity_pos/stepped", ClientboundMoveEntityPacket.Pos.STREAM_CODEC::encode,
+                new ClientboundMoveEntityPacket.Pos(7, new VecDelta.Stepped(List.of(
+                        new VecDelta.Stepped.DeltaStep((short) 4096, (short) 0, (short) 0, 1),
+                        new VecDelta.Stepped.DeltaStep((short) 0, (short) -2048, (short) 1, 3))), false));
+        encode("entity_position_sync/stepped", ClientboundEntityPositionSyncPacket.STREAM_CODEC::encode,
+                new ClientboundEntityPositionSyncPacket(7, PositionPath.stepped(List.of(
+                        new net.minecraft.world.entity.PositionStep(movement, 1),
+                        new net.minecraft.world.entity.PositionStep(position, 3))), 45.0f, -10.0f, false));
         encode("entity_position_sync/on_ground",
                 ClientboundEntityPositionSyncPacket.STREAM_CODEC::encode,
                 new ClientboundEntityPositionSyncPacket(
