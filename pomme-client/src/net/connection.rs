@@ -1158,71 +1158,62 @@ mod tests {
 
     use super::*;
 
-    /// Game-phase `update_tags` and `start_configuration` read raw.
+    /// Clientbound packet `name` of `phase`: its id, then `payload`.
+    fn frame(phase: Phase, name: &str, payload: &[u8]) -> Vec<u8> {
+        let id = PacketTable::native().id(phase, Direction::Clientbound, name);
+        let mut frame = Vec::new();
+        pomme_protocol::wire::write_varint(&mut frame, id.unwrap());
+        frame.extend(payload);
+        frame
+    }
+
+    /// Game-phase `update_tags` and `start_configuration` read raw, from the
+    /// game's own `update_tags`.
     #[test]
     fn game_tags_and_start_configuration_read_raw() {
-        use azalea_protocol::common::tags::{TagMap, Tags as AzaleaTags};
-        use azalea_protocol::packets::game::{
-            ClientboundGamePacket, c_start_configuration, c_update_tags,
-        };
-
-        let tag = |name: &str, elements: Vec<i32>| AzaleaTags {
-            name: name.into(),
-            elements,
-        };
-        let map = TagMap(
-            [
-                (
-                    "minecraft:block".into(),
-                    vec![tag("minecraft:logs", vec![1, 300])],
-                ),
-                (
-                    DIALOG_REGISTRY.into(),
-                    vec![tag("minecraft:pause_screen_additions", vec![2])],
-                ),
-            ]
-            .into_iter()
-            .collect(),
+        let additions = "minecraft:pause_screen_additions".to_owned();
+        let update = frame(
+            Phase::Game,
+            "update_tags",
+            &pomme_protocol::vanilla_fixtures::case("update_tags/two_registries"),
         );
-        let frame = azalea_protocol::write::serialize_packet(&ClientboundGamePacket::UpdateTags(
-            c_update_tags::ClientboundUpdateTags { tags: map },
-        ))
-        .unwrap();
-        let tags = crate::net::read_raw_frame(&frame, pomme_protocol::tags::read)
+        let tags = crate::net::read_raw_frame(&update, pomme_protocol::tags::read)
             .unwrap()
             .unwrap();
         let expected: Tags = [
             (
                 "minecraft:block".to_owned(),
-                [("minecraft:logs".to_owned(), vec![1, 300])].into(),
+                [
+                    ("minecraft:logs".to_owned(), vec![1, 300]),
+                    ("minecraft:empty".to_owned(), vec![]),
+                ]
+                .into(),
             ),
             (
                 DIALOG_REGISTRY.to_owned(),
-                [("minecraft:pause_screen_additions".to_owned(), vec![2])].into(),
+                [(additions.clone(), vec![2])].into(),
             ),
         ]
         .into();
         assert_eq!(tags, expected);
-        assert!(crate::net::read_raw_frame(&frame, START_CONFIGURATION).is_none());
+        assert!(crate::net::read_raw_frame(&update, START_CONFIGURATION).is_none());
 
         assert_eq!(
             registry_tags(&tags, DIALOG_REGISTRY),
-            Some([("minecraft:pause_screen_additions".to_owned(), vec![2])].into())
+            Some([(additions, vec![2])].into())
         );
         let (tx, rx) = crossbeam_channel::unbounded();
         forward_tags(&tx, &tags);
         assert!(rx.try_iter().any(|event| matches!(
             event,
-            NetworkEvent::BlockTags { tags } if tags == [("minecraft:logs".to_owned(), vec![1, 300])]
+            NetworkEvent::BlockTags { tags } if tags.contains(&("minecraft:logs".to_owned(), vec![1, 300]))
         )));
 
-        let frame =
-            azalea_protocol::write::serialize_packet(&ClientboundGamePacket::StartConfiguration(
-                c_start_configuration::ClientboundStartConfiguration,
-            ))
-            .unwrap();
         assert!(matches!(
-            crate::net::read_raw_frame(&frame, START_CONFIGURATION),
+            crate::net::read_raw_frame(
+                &frame(Phase::Game, "start_configuration", &[]),
+                START_CONFIGURATION
+            ),
             Some(Ok(()))
         ));
     }
@@ -1350,35 +1341,34 @@ mod tests {
     /// login finished, then finish configuration. No registry data and no
     /// compression.
     async fn joins_over_the_pipe(encrypted: bool) {
-        use azalea_auth::game_profile::GameProfile;
-        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
-        use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
-        use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
-        use azalea_protocol::packets::login::c_hello::ClientboundHello;
-        use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
-        use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
-        use azalea_protocol::read::deserialize_packet;
+        use pomme_protocol::codec::Reader;
+        use pomme_protocol::wire::{write_utf, write_varint};
         use uuid::Uuid;
 
         use crate::net::conn::memory_pipes;
 
-        /// The next packet the client sent, in whichever phase the caller
-        /// names.
-        async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
-            peer: &mut Conn,
-        ) -> P {
-            deserialize_packet(&mut std::io::Cursor::new(
-                &peer.reader.read().await.unwrap(),
-            ))
-            .unwrap()
+        /// The payload of the next packet the client sent, which is `name`
+        /// of `phase`.
+        async fn sent(peer: &mut Conn, phase: Phase, name: &str) -> Vec<u8> {
+            let frame = peer.reader.read().await.unwrap();
+            let mut r = Reader::new(&frame);
+            assert_eq!(
+                PacketTable::native().name_of(phase, Direction::Serverbound, r.varint().unwrap()),
+                Some(name)
+            );
+            frame[r.pos()..].to_vec()
         }
 
-        async fn send<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
-            peer: &mut Conn,
-            packet: &P,
-        ) {
-            let frame = azalea_protocol::write::serialize_packet(packet).unwrap();
-            peer.writer.write(&frame).await.unwrap();
+        async fn send(peer: &mut Conn, phase: Phase, name: &str, payload: &[u8]) {
+            peer.writer
+                .write(&frame(phase, name, payload))
+                .await
+                .unwrap();
+        }
+
+        fn byte_array(out: &mut Vec<u8>, bytes: &[u8]) {
+            write_varint(out, bytes.len() as u32);
+            out.extend(bytes);
         }
 
         let (client_end, server_end) = memory_pipes();
@@ -1405,59 +1395,46 @@ mod tests {
             packet_rx,
         ));
 
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundHandshakePacket::Intention(p) if p.protocol_version == NATIVE.protocol
-        ));
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundLoginPacket::Hello(p) if p.name == "Steve"
-        ));
+        let intention = sent(&mut peer, Phase::Handshake, "intention").await;
+        assert_eq!(Reader::new(&intention).var_i32(), Ok(NATIVE.protocol));
+        let hello = sent(&mut peer, Phase::Login, "hello").await;
+        assert_eq!(Reader::new(&hello).utf(16), Ok("Steve"));
 
         if encrypted {
             let server = crate::net::crypt::ServerKey::new();
-            let challenge = vec![7, 3, 9, 1];
-            let hello = ClientboundLoginPacket::Hello(ClientboundHello {
-                server_id: String::new(),
-                public_key: server.public_key.clone(),
-                challenge: challenge.clone(),
-                should_authenticate: false,
-            });
-            send(&mut peer, &hello).await;
+            let challenge = [7, 3, 9, 1];
+            // An empty server id, the key, the challenge, and no
+            // authentication.
+            let mut hello = vec![0];
+            byte_array(&mut hello, &server.public_key);
+            byte_array(&mut hello, &challenge);
+            hello.push(0);
+            send(&mut peer, Phase::Login, "hello", &hello).await;
 
-            let ServerboundLoginPacket::Key(key) = sent(&mut peer).await else {
-                panic!("the client answers the hello with its key");
-            };
-            assert_eq!(server.decrypt(&key.encrypted_challenge), challenge);
-            peer.set_encryption_key(server.decrypt(&key.key_bytes).try_into().unwrap());
+            let key = sent(&mut peer, Phase::Login, "key").await;
+            let mut r = Reader::new(&key);
+            let secret = server.decrypt(r.byte_array(256).unwrap());
+            assert_eq!(server.decrypt(r.byte_array(256).unwrap()), challenge);
+            peer.set_encryption_key(secret.try_into().unwrap());
         }
 
-        let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
-            game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
-            session_id: Uuid::nil(),
-        });
-        send(&mut peer, &finished).await;
+        // Steve's profile with no properties, then the session id.
+        let mut finished = Uuid::nil().as_bytes().to_vec();
+        write_utf(&mut finished, "Steve");
+        finished.push(0);
+        finished.extend(Uuid::nil().as_bytes());
+        send(&mut peer, Phase::Login, "login_finished", &finished).await;
 
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundLoginPacket::LoginAcknowledged(_)
-        ));
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundConfigPacket::CustomPayload(p) if p.identifier.to_string() == "minecraft:brand"
-        ));
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
-        ));
+        sent(&mut peer, Phase::Login, "login_acknowledged").await;
+        let brand = sent(&mut peer, Phase::Configuration, "custom_payload").await;
+        assert_eq!(Reader::new(&brand).identifier(), Ok("minecraft:brand"));
+        let information = sent(&mut peer, Phase::Configuration, "client_information").await;
+        let mut r = Reader::new(&information);
+        r.utf(16).unwrap();
+        assert_eq!(r.u8(), Ok(8), "the view distance");
 
-        let finish = ClientboundConfigPacket::FinishConfiguration(ClientboundFinishConfiguration);
-        send(&mut peer, &finish).await;
-
-        assert!(matches!(
-            sent(&mut peer).await,
-            ServerboundConfigPacket::FinishConfiguration(_)
-        ));
+        send(&mut peer, Phase::Configuration, "finish_configuration", &[]).await;
+        sent(&mut peer, Phase::Configuration, "finish_configuration").await;
 
         // Protocol selection and the end of login precede configuration; the
         // remaining events arrive as soon as configuration ends, before any

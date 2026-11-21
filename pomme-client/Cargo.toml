@@ -75,8 +75,7 @@ hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
 # The packet stream cipher (`net::crypt`).
 aes = "0.9"
 cfb8 = "0.9"
-# Pomme's own block state type, under the name the azalea crates find it by.
-pomme-block = { package = "azalea-block", version = "0.16" }
+pomme-block = { path = "../pomme-block" }
 pomme-item = { path = "../pomme-item" }
 pomme-registry = { path = "../pomme-registry" }
 pomme-text = { path = "../pomme-text" }
@@ -131,16 +130,3 @@ paranoid-android = "0.2"
 
 [dev-dependencies]
 pomme-protocol = { path = "../pomme-protocol", features = ["vanilla-fixtures"] }
-# The other side of the packet cross-checks (`net/azalea_compat.rs`), and the
-# server end of the join test. `connecting` and `online-mode` only gate
-# azalea's own connection type.
-azalea-protocol = { version = "0.16", default-features = false }
-# The types azalea's packets hold, for the same cross-checks.
-azalea-inventory = "0.16"
-azalea-buf = "0.16"
-azalea-crypto = "0.16"
-azalea-auth = "0.16"
-azalea-entity = "0.16"
-azalea-chat = "0.16"
-# azalea-core uses bevy_ecs without gating it on its feature.
-azalea-core = { version = "0.16", features = ["bevy_ecs", "serde"] }

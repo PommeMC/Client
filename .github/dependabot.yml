@@ -10,9 +10,6 @@ updates:
     schedule:
       interval: weekly
     groups:
-      azalea:
-        patterns:
-          - "azalea-*"
       vulkan:
         patterns:
           - "ash"

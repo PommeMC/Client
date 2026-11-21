@@ -450,8 +450,7 @@ fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
     }))
 }
 
-/// `ClientboundLevelParticles`' packet id from the vanilla-derived table
-/// (cross-checked against azalea's dispatch table in `azalea_compat`).
+/// `ClientboundLevelParticles`' packet id from the vanilla-derived table.
 fn level_particles_packet_id() -> u32 {
     use pomme_protocol::{Direction, PacketTable, Phase};
 

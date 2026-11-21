@@ -81,9 +81,6 @@ macro_rules! registry {
                 Self::try_from(&$crate::Identifier::new(s))
             }
         }
-
-        #[cfg(feature = "azalea")]
-        $crate::azalea::builtin_registry!($name);
     };
 }
 
@@ -183,8 +180,5 @@ macro_rules! data_registry {
                 $crate::DataRegistryKeyRef::into_ident(key)
             }
         }
-
-        #[cfg(feature = "azalea")]
-        $crate::azalea::data_registry!($registry, $name, $key);
     };
 }

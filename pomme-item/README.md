@@ -12,7 +12,3 @@ bytes, each ported from the game's codec.
 `tools/codec-oracle/DefaultComponents.java` runs on the reference server jar
 (`just typegen <version>`), builds each item's components the way the game
 does and encodes them with its own codecs.
-
-Most component values and the component hashes still come from the
-`pomme-inventory` fork, through `pomme-client/src/net/item_codec.rs`. They
-move here as they are ported.

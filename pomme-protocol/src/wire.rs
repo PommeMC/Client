@@ -251,9 +251,6 @@ pub fn read_lp_vec3(bytes: &[u8], pos: &mut usize) -> Option<DVec3> {
 mod tests {
     use super::*;
 
-    // The azalea LpVec3 round-trip cross-check lives in pomme-client's
-    // net::azalea_compat (this crate stays azalea-free).
-
     #[test]
     fn interact_packet_layout() {
         // id 0x1A, entity id 42, hand, LpVec3 zero byte, sneaking.

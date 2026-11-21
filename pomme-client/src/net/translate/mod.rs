@@ -778,7 +778,7 @@ const LOGIN_PREFIX_763: usize = 7;
 
 /// Native-registry component ids whose payloads the stack walker can advance
 /// past (26.2 `DataComponents` registration order; anchored in
-/// `component_id_anchors` in `azalea_compat`). Matching happens after the
+/// `component_id_anchors` in `wire_tests`). Matching happens after the
 /// remap, so one set of ids serves every wire version.
 pub(crate) const COMPONENT_MAP_ID: u32 = 46;
 pub(crate) const COMPONENT_PROFILE: u32 = 70;

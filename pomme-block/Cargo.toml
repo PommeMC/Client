@@ -1,10 +1,6 @@
 [package]
-name = "azalea-block"
-description = "Data-free shim replacing azalea-block; block semantics live in pomme's own per-version tables."
-version = "0.16.0+mc26.2"
+name = "pomme-block"
+description = "A block state id; what a state means lives in pomme's own per-version tables."
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
-
-[dependencies]
-azalea-buf = { version = "0.16.0", default-features = false }
-pomme-registry = { path = "../pomme-registry", features = ["azalea"] }

@@ -1,7 +1,5 @@
 pub mod address;
 mod advancement_wire;
-#[cfg(test)]
-mod azalea_compat;
 mod block_wire;
 mod border_wire;
 pub(crate) mod capture;
@@ -42,6 +40,8 @@ pub mod translate;
 mod waypoint_wire;
 #[cfg(test)]
 mod wire_corpus;
+#[cfg(test)]
+mod wire_tests;
 
 use std::sync::Arc;
 
