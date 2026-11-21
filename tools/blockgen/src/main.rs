@@ -4,7 +4,6 @@
 //!
 //! Usage:
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
-//!   blockgen behavior <azalea generated.rs> <out.json>
 //!   blockgen state <generated/state.json> <blocks-<v>.json> <out.json>
 //!   blockgen sounds <out.json> <generated/sounds.json>...
 //!
@@ -13,14 +12,6 @@
 //! id + property set in the report is cross-checked against the cartesian
 //! reconstruction the client uses, and the id space is verified dense — the
 //! tool hard-fails rather than emit silently-wrong data.
-//!
-//! `behavior` seeds the name-keyed destroy-time table from an azalea
-//! `generated.rs` (e.g. `~/.cargo/git/checkouts/azalea-*/<rev>/azalea-block/
-//! src/generated.rs`); new blocks the seed doesn't know must be appended by
-//! hand from the decompiled `Blocks.java`. Hand-added entries survive a
-//! regen (existing keys the seed doesn't produce are carried over and
-//! listed), but the seed wins for keys it does produce — a hand-correction
-//! to a seeded value does not survive.
 //!
 //! `state` compacts the raw per-state property dump produced by running
 //! vanilla (`tools/stategen/StateDump.java`, see `just stategen`) into the
@@ -43,10 +34,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
-        [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
         [cmd, dump, blocks, out] if cmd == "state" => gen_state(dump, blocks, out),
         [cmd, out, dumps @ ..] if cmd == "sounds" && !dumps.is_empty() => gen_sounds(out, dumps),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>\n       blockgen sounds <out.json> <version>=<sounds.json>... (newest first)".into()),
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>\n       blockgen sounds <out.json> <version>=<sounds.json>... (newest first)".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -279,77 +269,6 @@ fn parse_block(name: &str, entry: &serde_json::Value) -> Result<Block, Error> {
     })
 }
 
-/// Extracts `destroy_time` + `requires_correct_tool_for_drops` per block from
-/// azalea's machine-generated `generated.rs` block list (uniform shape:
-/// `name => BlockBehavior::new().strength(a, b)..., {`).
-fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
-    let source = std::fs::read_to_string(generated_path)?;
-    let mut entries: BTreeMap<String, (f32, bool)> = BTreeMap::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        let Some((name, rest)) = trimmed.split_once(" => BlockBehavior::new()") else {
-            continue;
-        };
-        if !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            continue;
-        }
-        let destroy_time = extract_float_arg(rest, ".strength(")
-            .or_else(|| extract_float_arg(rest, ".destroy_time("))
-            .unwrap_or(0.0);
-        let requires_tool = rest.contains(".requires_correct_tool_for_drops()");
-        entries.insert(name.to_string(), (destroy_time, requires_tool));
-    }
-
-    if entries.is_empty() {
-        return Err("no block behavior entries found — wrong input file?".into());
-    }
-
-    // Carry over hand-appended keys the seed doesn't know.
-    let mut carried: Vec<String> = Vec::new();
-    match std::fs::read_to_string(out_path) {
-        Ok(existing) => {
-            let existing: BTreeMap<String, BehaviorJson> =
-                serde_json::from_str(&existing).map_err(|e| format!("{out_path}: {e}"))?;
-            for (name, b) in existing {
-                if !entries.contains_key(&name) {
-                    entries.insert(name.clone(), (b.destroy_time, b.requires_correct_tool));
-                    carried.push(name);
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{out_path}: {e}").into()),
-    }
-
-    let mut out = String::new();
-    writeln!(out, "{{")?;
-    let len = entries.len();
-    for (i, (name, (destroy_time, requires_tool))) in entries.iter().enumerate() {
-        let comma = if i + 1 < len { "," } else { "" };
-        writeln!(
-            out,
-            "  {}: {{\"destroy_time\": {destroy_time}, \"requires_correct_tool\": {requires_tool}}}{comma}",
-            serde_json::to_string(name)?
-        )?;
-    }
-    writeln!(out, "}}")?;
-
-    std::fs::write(out_path, &out)?;
-    println!("wrote {len} behavior entries to {out_path}");
-    if !carried.is_empty() {
-        println!(
-            "carried over {} hand-added entries: {}",
-            carried.len(),
-            carried.join(", ")
-        );
-    }
-    Ok(())
-}
-
 /// A block's `SoundType` as `SoundDump` writes it: volume, pitch, then the
 /// break, step, place, hit and fall events.
 type SoundTypeRow = (f32, f32, String, String, String, String, String);
@@ -468,20 +387,6 @@ fn write_lines(
         writeln!(out, "    {}{comma}", line?)?;
     }
     Ok(())
-}
-
-/// An entry of the emitted `block_behavior.json`, read back on regen.
-#[derive(serde::Deserialize)]
-struct BehaviorJson {
-    destroy_time: f32,
-    requires_correct_tool: bool,
-}
-
-fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
-    let start = text.find(method)? + method.len();
-    let rest = &text[start..];
-    let end = rest.find([',', ')'])?;
-    rest[..end].trim().parse().ok()
 }
 
 /// Raw per-state dump written by `tools/stategen/StateDump.java`.
