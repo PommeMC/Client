@@ -1214,7 +1214,8 @@
     "cat_variant": 11,
     "chicken_variant": 3,
     "cow_variant": 3,
-    "wolf_variant": 9
+    "wolf_variant": 9,
+    "painting_variant": 51
   },
   "cases": {
     "add_entity/zombie": "070000000000000000000000000000002a9a013ff8000000000000c04e000000000000400a000000000000f9ff20013ffec0201005",

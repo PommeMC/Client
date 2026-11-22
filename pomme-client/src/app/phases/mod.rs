@@ -17,6 +17,7 @@ use crate::ui::common;
 pub mod connecting;
 pub mod in_game;
 pub mod in_menu;
+pub mod non_living;
 pub mod saving;
 
 pub struct Gfx {

@@ -530,6 +530,7 @@ impl GameState {
     fn clear_entities(&mut self) {
         self.entity_store = crate::entity::EntityStore::new();
         self.item_entity_store = crate::entity::ItemEntityStore::new();
+        self.non_living_store.clear();
         self.entity_positions.clear();
         self.entity_kinds.clear();
         self.vehicle_passengers.clear();
@@ -3161,6 +3162,7 @@ impl AppCore {
                     x_rot_deg,
                     y_rot_deg,
                     head_y_rot_deg,
+                    data,
                 } => {
                     game.entity_positions.insert(id, position);
                     game.entity_kinds.insert(id, entity_type);
@@ -3191,6 +3193,23 @@ impl AppCore {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
                     }
+                    if crate::entity::non_living::is_non_living(entity_type) {
+                        game.non_living_store.spawn(
+                            id,
+                            entity_type,
+                            uuid,
+                            position,
+                            velocity,
+                            y_rot_deg,
+                            x_rot_deg,
+                            data,
+                        );
+                        if let Some((name, _)) =
+                            game.non_living_store.get(id).and_then(|e| e.item.as_ref())
+                        {
+                            renderer.ensure_item_mesh(name);
+                        }
+                    }
                 }
                 NetworkEvent::EntityMoved {
                     id,
@@ -3208,6 +3227,7 @@ impl AppCore {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.non_living_store.move_delta(id, dvec3(dx, dy, dz));
                         if let Some(pos) = game.entity_positions.get_mut(&id) {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
@@ -3230,7 +3250,9 @@ impl AppCore {
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.non_living_store.move_delta(id, dvec3(dx, dy, dz));
                         if let Some(pos) = game.entity_positions.get_mut(&id) {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
@@ -3246,6 +3268,7 @@ impl AppCore {
                     if game.steered_boat() != Some(id) {
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                     }
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
@@ -3256,6 +3279,7 @@ impl AppCore {
                     } else {
                         game.item_entity_store.set_motion(id, velocity);
                         game.entity_store.set_living_motion(id, velocity);
+                        game.non_living_store.set_motion(id, velocity);
                     }
                 }
                 NetworkEvent::PlayerKnockback { delta } => {
@@ -3287,6 +3311,8 @@ impl AppCore {
                         }
                         game.item_entity_store
                             .teleport(id, position, velocity, on_ground);
+                        game.non_living_store.teleport(id, position, velocity);
+                        game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.entity_positions.insert(id, position);
                         self.audio.update_entity_sound_position(id, position);
                     }
@@ -3347,6 +3373,7 @@ impl AppCore {
                         self.audio.stop_entity_sounds(*id);
                     }
                     game.item_entity_store.remove(&ids);
+                    game.non_living_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.controlled_vehicle_id = None;
                     }
@@ -3368,6 +3395,7 @@ impl AppCore {
                 }
                 NetworkEvent::EntityItemData {
                     id,
+                    index,
                     item_name,
                     item_id,
                     damage,
@@ -3375,8 +3403,21 @@ impl AppCore {
                     stack,
                 } => {
                     renderer.ensure_item_mesh(&item_name);
-                    game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count, stack);
+                    if game.non_living_store.contains(id) {
+                        game.non_living_store
+                            .set_item(id, index, Some((item_name, stack)));
+                    } else if index == 8 {
+                        // `ItemEntity.DATA_ITEM`.
+                        game.item_entity_store
+                            .set_item_data(id, item_name, item_id, damage, count, stack);
+                    }
+                }
+                NetworkEvent::EntityItemCleared { id, index } => {
+                    game.non_living_store.set_item(id, index, None);
+                }
+                NetworkEvent::PaintingVariant { id, variant } => {
+                    let shape = painting_shape(&game.registries, &variant);
+                    game.non_living_store.set_painting(id, shape);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
@@ -3406,6 +3447,7 @@ impl AppCore {
                         game.item_entity_store.set_shared_flags(id, flags);
                     }
                     game.entity_store.apply_entity_data(id, index, value);
+                    game.non_living_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
@@ -3497,6 +3539,21 @@ impl AppCore {
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }
+                NetworkEvent::ArmorStandHit { id } => {
+                    let game_time = game.sky_state.game_time as i64;
+                    if let Some(pos) = game.entity_store.armor_stand_hit(id, game_time)
+                        && !game.silent_entities.contains(&id)
+                    {
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.armor_stand.hit"),
+                            crate::audio::CATEGORY_NEUTRAL,
+                            pos,
+                            0.3,
+                            1.0,
+                            fastrand::u64(..),
+                        );
+                    }
+                }
                 NetworkEvent::GolemPunch { id } => {
                     game.entity_store.golem_punch(id);
                 }
@@ -3554,16 +3611,30 @@ impl AppCore {
                                 game.player.position.z,
                             )
                         });
-                    if let Some(item_pos) =
-                        game.item_entity_store.pickup(item_id, target_pos, amount)
+                    let orb = game.non_living_store.get(item_id).is_some_and(|e| {
+                        e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb
+                    });
+                    let from = game
+                        .non_living_store
+                        .pickup(item_id, target_pos)
+                        .or_else(|| game.item_entity_store.pickup(item_id, target_pos, amount));
+                    // `handleTakeItemEntity` plays these client-side: an orb's,
+                    // else the item one.
+                    if let Some(from) = from
+                        && !game.silent_entities.contains(&item_id)
                     {
-                        // Vanilla plays this client-side in handleTakeItemEntity.
+                        let (sound, volume, spread, pitch) = if orb {
+                            ("entity.experience_orb.pickup", 0.1, 0.35, 0.9)
+                        } else {
+                            ("entity.item.pickup", 0.2, 1.4, 2.0)
+                        };
+                        let pitch = (fastrand::f32() - fastrand::f32()) * spread + pitch;
                         self.audio.play_world_sound(
-                            &crate::audio::SoundRef::event("entity.item.pickup"),
+                            &crate::audio::SoundRef::event(sound),
                             crate::audio::CATEGORY_PLAYERS,
-                            item_pos,
-                            0.2,
-                            (fastrand::f32() - fastrand::f32()) * 1.4 + 2.0,
+                            from,
+                            volume,
+                            pitch,
                             fastrand::u64(..),
                         );
                     }
@@ -4712,6 +4783,37 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     }
     // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
     1.0_f32.lerp(modifier, effect_scale)
+}
+
+/// A painting's `Holder<PaintingVariant>`: a synced `painting_variant` entry
+/// by id, or the variant sent inline.
+fn painting_shape(
+    registries: &crate::net::registry_holder::RegistryHolder,
+    variant: &pomme_protocol::entity_data::PaintingVariant,
+) -> Option<crate::entity::non_living::PaintingShape> {
+    use pomme_protocol::entity_data::PaintingVariant;
+
+    use crate::entity::non_living::PaintingShape;
+    match variant {
+        PaintingVariant::Registered(id) => {
+            let (_, entry) =
+                registries.entry(&crate::net::PAINTING_VARIANT_REGISTRY.into(), *id)?;
+            Some(PaintingShape {
+                width: entry.int("width")?,
+                height: entry.int("height")?,
+                asset_id: entry.string("asset_id")?.to_str().into_owned(),
+            })
+        }
+        PaintingVariant::Direct {
+            width,
+            height,
+            asset_id,
+        } => Some(PaintingShape {
+            width: *width,
+            height: *height,
+            asset_id: asset_id.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]

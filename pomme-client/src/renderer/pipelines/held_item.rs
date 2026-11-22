@@ -155,6 +155,13 @@ impl HeldItemPipeline {
         }
     }
 
+    /// `item_name`'s `display.fixed`; `ItemTransforms` leaves a missing one
+    /// `NO_TRANSFORM`.
+    pub fn fixed_display(&self, item_name: &str) -> DisplayTransform {
+        self.display
+            .resolve(item_name, false, &["fixed"], DisplayTransform::IDENTITY)
+    }
+
     /// `item`'s `thirdperson_*hand` display, as an arm holds it.
     pub fn third_person_display(
         &self,

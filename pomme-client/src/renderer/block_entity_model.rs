@@ -2,7 +2,7 @@ use glam::Vec3;
 
 use super::entity_model::{
     BakedEntityModel, EntityPart, FACE_ALL, FACE_NEG_X, FACE_POS_X, ModelConvention, ModelCube,
-    bake_model, generate_cube_vertices,
+    bake_model, bake_model_y_up, generate_cube_vertices,
 };
 
 /// Shulker box, closed state. Matches vanilla `ShulkerModel`: a 16x12x16 lid
@@ -380,17 +380,7 @@ pub fn bake_skull_model(kind: SkullKind) -> BakedEntityModel {
     };
 
     let (tex_w, tex_h) = kind.texture_size();
-    let mut vertices = Vec::new();
-    let mut part_ranges = Vec::new();
-    for part in &parts {
-        let start = vertices.len() as u32;
-        for cube in &part.cubes {
-            generate_cube_vertices(cube, tex_w, tex_h, FACE_ALL, false, &mut vertices);
-        }
-        part_ranges.push((start, vertices.len() as u32 - start));
-    }
-    let mut model = BakedEntityModel::new(parts, vertices, part_ranges)
-        .with_convention(ModelConvention::BlockYUp);
+    let mut model = bake_model_y_up(parts, tex_w, tex_h);
     // `PartPose.scaled(0.75)` on the dragon's head.
     model.part_scales[0] = head_scale;
     model

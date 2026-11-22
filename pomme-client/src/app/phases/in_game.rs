@@ -396,6 +396,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub non_living_store: crate::entity::non_living::NonLivingStore,
     pub particle_store: crate::particle::ParticleStore,
     pub level_runtime: crate::world::level::LevelRuntime,
     pub block_entity_anim: BlockEntityAnimStore,
@@ -579,6 +580,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            non_living_store: crate::entity::non_living::NonLivingStore::new(),
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
@@ -3102,6 +3104,7 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
+        tick_non_living(game);
         if !game.deterministic {
             game.level_runtime.animate_tick(
                 &game.block_registry,
@@ -5070,6 +5073,8 @@ pub fn update_game(
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
+                    arrow_shake: 0.0,
+                    armor_stand: extras.armor_stand,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -5192,7 +5197,7 @@ pub fn update_game(
         );
     }
 
-    let item_renders = if benchmark_running {
+    let mut item_renders = if benchmark_running {
         Vec::new()
     } else {
         build_item_render_infos(
@@ -5213,7 +5218,28 @@ pub fn update_game(
     let moving_block_renders =
         moving_block_renders(game, gfx.renderer.camera_render_position(), partial_tick);
 
-    let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
+    let non_living = if benchmark_running {
+        super::non_living::NonLivingRenders::default()
+    } else {
+        let frame = super::non_living::Frame {
+            world_light: &world_light,
+            camera: gfx.renderer.camera_render_position(),
+            anchor: gfx.renderer.camera_anchor(),
+            orientation: gfx.renderer.camera_orientation(),
+            partial: partial_tick,
+            outline: &|glowing, uuid| {
+                outline(glowing, false, &|| {
+                    scoreboard_name(&game.tab_list, uuid, None)
+                })
+            },
+        };
+        super::non_living::build(&game.non_living_store, &mut gfx.renderer, &frame)
+    };
+    entity_renders.extend(non_living.entities);
+    item_renders.extend(non_living.items);
+    gfx.renderer.set_custom_geometry(non_living.quads);
+
+    let mut shadow_casters = if core.menu.entity_shadows && !benchmark_running {
         shadow_casters(
             &entity_renders,
             &game.item_entity_store,
@@ -5223,6 +5249,9 @@ pub fn update_game(
     } else {
         Vec::new()
     };
+    if core.menu.entity_shadows {
+        shadow_casters.extend(non_living.shadows);
+    }
 
     // `BlockEntityRenderer.shouldRender` at the default view distance, 64.
     let sign_renders: Vec<SignRenderInfo> = if benchmark_running {
@@ -5844,7 +5873,10 @@ fn held_stack(stack: &pomme_item::ItemStack) -> Option<(String, pomme_item::Item
     (name != "air").then(|| (name, data.clone()))
 }
 
-fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
+pub(super) fn dropped_item_geometry(
+    renderer: &Renderer,
+    item_name: &str,
+) -> (glam::Mat4, f32, f32) {
     let mesh = renderer.item_mesh_info(item_name);
     let is_block_model = mesh
         .map(|mesh| mesh.is_block_model)
@@ -6111,6 +6143,7 @@ struct EntityExtras {
     flap_speed: f32,
     body_transform: Option<glam::Mat4>,
     render_offset: glam::DVec3,
+    armor_stand: crate::renderer::entity_model::ArmorStandPose,
     nose_wobble_speed: f32,
     is_angry: bool,
     tail_angle: f32,
@@ -6191,6 +6224,30 @@ fn entity_extras(
             variant_index: e.variant,
             ..Default::default()
         },
+        EntityKind::ArmorStand => {
+            let stand = &e.armor_stand;
+            // `ArmorStandRenderer.setupRotations`: a hit wobbles it for five
+            // ticks.
+            let wiggle = (game_time - stand.last_hit) as f32 + alpha;
+            EntityExtras {
+                armor_stand: crate::renderer::entity_model::ArmorStandPose {
+                    poses: stand.poses,
+                    show_arms: stand.show_arms(),
+                    show_base_plate: stand.show_base_plate(),
+                    y_rot_deg: lerp_angle(
+                        e.prev_look_dir.y_rot_deg(),
+                        e.look_dir.y_rot_deg(),
+                        alpha,
+                    ),
+                },
+                body_transform: (wiggle < 5.0).then(|| {
+                    glam::Mat4::from_rotation_y(
+                        ((wiggle / 1.5 * std::f32::consts::PI).sin() * 3.0).to_radians(),
+                    )
+                }),
+                ..Default::default()
+            }
+        }
         EntityKind::Chicken => EntityExtras {
             variant_index: e.variant,
             flap: e.prev_flap.lerp(e.flap, alpha),
@@ -7142,4 +7199,45 @@ mod debug_release_tests {
             );
         }
     }
+}
+
+/// The non-living entities' client tick, after the item entities'.
+fn tick_non_living(game: &mut GameState) {
+    // `ExperienceOrb.followNearbyPlayer` skips spectators.
+    let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| {
+        (
+            *game.player.position,
+            f64::from(game.player.target_eye_height()),
+        )
+    });
+    let player_eye_height = f64::from(crate::entity::dimensions::EntityDimensions::eye_height(
+        EntityKind::Player,
+    ));
+    let players: Vec<_> = local
+        .into_iter()
+        .chain(
+            game.entity_store
+                .living
+                .values()
+                .filter(|e| e.entity_type == EntityKind::Player && !game.is_spectator(e))
+                .map(|e| (*e.position, player_eye_height)),
+        )
+        .collect();
+    let player_id = game.player.entity_id;
+    let player_eye = *game.player.eye_pos();
+    let living = &game.entity_store.living;
+    let eye_of = |id: i32| {
+        if id == player_id {
+            Some(player_eye)
+        } else {
+            living.get(&id).map(|e| *e.eye_position(1.0))
+        }
+    };
+    let world = crate::entity::non_living::TickWorld {
+        chunks: &game.chunk_store,
+        block_state_table: game.block_registry.block_state_table(),
+        players: &players,
+        eye_of: &eye_of,
+    };
+    game.non_living_store.tick(&world);
 }

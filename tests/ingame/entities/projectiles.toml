@@ -1,0 +1,131 @@
+# Projectiles and experience orbs: a plain, a tipped and a spectral arrow and
+# a trident stuck in a wall; a snowball, egg, ender pearl, splash potion,
+# bottle o' enchanting, fireball and small fireball held still in the air; a
+# firework rocket shot at an angle, which doesn't climb; and orbs of rising
+# value on the ground. The camera is a spectator's, which orbs don't follow.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode spectator"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 600.5 -58 597.5 0 10"
+
+[[step]]
+expect = { player = { position = [600.5, -58.0, 597.5] } }
+
+[[step]]
+expect = { block = "grass_block", at = [600, -61, 605] }
+
+[[step]]
+chat = "/fill 594 -60 607 607 -55 607 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [600, -58, 607] }
+
+# Fired into the wall, they stick.
+[[step]]
+chat = "/summon minecraft:arrow 597.5 -57.5 605.5 {Motion:[0.0,0.0,1.0]}"
+
+[[step]]
+chat = "/summon minecraft:arrow 598.5 -57.5 605.5 {Motion:[0.2,0.0,1.0],item:{id:\"minecraft:tipped_arrow\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:poison\"}}}}"
+
+[[step]]
+chat = "/summon minecraft:spectral_arrow 602.5 -57.5 605.5 {Motion:[-0.2,0.1,1.0]}"
+
+[[step]]
+chat = "/summon minecraft:trident 603.5 -57.0 605.5 {Motion:[0.0,-0.2,1.0]}"
+
+[[step]]
+chat = "/summon minecraft:snowball 597.5 -58.5 603.5 {NoGravity:1b,Motion:[0.0,0.0,0.0]}"
+
+[[step]]
+chat = "/summon minecraft:egg 598.5 -58.5 603.5 {NoGravity:1b,Motion:[0.0,0.0,0.0]}"
+
+[[step]]
+chat = "/summon minecraft:ender_pearl 599.5 -58.5 603.5 {NoGravity:1b,Motion:[0.0,0.0,0.0]}"
+
+[[step]]
+chat = "/summon minecraft:splash_potion 600.5 -58.5 603.5 {NoGravity:1b,Motion:[0.0,0.0,0.0],Item:{id:\"minecraft:splash_potion\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:healing\"}}}}"
+
+[[step]]
+chat = "/summon minecraft:experience_bottle 601.5 -58.5 603.5 {NoGravity:1b,Motion:[0.0,0.0,0.0]}"
+
+[[step]]
+chat = "/summon minecraft:fireball 603.0 -59.0 603.5 {Motion:[0.0,0.0,0.0],acceleration_power:0.0d}"
+
+[[step]]
+chat = "/summon minecraft:small_fireball 604.5 -58.5 603.5 {Motion:[0.0,0.0,0.0],acceleration_power:0.0d}"
+
+[[step]]
+chat = "/summon minecraft:firework_rocket 596.5 -58.5 603.5 {ShotAtAngle:1b,Motion:[0.0,0.0,0.0],LifeTime:100000}"
+
+[[step]]
+chat = "/summon minecraft:experience_orb 597.5 -60 601.5 {Value:1}"
+
+[[step]]
+chat = "/summon minecraft:experience_orb 599.0 -60 601.5 {Value:20}"
+
+[[step]]
+chat = "/summon minecraft:experience_orb 600.5 -60 601.5 {Value:150}"
+
+[[step]]
+chat = "/summon minecraft:experience_orb 602.0 -60 601.5 {Value:1300}"
+
+[[step]]
+chat = "/summon minecraft:experience_orb 603.5 -60 601.5 {Value:2500}"
+
+[[step]]
+expect = { entity = "trident" }
+
+[[step]]
+expect = { entity = "snowball", item = "snowball" }
+
+[[step]]
+expect = { entity = "splash_potion", item = "splash_potion" }
+
+[[step]]
+expect = { entity = "firework_rocket", item = "firework_rocket" }
+
+[[step]]
+expect = { entity = "experience_orb" }
+
+[[step]]
+look_at = [600.5, -58.5, 605.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "projectiles"
+
+# Along the wall: the arrows and trident sticking out of it.
+[[step]]
+chat = "/tp @s 608.5 -57 603.5 60 15"
+
+[[step]]
+look_at = [600.5, -57.5, 606.0]
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "stuck"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 594 -60 607 607 -55 607 minecraft:air"
+
+[[step]]
+expect = { gone = "experience_orb" }

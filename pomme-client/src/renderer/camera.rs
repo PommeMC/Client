@@ -468,6 +468,13 @@ impl Camera {
         }
     }
 
+    /// Vanilla `Camera.rotation`, which billboards face the camera with:
+    /// local +X to the camera's right, +Y up and +Z back toward it.
+    pub fn orientation(&self) -> glam::Mat3 {
+        let (right, up) = self.billboard_axes();
+        glam::Mat3::from_cols(right, up, right.cross(up))
+    }
+
     /// The way the camera looks (vanilla `Camera.forwardVector`).
     pub fn forward(&self) -> Vec3 {
         self.view_basis().0

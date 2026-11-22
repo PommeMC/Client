@@ -41,7 +41,7 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
             x_rot,
             y_rot,
             y_head_rot,
-            data: _,
+            data,
         } => {
             let Some(entity_type) = native_entity_type(entity_type) else {
                 tracing::debug!("Dropping entity {id} of an unknown type {entity_type}");
@@ -56,6 +56,7 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
                 x_rot_deg: x_rot,
                 y_rot_deg: y_rot,
                 head_y_rot_deg: y_head_rot,
+                data,
             }
         }
         EntityPacket::Remove { ids } => NetworkEvent::EntitiesRemoved { ids },
@@ -171,6 +172,7 @@ fn entity_event(id: i32, event: i8) -> Option<NetworkEvent> {
         10 => NetworkEvent::SheepEatStart { id },
         11 => NetworkEvent::GolemOfferFlower { id, offering: true },
         19 => NetworkEvent::SquidTentacleReset { id },
+        32 => NetworkEvent::ArmorStandHit { id },
         24..=28 => NetworkEvent::PermissionLevel {
             id,
             level: (event - 24) as u8,

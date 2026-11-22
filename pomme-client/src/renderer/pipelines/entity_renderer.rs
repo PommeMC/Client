@@ -202,6 +202,9 @@ pub struct EntityRenderInfo {
     /// `DolphinRenderState.isMoving`.
     pub dolphin_moving: bool,
     pub turtle: entity_model::TurtleAnims,
+    /// `ArrowRenderState.shake`: the landing quiver's remaining ticks.
+    pub arrow_shake: f32,
+    pub armor_stand: entity_model::ArmorStandPose,
     /// Iron golem countdowns; the punch one is partial-tick adjusted.
     pub golem_attack_ticks: f32,
     pub golem_offer_flower_ticks: u32,
@@ -296,6 +299,8 @@ impl Default for EntityRenderInfo {
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
             turtle: entity_model::TurtleAnims::default(),
+            arrow_shake: 0.0,
+            armor_stand: Default::default(),
             golem_attack_ticks: 0.0,
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
@@ -485,6 +490,8 @@ struct ArmorMeshes {
     humanoid: [ArmorMesh; 4],
     husk: [ArmorMesh; 4],
     zombie_villager: [ArmorMesh; 4],
+    armor_stand: [ArmorMesh; 4],
+    small_armor_stand: [ArmorMesh; 4],
     /// `LLAMA_DECOR` chestless and chested; the baby never shows a chest.
     llama_decor: [ArmorMesh; 2],
     baby_llama_decor: ArmorMesh,
@@ -795,6 +802,8 @@ fn build_armor_meshes(device: &rhi::backend::Device) -> ArmorMeshes {
         humanoid: bake(entity_model::bake_humanoid_armor_model),
         husk: bake(entity_model::bake_husk_armor_model),
         zombie_villager: bake(entity_model::bake_zombie_villager_armor_model),
+        armor_stand: bake(entity_model::bake_armor_stand_armor_model),
+        small_armor_stand: bake(entity_model::bake_small_armor_stand_armor_model),
         llama_decor: [false, true]
             .map(|chest| build_armor_mesh(device, entity_model::bake_llama_decor_model(chest))),
         baby_llama_decor: build_armor_mesh(device, entity_model::bake_baby_llama_decor_model()),
@@ -817,12 +826,18 @@ fn destroy_armor_assets(device: &rhi::backend::Device, assets: &mut HashMap<Stri
 impl ArmorMeshes {
     // TODO: the other vanilla `HumanoidArmorLayer` wearers once pomme renders
     // them: wither skeleton (1.2 scale), parched, piglin / piglin brute /
-    // zombified piglin (`PiglinModel.createArmorMeshSet`), giant, armor stand.
-    fn for_entity(&self, kind: EntityKind, slot: usize) -> Option<&ArmorMesh> {
+    // zombified piglin (`PiglinModel.createArmorMeshSet`), giant.
+    fn for_entity(&self, kind: EntityKind, is_baby: bool, slot: usize) -> Option<&ArmorMesh> {
         if slot >= 4 {
             return None;
         }
         match kind {
+            EntityKind::ArmorStand if is_baby => Some(&self.small_armor_stand[slot]),
+            EntityKind::ArmorStand => Some(&self.armor_stand[slot]),
+            // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
+            // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
+            // `CubeDeformation`, which pomme's model format lacks.
+            _ if is_baby => None,
             EntityKind::ZombieVillager => Some(&self.zombie_villager[slot]),
             EntityKind::Husk => Some(&self.husk[slot]),
             EntityKind::Player
@@ -940,6 +955,10 @@ enum AnimationType {
     Golem,
     /// Paddles (`AbstractBoatModel.setupAnim`).
     Boat,
+    /// The landing quiver (`ArrowModel.setupAnim`).
+    Arrow,
+    /// The synced poses (`ArmorStandModel.setupAnim`).
+    ArmorStand,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -2213,6 +2232,55 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
     ];
+    const ARROW_TEX: &[&[ResourceId]] = tex_table!("projectiles" => "arrow", "arrow_tipped");
+    const SPECTRAL_ARROW_TEX: &[&[ResourceId]] = tex_table!("projectiles" => "arrow_spectral");
+    const TRIDENT_TEX: &[&[ResourceId]] = tex_table!("trident" => "trident");
+    const ARMOR_STAND_TEX: &[&[ResourceId]] = tex_table!("armorstand" => "armorstand");
+    let single = |kind, anim, adult| MobDef {
+        kind,
+        anim,
+        adult: vec![adult],
+        baby: None,
+        adult_overlays: vec![],
+        baby_overlays: vec![],
+    };
+    defs.extend([
+        // `TippableArrowRenderer` (variant 1 tipped) and `SpectralArrowRenderer`.
+        single(
+            EntityKind::Arrow,
+            AnimationType::Arrow,
+            opaque(entity_model::bake_arrow_model(), ARROW_TEX, 32),
+        ),
+        single(
+            EntityKind::SpectralArrow,
+            AnimationType::Arrow,
+            opaque(entity_model::bake_arrow_model(), SPECTRAL_ARROW_TEX, 32),
+        ),
+        // TODO: a foil trident's `entitySolidGlint` needs an entity glint pass.
+        single(
+            EntityKind::Trident,
+            AnimationType::Static,
+            opaque(entity_model::bake_trident_model(), TRIDENT_TEX, 32),
+        ),
+        // A small stand draws the `ARMOR_STAND_SMALL` mesh (`isBaby` is
+        // `isSmall`).
+        MobDef {
+            baby: Some(opaque(
+                entity_model::bake_armor_stand_model(true),
+                ARMOR_STAND_TEX,
+                64,
+            )),
+            ..single(
+                EntityKind::ArmorStand,
+                AnimationType::ArmorStand,
+                opaque(
+                    entity_model::bake_armor_stand_model(false),
+                    ARMOR_STAND_TEX,
+                    64,
+                ),
+            )
+        },
+    ]);
     defs.extend(BOATS.into_iter().map(|(kind, tex)| {
         let (model, water_patch) = entity_model::bake_boat(kind);
         let tex_size = if crate::entity::is_chest_boat(kind) {
@@ -2556,17 +2624,14 @@ impl EntityRenderer {
                 let layers = self.equipment_layers(&decor.equipment, |asset| &asset.llama_body);
                 self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
             }
-            // TODO: baby armor (vanilla `HUMANOID_BABY` layer type +
-            // `HumanoidModel.createBabyArmorMeshSet`) needs anisotropic
-            // `CubeDeformation`, which pomme's model format lacks.
-            if v.info.is_baby {
-                continue;
-            }
             for slot in ARMOR_SUBMIT_ORDER {
                 let Some(armor) = &v.info.armor[slot] else {
                     continue;
                 };
-                let Some(mesh) = self.armor_meshes.for_entity(v.info.entity_kind, slot) else {
+                let Some(mesh) =
+                    self.armor_meshes
+                        .for_entity(v.info.entity_kind, v.info.is_baby, slot)
+                else {
                     continue;
                 };
                 let layers = self.armor_layers(armor, slot);
@@ -2912,6 +2977,10 @@ impl EntityRenderer {
                 info.rowing_time_left,
                 info.rowing_time_right,
             ),
+            AnimationType::Arrow => entity_model::compute_arrow_anim(model, info.arrow_shake),
+            AnimationType::ArmorStand => {
+                entity_model::compute_armor_stand_anim(model, &info.armor_stand)
+            }
             AnimationType::Static => entity_model::PartAnim::default(),
         }
     }
@@ -2991,23 +3060,25 @@ impl EntityRenderer {
                 | EntityKind::Skeleton
                 | EntityKind::Stray
                 | EntityKind::Bogged
+                | EntityKind::ArmorStand
         ) {
             return None;
         }
         let entry = self.mobs.get(&info.entity_kind)?;
         let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
-        let parts = variant.model.compute_part_transforms(&self.compute_anim(
-            entry.anim,
-            &variant.model,
-            info,
-        ));
+        let mut anim = self.compute_anim(entry.anim, &variant.model, info);
+        // `ArmorStandModel.translateToHand` shows a hidden arm for the item.
+        anim.scale.retain(|&(_, scale)| scale != glam::Vec3::ZERO);
+        let parts = variant.model.compute_part_transforms(&anim);
+        // `ItemInHandLayer.useBabyOffset`: never for an armor stand.
+        let baby_offset = info.is_baby && info.entity_kind != EntityKind::ArmorStand;
         let entity = Self::entity_matrix(info, anchor);
         // Part frames are vanilla's with Y negated (the bake negates it), so
         // the layer's steps go through the mirror back to vanilla's frame.
         let y_mirror = glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0));
         let hand = |name: &str, right_arm: bool| {
             let arm = variant.model.parts.iter().position(|p| p.name == name)?;
-            Some(entity * parts[arm] * y_mirror * held_item::arm_to_item(right_arm, info.is_baby))
+            Some(entity * parts[arm] * y_mirror * held_item::arm_to_item(right_arm, baby_offset))
         };
         Some([hand("right_arm", true)?, hand("left_arm", false)?])
     }
@@ -3378,6 +3449,8 @@ impl EntityRenderer {
             .iter_mut()
             .chain(self.armor_meshes.husk.iter_mut())
             .chain(self.armor_meshes.zombie_villager.iter_mut())
+            .chain(self.armor_meshes.armor_stand.iter_mut())
+            .chain(self.armor_meshes.small_armor_stand.iter_mut())
             .chain(self.armor_meshes.llama_decor.iter_mut())
             .chain([&mut self.armor_meshes.baby_llama_decor])
         {

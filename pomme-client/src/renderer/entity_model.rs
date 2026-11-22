@@ -7,6 +7,7 @@ use crate::renderer::rhi;
 use crate::util::clamped_lerp;
 
 mod armadillo;
+mod armor_stand;
 mod axolotl;
 mod bee;
 mod copper_golem_anim;
@@ -17,9 +18,11 @@ mod llama;
 mod panda;
 mod parrot;
 mod polar_bear;
+mod projectile;
 mod sniffer_anim;
 mod turtle;
 pub use armadillo::*;
+pub use armor_stand::*;
 pub use axolotl::*;
 pub use bee::*;
 pub use dolphin::*;
@@ -29,6 +32,7 @@ pub use llama::*;
 pub use panda::*;
 pub use parrot::*;
 pub use polar_bear::*;
+pub use projectile::*;
 pub use turtle::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
@@ -317,13 +321,23 @@ impl BakedEntityModel {
 }
 
 pub fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntityModel {
+    bake_parts(parts, tex_w, tex_h, true)
+}
+
+/// [`bake_model`] in [`ModelConvention::BlockYUp`], for the models a
+/// renderer submits without `LivingEntityRenderer`'s flip.
+pub(crate) fn bake_model_y_up(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntityModel {
+    bake_parts(parts, tex_w, tex_h, false).with_convention(ModelConvention::BlockYUp)
+}
+
+fn bake_parts(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32, y_down: bool) -> BakedEntityModel {
     let mut vertices = Vec::new();
     let mut part_ranges = Vec::new();
 
     for part in &parts {
         let start = vertices.len() as u32;
         for cube in &part.cubes {
-            generate_cube_vertices(cube, tex_w, tex_h, FACE_ALL, true, &mut vertices);
+            generate_cube_vertices(cube, tex_w, tex_h, FACE_ALL, y_down, &mut vertices);
         }
         let count = vertices.len() as u32 - start;
         part_ranges.push((start, count));

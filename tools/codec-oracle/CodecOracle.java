@@ -436,7 +436,7 @@ public final class CodecOracle {
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
         sizes.addProperty("worldgen/biome", biomes.size());
         for (ResourceKey<? extends Registry<?>> key : List.of(Registries.CAT_VARIANT, Registries.CHICKEN_VARIANT,
-                Registries.COW_VARIANT, Registries.WOLF_VARIANT)) {
+                Registries.COW_VARIANT, Registries.WOLF_VARIANT, Registries.PAINTING_VARIANT)) {
             sizes.addProperty(key.identifier().getPath(), registries.lookupOrThrow(key).size());
         }
         out.add("registry_sizes", sizes);

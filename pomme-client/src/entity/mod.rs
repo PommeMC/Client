@@ -4,6 +4,7 @@ pub mod components;
 pub mod dimensions;
 pub mod glowing;
 pub mod light;
+pub mod non_living;
 pub mod shadow;
 pub mod villager;
 
@@ -61,6 +62,61 @@ pub enum MetaValue {
     Byte(u8),
     Float(f32),
     Long(i64),
+    /// An armor stand pose, degrees.
+    Rotations([f32; 3]),
+    /// `Direction.get3DDataValue`.
+    Direction(u32),
+}
+
+/// `ArmorStand`'s synced client flags and poses, and its last hit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmorStandState {
+    /// `DATA_CLIENT_FLAGS`: 0x01 small, 0x04 arms, 0x08 no base plate,
+    /// 0x10 marker.
+    // TODO: a marker's render types (`ArmorStandRenderer.getRenderType`:
+    // no outline, nothing while invisible) and its brightest-block light probe.
+    pub flags: u8,
+    /// Head, body, left arm, right arm, left leg, right leg, in degrees.
+    pub poses: [[f32; 3]; 6],
+    /// `ArmorStand.lastHit`, the game time of the last wobble.
+    pub last_hit: i64,
+}
+
+impl Default for ArmorStandState {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            // `DEFAULT_*_POSE`.
+            poses: [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [-10.0, 0.0, -10.0],
+                [-15.0, 0.0, 10.0],
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, 1.0],
+            ],
+            last_hit: 0,
+        }
+    }
+}
+
+impl ArmorStandState {
+    pub fn is_small(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
+    pub fn show_arms(&self) -> bool {
+        self.flags & 0x04 != 0
+    }
+
+    pub fn show_base_plate(&self) -> bool {
+        self.flags & 0x08 == 0
+    }
+
+    /// The `Rotations` constructor: each angle `% 360`, a non-finite one 0.
+    fn rotations(r: [f32; 3]) -> [f32; 3] {
+        r.map(|a| if a.is_finite() { a % 360.0 } else { 0.0 })
+    }
 }
 
 /// Vanilla `Sniffer.State`, in id order.
@@ -878,6 +934,7 @@ pub struct LivingEntity {
     /// Iron golem punch / flower-offer countdowns (entity events 4, 11, 34).
     pub golem_attack_ticks: u8,
     pub golem_offer_flower_ticks: u16,
+    pub armor_stand: ArmorStandState,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -968,12 +1025,14 @@ fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
 
 /// Per-kind `pushEntities` / `doPush` overrides. Team rules, spectators and
 /// shared vehicles are the caller's `pusher_allowed` filter.
-// TODO: once these kinds are modeled: ArmorStand no-ops doPush/pushEntities,
-// Vex ticks with noPhysics (no push), and Warden / Creaking gate the
-// reciprocal impulse in isPushable.
+// TODO: once these kinds are modeled: Vex ticks with noPhysics (no push),
+// and Warden / Creaking gate the reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
-    // `Parrot.doPush` skips players.
-    !matches!(entity.entity_type, EntityKind::Bat | EntityKind::Parrot)
+    // `Parrot.doPush` skips players; `ArmorStand.doPush` does nothing.
+    !matches!(
+        entity.entity_type,
+        EntityKind::Bat | EntityKind::Parrot | EntityKind::ArmorStand
+    )
 }
 
 /// The pusher's `isPushable`, which gates only the reciprocal impulse.
@@ -1143,6 +1202,7 @@ impl LivingEntity {
             dark_ticks: 0,
             golem_attack_ticks: 0,
             golem_offer_flower_ticks: 0,
+            armor_stand: ArmorStandState::default(),
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -1706,6 +1766,12 @@ impl LivingEntity {
                 turn_body(self.body_y_rot_deg, y_rot, dx, dz, self.swing_time > 0);
             return;
         }
+        // `ArmorStand.tickHeadTurn`: body and head follow the yaw.
+        if self.entity_type == EntityKind::ArmorStand {
+            self.body_y_rot_deg = y_rot;
+            self.head_y_rot_deg = y_rot;
+            return;
+        }
         // A scared armadillo's control skips its client tick.
         if self.entity_type == EntityKind::Armadillo && self.armadillo.is_scared() {
             return;
@@ -1988,6 +2054,13 @@ impl ItemEntityStore {
     }
 }
 
+/// Whether the chunk holding `pos` is loaded; entities there don't move.
+fn chunk_loaded(chunks: &ChunkStore, pos: DVec3) -> bool {
+    chunks
+        .get_chunk(&ChunkPos::containing(BlockPos::containing(pos)))
+        .is_some()
+}
+
 /// Vanilla `ItemEntity.getDefaultGravity`.
 const ITEM_GRAVITY: f64 = 0.04;
 /// Vanilla `Entity.getAirDrag`.
@@ -2004,14 +2077,13 @@ fn tick_item_physics(
     chunk_store: &ChunkStore,
     block_state_table: crate::world::block::BlockStateTable,
 ) {
+    // Don't simulate (and fall) through unloaded terrain.
+    if !chunk_loaded(chunk_store, *entity.position) {
+        return;
+    }
     let block_x = entity.position.x.floor() as i32;
     let block_y = entity.position.y.floor() as i32;
     let block_z = entity.position.z.floor() as i32;
-    let chunk_pos = ChunkPos::new(block_x.div_euclid(16), block_z.div_euclid(16));
-    if chunk_store.get_chunk(&chunk_pos).is_none() {
-        // Don't simulate (and fall) through unloaded terrain.
-        return;
-    }
 
     let state = chunk_store.get_block_state(block_x, block_y, block_z);
     let fluid = block_state_table.block_state_data(state).fluid();
@@ -2138,6 +2210,16 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
+            // `ArmorStand.DATA_CLIENT_FLAGS` and its six poses, ahead of the
+            // mob flags it would otherwise read as.
+            // `ArmorStand.isBaby` is `isSmall`.
+            (EntityKind::ArmorStand, 15, Byte(f)) => {
+                entity.armor_stand.flags = f;
+                entity.is_baby = entity.armor_stand.is_small();
+            }
+            (EntityKind::ArmorStand, 16..=21, MetaValue::Rotations(r)) => {
+                entity.armor_stand.poses[usize::from(index - 16)] = ArmorStandState::rotations(r);
+            }
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => {
                 entity.is_on_fire = shared_flags_on_fire(f);
@@ -2490,6 +2572,15 @@ impl EntityStore {
     }
 
     /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
+    /// `ArmorStand.handleEntityEvent(32)`: the hit wobble starts now.
+    pub fn armor_stand_hit(&mut self, id: i32, game_time: i64) -> Option<Position> {
+        let entity = self.living.get_mut(&id)?;
+        (entity.entity_type == EntityKind::ArmorStand).then(|| {
+            entity.armor_stand.last_hit = game_time;
+            entity.position
+        })
+    }
+
     pub fn golem_punch(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::IronGolem
@@ -2784,6 +2875,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
         || matches!(
             kind,
             EntityKind::Player
+                | EntityKind::ArmorStand
                 | EntityKind::Bee
                 | EntityKind::Parrot
                 | EntityKind::Pig

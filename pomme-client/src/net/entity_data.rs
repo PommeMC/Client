@@ -18,9 +18,6 @@ use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::net::registry_holder::RegistryHolder;
 use crate::position::BlockPos;
 
-/// `ItemEntity.DATA_ITEM`.
-const ITEM_INDEX: u8 = 8;
-
 /// `Pose.CROUCHING`'s id.
 const CROUCHING: u32 = 5;
 
@@ -38,11 +35,21 @@ pub(super) fn handle_raw_entity_data(
         read_entity_data(payload, super::translate::active()).map(|(id, values)| {
             for DataValue { index, value } in values {
                 match &value {
-                    Value::Item(Some(stack)) if index == ITEM_INDEX => {
-                        if let ItemStack::Present(stack) = ItemStack::from_wire(stack) {
-                            send_item_data(id, &stack, event_tx);
+                    // `ItemEntity.DATA_ITEM` and the thrown items' at 8,
+                    // `ItemFrame.DATA_ITEM` at 9; the store picks by kind.
+                    Value::Item(stack) => match stack.as_ref().map(ItemStack::from_wire) {
+                        Some(ItemStack::Present(stack)) => {
+                            send_item_data(id, index, &stack, event_tx);
                         }
-                    }
+                        _ => send_ordered(event_tx, NetworkEvent::EntityItemCleared { id, index }),
+                    },
+                    Value::PaintingVariant(variant) => send_ordered(
+                        event_tx,
+                        NetworkEvent::PaintingVariant {
+                            id,
+                            variant: variant.clone(),
+                        },
+                    ),
                     value => send_data_value(id, index, value, registry_holder, event_tx),
                 }
             }
@@ -74,7 +81,7 @@ pub(super) fn read_entity_data(
     Ok((id, values))
 }
 
-fn send_item_data(id: i32, stack: &ItemStackData, event_tx: &Sender<NetworkEvent>) {
+fn send_item_data(id: i32, index: u8, stack: &ItemStackData, event_tx: &Sender<NetworkEvent>) {
     let damage = stack
         .component::<pomme_item::components::Damage>()
         .map(|component| component.amount)
@@ -83,6 +90,7 @@ fn send_item_data(id: i32, stack: &ItemStackData, event_tx: &Sender<NetworkEvent
         event_tx,
         NetworkEvent::EntityItemData {
             id,
+            index,
             item_name: crate::player::inventory::item_resource_name(stack.kind),
             item_id: stack.kind.to_u32(),
             damage,
@@ -206,6 +214,8 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
         Value::Byte(v) => MetaValue::Byte(*v),
         Value::Float(v) => MetaValue::Float(*v),
         Value::Long(v) => MetaValue::Long(*v),
+        Value::Rotations(v) => MetaValue::Rotations(*v),
+        Value::Direction(v) => MetaValue::Direction(*v),
         _ => return,
     };
     send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });
@@ -224,7 +234,7 @@ mod tests {
             .id_of(pomme_protocol::ClientRegistry::Item, "stone")
             .unwrap();
         let mut payload = vec![7];
-        payload.extend([ITEM_INDEX, 7, 2]);
+        payload.extend([8, 7, 2]);
         write_varint(&mut payload, stone);
         payload.extend([0, 0]);
         // Pose, then a byte the store resolves itself.
@@ -242,7 +252,7 @@ mod tests {
         assert!(matches!(
             &events[..],
             [
-                NetworkEvent::EntityItemData { id: 7, count: 2, item_name, .. },
+                NetworkEvent::EntityItemData { id: 7, index: 8, count: 2, item_name, .. },
                 NetworkEvent::EntityPose { id: 7, is_crouching: true },
                 NetworkEvent::EntityData { id: 7, index: 0, value: MetaValue::Byte(2) },
             ] if item_name == "stone"
