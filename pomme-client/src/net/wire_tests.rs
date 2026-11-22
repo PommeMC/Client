@@ -3277,11 +3277,8 @@ fn translate_add_player_763() {
     };
     assert_eq!(id, 42);
     assert_eq!(wire_uuid, uuid.as_u128());
-    let native =
-        translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
     assert_eq!(
-        native
-            .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32),
+        native_entity_kind(&translation, entity_type),
         Some(pomme_registry::builtin::EntityKind::Player)
     );
     assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
@@ -3291,6 +3288,51 @@ fn translate_add_player_763() {
         (angle(10), angle(20), angle(20))
     );
     assert_eq!(data, 0);
+}
+
+/// The native kind of a wire entity type, as the entity reader resolves it.
+fn native_entity_kind(
+    translation: &crate::net::translate::TranslationSession,
+    wire_type: u32,
+) -> Option<pomme_registry::builtin::EntityKind> {
+    translation
+        .remap_to_native(pomme_protocol::ClientRegistry::EntityType, wire_type)
+        .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32)
+}
+
+/// 1.21.4 spawned XP orbs with `add_experience_orb`, which 1.21.5 dropped for
+/// `add_entity`: the orb's value rides in the data field.
+#[test]
+fn translate_add_experience_orb_769() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "add_experience_orb"),
+    );
+    wire::write_varint(&mut old, 42); // entity id
+    old.extend_from_slice(&1.5f64.to_be_bytes());
+    old.extend_from_slice(&64.0f64.to_be_bytes());
+    old.extend_from_slice(&(-2.5f64).to_be_bytes());
+    old.extend_from_slice(&37i16.to_be_bytes());
+
+    let translation = translation_for(769);
+    let pomme_protocol::entity::EntityPacket::Add {
+        id,
+        entity_type,
+        position,
+        data,
+        ..
+    } = translate_and_read(769, old, "add_entity", pomme_protocol::entity::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(id, 42);
+    assert_eq!(
+        native_entity_kind(&translation, entity_type),
+        Some(pomme_registry::builtin::EntityKind::ExperienceOrb)
+    );
+    assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
+    assert_eq!(data, 37);
 }
 
 /// 1.20.2 made the serverbound login hello's profile id mandatory; 763 wraps

@@ -4,6 +4,9 @@
 # firework rocket shot at an angle, which doesn't climb; and orbs of rising
 # value on the ground. The camera is a spectator's, which orbs don't follow.
 
+# The splash_potion entity arrived in 1.21.5.
+min_version = "1.21.5"
+
 [[step]]
 wait_ms = 2000
 

@@ -9,6 +9,30 @@ impl Ids769 {
     }
 }
 
+/// Rewrites `add_experience_orb` (entity id, position, short value) onto the
+/// wire version's `add_entity`: a UUID made from the id, no rotation or
+/// velocity, and the value in the data field, which the orb reads at spawn.
+/// The caller feeds it back through the chain.
+pub(super) fn translate_add_experience_orb(ids: &Ids769, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let entity = var_u32(&mut cur)?;
+    let pos_at = cur.position() as usize;
+    advance(&mut cur, 24)?; // position doubles
+    let pos_end = cur.position() as usize;
+    let value = i16::from_be_bytes([read_u8(&mut cur)?, read_u8(&mut cur)?]);
+
+    let mut out = Vec::with_capacity(payload.len() + 32);
+    wire::write_varint(&mut out, ids.add_entity_old_id);
+    wire::write_varint(&mut out, entity);
+    out.extend_from_slice(uuid::Uuid::from_u128(u128::from(entity) + 1).as_bytes());
+    wire::write_varint(&mut out, ids.experience_orb_entity_type);
+    out.extend_from_slice(&payload[pos_at..pos_end]);
+    out.extend_from_slice(&[0; 3]); // x/y/head rotation
+    wire::write_varint(&mut out, i32::from(value) as u32);
+    out.extend_from_slice(&[0; 6]); // velocity shorts
+    Some(out)
+}
+
 /// Rewrites a native `set_creative_mode_slot` payload for 1.20.5 to 1.21.4,
 /// whose stack codec doesn't length-prefix each component value as 1.21.5's
 /// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` does. Ids are already in the

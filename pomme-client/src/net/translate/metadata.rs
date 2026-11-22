@@ -13,9 +13,6 @@ use super::*;
 /// vanilla entity sends one after an untranslatable stack).
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
-/// TODO: lift pre-1.21.6 hanging-entity indices (an item frame's item/rotation
-/// at 8/9, a painting's variant at 8) into 26.2's numbering instead of passing
-/// the index byte through, so those entities can render on those wires.
 pub(super) fn translate_entity_data(
     id: u32,
     payload: &[u8],

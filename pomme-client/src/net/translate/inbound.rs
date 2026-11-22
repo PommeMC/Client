@@ -403,6 +403,13 @@ impl Translation {
             let frame = translate_add_player_763(v, &raw[id_end..])?;
             return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
         }
+        // So does add_experience_orb before 1.21.5.
+        if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v769.as_ref())
+            && wire_id == v.add_experience_orb_old_id
+        {
+            let frame = translate_add_experience_orb(v, &raw[id_end..])?;
+            return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
+        }
         let id = match &self.game_ids {
             Some(ids) => {
                 let Some(native) = ids.inbound.get(wire_id as usize).copied().flatten() else {

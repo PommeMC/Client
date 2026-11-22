@@ -2576,7 +2576,7 @@ impl Renderer {
             let camera = (self.camera_render_position() - self.camera.anchor()).as_vec3();
             let custom = std::mem::take(&mut self.custom_quads);
             self.custom_geometry_pipeline
-                .prepare(frame, camera, &custom);
+                .prepare(&self.ctx.device, frame, camera, &custom);
             let mut text = WorldTextVertices::default();
             if let Some(glyph_map) = self.menu_pipeline.mc_glyph_map() {
                 let anchor = self.camera.anchor();

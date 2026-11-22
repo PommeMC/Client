@@ -11,9 +11,6 @@ use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::{rhi, shader, util};
 use crate::resources::{ResourceManager, resource_id};
 
-/// A frame's vertex budget: a 16x16 painting is 1584 vertices.
-const MAX_VERTICES: usize = 65536;
-
 /// The textures the geometry samples. Paintings key theirs by sprite id
 /// (`minecraft:kebab`), as `AtlasIds.PAINTINGS` does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -72,7 +69,7 @@ pub struct CustomGeometryPipeline {
     lightmap_set: rhi::backend::BindGroup,
     sampler: rhi::backend::Sampler,
     textures: HashMap<CustomTexture, LoadedTexture>,
-    vertex_buffers: Vec<rhi::backend::Buffer>,
+    vertices: super::item_entity::FrameArena<CustomVertex>,
     runs: Vec<Run>,
 }
 
@@ -96,11 +93,10 @@ impl CustomGeometryPipeline {
             std::mem::size_of::<CameraUniform>() as u64,
             "custom_geometry_camera",
         );
-        let vertex_buffers = util::create_per_frame_host_buffers(
+        let vertices = super::item_entity::FrameArena::new(
             device,
-            (MAX_VERTICES * std::mem::size_of::<CustomVertex>()) as u64,
             rhi::BufferUsages::VERTEX,
-            "custom_geometry_vertices",
+            "custom_geometry_vertices".into(),
         );
         let sampler = rhi::backend::create_sampler(device, &rhi::SamplerDesc::NEAREST);
         let mut pipeline = Self {
@@ -114,7 +110,7 @@ impl CustomGeometryPipeline {
             lightmap_set: lightmap.group,
             sampler,
             textures: HashMap::new(),
-            vertex_buffers,
+            vertices,
             runs: Vec::new(),
         };
         pipeline.reload_textures(device, resources);
@@ -129,9 +125,13 @@ impl CustomGeometryPipeline {
         resources: &dyn ResourceManager,
     ) {
         self.destroy_textures(device);
+        // The orb's texture moved into `experience/` after 1.21.11.
         let mut sources = vec![(
             CustomTexture::ExperienceOrb,
-            resource_id!("minecraft:textures/entity/experience/experience_orb.png"),
+            vec![
+                resource_id!("minecraft:textures/entity/experience/experience_orb.png"),
+                resource_id!("minecraft:textures/entity/experience_orb.png"),
+            ],
         )];
         match resources.list_resources("textures/painting", &|id| id.path().ends_with(".png")) {
             Ok(entries) => sources.extend(entries.into_keys().filter_map(|id| {
@@ -144,12 +144,12 @@ impl CustomGeometryPipeline {
                 } else {
                     CustomTexture::Painting(format!("{}:{name}", id.namespace()))
                 };
-                Some((texture, id))
+                Some((texture, vec![id]))
             })),
             Err(error) => tracing::warn!("Failed to list painting textures: {error}"),
         }
-        for (key, id) in sources {
-            let texture = util::load_asset_texture(device, resources, &id);
+        for (key, ids) in sources {
+            let texture = super::entity_renderer::load_entity_texture(device, resources, &ids, 16);
             let set =
                 util::create_texture_group(device, self.tex_layout, texture.handle(), self.sampler);
             self.textures.insert(key, LoadedTexture { texture, set });
@@ -173,7 +173,13 @@ impl CustomGeometryPipeline {
 
     /// Uploads `quads`: the solid ones first, then the translucent ones far
     /// to near from the camera, as `sortOnUpload` orders them.
-    pub fn prepare(&mut self, frame: usize, camera: glam::Vec3, quads: &[CustomQuad]) {
+    pub fn prepare(
+        &mut self,
+        device: &rhi::backend::Device,
+        frame: usize,
+        camera: glam::Vec3,
+        quads: &[CustomQuad],
+    ) {
         self.runs.clear();
         let center = |quad: &CustomQuad| {
             quad.corners
@@ -198,9 +204,6 @@ impl CustomGeometryPipeline {
         });
         let mut vertices = Vec::with_capacity(order.len() * 6);
         for quad in order {
-            if vertices.len() + 6 > MAX_VERTICES {
-                break;
-            }
             let start = vertices.len() as u32;
             for i in [0, 1, 2, 0, 2, 3] {
                 vertices.push(quad.corners[i]);
@@ -217,18 +220,15 @@ impl CustomGeometryPipeline {
                 }),
             }
         }
-        if !vertices.is_empty() {
-            self.vertex_buffers[frame].write(bytemuck::cast_slice(&vertices));
-        }
+        self.vertices.begin_frame(device, frame, vertices.len());
+        self.vertices.push(frame, &vertices);
     }
 
     pub fn draw(&self, pass: &mut rhi::backend::RenderPassEncoder, frame: usize) {
         if self.runs.is_empty() {
             return;
         }
-        pass.set_vertex_buffer(0, self.vertex_buffers[frame].handle());
-        pass.set_bind_group(0, self.camera_sets[frame]);
-        pass.set_bind_group(2, self.lightmap_set);
+        pass.set_vertex_buffer(0, self.vertices.buffer(frame).handle());
         let mut bound = None;
         for run in &self.runs {
             if bound != Some(run.translucent) {
@@ -237,6 +237,10 @@ impl CustomGeometryPipeline {
                 } else {
                     &self.solid
                 });
+                // Bound after the pipeline, whose layout they're checked
+                // against.
+                pass.set_bind_group(0, self.camera_sets[frame]);
+                pass.set_bind_group(2, self.lightmap_set);
                 bound = Some(run.translucent);
             }
             pass.set_bind_group(1, run.texture);
@@ -263,7 +267,7 @@ impl CustomGeometryPipeline {
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
         self.destroy_textures(device);
         util::destroy_buffers(device, &mut self.camera_buffers);
-        util::destroy_buffers(device, &mut self.vertex_buffers);
+        self.vertices.destroy(device);
         self.sampler.destroy(device);
         self.solid.destroy(device);
         self.translucent.destroy(device);

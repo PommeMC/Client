@@ -2232,10 +2232,28 @@ fn mob_definitions() -> Vec<MobDef> {
             baby_overlays: vec![],
         },
     ];
-    const ARROW_TEX: &[&[ResourceId]] = tex_table!("projectiles" => "arrow", "arrow_tipped");
-    const SPECTRAL_ARROW_TEX: &[&[ResourceId]] = tex_table!("projectiles" => "arrow_spectral");
-    const TRIDENT_TEX: &[&[ResourceId]] = tex_table!("trident" => "trident");
-    const ARMOR_STAND_TEX: &[&[ResourceId]] = tex_table!("armorstand" => "armorstand");
+    // Each falls back to its name on 1.21.11 and older.
+    const ARROW_TEX: &[&[ResourceId]] = &[
+        &[resource_id!(
+            "minecraft:textures/entity/projectiles/arrow.png"
+        )],
+        &[
+            resource_id!("minecraft:textures/entity/projectiles/arrow_tipped.png"),
+            resource_id!("minecraft:textures/entity/projectiles/tipped_arrow.png"),
+        ],
+    ];
+    const SPECTRAL_ARROW_TEX: &[&[ResourceId]] = &[&[
+        resource_id!("minecraft:textures/entity/projectiles/arrow_spectral.png"),
+        resource_id!("minecraft:textures/entity/projectiles/spectral_arrow.png"),
+    ]];
+    const TRIDENT_TEX: &[&[ResourceId]] = &[&[
+        resource_id!("minecraft:textures/entity/trident/trident.png"),
+        resource_id!("minecraft:textures/entity/trident.png"),
+    ]];
+    const ARMOR_STAND_TEX: &[&[ResourceId]] = &[&[
+        resource_id!("minecraft:textures/entity/armorstand/armorstand.png"),
+        resource_id!("minecraft:textures/entity/armorstand/wood.png"),
+    ]];
     let single = |kind, anim, adult| MobDef {
         kind,
         anim,
@@ -4016,7 +4034,7 @@ fn build_variants(
         .collect()
 }
 
-fn load_entity_texture(
+pub(super) fn load_entity_texture(
     device: &rhi::backend::Device,
     resources: &dyn ResourceManager,
     asset_keys: &[ResourceId],

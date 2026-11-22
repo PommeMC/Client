@@ -5224,6 +5224,7 @@ pub fn update_game(
         let frame = super::non_living::Frame {
             world_light: &world_light,
             camera: gfx.renderer.camera_render_position(),
+            frustum: gfx.renderer.frustum_planes(),
             anchor: gfx.renderer.camera_anchor(),
             orientation: gfx.renderer.camera_orientation(),
             partial: partial_tick,
@@ -7201,6 +7202,22 @@ mod debug_release_tests {
     }
 }
 
+/// `ItemPickupParticle.updatePosition`'s target on collector `id`: halfway
+/// up to its eyes. `None` when the client doesn't have it.
+pub(crate) fn pickup_target(
+    player: &crate::player::LocalPlayer,
+    entities: &crate::entity::EntityStore,
+    id: i32,
+) -> Option<Position> {
+    let (feet, eye) = if id == player.entity_id {
+        (player.position, player.eye_pos())
+    } else {
+        let entity = entities.living.get(&id)?;
+        (entity.position, entity.eye_position(1.0))
+    };
+    Some(feet.lerp(eye, 0.5))
+}
+
 /// The non-living entities' client tick, after the item entities'.
 fn tick_non_living(game: &mut GameState) {
     use crate::entity::non_living::OrbTarget;
@@ -7252,11 +7269,15 @@ fn tick_non_living(game: &mut GameState) {
                 ),
             })
     };
+    let local_player = &game.player;
+    let entities = &game.entity_store;
+    let pickup_target_of = |id: i32| pickup_target(local_player, entities, id);
     let world = crate::entity::non_living::TickWorld {
         chunks: &game.chunk_store,
         block_state_table: game.block_registry.block_state_table(),
         players: &players,
         owner_of: &owner_of,
+        pickup_target_of: &pickup_target_of,
     };
     game.non_living_store.tick(&world);
 }

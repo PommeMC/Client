@@ -75,7 +75,8 @@ pub struct ArmorStandState {
     /// `DATA_CLIENT_FLAGS`: 0x01 small, 0x04 arms, 0x08 no base plate,
     /// 0x10 marker.
     // TODO: a marker's render types (`ArmorStandRenderer.getRenderType`:
-    // no outline, nothing while invisible) and its brightest-block light probe.
+    // no outline, nothing while invisible) and its brightest-block light
+    // probe.
     pub flags: u8,
     /// Head, body, left arm, right arm, left leg, right leg, in degrees.
     pub poses: [[f32; 3]; 6],
@@ -112,6 +113,10 @@ impl ArmorStandState {
 
     pub fn show_base_plate(&self) -> bool {
         self.flags & 0x08 == 0
+    }
+
+    pub fn is_marker(&self) -> bool {
+        self.flags & 0x10 != 0
     }
 
     /// The `Rotations` constructor: each angle `% 360`, a non-finite one 0.
@@ -1002,6 +1007,12 @@ pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32
 
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
     let mut dims = EntityDimensions::of(entity.entity_type);
+    // `ArmorStand.MARKER_DIMENSIONS`.
+    if entity.is_marker_stand() {
+        dims.width = 0.0;
+        dims.height = 0.0;
+        return dims;
+    }
     // `Sniffer.DIGGING_DIMENSIONS`, then the same age scale.
     if entity.entity_type == EntityKind::Sniffer && entity.sniffer_state == SnifferState::Digging {
         dims.height -= 0.4;
@@ -1241,6 +1252,15 @@ impl LivingEntity {
             interp_head_y_rot_deg: y_rot_deg,
             interp_head_y_rot_steps: 0,
         }
+    }
+
+    /// `Entity.isPickable`: a marker armor stand can't be targeted.
+    pub fn is_pickable(&self) -> bool {
+        !self.is_marker_stand()
+    }
+
+    fn is_marker_stand(&self) -> bool {
+        self.entity_type == EntityKind::ArmorStand && self.armor_stand.is_marker()
     }
 
     pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {

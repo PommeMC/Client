@@ -3609,21 +3609,17 @@ impl AppCore {
                     amount,
                 } => {
                     // No flight when the client lacks the collector.
-                    let target_pos = if collector_id == game.player.entity_id {
-                        Some(game.player.position)
-                    } else {
-                        game.entity_store
-                            .living
-                            .get(&collector_id)
-                            .map(|e| e.position)
-                    }
-                    .map(|pos| pos + dvec3(0.0, 0.81, 0.0));
+                    let target_pos = super::phases::in_game::pickup_target(
+                        &game.player,
+                        &game.entity_store,
+                        collector_id,
+                    );
                     let orb = game.non_living_store.get(item_id).is_some_and(|e| {
                         e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb
                     });
                     let from = game
                         .non_living_store
-                        .pickup(item_id, target_pos)
+                        .pickup(item_id, target_pos.map(|target| (collector_id, target)))
                         .or_else(|| game.item_entity_store.pickup(item_id, target_pos, amount));
                     // `handleTakeItemEntity` plays these client-side: an orb's,
                     // else the item one.

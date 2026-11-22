@@ -2164,6 +2164,7 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
     let mut touched: Vec<_> = entities
         .living
         .iter()
+        .filter(|(_, entity)| entity.is_pickable())
         .filter_map(|(&entity_id, entity)| {
             let entity_pos: DVec3 = entity.position.into();
             let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);

@@ -13,6 +13,7 @@ use crate::entity::components::Position;
 use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::non_living::{self, NonLivingEntity, PaintingShape, is_arrow, is_item_frame};
+use crate::physics::aabb::Aabb;
 use crate::renderer::Renderer;
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
 use crate::renderer::pipelines::custom_geometry::{CustomQuad, CustomTexture, CustomVertex};
@@ -36,6 +37,8 @@ const ORB_SHADOW: (f32, f32) = (0.15, 0.75);
 pub struct Frame<'a> {
     pub world_light: &'a WorldLight<'a>,
     pub camera: DVec3,
+    /// Planes relative to `camera`.
+    pub frustum: [[f32; 4]; 6],
     pub anchor: DVec3,
     pub orientation: Mat3,
     pub partial: f32,
@@ -122,6 +125,9 @@ fn push_entity(
         }
         kind if is_item_frame(kind) => item_frame(out, renderer, e, relative, light(), outline),
         EntityKind::ExperienceOrb => {
+            if !should_render(frame, *position, Aabb::from_center(*position, 0.25, 0.25)) {
+                return;
+            }
             out.quads
                 .push(orb(e, relative, frame.orientation, partial, light()));
             if outlined {
@@ -135,6 +141,8 @@ fn push_entity(
         }
         EntityKind::Painting => {
             if let Some(shape) = &e.painting
+                && let Some(aabb) = e.bounding_box()
+                && should_render(frame, *position, aabb)
                 && renderer.has_custom_texture(&CustomTexture::Painting(shape.asset_id.clone()))
             {
                 painting(&mut out.quads, frame.world_light, e, shape, relative);
@@ -142,6 +150,22 @@ fn push_entity(
         }
         _ => {}
     }
+}
+
+/// `EntityRenderer.shouldRender`: within `Entity.shouldRenderAtSqrDistance`'s
+/// reach for the box's size (at the default entity distance), and the box,
+/// grown half a block, in the frustum.
+fn should_render(frame: &Frame<'_>, position: DVec3, aabb: Aabb) -> bool {
+    let reach = (aabb.max - aabb.min).element_sum() / 3.0 * 64.0;
+    if position.distance_squared(frame.camera) >= reach * reach {
+        return false;
+    }
+    let corner = |at: DVec3| (at - frame.camera).as_vec3().to_array();
+    crate::renderer::chunk::occlusion_graph::aabb_in_frustum(
+        &corner(aabb.min - 0.5),
+        &corner(aabb.max + 0.5),
+        &frame.frustum,
+    )
 }
 
 /// `ArrowRenderer` and `ThrownTridentRenderer`: yaw - 90 about Y, then the
@@ -186,7 +210,7 @@ fn push_ground_item(
         return;
     };
     let (model, tints) = renderer.item_draw(name, stack);
-    let ground = super::in_game::dropped_item_geometry(renderer, name).0;
+    let ground = super::in_game::dropped_item_geometry(renderer, &model).0;
     out.items.push(ItemRenderInfo {
         item_name: model,
         outline_color,

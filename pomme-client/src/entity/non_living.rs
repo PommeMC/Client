@@ -95,6 +95,28 @@ pub fn is_non_living(kind: EntityKind) -> bool {
         )
 }
 
+/// The 26.3 index of a value the session's wire sent at `index`.
+fn native_index(kind: EntityKind, index: u8) -> u8 {
+    native_index_at(kind, index, crate::version::session_protocol())
+}
+
+/// [`native_index`] for `protocol`: 1.21.6 synced a hanging entity's facing
+/// at 8 and 1.21.2 an arrow's `IN_GROUND` at 10, each moving what followed up
+/// one.
+fn native_index_at(kind: EntityKind, index: u8, protocol: i32) -> u8 {
+    let inserted_at = if is_item_frame(kind) || kind == EntityKind::Painting {
+        (protocol < 771).then_some(8)
+    } else if is_arrow(kind) {
+        (protocol < 768).then_some(10)
+    } else {
+        None
+    };
+    match inserted_at {
+        Some(at) if index >= at => index + 1,
+        _ => index,
+    }
+}
+
 /// `AbstractArrow.SHAKE_TIME`.
 const SHAKE_TIME: i32 = 7;
 /// `AbstractArrow.ID_FLAGS`' no-physics bit.
@@ -348,15 +370,20 @@ impl NonLivingEntity {
 pub struct NonLivingPickup {
     pub entity: NonLivingEntity,
     start: Position,
+    collector: i32,
+    /// Where the collector was last tick and is now (`targetXOld`, `targetX`).
+    prev_target: Position,
     target: Position,
     life: u32,
 }
 
 impl NonLivingPickup {
-    /// `ItemPickupParticleGroup.fromParticle`: the squared-time lerp.
+    /// `ItemPickupParticleGroup.fromParticle`: toward the collector's lerped
+    /// position, on squared time.
     pub fn position(&self, partial: f32) -> Position {
         let t = (self.life as f32 + partial) / PICKUP_LIFE as f32;
-        self.start.lerp(self.target, (t * t) as f64)
+        let target = self.prev_target.lerp(self.target, partial as f64);
+        self.start.lerp(target, (t * t) as f64)
     }
 }
 
@@ -379,6 +406,8 @@ pub struct TickWorld<'a> {
     pub players: &'a [OrbTarget],
     /// A returning trident's owner, by id, if the client has it.
     pub owner_of: &'a dyn Fn(i32) -> Option<TridentOwner>,
+    /// Where a pickup flies to on a collector, by id (`ItemPickupParticle`).
+    pub pickup_target_of: &'a dyn Fn(i32) -> Option<Position>,
 }
 
 /// What `ThrownTrident.tick` reads off its owner.
@@ -432,6 +461,11 @@ impl NonLivingStore {
         if entity.is_hanging() {
             entity.block_pos = BlockPos::containing(*position);
             entity.set_direction(Direction::from_3d(data));
+        } else if kind == EntityKind::ExperienceOrb {
+            // Native servers send 0 here and the value as data; the
+            // translation carries an older wire's `add_experience_orb`
+            // value here instead.
+            entity.xp_value = data;
         } else {
             entity.owner = data;
         }
@@ -499,7 +533,7 @@ impl NonLivingStore {
         let Some(e) = self.entities.get_mut(&id) else {
             return;
         };
-        match (index, value) {
+        match (native_index(e.kind, index), value) {
             (0, MetaValue::Byte(flags)) => e.shared_flags = flags,
             (5, MetaValue::Bool(no_gravity)) => e.no_gravity = no_gravity,
             // `HangingEntity.DATA_DIRECTION`.
@@ -548,7 +582,7 @@ impl NonLivingStore {
         };
         let slot = if is_item_frame(e.kind) { 9 } else { 8 };
         let holds_item = is_item_frame(e.kind) || default_item(e.kind).is_some();
-        if index != slot || !holds_item {
+        if native_index(e.kind, index) != slot || !holds_item {
             return;
         }
         e.item = item;
@@ -572,11 +606,11 @@ impl NonLivingStore {
     /// has one. An arrow is removed with it; an orb waits for the server's
     /// removal, since one orb can be picked up several times. Returns where
     /// it was, for the sound.
-    pub fn pickup(&mut self, id: i32, target: Option<Position>) -> Option<Position> {
+    pub fn pickup(&mut self, id: i32, collector: Option<(i32, Position)>) -> Option<Position> {
         let entity = self.entities.get(&id)?;
         let start = entity.position;
         let frozen = if entity.kind == EntityKind::ExperienceOrb {
-            target.is_some().then(|| {
+            collector.is_some().then(|| {
                 let mut copy = NonLivingEntity::new(
                     entity.kind,
                     entity.uuid,
@@ -592,10 +626,12 @@ impl NonLivingStore {
         } else {
             Some(self.entities.remove(&id)?)
         };
-        if let (Some(entity), Some(target)) = (frozen, target) {
+        if let (Some(entity), Some((collector, target))) = (frozen, collector) {
             self.pickups.push(NonLivingPickup {
                 entity,
                 start,
+                collector,
+                prev_target: target,
                 target,
                 life: 0,
             });
@@ -629,10 +665,15 @@ impl NonLivingStore {
             e.first_tick = false;
             alive
         });
-        for pickup in &mut self.pickups {
-            pickup.life += 1;
-        }
-        self.pickups.retain(|p| p.life < PICKUP_LIFE);
+        // `ItemPickupParticle.tick`.
+        self.pickups.retain_mut(|p| {
+            p.life += 1;
+            p.prev_target = p.target;
+            if let Some(target) = (world.pickup_target_of)(p.collector) {
+                p.target = target;
+            }
+            p.life < PICKUP_LIFE
+        });
     }
 }
 
@@ -783,7 +824,8 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     e.y_rot = lerp_rotation(e.y_rot, y_rot);
     if move_clipped(e, world, movement, physics) {
         // `AbstractArrow.onHitBlock`: back off the face, stop and quiver.
-        e.position -= movement.signum() * f64::from(0.05f32);
+        let signum = movement.map(|c| if c == 0.0 { 0.0 } else { c.signum() });
+        e.position -= signum * f64::from(0.05f32);
         e.velocity = DVec3::ZERO;
         e.in_ground = true;
         e.shake_time = SHAKE_TIME;
@@ -931,7 +973,9 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     let friction = if on_ground { 0.98 * 0.6 } else { 0.98 };
     e.velocity *= friction;
     let vertical_collision_below = movement.y < 0.0 && delta.y != movement.y;
-    if vertical_collision_below && fall_speed < -GRAVITY {
+    // `getGravity()` is 0 for a weightless orb.
+    let gravity = if e.no_gravity { 0.0 } else { GRAVITY };
+    if vertical_collision_below && fall_speed < -gravity {
         e.velocity.y = -fall_speed * 0.4;
     }
 }
@@ -1077,6 +1121,16 @@ mod tests {
     }
 
     #[test]
+    fn older_wires_lift_inserted_indices() {
+        // A 1.21.5 frame's item at 8, a 1.21.1 arrow's colour at 10.
+        assert_eq!(native_index_at(EntityKind::ItemFrame, 8, 770), 9);
+        assert_eq!(native_index_at(EntityKind::ItemFrame, 8, 771), 8);
+        assert_eq!(native_index_at(EntityKind::Arrow, 10, 767), 11);
+        assert_eq!(native_index_at(EntityKind::Arrow, 8, 767), 8);
+        assert_eq!(native_index_at(EntityKind::Snowball, 8, 763), 8);
+    }
+
+    #[test]
     fn attached_fireworks_hide() {
         let mut store = spawn(EntityKind::FireworkRocket, DVec3::ZERO, 0);
         store.apply_entity_data(1, 9, MetaValue::OptionalUnsignedInt(Some(5)));
@@ -1095,6 +1149,7 @@ mod tests {
             block_state_table: BlockStateTable::native(),
             players: &[],
             owner_of: &|_| None,
+            pickup_target_of: &|_| None,
         };
         store.tick(&world);
         let arrow = store.get(1).unwrap();

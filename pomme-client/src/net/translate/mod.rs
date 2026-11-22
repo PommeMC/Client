@@ -150,8 +150,8 @@
 //!   shows only once its chunks are sent again
 //! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
 //!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
-//!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
-//!   renders neither entity, so the shift is left in place
+//!   and 9 on 26.2); the walker passes index bytes through unremapped and the
+//!   store lifts them (`entity::non_living::native_index`)
 //!
 //! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
@@ -174,9 +174,11 @@
 //!   `optional_uuid` where 1.21.5 has `optional_living_entity_reference`
 //!   (wire-identical); `compound_tag` sits at 16 like 1.21.8, stripped the same
 //!   way
-//! - `add_experience_orb` has no newer equivalent and pomme renders no XP orbs;
-//!   the frame is dropped, like `add_entity` for the thrown `potion` entity
-//!   1.21.5 split into splash/lingering
+//! - `add_experience_orb` spawned XP orbs, which 1.21.5 moved to `add_entity`
+//!   with the value as entity data; it becomes the wire version's `add_entity`
+//!   with the value in its data field, which the orb reads at spawn.
+//!   `add_entity` for the thrown `potion` entity 1.21.5 split into
+//!   splash/lingering is dropped
 //! - serverbound `set_creative_mode_slot` wrote item component values bare,
 //!   where 1.21.5 length-prefixes each one
 //!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); the prefixes are stripped
@@ -237,9 +239,8 @@
 //!   1.21.2 appended; it is stripped in both phases
 //! - `AbstractArrow` gained `in_ground` at index 10, so an arrow sends its
 //!   effect color at 10 and a trident its loyalty/foil at 10/11, where 26.2
-//!   reads 11 and 11/12. The indices pass through unshifted, which costs
-//!   nothing while pomme reads metadata only for living entities; a lift
-//!   belongs beside `normalize_player_index_at` in `entity/mod.rs`
+//!   reads 11 and 11/12. The indices pass through unshifted and the store lifts
+//!   them (`entity::non_living::native_index`)
 //!
 //! 1.20.6 -> 26.2 wire changes (all of 1.21.1's — 1.21 only appended
 //! `custom_report_details`/`server_links`, so the tables are a strict
@@ -631,6 +632,11 @@ struct Ids764 {
 /// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
+    /// The wire ids and entity type the `add_experience_orb` rewrite
+    /// synthesizes an `add_entity` with.
+    add_experience_orb_old_id: u32,
+    add_entity_old_id: u32,
+    experience_orb_entity_type: u32,
     /// Native + wire ids for the creative slot's undelimited stack.
     creative_slot_id: u32,
     creative_slot_old_id: u32,
