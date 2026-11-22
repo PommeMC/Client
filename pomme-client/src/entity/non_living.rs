@@ -693,24 +693,16 @@ impl TickWorld<'_> {
 /// enters a block's collision shape.
 fn clip_blocks(world: &TickWorld<'_>, from: DVec3, to: DVec3) -> Option<DVec3> {
     let collision = world.collision();
-    let ctx = CollisionContext::EMPTY;
-    let (min, max) = (from.min(to).floor(), from.max(to).floor());
-    let mut nearest: Option<(f64, DVec3)> = None;
-    for x in min.x as i32..=max.x as i32 {
-        for y in min.y as i32..=max.y as i32 {
-            for z in min.z as i32..=max.z as i32 {
-                for aabb in collision.block_boxes(BlockPos::new(x, y, z), &ctx) {
-                    if let Some(hit) = aabb.clip(from, to) {
-                        let distance = hit.distance_squared(from);
-                        if nearest.is_none_or(|(d, _)| distance < d) {
-                            nearest = Some((distance, hit));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    nearest.map(|(_, hit)| hit)
+    crate::physics::collision::traverse_blocks(from, to, |pos| {
+        collision
+            .block_boxes(pos, &CollisionContext::EMPTY)
+            .iter()
+            .filter_map(|aabb| aabb.clip(from, to))
+            .min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            })
+    })
 }
 
 /// Whether `pos` lies inside a collision box of the block it's in
@@ -824,8 +816,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     e.y_rot = lerp_rotation(e.y_rot, y_rot);
     if move_clipped(e, world, movement, physics) {
         // `AbstractArrow.onHitBlock`: back off the face, stop and quiver.
-        let signum = movement.map(|c| if c == 0.0 { 0.0 } else { c.signum() });
-        e.position -= signum * f64::from(0.05f32);
+        e.position -= crate::util::java_signum(movement) * f64::from(0.05f32);
         e.velocity = DVec3::ZERO;
         e.in_ground = true;
         e.shake_time = SHAKE_TIME;

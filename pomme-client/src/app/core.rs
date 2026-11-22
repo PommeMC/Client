@@ -3321,6 +3321,7 @@ impl AppCore {
                         game.non_living_store.teleport(id, position, velocity);
                         game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.entity_positions.insert(id, position);
+                        sync_hanging_position(game, id);
                         self.audio.update_entity_sound_position(id, position);
                     }
                 }

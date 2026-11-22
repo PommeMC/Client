@@ -2003,10 +2003,12 @@ impl ItemEntityStore {
         amount: i32,
     ) -> Option<Position> {
         let entity = self.items.get_mut(&item_id)?;
-        if entity.item_name.is_empty() {
-            return None;
-        }
         let start_pos = entity.position;
+        // An empty stack has nothing to shrink or fly, and goes.
+        if entity.item_name.is_empty() {
+            self.items.remove(&item_id);
+            return Some(start_pos);
+        }
         let anim = target_pos.map(|target_pos| PickupAnimation {
             item_name: entity.item_name.clone(),
             item_id: entity.item_id,

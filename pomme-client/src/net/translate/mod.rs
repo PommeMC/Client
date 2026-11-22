@@ -241,6 +241,9 @@
 //!   effect color at 10 and a trident its loyalty/foil at 10/11, where 26.2
 //!   reads 11 and 11/12. The indices pass through unshifted and the store lifts
 //!   them (`entity::non_living::native_index`)
+//! - `painting_variant` values were a plain registry id through 1.20.6 and an
+//!   inline variant had no title or author on 1.21/1.21.1; they aren't
+//!   rewritten (TODO in `metadata.rs`), so paintings don't show on those wires
 //!
 //! 1.20.6 -> 26.2 wire changes (all of 1.21.1's — 1.21 only appended
 //! `custom_report_details`/`server_links`, so the tables are a strict

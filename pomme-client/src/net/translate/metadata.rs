@@ -13,6 +13,10 @@ use super::*;
 /// vanilla entity sends one after an untranslatable stack).
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
+/// TODO: rewrite `painting_variant` values before 1.21.2: a plain registry
+/// id through 1.20.6 (an unsynced registry before 1.21), an inline variant
+/// without title and author on 1.21/1.21.1. Read as 26.2's holder, a
+/// painting misreads its packet or draws nothing.
 pub(super) fn translate_entity_data(
     id: u32,
     payload: &[u8],

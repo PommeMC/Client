@@ -376,6 +376,57 @@ fn collect_candidate_step_up_heights(
     candidates.into_iter().map(f64::from).collect()
 }
 
+/// Vanilla `BlockGetter.traverseBlocks`: the blocks the segment `from -> to`
+/// passes through, in order, until `visit` gives a result. Both ends are
+/// pushed 1e-7 of the length outward, so a segment ending on a face still
+/// reaches the block past it.
+pub fn traverse_blocks<T>(
+    from: DVec3,
+    to: DVec3,
+    mut visit: impl FnMut(BlockPos) -> Option<T>,
+) -> Option<T> {
+    if from == to {
+        return None;
+    }
+    let end = to.lerp(from, -1.0e-7);
+    let start = from.lerp(to, -1.0e-7);
+    let mut block = start.floor().as_ivec3();
+    let mut visit = |b: glam::IVec3| visit(BlockPos::new(b.x, b.y, b.z));
+    if let Some(hit) = visit(block) {
+        return Some(hit);
+    }
+    let delta = end - start;
+    let sign = crate::util::java_signum(delta).as_ivec3();
+    let t_delta = DVec3::select(
+        sign.cmpeq(glam::IVec3::ZERO),
+        DVec3::splat(f64::MAX),
+        sign.as_dvec3() / delta,
+    );
+    let frac = start - start.floor();
+    let mut t = t_delta * DVec3::select(sign.cmpgt(glam::IVec3::ZERO), DVec3::ONE - frac, frac);
+    while t.x <= 1.0 || t.y <= 1.0 || t.z <= 1.0 {
+        if t.x < t.y {
+            if t.x < t.z {
+                block.x += sign.x;
+                t.x += t_delta.x;
+            } else {
+                block.z += sign.z;
+                t.z += t_delta.z;
+            }
+        } else if t.y < t.z {
+            block.y += sign.y;
+            t.y += t_delta.y;
+        } else {
+            block.z += sign.z;
+            t.z += t_delta.z;
+        }
+        if let Some(hit) = visit(block) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 /// Vanilla `Entity.collide`, stepping up when this move landed or the entity
 /// was already on the ground.
 pub fn resolve_collision(
@@ -676,5 +727,47 @@ mod tests {
         let mut empty = Vec::new();
         assert!(world.special_boxes(moving, BlockPos::new(0, 64, 0), &mut empty));
         assert!(empty.is_empty());
+    }
+
+    fn visited(from: DVec3, to: DVec3) -> Vec<BlockPos> {
+        let mut blocks = Vec::new();
+        traverse_blocks(from, to, |pos| {
+            blocks.push(pos);
+            None::<()>
+        });
+        blocks
+    }
+
+    #[test]
+    fn walks_the_crossed_blocks_in_order() {
+        let blocks = visited(DVec3::new(0.5, 0.5, 0.5), DVec3::new(3.5, 0.5, 0.5));
+        assert_eq!(
+            blocks,
+            (0..4).map(|x| BlockPos::new(x, 0, 0)).collect::<Vec<_>>()
+        );
+    }
+
+    /// The far end is pushed past a face it ends on.
+    #[test]
+    fn a_segment_ending_on_a_face_reaches_past_it() {
+        let blocks = visited(DVec3::new(0.5, 0.5, 0.5), DVec3::new(1.0, 0.5, 0.5));
+        assert_eq!(blocks.last(), Some(&BlockPos::new(1, 0, 0)));
+    }
+
+    /// A huge segment stops at the first hit instead of scanning its box.
+    #[test]
+    fn stops_at_the_first_hit() {
+        let mut steps = 0;
+        let hit = traverse_blocks(DVec3::splat(0.5), DVec3::splat(1.0e6), |pos| {
+            steps += 1;
+            (pos.x >= 3).then_some(pos)
+        });
+        assert_eq!(hit.map(|p| p.x), Some(3));
+        assert!(steps < 20, "{steps}");
+    }
+
+    #[test]
+    fn a_point_visits_nothing() {
+        assert!(visited(DVec3::ONE, DVec3::ONE).is_empty());
     }
 }

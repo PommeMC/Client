@@ -2073,83 +2073,23 @@ pub fn raycast(
     block_state_table: BlockStateTable,
     held_item: Option<&str>,
 ) -> Option<BlockHitResult> {
-    let dir = dir.as_dvec3();
-    let mut bx = origin.x.floor() as i32;
-    let mut by = origin.y.floor() as i32;
-    let mut bz = origin.z.floor() as i32;
-
-    let step_x = if dir.x > 0.0 { 1 } else { -1 };
-    let step_y = if dir.y > 0.0 { 1 } else { -1 };
-    let step_z = if dir.z > 0.0 { 1 } else { -1 };
-
-    let t_delta_x = if dir.x != 0.0 {
-        (1.0 / dir.x).abs()
-    } else {
-        f64::INFINITY
-    };
-    let t_delta_y = if dir.y != 0.0 {
-        (1.0 / dir.y).abs()
-    } else {
-        f64::INFINITY
-    };
-    let t_delta_z = if dir.z != 0.0 {
-        (1.0 / dir.z).abs()
-    } else {
-        f64::INFINITY
-    };
-
-    let mut t_max_x = if dir.x > 0.0 {
-        (bx as f64 + 1.0 - origin.x) * t_delta_x
-    } else {
-        (origin.x - bx as f64) * t_delta_x
-    };
-    let mut t_max_y = if dir.y > 0.0 {
-        (by as f64 + 1.0 - origin.y) * t_delta_y
-    } else {
-        (origin.y - by as f64) * t_delta_y
-    };
-    let mut t_max_z = if dir.z > 0.0 {
-        (bz as f64 + 1.0 - origin.z) * t_delta_z
-    } else {
-        (origin.z - bz as f64) * t_delta_z
-    };
-
-    let reach_end = origin + dir * max_dist as f64;
-    let mut t = 0.0_f64;
-    while t <= max_dist as f64 {
-        let state = chunks.get_block_state(bx, by, bz);
+    let reach_end = origin + dir.as_dvec3() * max_dist as f64;
+    crate::physics::collision::traverse_blocks(origin, reach_end, |block_pos| {
+        let state = chunks.get_block_state(block_pos.x, block_pos.y, block_pos.z);
         let block_state_data = block_state_table.block_state_data(state);
-        if !block_state_data.is_air() {
-            let block_pos = BlockPos {
-                x: bx,
-                y: by,
-                z: bz,
-            };
-            let outline = block_shape::outline_shape_holding_data(block_state_data, held_item);
-            let shape_offset = block_state_data.outline_shape_position(bx, by, bz);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, shape_offset, outline) {
-                return Some(BlockHitResult {
-                    block_pos,
-                    face,
-                    hit_point,
-                });
-            }
+        if block_state_data.is_air() {
+            return None;
         }
-        if t_max_x < t_max_y && t_max_x < t_max_z {
-            t = t_max_x;
-            t_max_x += t_delta_x;
-            bx += step_x;
-        } else if t_max_y < t_max_z {
-            t = t_max_y;
-            t_max_y += t_delta_y;
-            by += step_y;
-        } else {
-            t = t_max_z;
-            t_max_z += t_delta_z;
-            bz += step_z;
-        }
-    }
-    None
+        let outline = block_shape::outline_shape_holding_data(block_state_data, held_item);
+        let shape_offset =
+            block_state_data.outline_shape_position(block_pos.x, block_pos.y, block_pos.z);
+        let (hit_point, face) = clip_shape(origin, reach_end, shape_offset, outline)?;
+        Some(BlockHitResult {
+            block_pos,
+            face,
+            hit_point,
+        })
+    })
 }
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against

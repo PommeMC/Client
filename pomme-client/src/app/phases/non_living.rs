@@ -73,6 +73,8 @@ pub fn build(
     out
 }
 
+/// `live` is false for a pickup's frozen copy, which has no outline or
+/// shadow and isn't culled.
 fn push_entity(
     out: &mut NonLivingRenders,
     renderer: &mut Renderer,
@@ -80,9 +82,13 @@ fn push_entity(
     e: &NonLivingEntity,
     position: Position,
     partial: f32,
-    outlined: bool,
+    live: bool,
 ) {
-    let outline = if outlined {
+    // Arrows and tridents cull with the entity models.
+    if live && !is_arrow(e.kind) && !should_render(frame, e, *position) {
+        return;
+    }
+    let outline = if live {
         (frame.outline)(e.is_glowing(), e.uuid)
     } else {
         None
@@ -125,12 +131,9 @@ fn push_entity(
         }
         kind if is_item_frame(kind) => item_frame(out, renderer, e, relative, light(), outline),
         EntityKind::ExperienceOrb => {
-            if !should_render(frame, *position, Aabb::from_center(*position, 0.25, 0.25)) {
-                return;
-            }
             out.quads
                 .push(orb(e, relative, frame.orientation, partial, light()));
-            if outlined {
+            if live {
                 out.shadows.push(ShadowCaster {
                     position: *position,
                     radius: ORB_SHADOW.0,
@@ -141,8 +144,6 @@ fn push_entity(
         }
         EntityKind::Painting => {
             if let Some(shape) = &e.painting
-                && let Some(aabb) = e.bounding_box()
-                && should_render(frame, *position, aabb)
                 && renderer.has_custom_texture(&CustomTexture::Painting(shape.asset_id.clone()))
             {
                 painting(&mut out.quads, frame.world_light, e, shape, relative);
@@ -152,11 +153,27 @@ fn push_entity(
     }
 }
 
-/// `EntityRenderer.shouldRender`: within `Entity.shouldRenderAtSqrDistance`'s
-/// reach for the box's size (at the default entity distance), and the box,
-/// grown half a block, in the frustum.
-fn should_render(frame: &Frame<'_>, position: DVec3, aabb: Aabb) -> bool {
-    let reach = (aabb.max - aabb.min).element_sum() / 3.0 * 64.0;
+/// `EntityRenderer.shouldRender`: within the kind's
+/// `shouldRenderAtSqrDistance` reach (at the default entity distance), and
+/// its box, grown half a block, in the frustum.
+fn should_render(frame: &Frame<'_>, e: &NonLivingEntity, position: DVec3) -> bool {
+    let aabb = e.bounding_box().unwrap_or_else(|| {
+        let size = EntityDimensions::of(e.kind);
+        Aabb::from_center(
+            position,
+            f64::from(size.width) / 2.0,
+            f64::from(size.height) / 2.0,
+        )
+    });
+    let size = (aabb.max - aabb.min).element_sum() / 3.0;
+    let reach = match e.kind {
+        // `ItemFrame`'s fixed size 16, `FireworkRocketEntity`'s 64 blocks.
+        kind if is_item_frame(kind) => 16.0 * 64.0,
+        EntityKind::FireworkRocket => 64.0,
+        // `ThrowableProjectile`, `AbstractHurtingProjectile`, `EyeOfEnder`.
+        kind if non_living::thrown_item_style(kind).is_some() => size * 4.0 * 64.0,
+        _ => size * 64.0,
+    };
     if position.distance_squared(frame.camera) >= reach * reach {
         return false;
     }
