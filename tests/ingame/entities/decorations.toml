@@ -1,5 +1,5 @@
 # Paintings, item frames and armor stands against a stone wall: a 1x1, 2x2
-# and 4x2 painting, a frame holding a flat item, a glow frame holding a block
+# and 4x2 painting, one of the default variant (the server never sends it), a frame holding a flat item, a glow frame holding a block
 # turned one step, an invisible frame showing only its item, a frame lying
 # on the floor, and armor stands plain, posed with arms, armor and a sword,
 # and small without a base plate.
@@ -41,6 +41,9 @@ chat = "/summon minecraft:painting 497 -58 499 {facing:2b,variant:\"minecraft:bu
 [[step]]
 chat = "/summon minecraft:painting 502 -57 499 {facing:2b,variant:\"minecraft:fighters\"}"
 
+[[step]]
+chat = "/summon minecraft:painting 505 -59 499 {facing:2b,variant:\"minecraft:alban\"}"
+
 # Item frames face north as 3D id 2; the floor one faces up (1).
 [[step]]
 chat = "/summon minecraft:item_frame 499 -59 499 {Facing:2b,Item:{id:\"minecraft:diamond\",count:1}}"
@@ -71,6 +74,9 @@ expect = { entity = "painting", variant = "bust" }
 
 [[step]]
 expect = { entity = "painting", variant = "fighters" }
+
+[[step]]
+expect = { entity = "painting", variant = "alban" }
 
 [[step]]
 expect = { entity = "item_frame", item = "diamond" }

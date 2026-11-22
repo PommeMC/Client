@@ -7230,20 +7230,33 @@ fn tick_non_living(game: &mut GameState) {
         )
         .collect();
     let player_id = game.player.entity_id;
-    let player_eye = *game.player.eye_pos();
+    let player = crate::entity::non_living::TridentOwner {
+        eye: *game.player.eye_pos(),
+        is_player: true,
+        alive: !game.dead,
+        width: f64::from(crate::entity::dimensions::EntityDimensions::of(EntityKind::Player).width),
+    };
     let living = &game.entity_store.living;
-    let eye_of = |id: i32| {
+    let owner_of = |id: i32| {
         if id == player_id {
-            Some(player_eye)
-        } else {
-            living.get(&id).map(|e| *e.eye_position(1.0))
+            return Some(player);
         }
+        living
+            .get(&id)
+            .map(|e| crate::entity::non_living::TridentOwner {
+                eye: *e.eye_position(1.0),
+                is_player: e.entity_type == EntityKind::Player,
+                alive: e.health > 0.0,
+                width: f64::from(
+                    crate::entity::dimensions::EntityDimensions::of(e.entity_type).width,
+                ),
+            })
     };
     let world = crate::entity::non_living::TickWorld {
         chunks: &game.chunk_store,
         block_state_table: game.block_registry.block_state_table(),
         players: &players,
-        eye_of: &eye_of,
+        owner_of: &owner_of,
     };
     game.non_living_store.tick(&world);
 }

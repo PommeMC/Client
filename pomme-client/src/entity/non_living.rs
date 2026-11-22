@@ -135,6 +135,10 @@ pub struct NonLivingEntity {
     pub in_ground: bool,
     /// `AbstractArrow.shakeTime`.
     pub shake_time: i32,
+    /// `AbstractArrow.inGroundTime`.
+    in_ground_time: u32,
+    /// `ThrownTrident.dealtDamage`, as far as the client sets it.
+    dealt_damage: bool,
     /// `Arrow.ID_EFFECT_COLOR`.
     pub arrow_color: i32,
     pub trident_loyalty: u8,
@@ -196,6 +200,8 @@ impl NonLivingEntity {
             arrow_flags: 0,
             in_ground: false,
             shake_time: 0,
+            in_ground_time: 0,
+            dealt_damage: false,
             arrow_color: -1,
             trident_loyalty: 0,
             attached_to_entity: false,
@@ -371,8 +377,18 @@ pub struct TickWorld<'a> {
     /// Every non-spectator player, the local one included, for
     /// `ExperienceOrb.followNearbyPlayer`.
     pub players: &'a [OrbTarget],
-    /// An entity's eye position by id, for a returning trident's owner.
-    pub eye_of: &'a dyn Fn(i32) -> Option<DVec3>,
+    /// A returning trident's owner, by id, if the client has it.
+    pub owner_of: &'a dyn Fn(i32) -> Option<TridentOwner>,
+}
+
+/// What `ThrownTrident.tick` reads off its owner.
+#[derive(Clone, Copy)]
+pub struct TridentOwner {
+    pub eye: DVec3,
+    pub is_player: bool,
+    /// `isAlive`.
+    pub alive: bool,
+    pub width: f64,
 }
 
 #[derive(Default)]
@@ -552,38 +568,47 @@ impl NonLivingStore {
     }
 
     /// `ClientPacketListener.handleTakeItemEntity` for an orb or arrow: a
-    /// pickup particle flies a frozen copy to the collector. An arrow is
-    /// removed with it; an orb waits for the server's removal, since one orb
-    /// can be picked up several times. Returns where it was, for the sound.
-    pub fn pickup(&mut self, id: i32, target: Position) -> Option<Position> {
+    /// pickup particle flies a frozen copy to the collector, when the client
+    /// has one. An arrow is removed with it; an orb waits for the server's
+    /// removal, since one orb can be picked up several times. Returns where
+    /// it was, for the sound.
+    pub fn pickup(&mut self, id: i32, target: Option<Position>) -> Option<Position> {
         let entity = self.entities.get(&id)?;
         let start = entity.position;
         let frozen = if entity.kind == EntityKind::ExperienceOrb {
-            let mut copy = NonLivingEntity::new(
-                entity.kind,
-                entity.uuid,
-                entity.position,
-                DVec3::ZERO,
-                entity.y_rot,
-                entity.x_rot,
-            );
-            copy.xp_value = entity.xp_value;
-            copy.tick_count = entity.tick_count;
-            copy
+            target.is_some().then(|| {
+                let mut copy = NonLivingEntity::new(
+                    entity.kind,
+                    entity.uuid,
+                    entity.position,
+                    DVec3::ZERO,
+                    entity.y_rot,
+                    entity.x_rot,
+                );
+                copy.xp_value = entity.xp_value;
+                copy.tick_count = entity.tick_count;
+                copy
+            })
         } else {
-            self.entities.remove(&id)?
+            Some(self.entities.remove(&id)?)
         };
-        self.pickups.push(NonLivingPickup {
-            entity: frozen,
-            start,
-            target,
-            life: 0,
-        });
+        if let (Some(entity), Some(target)) = (frozen, target) {
+            self.pickups.push(NonLivingPickup {
+                entity,
+                start,
+                target,
+                life: 0,
+            });
+        }
         Some(start)
     }
 
     pub fn tick(&mut self, world: &TickWorld<'_>) {
-        for e in self.entities.values_mut() {
+        self.entities.retain(|_, e| {
+            // Entities outside loaded chunks don't tick.
+            if !super::chunk_loaded(world.chunks, *e.position) {
+                return true;
+            }
             // `Entity.commonTick`.
             e.prev_position = e.position;
             e.prev_y_rot = e.y_rot;
@@ -594,18 +619,16 @@ impl NonLivingStore {
                 e.interpolation = (steps > 1).then_some((target, steps - 1));
             }
             e.tick_count += 1;
-            if !super::chunk_loaded(world.chunks, *e.position) {
-                continue;
-            }
+            let alive = !is_arrow(e.kind) || tick_arrow(e, world);
             match e.kind {
-                kind if is_arrow(kind) => tick_arrow(e, world),
                 kind if thrown_item_style(kind).is_some() => tick_thrown(e, world),
                 EntityKind::FireworkRocket => tick_firework(e, world),
                 EntityKind::ExperienceOrb => tick_orb(e, world),
                 _ => {}
             }
             e.first_tick = false;
-        }
+            alive
+        });
         for pickup in &mut self.pickups {
             pickup.life += 1;
         }
@@ -695,21 +718,41 @@ fn move_clipped(
     hit.is_some()
 }
 
-/// `AbstractArrow.tick` (and `ThrownTrident.tick`'s loyalty return) as the
-/// client runs it; hits, despawning and falling are server-side.
-fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
-    let physics = !e.is_no_physics();
-    if e.kind == EntityKind::Trident
-        && e.trident_loyalty > 0
-        && !physics
-        && let Some(owner_eye) = (world.eye_of)(e.owner)
-    {
-        // `ThrownTrident.tick`: the return pull toward the owner's eyes.
-        let to_owner = owner_eye - *e.position;
-        let loyalty = e.trident_loyalty as f64;
-        e.position.y += to_owner.y * 0.015 * loyalty;
-        e.velocity = e.velocity * 0.95 + to_owner.normalize_or_zero() * (0.05 * loyalty);
+/// `ThrownTrident.tick`'s return ahead of the arrow tick: after a few ticks
+/// in the ground a loyal trident flies back to its owner, and is discarded
+/// once its owner is gone or, for a mob, reached. Whether it lives on.
+fn tick_trident_return(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
+    if e.in_ground_time > 4 {
+        e.dealt_damage = true;
     }
+    if e.trident_loyalty == 0 || !(e.dealt_damage || e.is_no_physics()) {
+        return true;
+    }
+    let Some(owner) = (world.owner_of)(e.owner) else {
+        return true;
+    };
+    // `isAcceptibleReturnOwner`: a client never sees a `ServerPlayer`.
+    if !owner.alive {
+        return false;
+    }
+    let to_owner = owner.eye - *e.position;
+    if !owner.is_player && to_owner.length() < owner.width + 1.0 {
+        return false;
+    }
+    e.arrow_flags |= FLAG_NO_PHYSICS;
+    let loyalty = f64::from(e.trident_loyalty);
+    e.position.y += to_owner.y * 0.015 * loyalty;
+    e.velocity = e.velocity * 0.95 + to_owner.normalize_or_zero() * (0.05 * loyalty);
+    true
+}
+
+/// `AbstractArrow.tick` as the client runs it; hits, despawning and falling
+/// are server-side. Whether it lives on.
+fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
+    if e.kind == EntityKind::Trident && !tick_trident_return(e, world) {
+        return false;
+    }
+    let physics = !e.is_no_physics();
     let movement = e.velocity;
     if physics && inside_collision(world, *e.position) {
         e.velocity = DVec3::ZERO;
@@ -719,8 +762,10 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         e.shake_time -= 1;
     }
     if e.in_ground && physics {
-        return;
+        e.in_ground_time += 1;
+        return true;
     }
+    e.in_ground_time = 0;
     let in_water = world.fluid_at(*e.position) == FluidKind::Water;
     let water_inertia = if e.kind == EntityKind::Trident {
         0.99
@@ -742,7 +787,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         e.velocity = DVec3::ZERO;
         e.in_ground = true;
         e.shake_time = SHAKE_TIME;
-        return;
+        return true;
     }
     if !in_water {
         e.velocity *= 0.99;
@@ -750,6 +795,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     if physics && !e.no_gravity {
         e.velocity.y -= 0.05;
     }
+    true
 }
 
 /// `ThrowableProjectile.tick`, `AbstractHurtingProjectile.tick` and
@@ -1037,6 +1083,23 @@ mod tests {
         assert!(store.get(1).unwrap().attached_to_entity);
         store.apply_entity_data(1, 9, MetaValue::OptionalUnsignedInt(None));
         assert!(!store.get(1).unwrap().attached_to_entity);
+    }
+
+    /// Entities in unloaded chunks don't age or end their first tick.
+    #[test]
+    fn unloaded_entities_hold_still() {
+        let mut store = spawn(EntityKind::Arrow, DVec3::ZERO, 0);
+        let chunks = ChunkStore::new(2);
+        let world = TickWorld {
+            chunks: &chunks,
+            block_state_table: BlockStateTable::native(),
+            players: &[],
+            owner_of: &|_| None,
+        };
+        store.tick(&world);
+        let arrow = store.get(1).unwrap();
+        assert_eq!(arrow.tick_count, 0);
+        assert!(arrow.first_tick);
     }
 
     #[test]

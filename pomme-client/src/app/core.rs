@@ -3204,6 +3204,13 @@ impl AppCore {
                             x_rot_deg,
                             data,
                         );
+                        // `Painting.defineSynchedData`'s default, registry
+                        // entry 0, which the server never sends.
+                        if entity_type == pomme_registry::builtin::EntityKind::Painting {
+                            let shape = painting_shape(&game.registries, &DEFAULT_PAINTING);
+                            game.non_living_store.set_painting(id, shape);
+                        }
+                        sync_hanging_position(game, id);
                         if let Some((name, _)) =
                             game.non_living_store.get(id).and_then(|e| e.item.as_ref())
                         {
@@ -3406,6 +3413,7 @@ impl AppCore {
                     if game.non_living_store.contains(id) {
                         game.non_living_store
                             .set_item(id, index, Some((item_name, stack)));
+                        sync_hanging_position(game, id);
                     } else if index == 8 {
                         // `ItemEntity.DATA_ITEM`.
                         game.item_entity_store
@@ -3414,10 +3422,12 @@ impl AppCore {
                 }
                 NetworkEvent::EntityItemCleared { id, index } => {
                     game.non_living_store.set_item(id, index, None);
+                    sync_hanging_position(game, id);
                 }
                 NetworkEvent::PaintingVariant { id, variant } => {
                     let shape = painting_shape(&game.registries, &variant);
                     game.non_living_store.set_painting(id, shape);
+                    sync_hanging_position(game, id);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
@@ -3598,18 +3608,16 @@ impl AppCore {
                     collector_id,
                     amount,
                 } => {
-                    let target_pos = game
-                        .entity_store
-                        .living
-                        .get(&collector_id)
-                        .map(|e| e.position + dvec3(0.0, 0.81, 0.0))
-                        .unwrap_or_else(|| {
-                            Position::new(
-                                game.player.position.x,
-                                game.player.position.y + 0.81,
-                                game.player.position.z,
-                            )
-                        });
+                    // No flight when the client lacks the collector.
+                    let target_pos = if collector_id == game.player.entity_id {
+                        Some(game.player.position)
+                    } else {
+                        game.entity_store
+                            .living
+                            .get(&collector_id)
+                            .map(|e| e.position)
+                    }
+                    .map(|pos| pos + dvec3(0.0, 0.81, 0.0));
                     let orb = game.non_living_store.get(item_id).is_some_and(|e| {
                         e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb
                     });
@@ -4784,6 +4792,17 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     1.0_f32.lerp(modifier, effect_scale)
 }
 
+const DEFAULT_PAINTING: pomme_protocol::entity_data::PaintingVariant =
+    pomme_protocol::entity_data::PaintingVariant::Registered(0);
+
+/// The shared position map takes a painting's or frame's centre, which its
+/// block, facing and contents set.
+fn sync_hanging_position(game: &mut GameState, id: i32) {
+    if let Some(e) = game.non_living_store.get(id) {
+        game.entity_positions.insert(id, e.position);
+    }
+}
+
 /// A painting's `Holder<PaintingVariant>`: a synced `painting_variant` entry
 /// by id, or the variant sent inline.
 fn painting_shape(
@@ -4800,7 +4819,7 @@ fn painting_shape(
             Some(PaintingShape {
                 width: entry.int("width")?,
                 height: entry.int("height")?,
-                asset_id: entry.string("asset_id")?.to_str().into_owned(),
+                asset_id: full_identifier(&entry.string("asset_id")?.to_str()),
             })
         }
         PaintingVariant::Direct {
@@ -4810,9 +4829,15 @@ fn painting_shape(
         } => Some(PaintingShape {
             width: *width,
             height: *height,
-            asset_id: asset_id.clone(),
+            asset_id: full_identifier(asset_id),
         }),
     }
+}
+
+/// An asset id as the painting textures key it: namespace and path in full.
+fn full_identifier(id: &str) -> String {
+    let id = pomme_registry::Identifier::new(id);
+    format!("{}:{}", id.namespace(), id.path())
 }
 
 #[cfg(test)]

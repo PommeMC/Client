@@ -1974,13 +1974,20 @@ impl ItemEntityStore {
     /// when empty (vanilla `handleTakeItemEntity`). Returns the item's
     /// position for the pickup sound, or `None` if there's nothing to pick
     /// up.
-    pub fn pickup(&mut self, item_id: i32, target_pos: Position, amount: i32) -> Option<Position> {
+    /// `handleTakeItemEntity` for an item entity: it shrinks by `amount`, and
+    /// flies to the collector when the client has one.
+    pub fn pickup(
+        &mut self,
+        item_id: i32,
+        target_pos: Option<Position>,
+        amount: i32,
+    ) -> Option<Position> {
         let entity = self.items.get_mut(&item_id)?;
         if entity.item_name.is_empty() {
             return None;
         }
         let start_pos = entity.position;
-        let anim = PickupAnimation {
+        let anim = target_pos.map(|target_pos| PickupAnimation {
             item_name: entity.item_name.clone(),
             item_id: entity.item_id,
             damage: entity.damage,
@@ -1991,10 +1998,10 @@ impl ItemEntityStore {
             bob_offset: entity.bob_offset,
             age: entity.age,
             life: 0,
-        };
+        });
         entity.count -= amount;
         let empty = entity.count <= 0;
-        self.pickups.push(anim);
+        self.pickups.extend(anim);
         if empty {
             self.items.remove(&item_id);
         }
