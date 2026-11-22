@@ -7203,12 +7203,13 @@ mod debug_release_tests {
 
 /// The non-living entities' client tick, after the item entities'.
 fn tick_non_living(game: &mut GameState) {
+    use crate::entity::non_living::OrbTarget;
     // `ExperienceOrb.followNearbyPlayer` skips spectators.
-    let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| {
-        (
-            *game.player.position,
-            f64::from(game.player.target_eye_height()),
-        )
+    let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| OrbTarget {
+        id: game.player.entity_id,
+        position: *game.player.position,
+        eye_height: f64::from(game.player.target_eye_height()),
+        dead: game.dead,
     });
     let player_eye_height = f64::from(crate::entity::dimensions::EntityDimensions::eye_height(
         EntityKind::Player,
@@ -7218,9 +7219,14 @@ fn tick_non_living(game: &mut GameState) {
         .chain(
             game.entity_store
                 .living
-                .values()
-                .filter(|e| e.entity_type == EntityKind::Player && !game.is_spectator(e))
-                .map(|e| (*e.position, player_eye_height)),
+                .iter()
+                .filter(|(_, e)| e.entity_type == EntityKind::Player && !game.is_spectator(e))
+                .map(|(&id, e)| OrbTarget {
+                    id,
+                    position: *e.position,
+                    eye_height: player_eye_height,
+                    dead: e.health <= 0.0,
+                }),
         )
         .collect();
     let player_id = game.player.entity_id;

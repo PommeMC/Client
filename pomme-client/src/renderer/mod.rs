@@ -1429,13 +1429,13 @@ impl Renderer {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
     }
 
-    /// The render anchor (camera block position); world-space data uploaded
-    /// to the GPU is rebased against this in f64 first (see `Camera::anchor`).
     /// `CameraRenderState.orientation`.
     pub fn camera_orientation(&self) -> glam::Mat3 {
         self.camera.orientation()
     }
 
+    /// The render anchor (camera block position); world-space data uploaded
+    /// to the GPU is rebased against this in f64 first (see `Camera::anchor`).
     pub fn camera_anchor(&self) -> glam::DVec3 {
         self.camera.anchor()
     }

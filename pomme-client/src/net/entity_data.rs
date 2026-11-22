@@ -216,6 +216,7 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
         Value::Long(v) => MetaValue::Long(*v),
         Value::Rotations(v) => MetaValue::Rotations(*v),
         Value::Direction(v) => MetaValue::Direction(*v),
+        Value::OptionalUnsignedInt(v) => MetaValue::OptionalUnsignedInt(*v),
         _ => return,
     };
     send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });

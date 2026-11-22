@@ -215,7 +215,7 @@ fn item_frame(
         * Mat4::from_rotation_x(e.x_rot.to_radians())
         * Mat4::from_rotation_y((180.0 - e.y_rot).to_radians());
     if !e.is_invisible() {
-        let key = crate::world::block::model::item_frame_model_key(glow, false);
+        let key = crate::world::block::model::item_frame_model_key(glow);
         renderer.ensure_item_mesh(key);
         out.items.push(ItemRenderInfo {
             item_name: key.into(),

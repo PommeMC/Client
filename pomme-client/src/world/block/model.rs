@@ -349,11 +349,6 @@ impl Direction {
         }
     }
 
-    /// Vanilla `Direction.toYRot`.
-    pub fn to_y_rot(self) -> f32 {
-        ((self.data_2d() & 3) * 90) as f32
-    }
-
     /// Vanilla `Direction.getCounterClockWise` about Y; up and down stay.
     pub fn counter_clockwise(self) -> Self {
         match self {
@@ -912,13 +907,12 @@ fn parse_item_tint_sources(
         .collect()
 }
 
-/// `blockstates/(glow_)item_frame.json`'s model for the fake `map` state.
-pub fn item_frame_model_key(glow: bool, map: bool) -> &'static str {
-    match (glow, map) {
-        (false, false) => "block/item_frame",
-        (false, true) => "block/item_frame_map",
-        (true, false) => "block/glow_item_frame",
-        (true, true) => "block/glow_item_frame_map",
+/// `blockstates/(glow_)item_frame.json`'s model for `map=false`.
+pub fn item_frame_model_key(glow: bool) -> &'static str {
+    if glow {
+        "block/glow_item_frame"
+    } else {
+        "block/item_frame"
     }
 }
 
@@ -1144,12 +1138,10 @@ pub fn bake_item_models(
     // `ItemFrameRenderer` draws the frame with; the `block/` keys can't
     // collide with an item's name.
     for glow in [false, true] {
-        for map in [false, true] {
-            let key = item_frame_model_key(glow, map);
-            let resolved = resolve_model(key, inputs, &mut model_cache);
-            if let Some(baked) = bake_resolved_model(&resolved, 0, 0, false, Tint::None) {
-                item_models.insert(key.to_string(), baked);
-            }
+        let key = item_frame_model_key(glow);
+        let resolved = resolve_model(key, inputs, &mut model_cache);
+        if let Some(baked) = bake_resolved_model(&resolved, 0, 0, false, Tint::None) {
+            item_models.insert(key.to_string(), baked);
         }
     }
 

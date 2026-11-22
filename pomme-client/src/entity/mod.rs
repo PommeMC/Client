@@ -66,6 +66,7 @@ pub enum MetaValue {
     Rotations([f32; 3]),
     /// `Direction.get3DDataValue`.
     Direction(u32),
+    OptionalUnsignedInt(Option<u32>),
 }
 
 /// `ArmorStand`'s synced client flags and poses, and its last hit.
@@ -2571,7 +2572,6 @@ impl EntityStore {
         }
     }
 
-    /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
     /// `ArmorStand.handleEntityEvent(32)`: the hit wobble starts now.
     pub fn armor_stand_hit(&mut self, id: i32, game_time: i64) -> Option<Position> {
         let entity = self.living.get_mut(&id)?;
@@ -2581,6 +2581,7 @@ impl EntityStore {
         })
     }
 
+    /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
     pub fn golem_punch(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::IronGolem

@@ -3539,11 +3539,10 @@ impl AppCore {
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }
+                // `ArmorStand.handleEntityEvent` plays it even for a silent stand.
                 NetworkEvent::ArmorStandHit { id } => {
                     let game_time = game.sky_state.game_time as i64;
-                    if let Some(pos) = game.entity_store.armor_stand_hit(id, game_time)
-                        && !game.silent_entities.contains(&id)
-                    {
+                    if let Some(pos) = game.entity_store.armor_stand_hit(id, game_time) {
                         self.audio.play_world_sound(
                             &crate::audio::SoundRef::event("entity.armor_stand.hit"),
                             crate::audio::CATEGORY_NEUTRAL,

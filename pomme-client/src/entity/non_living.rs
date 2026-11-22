@@ -143,6 +143,8 @@ pub struct NonLivingEntity {
     pub shot_at_angle: bool,
     // Experience orbs.
     pub xp_value: i32,
+    /// `ExperienceOrb.followingPlayer`'s id.
+    following_player: Option<i32>,
     /// `LinearInterpolationHandler`'s target and remaining steps.
     interpolation: Option<(DVec3, u32)>,
     // Paintings and item frames.
@@ -199,6 +201,7 @@ impl NonLivingEntity {
             attached_to_entity: false,
             shot_at_angle: false,
             xp_value: 0,
+            following_player: None,
             interpolation: None,
             block_pos: BlockPos::new(0, 0, 0),
             direction: Direction::South,
@@ -351,14 +354,23 @@ impl NonLivingPickup {
     }
 }
 
+/// A player an orb can follow.
+pub struct OrbTarget {
+    pub id: i32,
+    pub position: DVec3,
+    pub eye_height: f64,
+    /// `isDeadOrDying`.
+    pub dead: bool,
+}
+
 /// The client's view of the world the tick reads: chunks for collision and
 /// the players an orb follows.
 pub struct TickWorld<'a> {
     pub chunks: &'a ChunkStore,
     pub block_state_table: BlockStateTable,
-    /// Every non-spectator player's position and eye height, the local one
-    /// included, for `ExperienceOrb.followNearbyPlayer`.
-    pub players: &'a [(DVec3, f64)],
+    /// Every non-spectator player, the local one included, for
+    /// `ExperienceOrb.followNearbyPlayer`.
+    pub players: &'a [OrbTarget],
     /// An entity's eye position by id, for a returning trident's owner.
     pub eye_of: &'a dyn Fn(i32) -> Option<DVec3>,
 }
@@ -496,10 +508,12 @@ impl NonLivingStore {
             (11, MetaValue::Byte(loyalty)) if e.kind == EntityKind::Trident => {
                 e.trident_loyalty = loyalty;
             }
-            // `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET` (an optional
-            // unsigned int, 0 for none) and `DATA_SHOT_AT_ANGLE`.
-            (9, MetaValue::Int(attached)) if e.kind == EntityKind::FireworkRocket => {
-                e.attached_to_entity = attached != 0;
+            // `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET` and
+            // `DATA_SHOT_AT_ANGLE`.
+            (9, MetaValue::OptionalUnsignedInt(attached))
+                if e.kind == EntityKind::FireworkRocket =>
+            {
+                e.attached_to_entity = attached.is_some();
             }
             (10, MetaValue::Bool(angled)) if e.kind == EntityKind::FireworkRocket => {
                 e.shot_at_angle = angled;
@@ -723,9 +737,11 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     e.x_rot = lerp_rotation(e.x_rot, x_rot);
     e.y_rot = lerp_rotation(e.y_rot, y_rot);
     if move_clipped(e, world, movement, physics) {
-        // The server confirms the hit with `IN_GROUND`; stop here meanwhile.
+        // `AbstractArrow.onHitBlock`: back off the face, stop and quiver.
+        e.position -= movement.signum() * f64::from(0.05f32);
         e.velocity = DVec3::ZERO;
         e.in_ground = true;
+        e.shake_time = SHAKE_TIME;
         return;
     }
     if !in_water {
@@ -834,15 +850,24 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         e.velocity.y -= GRAVITY;
     }
     // TODO: the lava hop (`random.nextFloat() - random.nextFloat()`).
-    // `followNearbyPlayer`: the nearest player within 8 blocks.
-    let nearest = world
-        .players
-        .iter()
-        .map(|&(pos, eye_height)| (pos, eye_height, pos.distance_squared(*e.position)))
-        .filter(|&(_, _, d)| d < 64.0)
-        .min_by(|a, b| a.2.total_cmp(&b.2));
-    if let Some((pos, eye_height, _)) = nearest {
-        let delta = pos + DVec3::Y * (eye_height / 2.0) - *e.position;
+    // `followNearbyPlayer`: keep the followed player until it turns
+    // spectator or leaves 8 blocks, then take the nearest living one.
+    let distance = |p: &OrbTarget| p.position.distance_squared(*e.position);
+    let followed = e
+        .following_player
+        .and_then(|id| world.players.iter().find(|p| p.id == id))
+        .filter(|p| distance(p) <= 64.0)
+        .or_else(|| {
+            world
+                .players
+                .iter()
+                .filter(|p| distance(p) < 64.0)
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+                .filter(|p| !p.dead)
+        });
+    e.following_player = followed.map(|p| p.id);
+    if let Some(player) = followed {
+        let delta = player.position + DVec3::Y * (player.eye_height / 2.0) - *e.position;
         let power = 1.0 - delta.length() / 8.0;
         e.velocity += delta.normalize_or_zero() * (power * power * 0.1);
     }
@@ -1003,6 +1028,15 @@ mod tests {
         store.teleport(1, Position::new(5.0, 64.0, 5.0), None);
         store.move_delta(1, DVec3::new(1.0, 0.0, 0.0));
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(6.0, 64.0, 5.0));
+    }
+
+    #[test]
+    fn attached_fireworks_hide() {
+        let mut store = spawn(EntityKind::FireworkRocket, DVec3::ZERO, 0);
+        store.apply_entity_data(1, 9, MetaValue::OptionalUnsignedInt(Some(5)));
+        assert!(store.get(1).unwrap().attached_to_entity);
+        store.apply_entity_data(1, 9, MetaValue::OptionalUnsignedInt(None));
+        assert!(!store.get(1).unwrap().attached_to_entity);
     }
 
     #[test]

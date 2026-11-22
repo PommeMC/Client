@@ -36,6 +36,8 @@ pub enum Serializer {
     Rotations,
     /// `Direction.STREAM_CODEC`: the 3D data value.
     Direction,
+    /// `OPTIONAL_UNSIGNED_INT`: 0 for none, else the value + 1.
+    OptionalUnsignedInt,
     /// `PaintingVariant.STREAM_CODEC`, a direct-capable holder.
     PaintingVariant,
     Skip(Shape),
@@ -55,7 +57,11 @@ impl Serializer {
                 r.varlong()?;
                 return Ok(true);
             }
-            Self::Int | Self::Pose | Self::Variant(_) | Self::Direction => &Shape::VarInt,
+            Self::Int
+            | Self::Pose
+            | Self::Variant(_)
+            | Self::Direction
+            | Self::OptionalUnsignedInt => &Shape::VarInt,
             Self::Rotations => &Shape::Struct(&[Shape::Float, Shape::Float, Shape::Float]),
             Self::PaintingVariant => &PAINTING_VARIANT,
             Self::Float => &Shape::Float,
@@ -100,6 +106,7 @@ pub enum Value {
     Rotations([f32; 3]),
     /// `Direction.get3DDataValue`.
     Direction(u32),
+    OptionalUnsignedInt(Option<u32>),
     PaintingVariant(PaintingVariant),
     /// A value the client doesn't read.
     Other,
@@ -173,8 +180,7 @@ macro_rules! serializers_26_2 {
     S::Skip(Ref(&PARTICLE)),
     S::Skip(List(usize::MAX, &PARTICLE)),
     S::VillagerData,
-    // OPTIONAL_UNSIGNED_INT: 0 for none, else the value + 1.
-    S::Skip(VarInt),
+    S::OptionalUnsignedInt,
     S::Pose,
     S::Variant(Variant::Cat),
     // CAT_SOUND_VARIANT
@@ -268,6 +274,7 @@ impl ItemCodec {
             S::Variant(variant) => Value::Variant(*variant, r.varint()?),
             S::Rotations => Value::Rotations([r.f32()?, r.f32()?, r.f32()?]),
             S::Direction => Value::Direction(r.varint()?),
+            S::OptionalUnsignedInt => Value::OptionalUnsignedInt(r.varint()?.checked_sub(1)),
             // `ByteBufCodecs.holder`: 0, then a direct value, else the id + 1.
             S::PaintingVariant => Value::PaintingVariant(match r.varint()? {
                 0 => {
@@ -376,6 +383,7 @@ mod tests {
             ),
             // `Direction.NORTH`
             (12, Value::Direction(2)),
+            (19, Value::OptionalUnsignedInt(Some(4))),
             // `Pose.SLEEPING`
             (20, Value::Pose(2)),
             (21, Value::Variant(Variant::Cat, last("cat_variant"))),
@@ -449,6 +457,23 @@ mod tests {
                 Value::Variant(Variant::Cow, 7),
                 Value::Item(None),
             ]
+        );
+    }
+
+    /// A painting's inline variant (`Holder.direct`) at 9, by vanilla's
+    /// encoder: the title is read past.
+    #[test]
+    fn direct_painting_variant_matches_vanilla_encoder() {
+        assert_eq!(
+            vanilla("painting_direct", 7),
+            [DataValue {
+                index: 9,
+                value: Value::PaintingVariant(PaintingVariant::Direct {
+                    width: 2,
+                    height: 1,
+                    asset_id: "minecraft:kebab".into(),
+                }),
+            }]
         );
     }
 
@@ -533,7 +558,9 @@ mod tests {
             (5, 34, &painting),
         ]);
         let decoded = values(&bytes);
-        assert_eq!(decoded[..4], [const { Value::Other }; 4]);
+        assert_eq!(decoded[0], Value::Other);
+        assert_eq!(decoded[1], Value::OptionalUnsignedInt(None));
+        assert_eq!(decoded[2..4], [const { Value::Other }; 2]);
         assert_eq!(decoded[4], Value::Int(9));
         // The direct painting's title is read past, not kept.
         assert_eq!(

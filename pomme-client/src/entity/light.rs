@@ -58,8 +58,7 @@ fn block_light_level(kind: EntityKind, block: u8, dark_ticks: i32) -> u8 {
         Allay | Blaze | DragonFireball | MagmaCube | ShulkerBullet | Vex | Wither | WitherSkull => {
             15
         }
-        // `ThrownItemRenderer`'s `fullBright` kinds.
-        EyeOfEnder | Fireball | SmallFireball => 15,
+        kind if super::non_living::thrown_item_style(kind).is_some_and(|s| s.full_bright) => 15,
         ExperienceOrb => (block + 7).min(15),
         // `ItemFrameRenderer.GLOW_FRAME_BRIGHTNESS`.
         GlowItemFrame => block.max(5),
