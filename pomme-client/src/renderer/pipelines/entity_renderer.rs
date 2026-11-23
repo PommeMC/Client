@@ -3086,7 +3086,9 @@ impl EntityRenderer {
         let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
         let mut anim = self.compute_anim(entry.anim, &variant.model, info);
         // `ArmorStandModel.translateToHand` shows a hidden arm for the item.
-        anim.scale.retain(|&(_, scale)| scale != glam::Vec3::ZERO);
+        if info.entity_kind == EntityKind::ArmorStand {
+            anim.scale.retain(|&(_, scale)| scale != glam::Vec3::ZERO);
+        }
         let parts = variant.model.compute_part_transforms(&anim);
         // `ItemInHandLayer.useBabyOffset`: never for an armor stand.
         let baby_offset = info.is_baby && info.entity_kind != EntityKind::ArmorStand;

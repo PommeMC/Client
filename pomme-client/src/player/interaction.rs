@@ -433,6 +433,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         entities: &EntityStore,
         non_living: &crate::entity::non_living::NonLivingStore,
+        is_spectator: &dyn Fn(&crate::entity::LivingEntity) -> bool,
         attributes: &AttributeMap,
         creative: bool,
         held_item: Option<&str>,
@@ -459,7 +460,7 @@ impl InteractionState {
             .unwrap_or(max_dist * max_dist);
         let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
 
-        if let Some(hit) = nearest_entity_hit(from, to, entities, non_living) {
+        if let Some(hit) = nearest_entity_hit(from, to, entities, non_living, is_spectator) {
             let dist_sq = hit.location.distance_squared(from);
             if dist_sq < block_dist_sq {
                 self.target =
@@ -2106,12 +2107,14 @@ fn nearest_entity_hit(
     to: DVec3,
     entities: &EntityStore,
     non_living: &crate::entity::non_living::NonLivingStore,
+    is_spectator: &dyn Fn(&crate::entity::LivingEntity) -> bool,
 ) -> Option<EntityHitResult> {
     // (id, box, position, `canBePickedFromInside`).
     let living = entities
         .living
         .iter()
-        .filter(|(_, entity)| entity.is_pickable())
+        // `Player.isPickable`: never a spectator.
+        .filter(|(_, entity)| entity.is_pickable() && !is_spectator(entity))
         .map(|(&entity_id, entity)| {
             let entity_pos: DVec3 = entity.position.into();
             // `SulfurCube.canBePickedFromInside`: not around its block.
@@ -2809,8 +2812,14 @@ mod tests {
             );
         }
         let pick = |from: DVec3| {
-            nearest_entity_hit(from, from + DVec3::Z * 6.0, &EntityStore::new(), &store)
-                .map(|hit| hit.entity_id)
+            nearest_entity_hit(
+                from,
+                from + DVec3::Z * 6.0,
+                &EntityStore::new(),
+                &store,
+                &|_| false,
+            )
+            .map(|hit| hit.entity_id)
         };
         // 1.4 blocks to the side: outside the 1x1 box, inside the pick radius.
         assert_eq!(pick(DVec3::new(1.4, 1.5, 0.0)), Some(4));
@@ -2833,8 +2842,34 @@ mod tests {
             3,
         );
         let from = DVec3::new(0.5, 1.5, 5.0);
-        let hit = nearest_entity_hit(from, from - DVec3::Z * 5.0, &EntityStore::new(), &hanging);
+        let hit = nearest_entity_hit(
+            from,
+            from - DVec3::Z * 5.0,
+            &EntityStore::new(),
+            &hanging,
+            &|_| false,
+        );
         assert_eq!(hit.map(|hit| hit.entity_id), Some(4));
+    }
+
+    /// `Player.isPickable`: a spectator lets the ray through.
+    #[test]
+    fn spectators_are_not_picked() {
+        let mut entities = EntityStore::new();
+        entities.spawn_living(
+            2,
+            EntityKind::Player,
+            Position::new(0.0, 0.0, 3.0),
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        let none = crate::entity::non_living::NonLivingStore::new();
+        let (from, to) = (DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 1.0, 6.0));
+        let pick = |spectating: bool| {
+            nearest_entity_hit(from, to, &entities, &none, &|_| spectating).map(|h| h.entity_id)
+        };
+        assert_eq!(pick(false), Some(2));
+        assert_eq!(pick(true), None);
     }
 
     #[test]
@@ -2855,13 +2890,15 @@ mod tests {
             DVec3::new(0.0, 1.0, 6.0),
             &entities,
             &none,
+            &|_| false,
         );
         assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
 
         // From inside their boxes the last one wins.
         let inside = DVec3::new(0.0, 0.2, 3.0);
         let pick = |entities: &EntityStore| {
-            nearest_entity_hit(inside, inside + DVec3::Z, entities, &none).map(|hit| hit.entity_id)
+            nearest_entity_hit(inside, inside + DVec3::Z, entities, &none, &|_| false)
+                .map(|hit| hit.entity_id)
         };
         assert_eq!(pick(&entities), Some(12));
 

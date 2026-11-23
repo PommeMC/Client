@@ -4299,6 +4299,7 @@ impl AppCore {
             &game.chunk_store,
             &game.entity_store,
             &game.non_living_store,
+            &|e| game.tab_list.is_spectator(e),
             &game.player.attributes,
             creative,
             held_item.as_deref(),

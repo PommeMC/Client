@@ -105,8 +105,9 @@ fn push_entity(
     // outline pass.
     if let Some(style) = non_living::thrown_item_style(e.kind) {
         // `ThrowableProjectile.shouldRenderAtSqrDistance`'s first two ticks,
-        // and `Fireball`'s and `EyeOfEnder`'s copies of it.
-        if e.tick_count >= 2 || position.distance_squared(frame.camera) >= 12.25 {
+        // and `Fireball`'s and `EyeOfEnder`'s copies of it, from the current
+        // tick's position (`Entity.shouldRender`).
+        if e.tick_count >= 2 || e.position.distance_squared(frame.camera) >= 12.25 {
             let pose = Mat4::from_translation(relative)
                 * Mat4::from_scale(Vec3::splat(style.scale))
                 * Mat4::from_mat3(frame.orientation);

@@ -315,7 +315,8 @@ impl NonLivingEntity {
         Some(Aabb::new(center - size / 2.0, center + size / 2.0))
     }
 
-    /// `HangingEntity.setDirection` / `ItemFrame.setDirection`.
+    /// `HangingEntity.setDirection` / `ItemFrame.setDirection`; only a frame
+    /// sets its pitch.
     fn set_direction(&mut self, direction: Direction) {
         // A painting only hangs on walls (`Validate.isTrue(horizontal)`).
         if self.kind == EntityKind::Painting && !direction.is_horizontal() {
@@ -323,7 +324,9 @@ impl NonLivingEntity {
         }
         self.direction = direction;
         if direction.is_horizontal() {
-            self.x_rot = 0.0;
+            if is_item_frame(self.kind) {
+                self.x_rot = 0.0;
+            }
             self.y_rot = (direction.data_2d() * 90) as f32;
         } else {
             self.x_rot = if direction == Direction::Up {
@@ -928,7 +931,10 @@ fn tick_firework(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     let movement = e.velocity;
     let (delta, on_ground) = move_with_collision(e, world, 0.25, movement);
     e.position += delta;
-    e.on_ground = on_ground;
+    // `Entity.move` updates it only for an asked vertical move.
+    if movement.y.abs() > 0.0 {
+        e.on_ground = on_ground;
+    }
     let (x_collision, z_collision) = horizontal_collisions(movement, delta);
     e.horizontal_collision = x_collision || z_collision;
     e.velocity = movement;
@@ -1111,6 +1117,23 @@ mod tests {
         let frame = store.get(1).unwrap();
         assert_eq!(*frame.position, DVec3::new(4.5, 70.5 - 0.46875, -2.5));
         assert_eq!(frame.x_rot, -90.0);
+    }
+
+    /// `HangingEntity.setDirection` leaves a painting's pitch alone.
+    #[test]
+    fn paintings_keep_their_pitch() {
+        let mut store = NonLivingStore::new();
+        store.spawn(
+            1,
+            EntityKind::Painting,
+            uuid::Uuid::nil(),
+            Position::from(DVec3::ZERO),
+            DVec3::ZERO,
+            0.0,
+            30.0,
+            3,
+        );
+        assert_eq!(store.get(1).unwrap().x_rot, 30.0);
     }
 
     /// `Painting.calculateBoundingBox`: an even side shifts half a block

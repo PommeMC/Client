@@ -938,14 +938,7 @@ impl GameState {
     fn is_pushable(&self, e: &crate::entity::LivingEntity) -> bool {
         e.health > 0.0
             && !matches!(e.entity_type, EntityKind::ArmorStand | EntityKind::Bat)
-            && !self.is_spectator(e)
-    }
-
-    /// Whether `e` is a player in spectator mode.
-    fn is_spectator(&self, e: &crate::entity::LivingEntity) -> bool {
-        e.player_uuid
-            .and_then(|uuid| self.tab_list.players.get(&uuid))
-            .is_some_and(|p| crate::player::is_spectator(p.game_mode))
+            && !self.tab_list.is_spectator(e)
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`
@@ -3749,9 +3742,9 @@ pub fn update_game(
             BarChoice::Empty => hud::ContextualBarKind::Empty,
         };
         // Vanilla `renderMaxAttackIndicator`: the picked entity is living
-        // (the `living` lookup, as frames and fireballs are picked too),
-        // alive, at full charge, and the weapon is slow enough to matter
-        // (delay > 5).
+        // (the `living` lookup, as frames and fireballs are picked too, less
+        // a boat, which that store keeps), alive, at full charge, and the
+        // weapon is slow enough to matter (delay > 5).
         // TODO: vanilla also skips it when the active item's ATTACK_RANGE
         // component says the hit is out of range (spears).
         let delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);
@@ -3763,7 +3756,7 @@ pub fn update_game(
                     .entity_store
                     .living
                     .get(&hit.entity_id)
-                    .is_some_and(|e| e.health > 0.0));
+                    .is_some_and(|e| !crate::entity::is_boat(e.entity_type) && e.health > 0.0));
         let attack = hud::AttackIndicatorState {
             mode: core.menu.attack_indicator,
             scale,
@@ -4975,7 +4968,7 @@ pub fn update_game(
                     visibility: visibility(e.is_invisible, &name),
                     pack_shadow: if game.riding_vehicle_id == Some(entity_id) {
                         PackShadow::Player
-                    } else if game.is_spectator(e) {
+                    } else if game.tab_list.is_spectator(e) {
                         PackShadow::Spectator
                     } else {
                         PackShadow::Entity
@@ -7235,7 +7228,9 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
             game.entity_store
                 .living
                 .iter()
-                .filter(|(_, e)| e.entity_type == EntityKind::Player && !game.is_spectator(e))
+                .filter(|(_, e)| {
+                    e.entity_type == EntityKind::Player && !game.tab_list.is_spectator(e)
+                })
                 .map(|(&id, e)| OrbTarget {
                     id,
                     position: *e.position,
