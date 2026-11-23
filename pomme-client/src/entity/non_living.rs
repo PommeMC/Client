@@ -811,6 +811,7 @@ fn tick_trident_return(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
 
 /// `AbstractArrow.tick` as the client runs it; hits, despawning and falling
 /// are server-side. Whether it lives on.
+// TODO: a crit arrow's CRIT trail and the underwater bubbles.
 fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     if e.kind == EntityKind::Trident && !tick_trident_return(e, world) {
         return false;
@@ -878,6 +879,8 @@ fn update_in_water(e: &mut NonLivingEntity, world: &TickWorld<'_>, pushed: bool)
 
 /// `ThrowableProjectile.tick`, `AbstractHurtingProjectile.tick` and
 /// `EyeOfEnder.tick` movement; hits are server-side.
+// TODO: the particles they spawn: underwater bubbles, a fireball's
+// `createParticleTrail` smoke and an eye of ender's PORTAL trail.
 fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     let in_water = e.in_water;
     match e.kind {
@@ -907,6 +910,7 @@ fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
 }
 
 /// `FireworkRocketEntity.tick`'s free flight; an attached rocket isn't drawn.
+// TODO: its FIREWORK spark trail.
 fn tick_firework(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     // `baseTick` runs first.
     update_in_water(e, world, true);

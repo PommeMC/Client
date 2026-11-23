@@ -162,6 +162,10 @@ fn event(packet: EntityPacket) -> Option<NetworkEvent> {
 
 /// `Entity.handleEntityEvent`'s ids the client acts on.
 // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
+// TODO: event 17, a firework's burst (`FireworkRocketEntity.handleEntityEvent`:
+// `createFireworks`' particles and blast sounds), and event 3 on a snowball
+// or egg (`ThrowableItemProjectile`'s item-break puff), which reads as a
+// death here.
 fn entity_event(id: i32, event: i8) -> Option<NetworkEvent> {
     Some(match event {
         1 => NetworkEvent::RabbitJump { id },
