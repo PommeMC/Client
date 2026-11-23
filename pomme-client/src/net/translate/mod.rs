@@ -243,7 +243,8 @@
 //!   `add_entity` named (`SessionState::index_lifts`)
 //! - `painting_variant` values were a plain registry id through 1.20.6 and an
 //!   inline variant had no title or author on 1.21/1.21.1; they aren't
-//!   rewritten (TODO in `metadata.rs`), so paintings don't show on those wires
+//!   rewritten (TODO in `metadata.rs`), so on 1.21/1.21.1 a registered variant
+//!   shows but an inline one misreads, and 1.20.6 and older draw none
 //!
 //! 1.20.6 -> 26.2 wire changes (all of 1.21.1's — 1.21 only appended
 //! `custom_report_details`/`server_links`, so the tables are a strict

@@ -329,6 +329,15 @@ impl NonLivingEntity {
         self.kind == EntityKind::Painting || is_item_frame(self.kind)
     }
 
+    /// `AbstractArrow.setInGround`; landing quivers through
+    /// `onSyncedDataUpdated`, which only a change fires.
+    fn set_in_ground(&mut self, in_ground: bool) {
+        if in_ground && !self.in_ground && !self.first_tick && self.shake_time <= 0 {
+            self.shake_time = SHAKE_TIME;
+        }
+        self.in_ground = in_ground;
+    }
+
     /// `Entity.isPickable`: only `BlockAttachedEntity` says yes here.
     pub fn is_pickable(&self) -> bool {
         self.is_hanging()
@@ -340,7 +349,7 @@ impl NonLivingEntity {
         if self.is_hanging() {
             self.block_pos = BlockPos::containing(*position);
             self.recalculate_bounding_box();
-        } else if self.kind == EntityKind::ExperienceOrb && !self.first_tick {
+        } else if self.kind == EntityKind::ExperienceOrb {
             // `LinearInterpolationHandler.interpolateTo`.
             self.interpolation = Some((*position, INTERPOLATION_STEPS));
         } else {
@@ -530,12 +539,7 @@ impl NonLivingStore {
             }
             // `AbstractArrow.ID_FLAGS` and `IN_GROUND`.
             (8, MetaValue::Byte(flags)) if is_arrow(e.kind) => e.arrow_flags = flags,
-            (10, MetaValue::Bool(in_ground)) if is_arrow(e.kind) => {
-                e.in_ground = in_ground;
-                if !e.first_tick && e.shake_time <= 0 && in_ground {
-                    e.shake_time = SHAKE_TIME;
-                }
-            }
+            (10, MetaValue::Bool(in_ground)) if is_arrow(e.kind) => e.set_in_ground(in_ground),
             // `Arrow.ID_EFFECT_COLOR`.
             (11, MetaValue::Int(color)) if e.kind == EntityKind::Arrow => e.arrow_color = color,
             // `ThrownTrident.ID_LOYALTY`.
@@ -761,7 +765,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     let movement = e.velocity;
     if physics && inside_collision(world, *e.position) {
         e.velocity = DVec3::ZERO;
-        e.in_ground = true;
+        e.set_in_ground(true);
     }
     if e.shake_time > 0 {
         e.shake_time -= 1;
@@ -789,7 +793,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
         // `AbstractArrow.onHitBlock`: back off the face, stop and quiver.
         e.position -= crate::util::java_signum(movement) * f64::from(0.05f32);
         e.velocity = DVec3::ZERO;
-        e.in_ground = true;
+        e.set_in_ground(true);
         e.shake_time = SHAKE_TIME;
     } else {
         if !e.in_water {
@@ -1061,6 +1065,36 @@ mod tests {
         store.apply_entity_data(1, 10, MetaValue::Bool(false));
         store.apply_entity_data(1, 10, MetaValue::Bool(true));
         assert_eq!(store.get(1).unwrap().shake_time, SHAKE_TIME);
+    }
+
+    /// A block appearing around a flying arrow lands it, quivering.
+    #[test]
+    fn an_arrow_inside_a_block_lands_quivering() {
+        let mut e = NonLivingEntity::new(
+            EntityKind::Arrow,
+            uuid::Uuid::nil(),
+            Position::default(),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+        );
+        e.first_tick = false;
+        e.set_in_ground(true);
+        assert_eq!(e.shake_time, SHAKE_TIME);
+        // Already in the ground, it doesn't quiver again.
+        e.shake_time = 0;
+        e.set_in_ground(true);
+        assert_eq!(e.shake_time, 0);
+    }
+
+    /// `LinearInterpolationHandler` eases an orb even before its first tick.
+    #[test]
+    fn a_new_orb_eases_to_its_first_move() {
+        let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
+        store.teleport(1, Position::from(DVec3::X), None);
+        let orb = store.get(1).unwrap();
+        assert_eq!(*orb.position, DVec3::ZERO);
+        assert_eq!(orb.interpolation, Some((DVec3::X, INTERPOLATION_STEPS)));
     }
 
     #[test]

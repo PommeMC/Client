@@ -4237,3 +4237,18 @@ fn removed_entities_forget_their_index_lift() {
         .unwrap();
     assert_eq!(entity_nine_index(&session, 767, 10), 10);
 }
+
+/// Entering configuration (a proxy's server switch) forgets every lift, as
+/// the client forgets every entity.
+#[test]
+fn configuration_forgets_every_index_lift() {
+    let session = spawned_nine(767, "arrow");
+    let mut keep_alive = Vec::new();
+    wire::write_varint(
+        &mut keep_alive,
+        config_id(767, Direction::Clientbound, "keep_alive"),
+    );
+    keep_alive.extend_from_slice(&[0; 8]);
+    session.translate_config_frame(keep_alive.into_boxed_slice());
+    assert_eq!(entity_nine_index(&session, 767, 10), 10);
+}

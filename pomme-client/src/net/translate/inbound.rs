@@ -376,6 +376,8 @@ impl Translation {
         raw: Box<[u8]>,
         state: &mut SessionState,
     ) -> Vec<Box<[u8]>> {
+        // The client drops every entity on entering configuration.
+        state.index_lifts.clear();
         let Some(ids) = self.config_ids.as_ref().filter(|ids| !ids.inbound_identity) else {
             return vec![raw];
         };
@@ -493,6 +495,9 @@ impl Translation {
                 self.record_index_lift(ids, payload, state);
             } else if id == v772.remove_entities_id {
                 forget_index_lifts(payload, state);
+            } else if ids.v776.as_ref().is_some_and(|v| id == v.login_id) {
+                // A new level holds none of the old entities.
+                state.index_lifts.clear();
             }
         }
         let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
