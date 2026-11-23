@@ -3721,12 +3721,7 @@ pub fn update_game(
             let entity_eye_pos = |uuid: &uuid::Uuid| {
                 store.player_by_uuid(uuid).map(|e| {
                     let feet = e.prev_position.lerp(e.position, partial_tick as f64);
-                    // TODO: swimming/gliding eye height needs entity pose data.
-                    let eye_height = if e.is_crouching {
-                        crate::player::CROUCH_EYE_HEIGHT
-                    } else {
-                        crate::player::STANDING_EYE_HEIGHT
-                    };
+                    let eye_height = e.player_eye_height();
                     let block_pos = glam::IVec3::new(
                         e.position.x.floor() as i32,
                         e.position.y.floor() as i32,
@@ -7230,9 +7225,6 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
         eye_height: f64::from(game.player.target_eye_height()),
         dead: game.dead,
     });
-    let player_eye_height = f64::from(crate::entity::dimensions::EntityDimensions::eye_height(
-        EntityKind::Player,
-    ));
     let players: Vec<_> = local
         .into_iter()
         .chain(
@@ -7243,7 +7235,7 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
                 .map(|(&id, e)| OrbTarget {
                     id,
                     position: *e.position,
-                    eye_height: player_eye_height,
+                    eye_height: f64::from(e.player_eye_height()),
                     dead: e.health <= 0.0,
                 }),
         )

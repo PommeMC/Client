@@ -1383,6 +1383,17 @@ impl LivingEntity {
             .clamp(0.0, 1.0)
     }
 
+    /// A player's `getEyeHeight` for its pose.
+    // TODO: swimming, gliding and sleeping eye heights need the synced pose,
+    // which pomme reads only as crouching.
+    pub fn player_eye_height(&self) -> f32 {
+        if self.is_crouching {
+            crate::player::CROUCH_EYE_HEIGHT
+        } else {
+            crate::player::STANDING_EYE_HEIGHT
+        }
+    }
+
     /// Vanilla `getEyePosition(partialTick)`, at the standing eye height.
     pub fn eye_position(&self, partial: f32) -> Position {
         let eye = crate::renderer::pipelines::entity_renderer::standing_eye_height(

@@ -2046,6 +2046,19 @@ impl AppCore {
         }
     }
 
+    /// A server move's delta for the non-living store and `entity_positions`;
+    /// a hanging entity's position re-derives from its block.
+    fn move_tracked_entity(&mut self, game: &mut GameState, id: i32, delta: glam::DVec3) {
+        game.non_living_store.move_delta(id, delta);
+        if let Some(pos) = game.entity_positions.get_mut(&id) {
+            *pos += delta;
+        }
+        sync_hanging_position(game, id);
+        if let Some(pos) = game.entity_positions.get(&id) {
+            self.audio.update_entity_sound_position(id, *pos);
+        }
+    }
+
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
         let removed = self.player_faces.remove(uuid).is_some();
@@ -3270,11 +3283,7 @@ impl AppCore {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        game.non_living_store.move_delta(id, dvec3(dx, dy, dz));
-                        if let Some(pos) = game.entity_positions.get_mut(&id) {
-                            *pos += dvec3(dx, dy, dz);
-                            self.audio.update_entity_sound_position(id, *pos);
-                        }
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz));
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -3295,11 +3304,7 @@ impl AppCore {
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                         game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        game.non_living_store.move_delta(id, dvec3(dx, dy, dz));
-                        if let Some(pos) = game.entity_positions.get_mut(&id) {
-                            *pos += dvec3(dx, dy, dz);
-                            self.audio.update_entity_sound_position(id, *pos);
-                        }
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz));
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -3358,7 +3363,8 @@ impl AppCore {
                         game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.entity_positions.insert(id, position);
                         sync_hanging_position(game, id);
-                        self.audio.update_entity_sound_position(id, position);
+                        self.audio
+                            .update_entity_sound_position(id, game.entity_positions[&id]);
                     }
                 }
                 NetworkEvent::LevelEvent {
@@ -4816,7 +4822,9 @@ const DEFAULT_PAINTING: pomme_protocol::entity_data::PaintingVariant =
 /// The shared position map takes a painting's or frame's centre, which its
 /// block, facing and contents set.
 fn sync_hanging_position(game: &mut GameState, id: i32) {
-    if let Some(e) = game.non_living_store.get(id) {
+    if let Some(e) = game.non_living_store.get(id)
+        && e.is_hanging()
+    {
         game.entity_positions.insert(id, e.position);
     }
 }

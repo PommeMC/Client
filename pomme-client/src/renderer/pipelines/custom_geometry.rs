@@ -20,6 +20,8 @@ pub enum CustomTexture {
     PaintingBack,
     /// `ExperienceOrbRenderer.EXPERIENCE_ORB_LOCATION`.
     ExperienceOrb,
+    /// The paintings atlas's missing sprite, for a variant with no texture.
+    Missing,
 }
 
 #[repr(C)]
@@ -150,10 +152,22 @@ impl CustomGeometryPipeline {
         }
         for (key, ids) in sources {
             let texture = super::entity_renderer::load_entity_texture(device, resources, &ids, 16);
-            let set =
-                util::create_texture_group(device, self.tex_layout, texture.handle(), self.sampler);
-            self.textures.insert(key, LoadedTexture { texture, set });
+            self.insert_texture(device, key, texture);
         }
+        let (pixels, size) = crate::ui::object_glyph::missing_tile();
+        let missing = util::create_sampled_texture(device, "missing", &pixels, size, size);
+        self.insert_texture(device, CustomTexture::Missing, missing);
+    }
+
+    fn insert_texture(
+        &mut self,
+        device: &rhi::backend::Device,
+        key: CustomTexture,
+        texture: rhi::backend::Texture,
+    ) {
+        let set =
+            util::create_texture_group(device, self.tex_layout, texture.handle(), self.sampler);
+        self.textures.insert(key, LoadedTexture { texture, set });
     }
 
     fn destroy_textures(&mut self, device: &rhi::backend::Device) {

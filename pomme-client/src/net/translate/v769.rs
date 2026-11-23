@@ -145,3 +145,37 @@ pub(super) fn translate_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> 
     out.extend_from_slice(payload);
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `add_entity` bytes an old orb becomes: its id, a UUID from the id,
+    /// the orb's type, the position, zero rotations, the value as the data
+    /// varint and zero velocity shorts.
+    #[test]
+    fn an_old_orb_becomes_these_add_entity_bytes() {
+        let ids = cached(769)
+            .and_then(|t| t.game_ids.as_ref())
+            .and_then(|g| g.v769.as_ref())
+            .unwrap();
+        let position: Vec<u8> = [1.5f64, 64.0, -2.5]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let mut payload = vec![42];
+        payload.extend(&position);
+        payload.extend(300i16.to_be_bytes());
+
+        let mut expected = Vec::new();
+        wire::write_varint(&mut expected, ids.add_entity_old_id);
+        expected.push(42);
+        expected.extend(43u128.to_be_bytes());
+        wire::write_varint(&mut expected, ids.experience_orb_entity_type);
+        expected.extend(&position);
+        expected.extend([0, 0, 0]);
+        expected.extend([0xAC, 0x02]); // 300
+        expected.extend([0; 6]);
+        assert_eq!(translate_add_experience_orb(ids, &payload), Some(expected));
+    }
+}

@@ -20,8 +20,8 @@ use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::{CollisionWorld, resolve_collision};
 use crate::position::BlockPos;
+use crate::world::block::BlockStateTable;
 pub use crate::world::block::model::Direction;
-use crate::world::block::{BlockStateTable, FluidKind};
 use crate::world::chunk::ChunkStore;
 
 /// A resolved painting variant: its size in blocks and its sprite.
@@ -325,7 +325,7 @@ impl NonLivingEntity {
         self.recalculate_bounding_box();
     }
 
-    fn is_hanging(&self) -> bool {
+    pub fn is_hanging(&self) -> bool {
         self.kind == EntityKind::Painting || is_item_frame(self.kind)
     }
 
@@ -635,7 +635,10 @@ impl NonLivingStore {
                 EntityKind::ExperienceOrb => tick_orb(e, world),
                 _ => {}
             }
-            e.first_tick = false;
+            // An arrow clears it in `tick_arrow`, which a stuck one skips.
+            if !is_arrow(e.kind) {
+                e.first_tick = false;
+            }
             if !alive {
                 discarded.push(id);
             }
@@ -657,12 +660,6 @@ impl NonLivingStore {
 impl TickWorld<'_> {
     fn collision(&self) -> CollisionWorld<'_> {
         CollisionWorld::new(self.chunks, self.block_state_table)
-    }
-
-    fn fluid_at(&self, pos: DVec3) -> FluidKind {
-        let block = BlockPos::containing(pos);
-        let state = self.chunks.get_block_state(block.x, block.y, block.z);
-        self.block_state_table.block_state_data(state).fluid().kind
     }
 }
 
@@ -775,11 +772,12 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
         return true;
     }
     e.in_ground_time = 0;
-    let water_inertia = if e.kind == EntityKind::Trident {
-        0.99
+    // `getWaterInertia`.
+    let water_inertia = f64::from(if e.kind == EntityKind::Trident {
+        0.99f32
     } else {
         0.6
-    };
+    });
     if e.in_water {
         e.velocity *= water_inertia;
     }
@@ -797,14 +795,15 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
         e.shake_time = SHAKE_TIME;
     } else {
         if !e.in_water {
-            e.velocity *= 0.99;
+            e.velocity *= f64::from(0.99f32);
         }
         if physics && !e.no_gravity {
             e.velocity.y -= 0.05;
         }
     }
-    // `AbstractArrow.isPushedByFluid`.
+    // `super.tick()`: `baseTick`, with `AbstractArrow.isPushedByFluid`.
     update_in_water(e, world, !e.in_ground);
+    e.first_tick = false;
     true
 }
 
@@ -834,7 +833,7 @@ fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         EntityKind::EyeOfEnder => update_in_water(e, world, true),
         EntityKind::Fireball | EntityKind::SmallFireball => {
             // `accelerationPower` stays its default on the client.
-            let inertia = if in_water { 0.8 } else { 0.95 };
+            let inertia = f64::from(if in_water { 0.8f32 } else { 0.95 });
             e.velocity = (e.velocity + crate::util::java_normalize(e.velocity) * 0.1) * inertia;
         }
         kind => {
@@ -846,7 +845,7 @@ fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
             if !e.no_gravity {
                 e.velocity.y -= gravity;
             }
-            e.velocity *= if in_water { 0.8 } else { 0.99 };
+            e.velocity *= f64::from(if in_water { 0.8f32 } else { 0.99 });
         }
     }
     move_clipped(e, world, e.velocity, e.kind != EntityKind::EyeOfEnder);
@@ -916,14 +915,15 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         &aabb,
         &CollisionContext::EMPTY,
     );
-    // `isEyeInFluid(WATER)`, the eye at 0.85 of the orb's height.
-    let eye = *e.position + DVec3::Y * (SIZE * 0.85);
-    if world.fluid_at(eye) == FluidKind::Water {
+    // `super.tick()`: `baseTick`.
+    update_in_water(e, world, true);
+    let eye = *e.position + DVec3::Y * f64::from(EntityDimensions::eye_height(e.kind));
+    if crate::player::eye_in_water(world.chunks, world.block_state_table, eye) {
         // `setUnderwaterMovement`.
         e.velocity = DVec3::new(
-            e.velocity.x * 0.99,
-            (e.velocity.y + 5.0e-4).min(0.06),
-            e.velocity.z * 0.99,
+            e.velocity.x * f64::from(0.99f32),
+            (e.velocity.y + f64::from(5.0e-4f32)).min(f64::from(0.06f32)),
+            e.velocity.z * f64::from(0.99f32),
         );
     } else if !colliding && !e.no_gravity {
         e.velocity.y -= GRAVITY;
@@ -961,7 +961,7 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     e.on_ground = on_ground;
     // TODO: per-block friction (ice, slime); vanilla multiplies by the block
     // below's, 0.6 by default.
-    let friction = if on_ground { 0.98 * 0.6 } else { 0.98 };
+    let friction = f64::from(if on_ground { 0.98f32 * 0.6 } else { 0.98 });
     e.velocity *= friction;
     let vertical_collision_below = movement.y < 0.0 && delta.y != movement.y;
     // `getGravity()` is 0 for a weightless orb.
@@ -1162,6 +1162,28 @@ mod tests {
         let arrow = store.get(1).unwrap();
         assert_eq!(arrow.tick_count, 0);
         assert!(arrow.first_tick);
+    }
+
+    /// A stuck arrow's tick returns before `baseTick`, so it stays on its
+    /// first tick, and a later landing doesn't quiver.
+    #[test]
+    fn a_stuck_arrow_keeps_its_first_tick() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let stone = BlockStateTable::native().find_state("stone", &[]);
+        chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
+        let mut store = spawn(EntityKind::Arrow, DVec3::new(8.5, 64.5, 8.5), 0);
+        let world = TickWorld {
+            chunks: &chunks,
+            block_state_table: BlockStateTable::native(),
+            players: &[],
+            owner_of: &|_| None,
+            pickup_target_of: &|_| None,
+        };
+        store.tick(&world);
+        let arrow = store.get(1).unwrap();
+        assert!(arrow.in_ground);
+        assert!(arrow.first_tick);
+        assert_eq!(arrow.shake_time, 0);
     }
 
     #[test]

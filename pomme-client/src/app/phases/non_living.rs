@@ -144,10 +144,14 @@ fn push_entity(
             }
         }
         EntityKind::Painting => {
-            if let Some(shape) = &e.painting
-                && renderer.has_custom_texture(&CustomTexture::Painting(shape.asset_id.clone()))
-            {
-                painting(&mut out.quads, frame.world_light, e, shape, relative);
+            if let Some(shape) = &e.painting {
+                let front = CustomTexture::Painting(shape.asset_id.clone());
+                let front = if renderer.has_custom_texture(&front) {
+                    front
+                } else {
+                    CustomTexture::Missing
+                };
+                painting(&mut out.quads, frame.world_light, e, shape, front, relative);
             }
         }
         _ => {}
@@ -338,6 +342,7 @@ fn painting(
     world_light: &WorldLight<'_>,
     e: &NonLivingEntity,
     shape: &PaintingShape,
+    front: CustomTexture,
     relative: Vec3,
 ) {
     let (width, height) = (shape.width.max(1), shape.height.max(1));
@@ -355,7 +360,6 @@ fn painting(
     const EDGE: f32 = 0.03125;
     // The edges take a one-texel strip of the back sprite.
     const STRIP: f32 = 0.0625;
-    let front = CustomTexture::Painting(shape.asset_id.clone());
     let back = CustomTexture::PaintingBack;
     let offset_x = -width as f32 / 2.0;
     let offset_y = -height as f32 / 2.0;

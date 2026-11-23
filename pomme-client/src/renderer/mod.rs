@@ -1112,7 +1112,8 @@ impl Renderer {
         water(&mut pack, PackGeometry::Water, View::Camera);
         draw_particles(&mut pack, true);
         pack.run_full_screen(device, encoder, frame, false);
-        // TODO: weather, clouds, dropped items, the block-break
+        // TODO: weather, clouds, dropped items, thrown items, item frames,
+        // paintings, XP orbs, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
         // block outline and chunk borders over the pack's depth; name tags
         // and sign text through `gbuffers_entities_translucent` (Iris's `TEXT` and
