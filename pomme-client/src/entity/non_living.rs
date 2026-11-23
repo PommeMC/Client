@@ -390,13 +390,14 @@ impl NonLivingEntity {
 
     /// `Entity.setPos` after a server move; a hanging entity's `setPos`
     /// (`BlockAttachedEntity`) re-derives it from the block the point is in.
-    fn set_position(&mut self, position: Position) {
+    /// `may_snap` for a position sync or teleport, which snap a jump over 64
+    /// blocks where a move packet always eases.
+    fn set_position(&mut self, position: Position, may_snap: bool) {
         if self.is_hanging() {
             self.block_pos = BlockPos::containing(*position);
             self.recalculate_bounding_box();
-        } else if self.position.distance_squared(*position) > 4096.0 {
-            // `handleEntityPositionSync` and `handleTeleportEntity` snap a
-            // jump over 64 blocks (`snapTo`).
+        } else if may_snap && self.position.distance_squared(*position) > 4096.0 {
+            // `snapTo`.
             self.interpolation = None;
             self.prev_position = position;
             self.position = position;
@@ -531,20 +532,29 @@ impl NonLivingStore {
 
     /// A move packet, decoded against the server's last position
     /// (`VecDeltaCodec.decode`), not where the client has simulated it to.
-    pub fn move_delta(&mut self, id: i32, delta: DVec3) {
+    pub fn move_delta(&mut self, id: i32, delta: DVec3, on_ground: bool) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.server_pos += delta;
-            e.set_position(Position::from(e.server_pos));
+            e.set_position(Position::from(e.server_pos), false);
+            e.on_ground = on_ground;
         }
     }
 
-    pub fn teleport(&mut self, id: i32, position: Position, velocity: Option<DVec3>) {
+    /// `handleEntityPositionSync` (no velocity) or `handleTeleportEntity`.
+    pub fn teleport(
+        &mut self,
+        id: i32,
+        position: Position,
+        velocity: Option<DVec3>,
+        on_ground: bool,
+    ) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.server_pos = *position;
-            e.set_position(position);
+            e.set_position(position, true);
             if let Some(velocity) = velocity {
                 e.velocity = velocity;
             }
+            e.on_ground = on_ground;
         }
     }
 
@@ -725,12 +735,17 @@ impl TickWorld<'_> {
 
 /// `Level.clip` with `ClipContext.Block.COLLIDER`: where the segment first
 /// enters a block's collision shape, or the start if it's already inside.
-fn clip_blocks(world: &TickWorld<'_>, from: DVec3, to: DVec3) -> Option<DVec3> {
+fn clip_blocks(
+    world: &TickWorld<'_>,
+    from: DVec3,
+    to: DVec3,
+    ctx: &CollisionContext,
+) -> Option<DVec3> {
     let collision = world.collision();
     crate::physics::collision::traverse_blocks(from, to, |pos| {
         // World-space boxes, as local ones at no offset.
         let boxes: Vec<_> = collision
-            .block_boxes(pos, &CollisionContext::EMPTY)
+            .block_boxes(pos, ctx)
             .iter()
             .map(|b| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
             .collect();
@@ -779,7 +794,11 @@ fn move_clipped(
     clip: bool,
 ) -> bool {
     let to = *e.position + movement;
-    let hit = clip.then(|| clip_blocks(world, *e.position, to)).flatten();
+    // `ClipContext`'s entity: `CollisionContext.of(projectile)`.
+    let ctx = projectile_context(e);
+    let hit = clip
+        .then(|| clip_blocks(world, *e.position, to, &ctx))
+        .flatten();
     e.position = Position::from(hit.unwrap_or(to));
     hit.is_some()
 }
@@ -953,6 +972,11 @@ fn horizontal_collisions(movement: DVec3, delta: DVec3) -> (bool, bool) {
     )
 }
 
+/// `CollisionContext.of` for one of these entities, which never descends.
+fn projectile_context(e: &NonLivingEntity) -> CollisionContext {
+    CollisionContext::entity(e.position.y, false, false)
+}
+
 /// `Entity.move(SELF)`'s block collision for a box `size` wide and tall,
 /// standing on the entity's position.
 fn move_with_collision(
@@ -962,7 +986,7 @@ fn move_with_collision(
     movement: DVec3,
 ) -> (DVec3, bool) {
     let aabb = Aabb::from_center(*e.position, size / 2.0, size / 2.0);
-    let ctx = CollisionContext::entity(e.position.y, false, false);
+    let ctx = projectile_context(e);
     resolve_collision(
         world.collision(),
         aabb,
@@ -1067,6 +1091,17 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tick world on `chunks` with no players or owners.
+    fn quiet_world(chunks: &ChunkStore) -> TickWorld<'_> {
+        TickWorld {
+            chunks,
+            block_state_table: BlockStateTable::native(),
+            players: &[],
+            owner_of: &|_| None,
+            pickup_target_of: &|_| None,
+        }
+    }
 
     fn spawn(kind: EntityKind, at: DVec3, data: i32) -> NonLivingStore {
         let mut store = NonLivingStore::new();
@@ -1205,7 +1240,7 @@ mod tests {
     #[test]
     fn a_new_orb_eases_to_its_first_move() {
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
-        store.teleport(1, Position::from(DVec3::X), None);
+        store.teleport(1, Position::from(DVec3::X), None, false);
         let orb = store.get(1).unwrap();
         assert_eq!(*orb.position, DVec3::ZERO);
         assert_eq!(orb.interpolation, Some((DVec3::X, INTERPOLATION_STEPS)));
@@ -1244,10 +1279,10 @@ mod tests {
     fn moves_decode_against_the_server_position() {
         let mut store = spawn(EntityKind::Snowball, DVec3::new(0.0, 64.0, 0.0), 0);
         store.entities.get_mut(&1).unwrap().position = Position::new(0.0, 64.0, 3.0);
-        store.move_delta(1, DVec3::new(0.0, 0.0, 1.5));
+        store.move_delta(1, DVec3::new(0.0, 0.0, 1.5), false);
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(0.0, 64.0, 1.5));
-        store.teleport(1, Position::new(5.0, 64.0, 5.0), None);
-        store.move_delta(1, DVec3::new(1.0, 0.0, 0.0));
+        store.teleport(1, Position::new(5.0, 64.0, 5.0), None, false);
+        store.move_delta(1, DVec3::new(1.0, 0.0, 0.0), false);
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(6.0, 64.0, 5.0));
     }
 
@@ -1257,7 +1292,7 @@ mod tests {
     fn item_frames_decode_moves_from_their_centre() {
         // Facing north on block (4, 70, -3): centred at x 4.5.
         let mut store = spawn(EntityKind::ItemFrame, DVec3::new(4.0, 70.0, -3.0), 2);
-        store.move_delta(1, DVec3::new(0.6, 0.0, 0.0));
+        store.move_delta(1, DVec3::new(0.6, 0.0, 0.0), false);
         // 4.5 + 0.6 is in block 5, where the corner's 4.6 isn't.
         assert_eq!(store.get(1).unwrap().position.x, 5.5);
     }
@@ -1283,13 +1318,7 @@ mod tests {
         chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::new(8.5, 65.0, 8.5), 1);
         store.entities.get_mut(&1).unwrap().first_tick = false;
-        let world = TickWorld {
-            chunks: &chunks,
-            block_state_table: BlockStateTable::native(),
-            players: &[],
-            owner_of: &|_| None,
-            pickup_target_of: &|_| None,
-        };
+        let world = quiet_world(&chunks);
         for _ in 0..20 {
             store.tick(&world);
             let orb = store.get(1).unwrap();
@@ -1302,11 +1331,53 @@ mod tests {
     #[test]
     fn a_far_teleport_snaps() {
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
-        store.teleport(1, Position::new(100.0, 0.0, 0.0), None);
+        store.teleport(1, Position::new(100.0, 0.0, 0.0), None, false);
         let orb = store.get(1).unwrap();
         assert_eq!(orb.position.x, 100.0);
         assert_eq!(orb.prev_position.x, 100.0);
         assert_eq!(orb.interpolation, None);
+    }
+
+    /// `handleMoveEntity` eases however far the move goes.
+    #[test]
+    fn a_far_move_packet_still_eases() {
+        let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
+        store.move_delta(1, DVec3::new(100.0, 0.0, 0.0), true);
+        let orb = store.get(1).unwrap();
+        assert_eq!(orb.position.x, 0.0);
+        assert!(orb.interpolation.is_some());
+        assert!(orb.on_ground);
+    }
+
+    /// The clip asks as the projectile: scaffolding is solid only from above.
+    #[test]
+    fn projectiles_rise_through_scaffolding() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let table = BlockStateTable::native();
+        let scaffolding =
+            table.find_state("scaffolding", &[("bottom", "false"), ("distance", "0")]);
+        chunks.set_block_state(8, 65, 8, scaffolding, table);
+        let world = quiet_world(&chunks);
+        let arrow = |y| {
+            NonLivingEntity::new(
+                EntityKind::Arrow,
+                uuid::Uuid::nil(),
+                Position::new(8.5, y, 8.5),
+                DVec3::ZERO,
+                0.0,
+                0.0,
+            )
+        };
+        let clip = |e: &NonLivingEntity, to: DVec3| {
+            clip_blocks(&world, *e.position, to, &projectile_context(e))
+        };
+        // From below, it flies through.
+        assert_eq!(clip(&arrow(64.0), DVec3::new(8.5, 67.0, 8.5)), None);
+        // From above, it lands on top.
+        assert_eq!(
+            clip(&arrow(67.0), DVec3::new(8.5, 64.5, 8.5)),
+            Some(DVec3::new(8.5, 66.0, 8.5))
+        );
     }
 
     /// `Entity.move` stops an orb along the axis it hit.
@@ -1319,13 +1390,7 @@ mod tests {
         let orb = store.entities.get_mut(&1).unwrap();
         orb.first_tick = false;
         orb.velocity = DVec3::new(0.5, 0.0, 0.0);
-        let world = TickWorld {
-            chunks: &chunks,
-            block_state_table: BlockStateTable::native(),
-            players: &[],
-            owner_of: &|_| None,
-            pickup_target_of: &|_| None,
-        };
+        let world = quiet_world(&chunks);
         store.tick(&world);
         let orb = store.get(1).unwrap();
         assert_eq!(orb.position.x, 8.75);
@@ -1346,13 +1411,7 @@ mod tests {
     fn unloaded_entities_hold_still() {
         let mut store = spawn(EntityKind::Arrow, DVec3::ZERO, 0);
         let chunks = ChunkStore::new(2);
-        let world = TickWorld {
-            chunks: &chunks,
-            block_state_table: BlockStateTable::native(),
-            players: &[],
-            owner_of: &|_| None,
-            pickup_target_of: &|_| None,
-        };
+        let world = quiet_world(&chunks);
         store.tick(&world);
         let arrow = store.get(1).unwrap();
         assert_eq!(arrow.tick_count, 0);
@@ -1367,13 +1426,7 @@ mod tests {
         let stone = BlockStateTable::native().find_state("stone", &[]);
         chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
         let mut store = spawn(EntityKind::Arrow, DVec3::new(8.5, 64.5, 8.5), 0);
-        let world = TickWorld {
-            chunks: &chunks,
-            block_state_table: BlockStateTable::native(),
-            players: &[],
-            owner_of: &|_| None,
-            pickup_target_of: &|_| None,
-        };
+        let world = quiet_world(&chunks);
         store.tick(&world);
         let arrow = store.get(1).unwrap();
         assert!(arrow.in_ground);

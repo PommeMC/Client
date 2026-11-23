@@ -2048,8 +2048,14 @@ impl AppCore {
 
     /// A server move's delta for the non-living store and `entity_positions`;
     /// a hanging entity's position re-derives from its block.
-    fn move_tracked_entity(&mut self, game: &mut GameState, id: i32, delta: glam::DVec3) {
-        game.non_living_store.move_delta(id, delta);
+    fn move_tracked_entity(
+        &mut self,
+        game: &mut GameState,
+        id: i32,
+        delta: glam::DVec3,
+        on_ground: bool,
+    ) {
+        game.non_living_store.move_delta(id, delta, on_ground);
         if let Some(pos) = game.entity_positions.get_mut(&id) {
             *pos += delta;
         }
@@ -3288,7 +3294,7 @@ impl AppCore {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz));
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz), on_ground);
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -3309,7 +3315,7 @@ impl AppCore {
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                         game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz));
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz), on_ground);
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -3364,7 +3370,8 @@ impl AppCore {
                         }
                         game.item_entity_store
                             .teleport(id, position, velocity, on_ground);
-                        game.non_living_store.teleport(id, position, velocity);
+                        game.non_living_store
+                            .teleport(id, position, velocity, on_ground);
                         game.non_living_store.rotate(id, y_rot_deg, x_rot_deg);
                         game.entity_positions.insert(id, position);
                         sync_hanging_position(game, id);
@@ -4354,6 +4361,7 @@ impl AppCore {
             game.player.eyes_in_water,
             legacy_mining,
             crate::player::interaction::EntityUse {
+                spectator: crate::player::is_spectator(game.player.game_mode),
                 entities: &game.entity_store,
                 non_living: &game.non_living_store,
                 passengers: &game.vehicle_passengers,

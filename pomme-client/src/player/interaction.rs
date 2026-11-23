@@ -78,6 +78,9 @@ pub enum HitResult {
 /// What a right click on an entity reads beyond the player's own state.
 #[derive(Clone, Copy)]
 pub struct EntityUse<'a> {
+    /// The local player is a spectator, for whom `MultiPlayerGameMode`'s
+    /// `interact` and `useItem` pass.
+    pub spectator: bool,
     pub entities: &'a EntityStore,
     pub non_living: &'a crate::entity::non_living::NonLivingStore,
     /// Every vehicle's passengers.
@@ -858,8 +861,7 @@ impl InteractionState {
                 // Vanilla `MultiPlayerGameMode.interact`: the packet goes
                 // out whatever the entity answers, and an entity that passes
                 // leaves the click to `useItem` (a shield raised at a zombie).
-                // TODO: the world border and a spectator's pass aren't
-                // checked.
+                // TODO: the world border isn't checked.
                 Some(HitResult::Entity(hit)) => {
                     sender.send_raw(wire::encode_interact(
                         hit.entity_id,
@@ -867,6 +869,9 @@ impl InteractionState {
                         hit.location - hit.entity_pos,
                         sneaking,
                     ));
+                    if entity_use.spectator {
+                        continue;
+                    }
                     let golden_dandelion = |h: &HandItem| {
                         h.stack
                             .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
@@ -921,7 +926,7 @@ impl InteractionState {
             // eating at the ground works.
             let result = match (result, held.stack) {
                 (UseResult::Fail, _) => return false,
-                (UseResult::Pass, Some(stack)) => self.use_item(
+                (UseResult::Pass, Some(stack)) if !entity_use.spectator => self.use_item(
                     sender, audio, player_pos, eye_pos, look, hand, stack, held.worn, food,
                     creative, effects,
                 ),
