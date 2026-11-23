@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use glam::DVec3;
 use pomme_item::ItemStackData;
 use pomme_registry::builtin::{EntityKind, ItemKind};
+use pomme_registry::tags;
 
 use super::MetaValue;
 use super::components::Position;
@@ -358,9 +359,30 @@ impl NonLivingEntity {
         }
     }
 
-    /// `Entity.isPickable`: only `BlockAttachedEntity` says yes here.
+    /// `Entity.isPickable`: `BlockAttachedEntity`, and `Projectile` for a
+    /// `#redirectable_projectile`.
     pub fn is_pickable(&self) -> bool {
-        self.is_hanging()
+        self.is_hanging() || tags::entities::REDIRECTABLE_PROJECTILE.contains(&self.kind)
+    }
+
+    /// The box a pick ray tests: the bounding box grown by `getPickRadius`,
+    /// 1 for a pickable projectile.
+    pub fn pick_box(&self) -> Option<Aabb> {
+        if self.is_hanging() {
+            self.bounding_box()
+        } else {
+            Some(self.dimensions_box(*self.position).inflate(DVec3::ONE))
+        }
+    }
+
+    /// The kind's `EntityDimensions` box standing at `position`.
+    pub fn dimensions_box(&self, position: DVec3) -> Aabb {
+        let size = EntityDimensions::of(self.kind);
+        Aabb::from_center(
+            position,
+            f64::from(size.width) / 2.0,
+            f64::from(size.height) / 2.0,
+        )
     }
 
     /// `Entity.setPos` after a server move; a hanging entity's `setPos`
@@ -840,12 +862,7 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
 /// box touches it, and the current that pushes a `pushed` entity.
 // TODO: lava's current.
 fn update_in_water(e: &mut NonLivingEntity, world: &TickWorld<'_>, pushed: bool) {
-    let size = EntityDimensions::of(e.kind);
-    let aabb = Aabb::from_center(
-        *e.position,
-        f64::from(size.width) / 2.0,
-        f64::from(size.height) / 2.0,
-    );
+    let aabb = e.dimensions_box(*e.position);
     let water = crate::player::water_contact(world.chunks, world.block_state_table, &aabb);
     e.in_water = water.height > 0.0;
     if pushed && e.in_water {
@@ -987,12 +1004,13 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         // `AbstractInterpolationHandler.applyPredictedMovement`.
         e.interpolation = Some((target + delta, steps));
     }
-    // `Entity.move`: the vertical state only updates when it moved
-    // vertically, as the client isn't authoritative for an orb.
-    let moved_vertically = delta.y.abs() > 0.0;
+    // `Entity.move`, whose `delta` is the asked movement (`movement` here):
+    // the vertical state only updates when it asked to move vertically, as
+    // the client isn't authoritative for an orb.
+    let moved_vertically = movement.y.abs() > 0.0;
     if moved_vertically {
         e.vertical_collision = delta.y != movement.y;
-        e.vertical_collision_below = e.vertical_collision && delta.y < 0.0;
+        e.vertical_collision_below = e.vertical_collision && movement.y < 0.0;
         e.on_ground = e.vertical_collision_below;
     }
     let x_collision = !mth_equal(delta.x, movement.x);
@@ -1212,6 +1230,30 @@ mod tests {
         let mut orbs = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 7);
         orbs.set_owner(1, 7);
         assert_eq!(orbs.get(1).unwrap().owner, None);
+    }
+
+    /// An orb lying on the ground stays there: its asked fall collides and
+    /// zeroes every tick.
+    #[test]
+    fn a_resting_orb_stays_put() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let stone = BlockStateTable::native().find_state("stone", &[]);
+        chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
+        let mut store = spawn(EntityKind::ExperienceOrb, DVec3::new(8.5, 65.0, 8.5), 1);
+        store.entities.get_mut(&1).unwrap().first_tick = false;
+        let world = TickWorld {
+            chunks: &chunks,
+            block_state_table: BlockStateTable::native(),
+            players: &[],
+            owner_of: &|_| None,
+            pickup_target_of: &|_| None,
+        };
+        for _ in 0..20 {
+            store.tick(&world);
+            let orb = store.get(1).unwrap();
+            assert_eq!(orb.position.y, 65.0);
+            assert_eq!(orb.velocity.y, 0.0);
+        }
     }
 
     /// `Entity.move` stops an orb along the axis it hit.

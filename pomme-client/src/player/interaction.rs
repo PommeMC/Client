@@ -2124,14 +2124,14 @@ fn nearest_entity_hit(
                 !swallowed,
             )
         });
-    let hanging = non_living
+    let non_living = non_living
         .entities()
         .filter(|(_, entity)| entity.is_pickable())
         .filter_map(|(entity_id, entity)| {
-            Some((entity_id, entity.bounding_box()?, *entity.position, true))
+            Some((entity_id, entity.pick_box()?, *entity.position, true))
         });
     let mut touched: Vec<_> = living
-        .chain(hanging)
+        .chain(non_living)
         .filter_map(|(entity_id, aabb, entity_pos, from_inside)| {
             let (location, dist_sq) = if aabb.contains(from) {
                 if !from_inside {
@@ -2788,6 +2788,36 @@ mod tests {
 
     /// Frames and paintings take the pick like any entity
     /// (`BlockAttachedEntity.isPickable`).
+    /// `Projectile.isPickable` for a `#redirectable_projectile`, its box
+    /// grown by a pick radius of 1.
+    #[test]
+    fn a_fireball_is_picked_within_its_pick_radius() {
+        let mut store = crate::entity::non_living::NonLivingStore::new();
+        for (id, kind, x) in [
+            (4, EntityKind::Fireball, 0.0),
+            (5, EntityKind::Snowball, 3.0),
+        ] {
+            store.spawn(
+                id,
+                kind,
+                uuid::Uuid::nil(),
+                Position::new(x, 1.0, 3.0),
+                DVec3::ZERO,
+                0.0,
+                0.0,
+                0,
+            );
+        }
+        let pick = |from: DVec3| {
+            nearest_entity_hit(from, from + DVec3::Z * 6.0, &EntityStore::new(), &store)
+                .map(|hit| hit.entity_id)
+        };
+        // 1.4 blocks to the side: outside the 1x1 box, inside the pick radius.
+        assert_eq!(pick(DVec3::new(1.4, 1.5, 0.0)), Some(4));
+        // A snowball isn't pickable.
+        assert_eq!(pick(DVec3::new(3.0, 1.1, 0.0)), None);
+    }
+
     #[test]
     fn item_frames_are_picked() {
         let mut hanging = crate::entity::non_living::NonLivingStore::new();

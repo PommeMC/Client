@@ -1394,12 +1394,17 @@ impl LivingEntity {
         }
     }
 
-    /// Vanilla `getEyePosition(partialTick)`, at the standing eye height.
+    /// Vanilla `getEyePosition(partialTick)`: a player's eye for its pose,
+    /// any other entity's standing one.
     pub fn eye_position(&self, partial: f32) -> Position {
-        let eye = crate::renderer::pipelines::entity_renderer::standing_eye_height(
-            self.entity_type,
-            self.is_baby,
-        );
+        let eye = if self.entity_type == EntityKind::Player {
+            self.player_eye_height()
+        } else {
+            crate::renderer::pipelines::entity_renderer::standing_eye_height(
+                self.entity_type,
+                self.is_baby,
+            )
+        };
         self.prev_position.lerp(self.position, f64::from(partial))
             + DVec3::new(0.0, f64::from(eye * self.stand_height_scale()), 0.0)
     }
@@ -1434,6 +1439,9 @@ impl LivingEntity {
             1.5
         } else if self.entity_type == EntityKind::Sniffer {
             2.05 * bounds(self.is_baby) / bounds(false)
+        } else if self.entity_type == EntityKind::ArmorStand {
+            // A marker's `MARKER_DIMENSIONS` are 0 by 0; a small stand's half.
+            living_entity_dimensions(self).height
         } else {
             bounds(self.is_baby) * self.stand_height_scale()
         };
@@ -2000,13 +2008,10 @@ impl ItemEntityStore {
         }
     }
 
-    /// Handle a take-item packet: animate the (pre-shrink) cluster flying to
-    /// the collector, then shrink the stack by `amount`, removing it only
-    /// when empty (vanilla `handleTakeItemEntity`). Returns the item's
-    /// position for the pickup sound, or `None` if there's nothing to pick
-    /// up.
-    /// `handleTakeItemEntity` for an item entity: it shrinks by `amount`, and
-    /// flies to the collector when the client has one.
+    /// `handleTakeItemEntity` for an item entity: the pre-shrink cluster flies
+    /// to the collector when the client has one, then the stack shrinks by
+    /// `amount` and goes once empty. Returns where it was, for the sound, or
+    /// `None` for an id the client doesn't have.
     pub fn pickup(
         &mut self,
         item_id: i32,
@@ -3067,6 +3072,14 @@ mod tests {
         assert_eq!(sniffer.name_tag_height(), 2.05);
         sniffer.is_baby = true;
         assert!((sniffer.name_tag_height() - 1.025).abs() < 1e-5);
+
+        // `ArmorStand.MARKER_DIMENSIONS` are 0 by 0; a small stand is half.
+        let mut stand = entity(EntityKind::ArmorStand);
+        assert_eq!(stand.name_tag_height(), 1.975);
+        stand.is_baby = true;
+        assert_eq!(stand.name_tag_height(), 1.975 / 2.0);
+        stand.armor_stand.flags = 0x10;
+        assert_eq!(stand.name_tag_height(), 0.0);
     }
 
     #[test]

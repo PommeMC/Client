@@ -3720,17 +3720,12 @@ pub fn update_game(
             let store = &game.entity_store;
             let entity_eye_pos = |uuid: &uuid::Uuid| {
                 store.player_by_uuid(uuid).map(|e| {
-                    let feet = e.prev_position.lerp(e.position, partial_tick as f64);
-                    let eye_height = e.player_eye_height();
                     let block_pos = glam::IVec3::new(
                         e.position.x.floor() as i32,
                         e.position.y.floor() as i32,
                         e.position.z.floor() as i32,
                     );
-                    (
-                        block_pos,
-                        *feet + glam::DVec3::new(0.0, f64::from(eye_height), 0.0),
-                    )
+                    (block_pos, *e.eye_position(partial_tick))
                 })
             };
             game.waypoints.extract_dots(
@@ -5410,8 +5405,9 @@ pub fn update_game(
     // `EntityRenderer.extractNameTags` with the living renderers'
     // `shouldShowName`.
     // TODO: an entity carrying passengers hides its name (Pomme doesn't link
-    // passengers yet), the below-name score (`belowNameDisplay`), and custom
-    // names on entities that aren't living.
+    // passengers yet), the below-name score (`belowNameDisplay`), custom
+    // names on entities that aren't living, and an armor stand set to show a
+    // name it doesn't have (its type name).
     let nameplate_renders = if benchmark_running {
         Vec::new()
     } else {
@@ -5427,12 +5423,17 @@ pub fn update_game(
                 continue;
             }
             let name = entity.scoreboard_name(&game.tab_list);
+            // `ArmorStandRenderer.shouldShowName`: exactly when its name is
+            // set to show, with no crosshair, invisibility or team rule.
+            let stand = entity.entity_type == EntityKind::ArmorStand;
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {
                 Some(_) => game.scoreboard.line(&name, None),
                 None => match &entity.custom_name_spans {
-                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                    Some(custom)
+                        if entity.custom_name_visible || !stand && target == Some(entity_id) =>
+                    {
                         game.scoreboard.line(&name, Some(custom))
                     }
                     _ => continue,
@@ -5442,15 +5443,17 @@ pub fn update_game(
             if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
                 continue;
             }
-            let visible = !entity.is_invisible
-                || spectating
-                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
-            let shown = game
-                .scoreboard
-                .name_tag_shown(&viewer, &name, visible)
-                .unwrap_or(!game.hide_gui && visible);
-            if !shown {
-                continue;
+            if !stand {
+                let visible = !entity.is_invisible
+                    || spectating
+                    || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+                let shown = game
+                    .scoreboard
+                    .name_tag_shown(&viewer, &name, visible)
+                    .unwrap_or(!game.hide_gui && visible);
+                if !shown {
+                    continue;
+                }
             }
             let position = entity
                 .prev_position

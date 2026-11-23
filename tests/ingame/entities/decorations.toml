@@ -2,7 +2,7 @@
 # and 4x2 painting, one of the default variant (the server never sends it), a frame holding a flat item, a glow frame holding a block
 # turned one step, an invisible frame showing only its item, a frame lying
 # on the floor, and armor stands plain, posed with arms, armor and a sword,
-# and small without a base plate.
+# and small without a base plate, and a hologram's floating name.
 
 [[step]]
 wait_ms = 2000
@@ -66,6 +66,10 @@ chat = "/summon minecraft:armor_stand 506.5 -60 496.5 {Rotation:[200f,0f],ShowAr
 [[step]]
 chat = "/summon minecraft:armor_stand 503.5 -60 496.5 {Rotation:[190f,0f],Small:1b,NoBasePlate:1b,ShowArms:1b,equipment:{chest:{id:\"minecraft:chainmail_chestplate\",count:1}}}"
 
+# A server hologram: an invisible marker stand whose name always shows.
+[[step]]
+chat = "/summon minecraft:armor_stand 500.5 -55.5 498.5 {Invisible:1b,Marker:1b,CustomNameVisible:1b,CustomName:\"Hologram\"}"
+
 [[step]]
 expect = { entity = "painting", variant = "kebab" }
 
@@ -89,6 +93,9 @@ expect = { entity = "item_frame", item = "compass" }
 
 [[step]]
 expect = { entity = "armor_stand", baby = true }
+
+[[step]]
+expect = { entity = "armor_stand", name = "Hologram" }
 
 [[step]]
 look_at = [500.5, -58.0, 499.5]

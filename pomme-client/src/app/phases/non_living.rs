@@ -13,7 +13,6 @@ use crate::entity::components::Position;
 use crate::entity::dimensions::EntityDimensions;
 use crate::entity::light::entity_light;
 use crate::entity::non_living::{self, NonLivingEntity, PaintingShape, is_arrow, is_item_frame};
-use crate::physics::aabb::Aabb;
 use crate::renderer::Renderer;
 use crate::renderer::chunk::block_lighter::{self, LightLevels, WorldLight};
 use crate::renderer::pipelines::custom_geometry::{CustomQuad, CustomTexture, CustomVertex};
@@ -164,14 +163,9 @@ fn push_entity(
 /// `shouldRenderAtSqrDistance` reach (at the default entity distance), and
 /// its box, grown half a block, in the frustum.
 fn should_render(frame: &Frame<'_>, e: &NonLivingEntity, position: DVec3) -> bool {
-    let aabb = e.bounding_box().unwrap_or_else(|| {
-        let size = EntityDimensions::of(e.kind);
-        Aabb::from_center(
-            position,
-            f64::from(size.width) / 2.0,
-            f64::from(size.height) / 2.0,
-        )
-    });
+    let aabb = e
+        .bounding_box()
+        .unwrap_or_else(|| e.dimensions_box(position));
     let size = (aabb.max - aabb.min).element_sum() / 3.0;
     let reach = match e.kind {
         // `ItemFrame`'s fixed size 16, `FireworkRocketEntity`'s 64 blocks.
