@@ -919,12 +919,22 @@ fn tick_firework(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     let (delta, on_ground) = move_with_collision(e, world, 0.25, movement);
     e.position += delta;
     e.on_ground = on_ground;
-    e.horizontal_collision = delta.x != movement.x || delta.z != movement.z;
+    let (x_collision, z_collision) = horizontal_collisions(movement, delta);
+    e.horizontal_collision = x_collision || z_collision;
     e.velocity = movement;
     // `Projectile.updateRotation`.
     let (x_rot, y_rot) = movement_angles(movement);
     e.x_rot = lerp_rotation(e.prev_x_rot, x_rot);
     e.y_rot = lerp_rotation(e.prev_y_rot, y_rot);
+}
+
+/// `Entity.move`'s `xCollision` and `zCollision`: the asked `movement` was
+/// cut short on that axis.
+fn horizontal_collisions(movement: DVec3, delta: DVec3) -> (bool, bool) {
+    (
+        !mth_equal(delta.x, movement.x),
+        !mth_equal(delta.z, movement.z),
+    )
 }
 
 /// `Entity.move(SELF)`'s block collision for a box `size` wide and tall,
@@ -1013,8 +1023,7 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         e.vertical_collision_below = e.vertical_collision && movement.y < 0.0;
         e.on_ground = e.vertical_collision_below;
     }
-    let x_collision = !mth_equal(delta.x, movement.x);
-    let z_collision = !mth_equal(delta.z, movement.z);
+    let (x_collision, z_collision) = horizontal_collisions(movement, delta);
     // `restituteMovementAfterCollisions`: an orb doesn't bounce off walls.
     // TODO: a bouncy block's restitution (`getBlockBounciness`) under it.
     if moved_vertically && e.vertical_collision || x_collision || z_collision {

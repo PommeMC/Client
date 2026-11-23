@@ -132,3 +132,6 @@ chat = "/fill 594 -60 607 607 -55 607 minecraft:air"
 
 [[step]]
 expect = { gone = "experience_orb" }
+
+[[step]]
+chat = "/gamerule advance_time true"

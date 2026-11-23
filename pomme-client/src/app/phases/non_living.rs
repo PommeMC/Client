@@ -273,6 +273,8 @@ fn item_frame(
     };
     let depth = if e.is_invisible() { 0.5 } else { 0.4375 };
     let (model, tints) = renderer.item_draw(name, stack);
+    // TODO: the display transform resolves from the item's own model, as the
+    // hands' do, not the stack's (an `item_model` component, a select).
     let fixed = renderer.item_fixed_transform(name);
     out.items.push(ItemRenderInfo {
         item_name: model,

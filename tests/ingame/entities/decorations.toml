@@ -125,3 +125,6 @@ chat = "/fill 493 -60 500 507 -54 500 minecraft:air"
 
 [[step]]
 expect = { gone = "armor_stand" }
+
+[[step]]
+chat = "/gamerule advance_time true"
