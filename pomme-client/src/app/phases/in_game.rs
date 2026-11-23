@@ -3104,7 +3104,8 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        tick_non_living(game);
+        let discarded = tick_non_living(game);
+        core.remove_entities(&mut gfx.renderer, game, &discarded);
         if !game.deterministic {
             game.level_runtime.animate_tick(
                 &game.block_registry,
@@ -7218,8 +7219,9 @@ pub(crate) fn pickup_target(
     Some(feet.lerp(eye, 0.5))
 }
 
-/// The non-living entities' client tick, after the item entities'.
-fn tick_non_living(game: &mut GameState) {
+/// The non-living entities' client tick, after the item entities'; the ids
+/// it discarded.
+fn tick_non_living(game: &mut GameState) -> Vec<i32> {
     use crate::entity::non_living::OrbTarget;
     // `ExperienceOrb.followNearbyPlayer` skips spectators.
     let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| OrbTarget {
@@ -7279,5 +7281,5 @@ fn tick_non_living(game: &mut GameState) {
         owner_of: &owner_of,
         pickup_target_of: &pickup_target_of,
     };
-    game.non_living_store.tick(&world);
+    game.non_living_store.tick(&world)
 }

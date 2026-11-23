@@ -95,28 +95,6 @@ pub fn is_non_living(kind: EntityKind) -> bool {
         )
 }
 
-/// The 26.3 index of a value the session's wire sent at `index`.
-fn native_index(kind: EntityKind, index: u8) -> u8 {
-    native_index_at(kind, index, crate::version::session_protocol())
-}
-
-/// [`native_index`] for `protocol`: 1.21.6 synced a hanging entity's facing
-/// at 8 and 1.21.2 an arrow's `IN_GROUND` at 10, each moving what followed up
-/// one.
-fn native_index_at(kind: EntityKind, index: u8, protocol: i32) -> u8 {
-    let inserted_at = if is_item_frame(kind) || kind == EntityKind::Painting {
-        (protocol < 771).then_some(8)
-    } else if is_arrow(kind) {
-        (protocol < 768).then_some(10)
-    } else {
-        None
-    };
-    match inserted_at {
-        Some(at) if index >= at => index + 1,
-        _ => index,
-    }
-}
-
 /// `AbstractArrow.SHAKE_TIME`.
 const SHAKE_TIME: i32 = 7;
 /// `AbstractArrow.ID_FLAGS`' no-physics bit.
@@ -126,6 +104,7 @@ const INTERPOLATION_STEPS: u32 = 3;
 /// `ItemPickupParticle.LIFE_TIME`.
 const PICKUP_LIFE: u32 = 3;
 
+#[derive(Clone)]
 pub struct NonLivingEntity {
     pub kind: EntityKind,
     pub uuid: uuid::Uuid,
@@ -193,11 +172,7 @@ impl NonLivingEntity {
         let item = default_item(kind).map(|kind| {
             (
                 crate::player::inventory::item_resource_name(kind),
-                ItemStackData {
-                    kind,
-                    count: 1,
-                    component_patch: Default::default(),
-                },
+                ItemStackData::new(kind, 1),
             )
         });
         Self {
@@ -348,6 +323,11 @@ impl NonLivingEntity {
 
     fn is_hanging(&self) -> bool {
         self.kind == EntityKind::Painting || is_item_frame(self.kind)
+    }
+
+    /// `Entity.isPickable`: only `BlockAttachedEntity` says yes here.
+    pub fn is_pickable(&self) -> bool {
+        self.is_hanging()
     }
 
     /// `Entity.setPos` after a server move; a hanging entity's `setPos`
@@ -533,7 +513,7 @@ impl NonLivingStore {
         let Some(e) = self.entities.get_mut(&id) else {
             return;
         };
-        match (native_index(e.kind, index), value) {
+        match (index, value) {
             (0, MetaValue::Byte(flags)) => e.shared_flags = flags,
             (5, MetaValue::Bool(no_gravity)) => e.no_gravity = no_gravity,
             // `HangingEntity.DATA_DIRECTION`.
@@ -582,7 +562,7 @@ impl NonLivingStore {
         };
         let slot = if is_item_frame(e.kind) { 9 } else { 8 };
         let holds_item = is_item_frame(e.kind) || default_item(e.kind).is_some();
-        if native_index(e.kind, index) != slot || !holds_item {
+        if index != slot || !holds_item {
             return;
         }
         e.item = item;
@@ -603,32 +583,15 @@ impl NonLivingStore {
 
     /// `ClientPacketListener.handleTakeItemEntity` for an orb or arrow: a
     /// pickup particle flies a frozen copy to the collector, when the client
-    /// has one. An arrow is removed with it; an orb waits for the server's
-    /// removal, since one orb can be picked up several times. Returns where
-    /// it was, for the sound.
+    /// has one. Returns where it was, for the sound; the caller removes an
+    /// arrow, while an orb waits for the server's removal, since one orb can
+    /// be picked up several times.
     pub fn pickup(&mut self, id: i32, collector: Option<(i32, Position)>) -> Option<Position> {
         let entity = self.entities.get(&id)?;
         let start = entity.position;
-        let frozen = if entity.kind == EntityKind::ExperienceOrb {
-            collector.is_some().then(|| {
-                let mut copy = NonLivingEntity::new(
-                    entity.kind,
-                    entity.uuid,
-                    entity.position,
-                    DVec3::ZERO,
-                    entity.y_rot,
-                    entity.x_rot,
-                );
-                copy.xp_value = entity.xp_value;
-                copy.tick_count = entity.tick_count;
-                copy
-            })
-        } else {
-            Some(self.entities.remove(&id)?)
-        };
-        if let (Some(entity), Some((collector, target))) = (frozen, collector) {
+        if let Some((collector, target)) = collector {
             self.pickups.push(NonLivingPickup {
-                entity,
+                entity: entity.clone(),
                 start,
                 collector,
                 prev_target: target,
@@ -639,8 +602,10 @@ impl NonLivingStore {
         Some(start)
     }
 
-    pub fn tick(&mut self, world: &TickWorld<'_>) {
-        self.entities.retain(|_, e| {
+    /// The client tick; returns the ids it discarded (a returned trident).
+    pub fn tick(&mut self, world: &TickWorld<'_>) -> Vec<i32> {
+        let mut discarded = Vec::new();
+        self.entities.retain(|&id, e| {
             // Entities outside loaded chunks don't tick.
             if !super::chunk_loaded(world.chunks, *e.position) {
                 return true;
@@ -663,6 +628,9 @@ impl NonLivingStore {
                 _ => {}
             }
             e.first_tick = false;
+            if !alive {
+                discarded.push(id);
+            }
             alive
         });
         // `ItemPickupParticle.tick`.
@@ -674,6 +642,7 @@ impl NonLivingStore {
             }
             p.life < PICKUP_LIFE
         });
+        discarded
     }
 }
 
@@ -690,18 +659,17 @@ impl TickWorld<'_> {
 }
 
 /// `Level.clip` with `ClipContext.Block.COLLIDER`: where the segment first
-/// enters a block's collision shape.
+/// enters a block's collision shape, or the start if it's already inside.
 fn clip_blocks(world: &TickWorld<'_>, from: DVec3, to: DVec3) -> Option<DVec3> {
     let collision = world.collision();
     crate::physics::collision::traverse_blocks(from, to, |pos| {
-        collision
+        // World-space boxes, as local ones at no offset.
+        let boxes: Vec<_> = collision
             .block_boxes(pos, &CollisionContext::EMPTY)
             .iter()
-            .filter_map(|aabb| aabb.clip(from, to))
-            .min_by(|a, b| {
-                a.distance_squared(from)
-                    .total_cmp(&b.distance_squared(from))
-            })
+            .map(|b| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
+            .collect();
+        crate::player::interaction::clip_shape(from, to, DVec3::ZERO, &boxes).map(|(hit, _)| hit)
     })
 }
 
@@ -1085,11 +1053,7 @@ mod tests {
         let stack = |kind| {
             Some((
                 crate::player::inventory::item_resource_name(kind),
-                ItemStackData {
-                    kind,
-                    count: 1,
-                    component_patch: Default::default(),
-                },
+                ItemStackData::new(kind, 1),
             ))
         };
         store.set_item(2, 8, stack(ItemKind::Diamond));
@@ -1109,16 +1073,6 @@ mod tests {
         store.teleport(1, Position::new(5.0, 64.0, 5.0), None);
         store.move_delta(1, DVec3::new(1.0, 0.0, 0.0));
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(6.0, 64.0, 5.0));
-    }
-
-    #[test]
-    fn older_wires_lift_inserted_indices() {
-        // A 1.21.5 frame's item at 8, a 1.21.1 arrow's colour at 10.
-        assert_eq!(native_index_at(EntityKind::ItemFrame, 8, 770), 9);
-        assert_eq!(native_index_at(EntityKind::ItemFrame, 8, 771), 8);
-        assert_eq!(native_index_at(EntityKind::Arrow, 10, 767), 11);
-        assert_eq!(native_index_at(EntityKind::Arrow, 8, 767), 8);
-        assert_eq!(native_index_at(EntityKind::Snowball, 8, 763), 8);
     }
 
     #[test]

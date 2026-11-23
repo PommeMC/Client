@@ -9,6 +9,10 @@ pub(super) struct SessionState {
     /// the previous list (as `config_sequence` keeps the previous
     /// `RegistryHolder`).
     pub(super) dimension_types: Vec<String>,
+    /// Entities whose wire inserted no field where 26.3 has one, by id: the
+    /// index from which theirs sit one lower (see
+    /// `Translation::record_index_lift`).
+    pub(super) index_lifts: std::collections::HashMap<u32, u8>,
 }
 
 /// Connection-owned state paired with shared immutable protocol tables.

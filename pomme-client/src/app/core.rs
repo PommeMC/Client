@@ -2010,6 +2010,42 @@ impl AppCore {
         }
     }
 
+    /// Drops `ids` from every entity store and the state keyed by them, for a
+    /// server's `remove_entities` and for what the client discards itself.
+    pub(crate) fn remove_entities(
+        &mut self,
+        renderer: &mut Renderer,
+        game: &mut GameState,
+        ids: &[i32],
+    ) {
+        for id in ids {
+            if let Some(entity) = game.entity_store.remove_living(*id)
+                && let Some(uuid) = entity.player_uuid
+                && !game.entity_store.has_player_uuid(&uuid)
+            {
+                self.remove_player_skin(renderer, &uuid);
+            }
+            game.entity_positions.remove(id);
+            game.entity_kinds.remove(id);
+            game.silent_entities.remove(id);
+            self.audio.stop_entity_sounds(*id);
+        }
+        game.item_entity_store.remove(ids);
+        game.non_living_store.remove(ids);
+        if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+            game.controlled_vehicle_id = None;
+        }
+        if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+            game.riding_vehicle_id = None;
+        }
+        for id in ids {
+            game.vehicle_passengers.remove(id);
+        }
+        for passengers in game.vehicle_passengers.values_mut() {
+            passengers.retain(|p| !ids.contains(p));
+        }
+    }
+
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
         let removed = self.player_faces.remove(uuid).is_some();
@@ -3368,32 +3404,7 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
-                    for id in &ids {
-                        if let Some(entity) = game.entity_store.remove_living(*id)
-                            && let Some(uuid) = entity.player_uuid
-                            && !game.entity_store.has_player_uuid(&uuid)
-                        {
-                            self.remove_player_skin(renderer, &uuid);
-                        }
-                        game.entity_positions.remove(id);
-                        game.entity_kinds.remove(id);
-                        game.silent_entities.remove(id);
-                        self.audio.stop_entity_sounds(*id);
-                    }
-                    game.item_entity_store.remove(&ids);
-                    game.non_living_store.remove(&ids);
-                    if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
-                        game.controlled_vehicle_id = None;
-                    }
-                    if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
-                        game.riding_vehicle_id = None;
-                    }
-                    for id in &ids {
-                        game.vehicle_passengers.remove(id);
-                    }
-                    for passengers in game.vehicle_passengers.values_mut() {
-                        passengers.retain(|p| !ids.contains(p));
-                    }
+                    self.remove_entities(renderer, game, &ids);
                 }
                 NetworkEvent::EntityHeadRotation {
                     id,
@@ -3615,19 +3626,23 @@ impl AppCore {
                         &game.entity_store,
                         collector_id,
                     );
-                    let orb = game.non_living_store.get(item_id).is_some_and(|e| {
-                        e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb
-                    });
-                    let from = game
+                    // An orb or arrow here, else an item entity.
+                    let orb = game
                         .non_living_store
-                        .pickup(item_id, target_pos.map(|target| (collector_id, target)))
-                        .or_else(|| game.item_entity_store.pickup(item_id, target_pos, amount));
+                        .get(item_id)
+                        .map(|e| e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb);
+                    let from = match orb {
+                        Some(_) => game
+                            .non_living_store
+                            .pickup(item_id, target_pos.map(|target| (collector_id, target))),
+                        None => game.item_entity_store.pickup(item_id, target_pos, amount),
+                    };
                     // `handleTakeItemEntity` plays these client-side: an orb's,
                     // else the item one.
                     if let Some(from) = from
                         && !game.silent_entities.contains(&item_id)
                     {
-                        let (sound, volume, spread, pitch) = if orb {
+                        let (sound, volume, spread, pitch) = if orb == Some(true) {
                             ("entity.experience_orb.pickup", 0.1, 0.35, 0.9)
                         } else {
                             ("entity.item.pickup", 0.2, 1.4, 2.0)
@@ -3641,6 +3656,10 @@ impl AppCore {
                             pitch,
                             fastrand::u64(..),
                         );
+                    }
+                    // Picking an arrow up removes it; an orb waits for the server.
+                    if orb == Some(false) {
+                        self.remove_entities(renderer, game, &[item_id]);
                     }
                 }
                 NetworkEvent::PlayerLogin {
@@ -4268,6 +4287,7 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.non_living_store,
             &game.player.attributes,
             creative,
             held_item.as_deref(),

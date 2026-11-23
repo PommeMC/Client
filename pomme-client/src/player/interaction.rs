@@ -431,6 +431,7 @@ impl InteractionState {
         look_dir: LookDirection,
         chunks: &ChunkStore,
         entities: &EntityStore,
+        non_living: &crate::entity::non_living::NonLivingStore,
         attributes: &AttributeMap,
         creative: bool,
         held_item: Option<&str>,
@@ -457,7 +458,7 @@ impl InteractionState {
             .unwrap_or(max_dist * max_dist);
         let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
 
-        if let Some(hit) = nearest_entity_hit(from, to, entities) {
+        if let Some(hit) = nearest_entity_hit(from, to, entities, non_living) {
             let dist_sq = hit.location.distance_squared(from);
             if dist_sq < block_dist_sq {
                 self.target =
@@ -2100,19 +2101,40 @@ pub fn raycast(
 /// for that, so equally near entities don't resolve at random.
 // TODO: vanilla skips the player's own vehicle unless the ray starts inside
 // a box.
-fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
-    let mut touched: Vec<_> = entities
+fn nearest_entity_hit(
+    from: DVec3,
+    to: DVec3,
+    entities: &EntityStore,
+    non_living: &crate::entity::non_living::NonLivingStore,
+) -> Option<EntityHitResult> {
+    // (id, box, position, `canBePickedFromInside`).
+    let living = entities
         .living
         .iter()
         .filter(|(_, entity)| entity.is_pickable())
-        .filter_map(|(&entity_id, entity)| {
+        .map(|(&entity_id, entity)| {
             let entity_pos: DVec3 = entity.position.into();
-            let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
+            // `SulfurCube.canBePickedFromInside`: not around its block.
+            let swallowed = entity.entity_type == EntityKind::SulfurCube
+                && entity.equipment(EquipmentSlot::Body).is_some();
+            (
+                entity_id,
+                living_entity_dimensions(entity).make_bounding_box(entity_pos),
+                entity_pos,
+                !swallowed,
+            )
+        });
+    let hanging = non_living
+        .entities()
+        .filter(|(_, entity)| entity.is_pickable())
+        .filter_map(|(entity_id, entity)| {
+            Some((entity_id, entity.bounding_box()?, *entity.position, true))
+        });
+    let mut touched: Vec<_> = living
+        .chain(hanging)
+        .filter_map(|(entity_id, aabb, entity_pos, from_inside)| {
             let (location, dist_sq) = if aabb.contains(from) {
-                // `SulfurCube.canBePickedFromInside`: not around its block.
-                let swallowed = entity.entity_type == EntityKind::SulfurCube
-                    && entity.equipment(EquipmentSlot::Body).is_some();
-                if swallowed {
+                if !from_inside {
                     return None;
                 }
                 (from, 0.0)
@@ -2146,20 +2168,19 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
 const INSIDE_PROBE_FRACTION: f64 = 0.001;
 
 /// Ports vanilla `VoxelShape.clip`: a ray starting inside the shape hits it at
-/// the probe point, otherwise the nearest box entry wins. An empty shape is
-/// never hit, so the caller walks on to the next block. Vanilla's
-/// degenerate-ray guard is dropped; `raycast` always passes a scaled unit
-/// direction.
-fn clip_shape(
+/// the probe point, otherwise the nearest box entry wins. An empty shape, or
+/// a ray too short to have a direction, is never hit, so the caller walks on
+/// to the next block.
+pub(crate) fn clip_shape(
     from: DVec3,
     to: DVec3,
     offset: DVec3,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction)> {
-    if boxes.is_empty() {
+    let ray = to - from;
+    if boxes.is_empty() || ray.length_squared() < 1.0e-7 {
         return None;
     }
-    let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
     let starts_inside = boxes
@@ -2765,6 +2786,27 @@ mod tests {
         }
     }
 
+    /// Frames and paintings take the pick like any entity
+    /// (`BlockAttachedEntity.isPickable`).
+    #[test]
+    fn item_frames_are_picked() {
+        let mut hanging = crate::entity::non_living::NonLivingStore::new();
+        // Facing south (3), on the block at z = 2: its box sits at z 2.0..2.0625.
+        hanging.spawn(
+            4,
+            EntityKind::ItemFrame,
+            uuid::Uuid::nil(),
+            Position::new(0.0, 1.0, 2.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            3,
+        );
+        let from = DVec3::new(0.5, 1.5, 5.0);
+        let hit = nearest_entity_hit(from, from - DVec3::Z * 5.0, &EntityStore::new(), &hanging);
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(4));
+    }
+
     #[test]
     fn equally_near_entities_resolve_to_the_lower_id() {
         let mut entities = EntityStore::new();
@@ -2777,17 +2819,19 @@ mod tests {
                 uuid::Uuid::nil(),
             );
         }
+        let none = crate::entity::non_living::NonLivingStore::new();
         let hit = nearest_entity_hit(
             DVec3::new(0.0, 1.0, 0.0),
             DVec3::new(0.0, 1.0, 6.0),
             &entities,
+            &none,
         );
         assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
 
         // From inside their boxes the last one wins.
         let inside = DVec3::new(0.0, 0.2, 3.0);
         let pick = |entities: &EntityStore| {
-            nearest_entity_hit(inside, inside + DVec3::Z, entities).map(|hit| hit.entity_id)
+            nearest_entity_hit(inside, inside + DVec3::Z, entities, &none).map(|hit| hit.entity_id)
         };
         assert_eq!(pick(&entities), Some(12));
 
@@ -2875,6 +2919,19 @@ mod tests {
             clip_shape(inside_the_slab, inside_the_slab + ray, block, &bottom_slab).unwrap();
         assert_eq!(hit_point, inside_the_slab + ray * INSIDE_PROBE_FRACTION);
         assert_eq!(face, Direction::Up);
+    }
+
+    /// A ray starting on a face it travels into stops there (the probe is
+    /// inside), where a plain box clip rejects the zero-length entry.
+    #[test]
+    fn ray_starting_on_a_face_stops_there() {
+        let cube: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+        let on_face = DVec3::new(0.5, 0.5, 0.0);
+        let ray = DVec3::new(0.0, 0.0, 1.0);
+        let (hit_point, _) = clip_shape(on_face, on_face + ray, DVec3::ZERO, &cube).unwrap();
+        assert_eq!(hit_point, on_face + ray * INSIDE_PROBE_FRACTION);
+        // Too short a ray has no direction to clip along.
+        assert!(clip_shape(on_face, on_face + ray * 1.0e-4, DVec3::ZERO, &cube).is_none());
     }
 
     /// Vanilla clips straight through an empty shape (`LiquidBlock.getShape`),

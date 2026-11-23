@@ -10,7 +10,9 @@ use super::*;
 /// stripped rather than failing the packet. An item-stack value can't
 /// always be walked without full component codecs — the remainder is copied
 /// verbatim, which is correct unless a shifted serializer follows one (no
-/// vanilla entity sends one after an untranslatable stack).
+/// vanilla entity sends one after an untranslatable stack). `lift` is the
+/// index from which the entity's wire numbers its values one lower than 26.3
+/// (`SessionState::index_lifts`).
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
 /// TODO: rewrite `painting_variant` values before 1.21.2: a plain registry
@@ -22,6 +24,7 @@ pub(super) fn translate_entity_data(
     payload: &[u8],
     ids: &GameIds,
     remaps: &RegistryRemaps,
+    lift: Option<u8>,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
@@ -59,7 +62,10 @@ pub(super) fn translate_entity_data(
             }
             return None;
         };
-        out.push(index);
+        out.push(match lift {
+            Some(at) if index >= at => index + 1,
+            _ => index,
+        });
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
         if ids.v764.is_some() && matches!(new, 5 | 6) {

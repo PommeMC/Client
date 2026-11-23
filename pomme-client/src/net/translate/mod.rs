@@ -150,8 +150,8 @@
 //!   shows only once its chunks are sent again
 //! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
 //!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
-//!   and 9 on 26.2); the walker passes index bytes through unremapped and the
-//!   store lifts them (`entity::non_living::native_index`)
+//!   and 9 on 26.2); the metadata rewrite lifts them, for the entities
+//!   `add_entity` named (`SessionState::index_lifts`)
 //!
 //! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
@@ -239,8 +239,8 @@
 //!   1.21.2 appended; it is stripped in both phases
 //! - `AbstractArrow` gained `in_ground` at index 10, so an arrow sends its
 //!   effect color at 10 and a trident its loyalty/foil at 10/11, where 26.2
-//!   reads 11 and 11/12. The indices pass through unshifted and the store lifts
-//!   them (`entity::non_living::native_index`)
+//!   reads 11 and 11/12. The metadata rewrite lifts them, for the entities
+//!   `add_entity` named (`SessionState::index_lifts`)
 //! - `painting_variant` values were a plain registry id through 1.20.6 and an
 //!   inline variant had no title or author on 1.21/1.21.1; they aren't
 //!   rewritten (TODO in `metadata.rs`), so paintings don't show on those wires

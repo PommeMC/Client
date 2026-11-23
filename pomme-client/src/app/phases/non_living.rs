@@ -133,7 +133,8 @@ fn push_entity(
         EntityKind::ExperienceOrb => {
             out.quads
                 .push(orb(e, relative, frame.orientation, partial, light()));
-            if live {
+            // `extractShadow` skips an invisible entity.
+            if live && !e.is_invisible() {
                 out.shadows.push(ShadowCaster {
                     position: *position,
                     radius: ORB_SHADOW.0,

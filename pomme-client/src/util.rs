@@ -4,13 +4,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Vanilla `Mth.clampedLerp`.
 /// Java's `Math.signum` / `Mth.sign` per component: 0 stays 0, where Rust's
 /// `signum` gives 1.
 pub fn java_signum(v: glam::DVec3) -> glam::DVec3 {
     v.map(|c| if c == 0.0 { 0.0 } else { c.signum() })
 }
 
+/// Vanilla `Mth.clampedLerp`.
 pub fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
     if factor < 0.0 {
         min

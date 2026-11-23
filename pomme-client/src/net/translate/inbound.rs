@@ -67,11 +67,43 @@ impl Translation {
         &self,
         id: u32,
         payload: &[u8],
-        _state: &mut SessionState,
+        state: &mut SessionState,
     ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
+        let entity = var_u32(&mut Cursor::new(payload))?;
+        let lift = state.index_lifts.get(&entity).copied();
 
-        translate_entity_data(id, payload, ids, self.to_native)
+        translate_entity_data(id, payload, ids, self.to_native, lift)
+    }
+
+    /// Notes a wire `add_entity` whose kind syncs a field this wire lacks:
+    /// 1.21.6 gave hanging entities a `direction` at 8, 1.21.2 arrows an
+    /// `in_ground` at 10, each moving what followed up one. A spawn of any
+    /// other kind clears what its id held.
+    fn record_index_lift(&self, ids: &GameIds, payload: &[u8], state: &mut SessionState) {
+        use pomme_registry::builtin::EntityKind;
+
+        use crate::entity::non_living::{is_arrow, is_item_frame};
+
+        let mut cur = Cursor::new(payload);
+        let Some(entity) = var_u32(&mut cur) else {
+            return;
+        };
+        state.index_lifts.remove(&entity);
+        let kind = advance(&mut cur, 16)
+            .and_then(|()| var_u32(&mut cur))
+            .and_then(|wire| self.remap_to_native(ClientRegistry::EntityType, wire))
+            .and_then(<EntityKind as pomme_registry::Registry>::from_u32);
+        let inserted_at = match kind {
+            Some(kind) if is_item_frame(kind) || kind == EntityKind::Painting => {
+                ids.v770.is_some().then_some(8)
+            }
+            Some(kind) if is_arrow(kind) => ids.v767.is_some().then_some(10),
+            _ => None,
+        };
+        if let Some(at) = inserted_at {
+            state.index_lifts.insert(entity, at);
+        }
     }
 
     /// Rewrites the chunk 774 payload into the native layout.
@@ -454,6 +486,11 @@ impl Translation {
             None => None,
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
+        if let Some(ids) = self.game_ids.as_ref()
+            && ids.v772.as_ref().is_some_and(|v| id == v.add_entity_id)
+        {
+            self.record_index_lift(ids, payload, state);
+        }
         let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
             if let Some(upgraded) = self.upgrade(id, payload) {
                 return upgraded;

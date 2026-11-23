@@ -4146,3 +4146,64 @@ fn lowers_26_3_serverbound_layouts_to_the_games_26_2_bytes() {
         Some(old_case("swing"))
     );
 }
+
+/// A wire `add_entity` (1.21.5 and older: velocity as trailing shorts) for
+/// entity 9 of entity type `kind`.
+fn old_add_entity(protocol: i32, kind: &str) -> Vec<u8> {
+    let types = pomme_protocol::RegistryTable::for_protocol(protocol).unwrap();
+    let wire_type = types
+        .names(pomme_protocol::ClientRegistry::EntityType)
+        .iter()
+        .position(|n| n == kind)
+        .unwrap() as u32;
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "add_entity"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[0; 16]); // uuid
+    wire::write_varint(&mut old, wire_type);
+    old.extend_from_slice(&[0; 24]); // position
+    old.extend_from_slice(&[0; 3]); // rotation
+    wire::write_varint(&mut old, 2); // data
+    old.extend_from_slice(&[0; 6]); // velocity
+    old
+}
+
+/// The index an int entity-data value at `index` reaches 26.3 at, sent for
+/// entity 9 after it spawned as `kind` on the same connection.
+fn lifted_index(protocol: i32, kind: &str, index: u8) -> u8 {
+    let session = translation_for(protocol);
+    session
+        .translate_game_frame(old_add_entity(protocol, kind).into_boxed_slice())
+        .unwrap();
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "set_entity_data"),
+    );
+    old.extend_from_slice(&[9, index, 1, 3, 0xFF]); // entity 9, int 3
+    let native = session
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut at = 0;
+    wire::read_varint(&native, &mut at).unwrap(); // packet id
+    assert_eq!(native[at], 9);
+    native[at + 1]
+}
+
+/// 1.21.6 gave hanging entities a synced direction at 8 and 1.21.2 arrows
+/// `in_ground` at 10; older wires' later values move up one, for the
+/// entities `add_entity` named only.
+#[test]
+fn older_entity_data_indices_lift_by_kind() {
+    // An item frame's rotation, a tipped arrow's colour.
+    assert_eq!(lifted_index(770, "item_frame", 9), 10);
+    assert_eq!(lifted_index(767, "arrow", 10), 11);
+    // Before the inserted field, and for other kinds, nothing moves.
+    assert_eq!(lifted_index(767, "arrow", 8), 8);
+    assert_eq!(lifted_index(770, "snowball", 9), 9);
+    // A 1.21.4 arrow already has `in_ground`.
+    assert_eq!(lifted_index(769, "arrow", 10), 10);
+}

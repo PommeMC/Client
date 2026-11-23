@@ -329,9 +329,9 @@ impl Direction {
         }
     }
 
-    /// Vanilla `Direction.from3DDataValue`: the id modulo 6.
+    /// Vanilla `Direction.from3DDataValue`: `abs(id % 6)`, Java's remainder.
     pub fn from_3d(id: i32) -> Self {
-        Self::VALUES[id.rem_euclid(6) as usize]
+        Self::VALUES[(id % 6).unsigned_abs() as usize]
     }
 
     pub fn is_horizontal(self) -> bool {
