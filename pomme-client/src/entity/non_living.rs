@@ -100,7 +100,8 @@ pub fn is_non_living(kind: EntityKind) -> bool {
 
 /// `AbstractArrow.SHAKE_TIME`.
 const SHAKE_TIME: i32 = 7;
-/// `AbstractArrow.ID_FLAGS`' no-physics bit.
+/// `AbstractArrow.ID_FLAGS`' crit and no-physics bits.
+const FLAG_CRIT: u8 = 1;
 const FLAG_NO_PHYSICS: u8 = 2;
 /// `LinearInterpolationHandler`'s default step count.
 const INTERPOLATION_STEPS: u32 = 3;
@@ -875,8 +876,8 @@ fn tick_arrow(e: &mut NonLivingEntity, id: i32, world: &TickWorld<'_>) -> bool {
     }
     e.x_rot = lerp_rotation(e.x_rot, x_rot);
     e.y_rot = lerp_rotation(e.y_rot, y_rot);
+    check_left_owner(e, id, world);
     if physics {
-        check_left_owner(e, id, world);
         if !step_move_and_hit(e, id, world, movement) {
             return false;
         }
@@ -931,6 +932,8 @@ fn step_move_and_hit(
                 e.velocity = DVec3::ZERO;
                 e.set_in_ground(true);
                 e.shake_time = SHAKE_TIME;
+                e.arrow_flags &= !FLAG_CRIT;
+                e.pierce_level = 0;
                 e.pierced.clear();
             }
             return true;
@@ -1291,6 +1294,14 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
 mod tests {
     use super::*;
 
+    /// The origin chunk with one stone block.
+    fn stone_at(x: i32, y: i32, z: i32) -> ChunkStore {
+        let chunks = ChunkStore::with_origin_chunk();
+        let stone = BlockStateTable::native().find_state("stone", &[]);
+        chunks.set_block_state(x, y, z, stone, BlockStateTable::native());
+        chunks
+    }
+
     /// A tick world on `chunks` with no players or owners.
     fn quiet_world(chunks: &ChunkStore) -> TickWorld<'_> {
         TickWorld {
@@ -1538,9 +1549,7 @@ mod tests {
     /// zeroes every tick.
     #[test]
     fn a_resting_orb_stays_put() {
-        let chunks = ChunkStore::with_origin_chunk();
-        let stone = BlockStateTable::native().find_state("stone", &[]);
-        chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
+        let chunks = stone_at(8, 64, 8);
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::new(8.5, 65.0, 8.5), 1);
         store.entities.get_mut(&1).unwrap().first_tick = false;
         let world = quiet_world(&chunks);
@@ -1651,6 +1660,20 @@ mod tests {
         assert_eq!(store.get(1).unwrap().position.x, 2.5);
     }
 
+    /// `AbstractArrow.onHitBlock` ends piercing and the crit.
+    #[test]
+    fn landing_ends_piercing() {
+        let chunks = stone_at(1, 64, 0);
+        let mut store = flying(EntityKind::Arrow, 1);
+        let arrow = store.entities.get_mut(&1).unwrap();
+        arrow.pierce_level = 2;
+        arrow.arrow_flags = FLAG_CRIT;
+        store.tick(&quiet_world(&chunks));
+        let arrow = store.get(1).unwrap();
+        assert!(arrow.in_ground);
+        assert_eq!((arrow.pierce_level, arrow.arrow_flags), (0, 0));
+    }
+
     /// `Projectile.canHitEntity`: the owner is passed until the projectile
     /// has left it.
     #[test]
@@ -1671,9 +1694,7 @@ mod tests {
     /// `Entity.move` stops an orb along the axis it hit.
     #[test]
     fn an_orb_stops_at_a_wall() {
-        let chunks = ChunkStore::with_origin_chunk();
-        let stone = BlockStateTable::native().find_state("stone", &[]);
-        chunks.set_block_state(9, 64, 8, stone, BlockStateTable::native());
+        let chunks = stone_at(9, 64, 8);
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::new(8.6, 64.0, 8.5), 1);
         let orb = store.entities.get_mut(&1).unwrap();
         orb.first_tick = false;
@@ -1710,9 +1731,7 @@ mod tests {
     /// first tick, and a later landing doesn't quiver.
     #[test]
     fn a_stuck_arrow_keeps_its_first_tick() {
-        let chunks = ChunkStore::with_origin_chunk();
-        let stone = BlockStateTable::native().find_state("stone", &[]);
-        chunks.set_block_state(8, 64, 8, stone, BlockStateTable::native());
+        let chunks = stone_at(8, 64, 8);
         let mut store = spawn(EntityKind::Arrow, DVec3::new(8.5, 64.5, 8.5), 0);
         let world = quiet_world(&chunks);
         store.tick(&world);

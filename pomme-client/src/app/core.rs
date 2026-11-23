@@ -3495,6 +3495,8 @@ impl AppCore {
                     }
                     game.entity_store.apply_entity_data(id, index, value);
                     game.non_living_store.apply_entity_data(id, index, value);
+                    // `HangingEntity.DATA_DIRECTION` moves its centre.
+                    sync_hanging_position(game, id);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
