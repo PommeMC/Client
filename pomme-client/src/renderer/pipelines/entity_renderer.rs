@@ -3807,6 +3807,7 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
         EntityKind::Goat if is_baby => 0.59375,
         EntityKind::Axolotl | EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
+        EntityKind::ArmorStand if is_baby => 0.9875,
         // Explicit `eyeHeight`s, halved; the 0.85 ratio would miss them.
         EntityKind::Sniffer
         | EntityKind::Bee

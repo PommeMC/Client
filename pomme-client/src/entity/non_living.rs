@@ -391,6 +391,12 @@ impl NonLivingEntity {
         if self.is_hanging() {
             self.block_pos = BlockPos::containing(*position);
             self.recalculate_bounding_box();
+        } else if self.position.distance_squared(*position) > 4096.0 {
+            // `handleEntityPositionSync` and `handleTeleportEntity` snap a
+            // jump over 64 blocks (`snapTo`).
+            self.interpolation = None;
+            self.prev_position = position;
+            self.position = position;
         } else if self.kind == EntityKind::ExperienceOrb {
             // `LinearInterpolationHandler.interpolateTo`.
             self.interpolation = Some((*position, INTERPOLATION_STEPS));
@@ -1263,6 +1269,17 @@ mod tests {
             assert_eq!(orb.position.y, 65.0);
             assert_eq!(orb.velocity.y, 0.0);
         }
+    }
+
+    /// A jump over 64 blocks snaps instead of easing.
+    #[test]
+    fn a_far_teleport_snaps() {
+        let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
+        store.teleport(1, Position::new(100.0, 0.0, 0.0), None);
+        let orb = store.get(1).unwrap();
+        assert_eq!(orb.position.x, 100.0);
+        assert_eq!(orb.prev_position.x, 100.0);
+        assert_eq!(orb.interpolation, None);
     }
 
     /// `Entity.move` stops an orb along the axis it hit.

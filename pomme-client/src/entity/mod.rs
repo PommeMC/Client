@@ -1400,6 +1400,9 @@ impl LivingEntity {
     pub fn eye_position(&self, partial: f32) -> Position {
         let eye = if self.entity_type == EntityKind::Player {
             self.player_eye_height()
+        } else if self.is_marker_stand() {
+            // `ArmorStand.MARKER_DIMENSIONS`.
+            0.0
         } else {
             crate::renderer::pipelines::entity_renderer::standing_eye_height(
                 self.entity_type,
@@ -3079,8 +3082,11 @@ mod tests {
         assert_eq!(stand.name_tag_height(), 1.975);
         stand.is_baby = true;
         assert_eq!(stand.name_tag_height(), 1.975 / 2.0);
+        // `BABY_DIMENSIONS.withEyeHeight(0.9875f)`.
+        assert_eq!(*stand.eye_position(1.0), DVec3::Y * f64::from(0.9875f32));
         stand.armor_stand.flags = 0x10;
         assert_eq!(stand.name_tag_height(), 0.0);
+        assert_eq!(*stand.eye_position(1.0), DVec3::ZERO);
     }
 
     #[test]
