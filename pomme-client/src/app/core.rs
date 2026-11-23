@@ -4343,6 +4343,7 @@ impl AppCore {
             legacy_mining,
             crate::player::interaction::EntityUse {
                 entities: &game.entity_store,
+                non_living: &game.non_living_store,
                 passengers: &game.vehicle_passengers,
                 item_tags: game.recipe_book.item_tags(),
             },

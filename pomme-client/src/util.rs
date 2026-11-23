@@ -10,6 +10,16 @@ pub fn java_signum(v: glam::DVec3) -> glam::DVec3 {
     v.map(|c| if c == 0.0 { 0.0 } else { c.signum() })
 }
 
+/// Vanilla `Vec3.normalize`: zero below a length of `1.0E-5f`.
+pub fn java_normalize(v: glam::DVec3) -> glam::DVec3 {
+    let length = v.length();
+    if length < f64::from(1.0e-5_f32) {
+        glam::DVec3::ZERO
+    } else {
+        v / length
+    }
+}
+
 /// Vanilla `Mth.clampedLerp`.
 pub fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
     if factor < 0.0 {

@@ -15,6 +15,7 @@ use pomme_registry::builtin::{EntityKind, ItemKind};
 
 use super::MetaValue;
 use super::components::Position;
+use super::dimensions::EntityDimensions;
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::{CollisionWorld, resolve_collision};
@@ -126,6 +127,8 @@ pub struct NonLivingEntity {
     pub shared_flags: u8,
     no_gravity: bool,
     on_ground: bool,
+    /// `Entity.wasTouchingWater`, as the last tick's end left it.
+    in_water: bool,
     horizontal_collision: bool,
     first_tick: bool,
     /// The item it shows: a thrown item's or firework's stack, or what an
@@ -191,6 +194,7 @@ impl NonLivingEntity {
             shared_flags: 0,
             no_gravity: false,
             on_ground: false,
+            in_water: false,
             horizontal_collision: false,
             first_tick: true,
             item,
@@ -743,7 +747,7 @@ fn tick_trident_return(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     e.arrow_flags |= FLAG_NO_PHYSICS;
     let loyalty = f64::from(e.trident_loyalty);
     e.position.y += to_owner.y * 0.015 * loyalty;
-    e.velocity = e.velocity * 0.95 + to_owner.normalize_or_zero() * (0.05 * loyalty);
+    e.velocity = e.velocity * 0.95 + crate::util::java_normalize(to_owner) * (0.05 * loyalty);
     true
 }
 
@@ -767,13 +771,12 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
         return true;
     }
     e.in_ground_time = 0;
-    let in_water = world.fluid_at(*e.position) == FluidKind::Water;
     let water_inertia = if e.kind == EntityKind::Trident {
         0.99
     } else {
         0.6
     };
-    if in_water {
+    if e.in_water {
         e.velocity *= water_inertia;
     }
     let (x_rot, mut y_rot) = movement_angles(movement);
@@ -788,27 +791,47 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
         e.velocity = DVec3::ZERO;
         e.in_ground = true;
         e.shake_time = SHAKE_TIME;
-        return true;
+    } else {
+        if !e.in_water {
+            e.velocity *= 0.99;
+        }
+        if physics && !e.no_gravity {
+            e.velocity.y -= 0.05;
+        }
     }
-    if !in_water {
-        e.velocity *= 0.99;
-    }
-    if physics && !e.no_gravity {
-        e.velocity.y -= 0.05;
-    }
+    // `AbstractArrow.isPushedByFluid`.
+    update_in_water(e, world, !e.in_ground);
     true
+}
+
+/// `Entity.updateFluidInteraction` for water, from `baseTick`: whether the
+/// box touches it, and the current that pushes a `pushed` entity.
+// TODO: lava's current.
+fn update_in_water(e: &mut NonLivingEntity, world: &TickWorld<'_>, pushed: bool) {
+    let size = EntityDimensions::of(e.kind);
+    let aabb = Aabb::from_center(
+        *e.position,
+        f64::from(size.width) / 2.0,
+        f64::from(size.height) / 2.0,
+    );
+    let water = crate::player::water_contact(world.chunks, world.block_state_table, &aabb);
+    e.in_water = water.height > 0.0;
+    if pushed && e.in_water {
+        e.velocity += water.current_impulse(e.velocity, false);
+    }
 }
 
 /// `ThrowableProjectile.tick`, `AbstractHurtingProjectile.tick` and
 /// `EyeOfEnder.tick` movement; hits are server-side.
 fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
-    let in_water = world.fluid_at(*e.position) == FluidKind::Water;
+    let in_water = e.in_water;
     match e.kind {
-        EntityKind::EyeOfEnder => {}
+        // `EyeOfEnder.tick` runs `baseTick` before it moves.
+        EntityKind::EyeOfEnder => update_in_water(e, world, true),
         EntityKind::Fireball | EntityKind::SmallFireball => {
             // `accelerationPower` stays its default on the client.
             let inertia = if in_water { 0.8 } else { 0.95 };
-            e.velocity = (e.velocity + e.velocity.normalize_or_zero() * 0.1) * inertia;
+            e.velocity = (e.velocity + crate::util::java_normalize(e.velocity) * 0.1) * inertia;
         }
         kind => {
             let gravity = match kind {
@@ -823,10 +846,15 @@ fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
         }
     }
     move_clipped(e, world, e.velocity, e.kind != EntityKind::EyeOfEnder);
+    if e.kind != EntityKind::EyeOfEnder {
+        update_in_water(e, world, true);
+    }
 }
 
 /// `FireworkRocketEntity.tick`'s free flight; an attached rocket isn't drawn.
 fn tick_firework(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
+    // `baseTick` runs first.
+    update_in_water(e, world, true);
     if e.attached_to_entity {
         return;
     }
@@ -916,7 +944,7 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     if let Some(player) = followed {
         let delta = player.position + DVec3::Y * (player.eye_height / 2.0) - *e.position;
         let power = 1.0 - delta.length() / 8.0;
-        e.velocity += delta.normalize_or_zero() * (power * power * 0.1);
+        e.velocity += crate::util::java_normalize(delta) * (power * power * 0.1);
     }
     let fall_speed = e.velocity.y;
     let movement = e.velocity;

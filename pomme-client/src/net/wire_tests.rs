@@ -4174,10 +4174,24 @@ fn old_add_entity(protocol: i32, kind: &str) -> Vec<u8> {
 /// The index an int entity-data value at `index` reaches 26.3 at, sent for
 /// entity 9 after it spawned as `kind` on the same connection.
 fn lifted_index(protocol: i32, kind: &str, index: u8) -> u8 {
+    entity_nine_index(&spawned_nine(protocol, kind), protocol, index)
+}
+
+/// A connection on which entity 9 spawned as `kind`.
+fn spawned_nine(protocol: i32, kind: &str) -> crate::net::translate::TranslationSession {
     let session = translation_for(protocol);
     session
         .translate_game_frame(old_add_entity(protocol, kind).into_boxed_slice())
         .unwrap();
+    session
+}
+
+/// The index entity 9's int value at `index` reaches 26.3 at on `session`.
+fn entity_nine_index(
+    session: &crate::net::translate::TranslationSession,
+    protocol: i32,
+    index: u8,
+) -> u8 {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -4206,4 +4220,20 @@ fn older_entity_data_indices_lift_by_kind() {
     assert_eq!(lifted_index(770, "snowball", 9), 9);
     // A 1.21.4 arrow already has `in_ground`.
     assert_eq!(lifted_index(769, "arrow", 10), 10);
+}
+
+/// A removed entity's lift goes with it.
+#[test]
+fn removed_entities_forget_their_index_lift() {
+    let session = spawned_nine(767, "arrow");
+    let mut remove = Vec::new();
+    wire::write_varint(
+        &mut remove,
+        old_id(767, Direction::Clientbound, "remove_entities"),
+    );
+    remove.extend_from_slice(&[1, 9]);
+    session
+        .translate_game_frame(remove.into_boxed_slice())
+        .unwrap();
+    assert_eq!(entity_nine_index(&session, 767, 10), 10);
 }

@@ -676,6 +676,7 @@ struct Ids773 {
 /// pre-1.21.9 entity-data serializer set and `profile` component layout.
 struct Ids772 {
     add_entity_id: u32,
+    remove_entities_id: u32,
     set_entity_motion_id: u32,
     player_rotation_id: u32,
     set_default_spawn_id: u32,

@@ -242,6 +242,7 @@ impl GameIds {
             }),
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),
+                remove_entities_id: id(Clientbound, "remove_entities"),
                 set_entity_motion_id: id(Clientbound, "set_entity_motion"),
                 player_rotation_id: id(Clientbound, "player_rotation"),
                 set_default_spawn_id: id(Clientbound, "set_default_spawn_position"),

@@ -22,6 +22,7 @@ use pomme_registry::builtin::{EntityKind, ItemKind};
 use pomme_registry::tags;
 
 use super::interaction::can_be_equipped_by;
+use crate::entity::non_living::{NonLivingEntity, is_item_frame};
 use crate::entity::{LivingEntity, is_ageable_mob, is_boat, is_chest_boat, is_equine, is_llama};
 use crate::recipe::ItemTags;
 
@@ -154,12 +155,31 @@ pub fn interact_on(target: Target, clicker: Clicker) -> Option<Taken> {
     if is_boat(kind) {
         return boat_interact(target, clicker);
     }
-    let taken = if kind == EntityKind::Player {
-        None
-    } else {
-        mob_interact(target, clicker)
+    let taken = match kind {
+        EntityKind::Player => None,
+        // `ArmorStand.interact`: a marker or a name tag goes to `Entity.interact`,
+        // which an armor stand passes; the rest is the server's.
+        EntityKind::ArmorStand => {
+            if target.entity.armor_stand.is_marker() || clicker.holds(ItemKind::NameTag) {
+                None
+            } else {
+                return QUIET;
+            }
+        }
+        _ => mob_interact(target, clicker),
     };
     taken.or_else(|| item_interact(target, clicker))
+}
+
+/// Vanilla `Player.interactOn` for a frame or painting, which tries no held
+/// item on a non-living entity: `ItemFrame.interact` takes the click when the
+/// frame or the hand holds something (`fixed` isn't synced, so it's never set
+/// on the client), and a painting's `Entity.interact` passes.
+pub fn non_living_interact(
+    entity: &NonLivingEntity,
+    held: Option<&ItemStackData>,
+) -> Option<Taken> {
+    swing_if(is_item_frame(entity.kind) && (entity.item.is_some() || held.is_some()))
 }
 
 /// Vanilla `AbstractBoat.interact` and `AbstractChestBoat.interact`.
@@ -565,6 +585,51 @@ mod tests {
                 thundering: false,
             },
         )
+    }
+
+    /// `ArmorStand.interact` leaves the click to the server unswung, so the
+    /// held item isn't used too; a name tag goes on to `NameTagItem`.
+    #[test]
+    fn armor_stands_take_the_click_quietly() {
+        let stand = entity(E::ArmorStand);
+        assert_eq!(click(&stand, None), QUIET);
+        assert_eq!(click(&stand, Some(I::DiamondHelmet)), QUIET);
+        assert_eq!(click(&stand, Some(I::NameTag)), None);
+    }
+
+    /// `ItemFrame.interact` takes a click with something in the frame or the
+    /// hand; a painting passes.
+    #[test]
+    fn frames_take_a_click_with_an_item_on_either_side() {
+        use crate::entity::non_living::NonLivingStore;
+        let mut store = NonLivingStore::new();
+        for (id, kind) in [(1, E::ItemFrame), (2, E::Painting)] {
+            store.spawn(
+                id,
+                kind,
+                uuid::Uuid::nil(),
+                Position::default(),
+                DVec3::ZERO,
+                0.0,
+                0.0,
+                3,
+            );
+        }
+        let pearl = ItemStackData::new(I::EnderPearl, 1);
+        let frame = store.get(1).unwrap();
+        assert_eq!(non_living_interact(frame, Some(&pearl)), SWING);
+        assert_eq!(non_living_interact(frame, None), None);
+        let painting = store.get(2).unwrap();
+        assert_eq!(non_living_interact(painting, Some(&pearl)), None);
+        store.set_item(
+            1,
+            9,
+            Some((
+                "minecraft:diamond".into(),
+                ItemStackData::new(I::Diamond, 1),
+            )),
+        );
+        assert_eq!(non_living_interact(store.get(1).unwrap(), None), SWING);
     }
 
     #[test]

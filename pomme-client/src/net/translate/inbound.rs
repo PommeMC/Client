@@ -487,9 +487,13 @@ impl Translation {
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
         if let Some(ids) = self.game_ids.as_ref()
-            && ids.v772.as_ref().is_some_and(|v| id == v.add_entity_id)
+            && let Some(v772) = ids.v772.as_ref()
         {
-            self.record_index_lift(ids, payload, state);
+            if id == v772.add_entity_id {
+                self.record_index_lift(ids, payload, state);
+            } else if id == v772.remove_entities_id {
+                forget_index_lifts(payload, state);
+            }
         }
         let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
             if let Some(upgraded) = self.upgrade(id, payload) {
@@ -546,5 +550,19 @@ impl Translation {
             tracing::warn!("Dropping game packet {id} with an unparsable 26.2 layout");
         }
         Some(upgraded.map(Vec::into_boxed_slice))
+    }
+}
+
+/// Drops the `index_lifts` of the entities a wire `remove_entities` names.
+fn forget_index_lifts(payload: &[u8], state: &mut SessionState) {
+    let mut cur = Cursor::new(payload);
+    let Some(count) = var_u32(&mut cur) else {
+        return;
+    };
+    for _ in 0..count {
+        let Some(entity) = var_u32(&mut cur) else {
+            return;
+        };
+        state.index_lifts.remove(&entity);
     }
 }

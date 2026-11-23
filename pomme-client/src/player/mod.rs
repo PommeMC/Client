@@ -70,16 +70,6 @@ pub(crate) fn is_water_block(
     block_state_table.block_state_data(state).fluid().kind == FluidKind::Water
 }
 
-#[inline]
-fn vanilla_vec3_normalize(v: glam::DVec3) -> glam::DVec3 {
-    let length = v.length();
-    if length < f64::from(1.0e-5_f32) {
-        glam::DVec3::ZERO
-    } else {
-        v / length
-    }
-}
-
 /// Vanilla `EntityFluidInteraction.update` for water over `bounds`, a
 /// bounding box (scanned deflated by 0.001): how high the water reaches above
 /// its bottom, and the current it gathered.
@@ -153,14 +143,14 @@ impl WaterContact {
         let mut impulse = if average {
             self.current * (1.0 / f64::from(self.count))
         } else {
-            vanilla_vec3_normalize(self.current)
+            crate::util::java_normalize(self.current)
         };
         impulse *= 0.014;
         if velocity.x.abs() < 0.003
             && velocity.z.abs() < 0.003
             && impulse.length() < 0.004_500_000_000_000_000_5
         {
-            impulse = vanilla_vec3_normalize(impulse) * 0.004_500_000_000_000_000_5;
+            impulse = crate::util::java_normalize(impulse) * 0.004_500_000_000_000_000_5;
         }
         impulse
     }
@@ -239,12 +229,12 @@ fn water_flow_at(
                     && block_state_data.is_full_face_sturdy(direction) == Some(true)
             };
             if solid_face(y) || solid_face(y + 1) {
-                flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
+                flow = crate::util::java_normalize(flow) + dvec3(0.0, -6.0, 0.0);
                 break;
             }
         }
     }
-    vanilla_vec3_normalize(flow)
+    crate::util::java_normalize(flow)
 }
 
 pub struct LocalPlayer {

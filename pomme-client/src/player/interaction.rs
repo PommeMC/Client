@@ -79,6 +79,7 @@ pub enum HitResult {
 #[derive(Clone, Copy)]
 pub struct EntityUse<'a> {
     pub entities: &'a EntityStore,
+    pub non_living: &'a crate::entity::non_living::NonLivingStore,
     /// Every vehicle's passengers.
     pub passengers: &'a HashMap<i32, Vec<i32>>,
     pub item_tags: &'a ItemTags,
@@ -869,30 +870,29 @@ impl InteractionState {
                         h.stack
                             .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
                     };
-                    let taken = entity_use
-                        .entities
-                        .living
-                        .get(&hit.entity_id)
-                        .and_then(|entity| {
-                            entity_interact::interact_on(
-                                Target {
-                                    entity,
-                                    passengers: entity_use
-                                        .passengers
-                                        .get(&hit.entity_id)
-                                        .map_or(0, Vec::len),
-                                },
-                                Clicker {
-                                    held: held.stack,
-                                    hand,
-                                    item_tags: entity_use.item_tags,
-                                    sneaking,
-                                    holding_golden_dandelion: hands.iter().any(golden_dandelion),
-                                    position: player_pos,
-                                    thundering: entity_use.entities.thundering,
-                                },
-                            )
-                        });
+                    let taken = match entity_use.entities.living.get(&hit.entity_id) {
+                        None => entity_use.non_living.get(hit.entity_id).and_then(|entity| {
+                            entity_interact::non_living_interact(entity, held.stack)
+                        }),
+                        Some(entity) => entity_interact::interact_on(
+                            Target {
+                                entity,
+                                passengers: entity_use
+                                    .passengers
+                                    .get(&hit.entity_id)
+                                    .map_or(0, Vec::len),
+                            },
+                            Clicker {
+                                held: held.stack,
+                                hand,
+                                item_tags: entity_use.item_tags,
+                                sneaking,
+                                holding_golden_dandelion: hands.iter().any(golden_dandelion),
+                                position: player_pos,
+                                thundering: entity_use.entities.thundering,
+                            },
+                        ),
+                    };
                     match taken {
                         Some(taken) => UseResult::Success {
                             swing: taken == Taken::Swing,
