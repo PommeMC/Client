@@ -149,6 +149,12 @@ pub struct NonLivingEntity {
     in_ground_time: u32,
     /// `ThrownTrident.dealtDamage`, as far as the client sets it.
     dealt_damage: bool,
+    /// `Projectile.leftOwner`: it has cleared its owner's vehicle and riders.
+    left_owner: bool,
+    /// `AbstractArrow.PIERCE_LEVEL` and the ids it has pierced
+    /// (`piercingIgnoreEntityIds`).
+    pierce_level: u8,
+    pierced: Vec<i32>,
     /// `Arrow.ID_EFFECT_COLOR`.
     pub arrow_color: i32,
     pub trident_loyalty: u8,
@@ -211,6 +217,9 @@ impl NonLivingEntity {
             shake_time: 0,
             in_ground_time: 0,
             dealt_damage: false,
+            left_owner: false,
+            pierce_level: 0,
+            pierced: Vec::new(),
             arrow_color: -1,
             trident_loyalty: 0,
             attached_to_entity: false,
@@ -276,7 +285,7 @@ impl NonLivingEntity {
     /// of the box `calculateBoundingBox` gives for its block and facing.
     fn recalculate_bounding_box(&mut self) {
         if let Some(aabb) = self.bounding_box() {
-            let center = (aabb.min + aabb.max) / 2.0;
+            let center = aabb.center();
             self.position = Position::from(center);
             self.prev_position = self.position;
             // `ItemFrame.recalculateBoundingBox` decodes later moves from
@@ -453,6 +462,22 @@ pub struct TickWorld<'a> {
     pub owner_of: &'a dyn Fn(i32) -> Option<TridentOwner>,
     /// Where a pickup flies to on a collector, by id (`ItemPickupParticle`).
     pub pickup_target_of: &'a dyn Fn(i32) -> Option<Position>,
+    /// What a projectile can hit (`canBeHitByProjectile`: alive and
+    /// pickable), as the tick began.
+    pub targets: &'a [HitTarget],
+}
+
+/// An entity a projectile can hit.
+#[derive(Clone, Copy, Debug)]
+pub struct HitTarget {
+    pub id: i32,
+    pub position: DVec3,
+    pub aabb: Aabb,
+    /// `getRootVehicle`'s id.
+    pub root: i32,
+    /// Its `hurtClient` takes an arrow's hit: a hanging entity's or a
+    /// vehicle's, so a non-piercing arrow goes.
+    pub takes_arrow: bool,
 }
 
 /// What `ThrownTrident.tick` reads off its owner.
@@ -609,6 +634,7 @@ impl NonLivingStore {
             }
             // `AbstractArrow.ID_FLAGS` and `IN_GROUND`.
             (8, MetaValue::Byte(flags)) if is_arrow(e.kind) => e.arrow_flags = flags,
+            (9, MetaValue::Byte(level)) if is_arrow(e.kind) => e.pierce_level = level,
             (10, MetaValue::Bool(in_ground)) if is_arrow(e.kind) => e.sync_in_ground(in_ground),
             // `Arrow.ID_EFFECT_COLOR`.
             (11, MetaValue::Int(color)) if e.kind == EntityKind::Arrow => e.arrow_color = color,
@@ -698,9 +724,9 @@ impl NonLivingStore {
                 e.interpolation = (steps > 1).then_some((target, steps - 1));
             }
             e.tick_count += 1;
-            let alive = !is_arrow(e.kind) || tick_arrow(e, world);
+            let alive = !is_arrow(e.kind) || tick_arrow(e, id, world);
             match e.kind {
-                kind if thrown_item_style(kind).is_some() => tick_thrown(e, world),
+                kind if thrown_item_style(kind).is_some() => tick_thrown(e, id, world),
                 EntityKind::FireworkRocket => tick_firework(e, world),
                 EntityKind::ExperienceOrb => tick_orb(e, world),
                 _ => {}
@@ -785,24 +811,6 @@ fn movement_angles(movement: DVec3) -> (f32, f32) {
     )
 }
 
-/// Moves by `movement`, stopping where it first enters a block when `clip`;
-/// whether it hit one.
-fn move_clipped(
-    e: &mut NonLivingEntity,
-    world: &TickWorld<'_>,
-    movement: DVec3,
-    clip: bool,
-) -> bool {
-    let to = *e.position + movement;
-    // `ClipContext`'s entity: `CollisionContext.of(projectile)`.
-    let ctx = projectile_context(e);
-    let hit = clip
-        .then(|| clip_blocks(world, *e.position, to, &ctx))
-        .flatten();
-    e.position = Position::from(hit.unwrap_or(to));
-    hit.is_some()
-}
-
 /// `ThrownTrident.tick`'s return ahead of the arrow tick: after a few ticks
 /// in the ground a loyal trident flies back to its owner, and is discarded
 /// once its owner is gone or, for a mob, reached. Whether it lives on.
@@ -834,7 +842,7 @@ fn tick_trident_return(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
 /// `AbstractArrow.tick` as the client runs it; hits, despawning and falling
 /// are server-side. Whether it lives on.
 // TODO: a crit arrow's CRIT trail and the underwater bubbles.
-fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
+fn tick_arrow(e: &mut NonLivingEntity, id: i32, world: &TickWorld<'_>) -> bool {
     if e.kind == EntityKind::Trident && !tick_trident_return(e, world) {
         return false;
     }
@@ -867,24 +875,206 @@ fn tick_arrow(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     }
     e.x_rot = lerp_rotation(e.x_rot, x_rot);
     e.y_rot = lerp_rotation(e.y_rot, y_rot);
-    if move_clipped(e, world, movement, physics) {
-        // `AbstractArrow.onHitBlock`: back off the face, stop and quiver.
-        e.position -= crate::util::java_signum(movement) * f64::from(0.05f32);
-        e.velocity = DVec3::ZERO;
-        e.set_in_ground(true);
-        e.shake_time = SHAKE_TIME;
+    if physics {
+        check_left_owner(e, id, world);
+        if !step_move_and_hit(e, id, world, movement) {
+            return false;
+        }
     } else {
-        if !e.in_water {
-            e.velocity *= f64::from(0.99f32);
-        }
-        if physics && !e.no_gravity {
-            e.velocity.y -= 0.05;
-        }
+        e.position += movement;
+    }
+    if !e.in_water {
+        e.velocity *= f64::from(0.99f32);
+    }
+    if physics && !e.in_ground && !e.no_gravity {
+        e.velocity.y -= 0.05;
     }
     // `super.tick()`: `baseTick`, with `AbstractArrow.isPushedByFluid`.
     update_in_water(e, world, !e.in_ground);
     e.first_tick = false;
     true
+}
+
+/// Where `movement` first enters a block's collision shape, as the
+/// projectile asks (`ClipContext` with its entity).
+fn block_hit(e: &NonLivingEntity, world: &TickWorld<'_>, movement: DVec3) -> Option<DVec3> {
+    clip_blocks(
+        world,
+        *e.position,
+        *e.position + movement,
+        &projectile_context(e),
+    )
+}
+
+/// `AbstractArrow.stepMoveAndHit` as the client runs it: to the first
+/// entity on the way, or to the block it hits. Whether it lives on.
+fn step_move_and_hit(
+    e: &mut NonLivingEntity,
+    id: i32,
+    world: &TickWorld<'_>,
+    movement: DVec3,
+) -> bool {
+    let block = block_hit(e, world, movement);
+    let to = block.unwrap_or(*e.position + movement);
+    loop {
+        let from = *e.position;
+        let mut hits = arrow_hits(e, id, world, from, to);
+        hits.sort_by(|a, b| {
+            let distance = |hit: &(HitTarget, DVec3)| from.distance_squared(hit.0.position);
+            distance(a).total_cmp(&distance(b))
+        });
+        let Some(&(_, location)) = hits.first() else {
+            e.position = Position::from(to);
+            if block.is_some() {
+                // `onHitBlock`: back off the face, stop and quiver.
+                e.position -= crate::util::java_signum(movement) * f64::from(0.05f32);
+                e.velocity = DVec3::ZERO;
+                e.set_in_ground(true);
+                e.shake_time = SHAKE_TIME;
+                e.pierced.clear();
+            }
+            return true;
+        };
+        e.position = Position::from(location);
+        // `hitTargetsOrDeflectSelf`.
+        // TODO: an entity's own `deflection` (a breeze's, a shield's), which
+        // ends the step.
+        for (target, _) in &hits {
+            if !arrow_hit_entity(e, target) {
+                return false;
+            }
+        }
+        if e.pierce_level == 0 {
+            return true;
+        }
+    }
+}
+
+/// `onHitEntity` as the client runs it: damage and knockback are the
+/// server's. Whether the arrow lives on.
+fn arrow_hit_entity(e: &mut NonLivingEntity, target: &HitTarget) -> bool {
+    if e.kind == EntityKind::Trident {
+        // `ThrownTrident.onHitEntity`.
+        e.dealt_damage = true;
+        return true;
+    }
+    if e.pierce_level > 0 {
+        if e.pierced.len() > usize::from(e.pierce_level) {
+            return false;
+        }
+        e.pierced.push(target.id);
+    }
+    !(target.takes_arrow && e.pierce_level == 0)
+}
+
+/// `findHitEntities`: every entity the segment passes within the margin of;
+/// a trident's (`ThrownTrident.findHitEntities`) is the nearest alone, and
+/// none once it has dealt damage.
+fn arrow_hits(
+    e: &NonLivingEntity,
+    id: i32,
+    world: &TickWorld<'_>,
+    from: DVec3,
+    to: DVec3,
+) -> Vec<(HitTarget, DVec3)> {
+    if e.kind == EntityKind::Trident {
+        return if e.dealt_damage {
+            Vec::new()
+        } else {
+            nearest_entity_hit(e, id, world, from, to)
+                .into_iter()
+                .collect()
+        };
+    }
+    // `ProjectileUtil.getManyEntityHitResult`, without the hits from inside.
+    let margin = hit_margin(e);
+    hit_candidates(e, id, world)
+        .filter_map(|target| {
+            if let Some(hit) = target.aabb.clip(from, to) {
+                return Some((target, hit));
+            }
+            if margin <= 0.0 {
+                return None;
+            }
+            let outside = target.aabb.inflate(DVec3::splat(margin)).clip(from, to)?;
+            // Only if no block stands between the grown box and the real one.
+            let center = target.aabb.center();
+            let towards =
+                clip_blocks(world, outside, center, &projectile_context(e)).unwrap_or(center);
+            target
+                .aabb
+                .clip(outside, towards)
+                .map(|_| (target, outside))
+        })
+        .collect()
+}
+
+/// `ProjectileUtil.getEntityHitResult` with the projectile's margin: the
+/// nearest entity the segment passes within it of.
+fn nearest_entity_hit(
+    e: &NonLivingEntity,
+    id: i32,
+    world: &TickWorld<'_>,
+    from: DVec3,
+    to: DVec3,
+) -> Option<(HitTarget, DVec3)> {
+    let margin = DVec3::splat(hit_margin(e));
+    hit_candidates(e, id, world)
+        .filter_map(|target| Some((target, target.aabb.inflate(margin).clip(from, to)?)))
+        .min_by(|a, b| {
+            from.distance_squared(a.1)
+                .total_cmp(&from.distance_squared(b.1))
+        })
+}
+
+/// `ProjectileUtil.computeMargin`: a young projectile's targets don't grow.
+fn hit_margin(e: &NonLivingEntity) -> f64 {
+    f64::from(((e.tick_count as f32 - 2.0) / 20.0).clamp(0.0, 0.3))
+}
+
+/// The targets `Projectile.canHitEntity` (and an arrow's pierced ids) let
+/// through: not itself, nor its owner's vehicle and riders until it has
+/// left them.
+fn hit_candidates<'w>(
+    e: &'w NonLivingEntity,
+    id: i32,
+    world: &'w TickWorld<'_>,
+) -> impl Iterator<Item = HitTarget> + 'w {
+    let owner_root = owner_root(e, world).filter(|_| !e.left_owner);
+    world.targets.iter().copied().filter(move |target| {
+        target.id != id && Some(target.root) != owner_root && !e.pierced.contains(&target.id)
+    })
+}
+
+/// The root vehicle of the projectile's owner, or the owner alone when the
+/// client has it unpickable.
+fn owner_root(e: &NonLivingEntity, world: &TickWorld<'_>) -> Option<i32> {
+    e.owner.map(|owner| {
+        world
+            .targets
+            .iter()
+            .find(|t| t.id == owner)
+            .map_or(owner, |t| t.root)
+    })
+}
+
+/// `Projectile.checkLeftOwner`: once nothing riding with its owner touches
+/// its swept box grown by 1, it may hit them.
+fn check_left_owner(e: &mut NonLivingEntity, id: i32, world: &TickWorld<'_>) {
+    if e.left_owner {
+        return;
+    }
+    let reach = e
+        .dimensions_box(*e.position)
+        .expand(e.velocity)
+        .inflate(DVec3::ONE);
+    e.left_owner = match owner_root(e, world) {
+        None => true,
+        Some(root) => !world
+            .targets
+            .iter()
+            .any(|t| t.id != id && t.root == root && t.aabb.intersects(&reach)),
+    };
 }
 
 /// `Entity.updateFluidInteraction` for water, from `baseTick`: whether the
@@ -903,7 +1093,7 @@ fn update_in_water(e: &mut NonLivingEntity, world: &TickWorld<'_>, pushed: bool)
 /// `EyeOfEnder.tick` movement; hits are server-side.
 // TODO: the particles they spawn: underwater bubbles, a fireball's
 // `createParticleTrail` smoke and an eye of ender's PORTAL trail.
-fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
+fn tick_thrown(e: &mut NonLivingEntity, id: i32, world: &TickWorld<'_>) {
     let in_water = e.in_water;
     match e.kind {
         // `EyeOfEnder.tick` runs `baseTick` before it moves.
@@ -925,10 +1115,19 @@ fn tick_thrown(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
             e.velocity *= f64::from(if in_water { 0.8f32 } else { 0.99 });
         }
     }
-    move_clipped(e, world, e.velocity, e.kind != EntityKind::EyeOfEnder);
-    if e.kind != EntityKind::EyeOfEnder {
-        update_in_water(e, world, true);
+    if e.kind == EntityKind::EyeOfEnder {
+        e.position += e.velocity;
+        return;
     }
+    // `ProjectileUtil.getHitResultOnMoveVector`: the block on the way, then
+    // the nearest entity before it.
+    let from = *e.position;
+    let to = block_hit(e, world, e.velocity).unwrap_or(from + e.velocity);
+    let to = nearest_entity_hit(e, id, world, from, to).map_or(to, |(_, hit)| hit);
+    e.position = Position::from(to);
+    // `super.tick()`: `Projectile.checkLeftOwner`, then `baseTick`.
+    check_left_owner(e, id, world);
+    update_in_water(e, world, true);
 }
 
 /// `FireworkRocketEntity.tick`'s free flight; an attached rocket isn't drawn.
@@ -1100,7 +1299,33 @@ mod tests {
             players: &[],
             owner_of: &|_| None,
             pickup_target_of: &|_| None,
+            targets: &[],
         }
+    }
+
+    /// A pig-sized target standing at `x`, 64, 0.5.
+    fn pig_at(id: i32, x: f64) -> HitTarget {
+        let position = DVec3::new(x, 64.0, 0.5);
+        HitTarget {
+            id,
+            position,
+            aabb: Aabb::from_center(position, 0.45, 0.45),
+            root: id,
+            takes_arrow: false,
+        }
+    }
+
+    /// A projectile `kind` at 0.5, 64.5, 0.5 heading +x at 2 blocks a
+    /// tick, owned by entity 7, on its `tick`th tick.
+    fn flying(kind: EntityKind, tick: u32) -> NonLivingStore {
+        let mut store = spawn(kind, DVec3::new(0.5, 64.5, 0.5), 0);
+        let e = store.entities.get_mut(&1).unwrap();
+        e.velocity = DVec3::new(2.0, 0.0, 0.0);
+        e.no_gravity = true;
+        e.first_tick = false;
+        e.tick_count = tick;
+        e.owner = Some(7);
+        store
     }
 
     fn spawn(kind: EntityKind, at: DVec3, data: i32) -> NonLivingStore {
@@ -1378,6 +1603,69 @@ mod tests {
             clip(&arrow(67.0), DVec3::new(8.5, 64.5, 8.5)),
             Some(DVec3::new(8.5, 66.0, 8.5))
         );
+    }
+
+    /// `ThrowableProjectile.tick` stops at the first entity on its way.
+    #[test]
+    fn a_snowball_stops_at_a_pig() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let targets = [pig_at(2, 2.0)];
+        let world = TickWorld {
+            targets: &targets,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Snowball, 1);
+        store.tick(&world);
+        // The pig's box starts at x 1.55.
+        assert_eq!(store.get(1).unwrap().position.x, 1.55);
+    }
+
+    /// An arrow stops at a mob it can't hurt on the client, and is gone
+    /// after hitting a frame's `hurtClient`; a piercing one passes both.
+    #[test]
+    fn arrows_hit_mobs_and_frames() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let mob = [pig_at(2, 2.0)];
+        let world = TickWorld {
+            targets: &mob,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Arrow, 1);
+        assert!(store.tick(&world).is_empty());
+        assert_eq!(store.get(1).unwrap().position.x, 1.55);
+
+        let frame = [HitTarget {
+            takes_arrow: true,
+            ..pig_at(3, 2.0)
+        }];
+        let world = TickWorld {
+            targets: &frame,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Arrow, 1);
+        assert_eq!(store.tick(&world), vec![1]);
+
+        let mut store = flying(EntityKind::Arrow, 1);
+        store.entities.get_mut(&1).unwrap().pierce_level = 1;
+        assert!(store.tick(&world).is_empty());
+        assert_eq!(store.get(1).unwrap().position.x, 2.5);
+    }
+
+    /// `Projectile.canHitEntity`: the owner is passed until the projectile
+    /// has left it.
+    #[test]
+    fn projectiles_pass_their_owner_until_they_leave_it() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let owner = [pig_at(7, 2.0)];
+        let world = TickWorld {
+            targets: &owner,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Snowball, 1);
+        store.tick(&world);
+        let snowball = store.get(1).unwrap();
+        assert_eq!(snowball.position.x, 0.5 + 2.0 * f64::from(0.99f32));
+        assert!(!snowball.left_owner);
     }
 
     /// `Entity.move` stops an orb along the axis it hit.

@@ -17,7 +17,7 @@ use crate::app::input::{self, InputState};
 use crate::attribute::{AttributeKind, AttributeMap};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
-use crate::entity::{EntityStore, living_entity_dimensions};
+use crate::entity::{EntityStore, living_entity_aabb};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
@@ -2127,7 +2127,7 @@ fn nearest_entity_hit(
                 && entity.equipment(EquipmentSlot::Body).is_some();
             (
                 entity_id,
-                living_entity_dimensions(entity).make_bounding_box(entity_pos),
+                living_entity_aabb(entity),
                 entity_pos,
                 !swallowed,
             )

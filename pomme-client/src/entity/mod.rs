@@ -1026,7 +1026,7 @@ pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimension
     dims
 }
 
-fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
+pub(crate) fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
     let dims = living_entity_dimensions(entity);
     Aabb::from_center(
         entity.position.into(),
@@ -1961,6 +1961,15 @@ impl ItemEntityStore {
             entity.damage = damage;
             entity.count = count;
             entity.stack = Some(stack);
+        }
+    }
+
+    /// `ItemEntity.DATA_ITEM` set empty: nothing draws.
+    pub fn clear_item(&mut self, id: i32) {
+        if let Some(entity) = self.items.get_mut(&id) {
+            entity.item_name.clear();
+            entity.count = 0;
+            entity.stack = None;
         }
     }
 

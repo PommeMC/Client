@@ -7211,6 +7211,68 @@ pub(crate) fn pickup_target(
     Some(feet.lerp(eye, 0.5))
 }
 
+/// What a projectile can hit this tick (`canBeHitByProjectile`): every
+/// alive, pickable entity, with the vehicle it rides at the root.
+fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
+    use crate::entity::non_living::HitTarget;
+    let mut vehicle_of: HashMap<i32, i32> = game
+        .vehicle_passengers
+        .iter()
+        .flat_map(|(&vehicle, riders)| riders.iter().map(move |&rider| (rider, vehicle)))
+        .collect();
+    if let Some(vehicle) = game.riding_vehicle_id {
+        vehicle_of.insert(game.player.entity_id, vehicle);
+    }
+    // `getRootVehicle`, bounded against a malformed loop.
+    let root = |mut id: i32| {
+        for _ in 0..vehicle_of.len() {
+            match vehicle_of.get(&id) {
+                Some(&vehicle) => id = vehicle,
+                None => break,
+            }
+        }
+        id
+    };
+    let mut targets = Vec::new();
+    if !crate::player::is_spectator(game.player.game_mode) && !game.dead {
+        targets.push(HitTarget {
+            id: game.player.entity_id,
+            position: *game.player.position,
+            aabb: game.player.bounding_box(),
+            root: root(game.player.entity_id),
+            takes_arrow: false,
+        });
+    }
+    for (&id, e) in &game.entity_store.living {
+        let boat = crate::entity::is_boat(e.entity_type);
+        if (boat || e.health > 0.0) && e.is_pickable() && !game.tab_list.is_spectator(e) {
+            targets.push(HitTarget {
+                id,
+                position: *e.position,
+                aabb: crate::entity::living_entity_aabb(e),
+                root: root(id),
+                // `VehicleEntity.hurtClient`.
+                takes_arrow: boat,
+            });
+        }
+    }
+    for (id, e) in game.non_living_store.entities() {
+        if e.is_pickable() {
+            targets.push(HitTarget {
+                id,
+                position: *e.position,
+                aabb: e
+                    .bounding_box()
+                    .unwrap_or_else(|| e.dimensions_box(*e.position)),
+                root: root(id),
+                // `BlockAttachedEntity.hurtClient`.
+                takes_arrow: e.is_hanging(),
+            });
+        }
+    }
+    targets
+}
+
 /// The non-living entities' client tick, after the item entities'; the ids
 /// it discarded.
 fn tick_non_living(game: &mut GameState) -> Vec<i32> {
@@ -7265,12 +7327,14 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
     let local_player = &game.player;
     let entities = &game.entity_store;
     let pickup_target_of = |id: i32| pickup_target(local_player, entities, id);
+    let targets = hit_targets(game);
     let world = crate::entity::non_living::TickWorld {
         chunks: &game.chunk_store,
         block_state_table: game.block_registry.block_state_table(),
         players: &players,
         owner_of: &owner_of,
         pickup_target_of: &pickup_target_of,
+        targets: &targets,
     };
     game.non_living_store.tick(&world)
 }

@@ -3219,6 +3219,10 @@ impl AppCore {
                     head_y_rot_deg,
                     data,
                 } => {
+                    // `ClientLevel.addEntity` drops whatever held the id.
+                    if game.entity_kinds.contains_key(&id) {
+                        self.remove_entities(renderer, game, &[id]);
+                    }
                     game.entity_positions.insert(id, position);
                     game.entity_kinds.insert(id, entity_type);
                     game.silent_entities.remove(&id);
@@ -3451,6 +3455,9 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::EntityItemCleared { id, index } => {
+                    if index == 8 {
+                        game.item_entity_store.clear_item(id);
+                    }
                     game.non_living_store.set_item(id, index, None);
                     sync_hanging_position(game, id);
                 }
