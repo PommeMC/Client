@@ -1663,7 +1663,7 @@ fn normalize_tiny_velocity(velocity: &mut Velocity) {
     }
 }
 
-fn mth_equal(a: f64, b: f64) -> bool {
+pub(crate) fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < MTH_EQUAL_EPSILON
 }
 

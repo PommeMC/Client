@@ -19,6 +19,7 @@ use super::dimensions::EntityDimensions;
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::CollisionContext;
 use crate::physics::collision::{CollisionWorld, resolve_collision};
+use crate::physics::movement::mth_equal;
 use crate::position::BlockPos;
 use crate::world::block::BlockStateTable;
 pub use crate::world::block::model::Direction;
@@ -121,12 +122,16 @@ pub struct NonLivingEntity {
     pub prev_x_rot: f32,
     /// `Entity.tickCount`.
     pub tick_count: u32,
-    /// The add-entity packet's data: a projectile's owner id.
-    pub owner: i32,
+    /// `Projectile.getOwner`: the add-entity packet's data, kept only when
+    /// that entity was loaded at spawn (`recreateFromPacket`).
+    owner: Option<i32>,
     /// `Entity.DATA_SHARED_FLAGS_ID`.
     pub shared_flags: u8,
     no_gravity: bool,
     on_ground: bool,
+    /// `Entity.verticalCollision` and `verticalCollisionBelow`.
+    vertical_collision: bool,
+    vertical_collision_below: bool,
     /// `Entity.wasTouchingWater`, as the last tick's end left it.
     in_water: bool,
     horizontal_collision: bool,
@@ -190,10 +195,12 @@ impl NonLivingEntity {
             prev_y_rot: y_rot,
             prev_x_rot: x_rot,
             tick_count: 0,
-            owner: 0,
+            owner: None,
             shared_flags: 0,
             no_gravity: false,
             on_ground: false,
+            vertical_collision: false,
+            vertical_collision_below: false,
             in_water: false,
             horizontal_collision: false,
             first_tick: true,
@@ -271,6 +278,11 @@ impl NonLivingEntity {
             let center = (aabb.min + aabb.max) / 2.0;
             self.position = Position::from(center);
             self.prev_position = self.position;
+            // `ItemFrame.recalculateBoundingBox` decodes later moves from
+            // the centre; a painting keeps the packet's position.
+            if is_item_frame(self.kind) {
+                self.server_pos = center;
+            }
         }
     }
 
@@ -329,13 +341,21 @@ impl NonLivingEntity {
         self.kind == EntityKind::Painting || is_item_frame(self.kind)
     }
 
-    /// `AbstractArrow.setInGround`; landing quivers through
-    /// `onSyncedDataUpdated`, which only a change fires.
+    /// `AbstractArrow.setInGround`: the client's own `set`, which fires
+    /// `onSyncedDataUpdated` only for a change.
     fn set_in_ground(&mut self, in_ground: bool) {
-        if in_ground && !self.in_ground && !self.first_tick && self.shake_time <= 0 {
+        if in_ground != self.in_ground {
+            self.sync_in_ground(in_ground);
+        }
+    }
+
+    /// `IN_GROUND` from the server, which fires `onSyncedDataUpdated` changed
+    /// or not: a landing quivers.
+    fn sync_in_ground(&mut self, in_ground: bool) {
+        self.in_ground = in_ground;
+        if in_ground && !self.first_tick && self.shake_time <= 0 {
             self.shake_time = SHAKE_TIME;
         }
-        self.in_ground = in_ground;
     }
 
     /// `Entity.isPickable`: only `BlockAttachedEntity` says yes here.
@@ -459,10 +479,19 @@ impl NonLivingStore {
             // translation carries an older wire's `add_experience_orb`
             // value here instead.
             entity.xp_value = data;
-        } else {
-            entity.owner = data;
         }
         self.entities.insert(id, entity);
+    }
+
+    /// `Projectile.recreateFromPacket`: the add-entity data names the owner,
+    /// which the caller passes only if that entity is loaded.
+    pub fn set_owner(&mut self, id: i32, owner: i32) {
+        if let Some(e) = self.entities.get_mut(&id)
+            && !e.is_hanging()
+            && e.kind != EntityKind::ExperienceOrb
+        {
+            e.owner = Some(owner);
+        }
     }
 
     pub fn contains(&self, id: i32) -> bool {
@@ -539,7 +568,7 @@ impl NonLivingStore {
             }
             // `AbstractArrow.ID_FLAGS` and `IN_GROUND`.
             (8, MetaValue::Byte(flags)) if is_arrow(e.kind) => e.arrow_flags = flags,
-            (10, MetaValue::Bool(in_ground)) if is_arrow(e.kind) => e.set_in_ground(in_ground),
+            (10, MetaValue::Bool(in_ground)) if is_arrow(e.kind) => e.sync_in_ground(in_ground),
             // `Arrow.ID_EFFECT_COLOR`.
             (11, MetaValue::Int(color)) if e.kind == EntityKind::Arrow => e.arrow_color = color,
             // `ThrownTrident.ID_LOYALTY`.
@@ -734,7 +763,7 @@ fn tick_trident_return(e: &mut NonLivingEntity, world: &TickWorld<'_>) -> bool {
     if e.trident_loyalty == 0 || !(e.dealt_damage || e.is_no_physics()) {
         return true;
     }
-    let Some(owner) = (world.owner_of)(e.owner) else {
+    let Some(owner) = e.owner.and_then(world.owner_of) else {
         return true;
     };
     // `isAcceptibleReturnOwner`: a client never sees a `ServerPlayer`.
@@ -952,21 +981,42 @@ fn tick_orb(e: &mut NonLivingEntity, world: &TickWorld<'_>) {
     }
     let fall_speed = e.velocity.y;
     let movement = e.velocity;
-    let (delta, on_ground) = move_with_collision(e, world, SIZE, movement);
+    let (delta, _) = move_with_collision(e, world, SIZE, movement);
     e.position += delta;
     if let Some((target, steps)) = e.interpolation {
         // `AbstractInterpolationHandler.applyPredictedMovement`.
         e.interpolation = Some((target + delta, steps));
     }
-    e.on_ground = on_ground;
+    // `Entity.move`: the vertical state only updates when it moved
+    // vertically, as the client isn't authoritative for an orb.
+    let moved_vertically = delta.y.abs() > 0.0;
+    if moved_vertically {
+        e.vertical_collision = delta.y != movement.y;
+        e.vertical_collision_below = e.vertical_collision && delta.y < 0.0;
+        e.on_ground = e.vertical_collision_below;
+    }
+    let x_collision = !mth_equal(delta.x, movement.x);
+    let z_collision = !mth_equal(delta.z, movement.z);
+    // `restituteMovementAfterCollisions`: an orb doesn't bounce off walls.
+    // TODO: a bouncy block's restitution (`getBlockBounciness`) under it.
+    if moved_vertically && e.vertical_collision || x_collision || z_collision {
+        if x_collision {
+            e.velocity.x = 0.0;
+        }
+        if z_collision {
+            e.velocity.z = 0.0;
+        }
+        if e.vertical_collision {
+            e.velocity.y = 0.0;
+        }
+    }
     // TODO: per-block friction (ice, slime); vanilla multiplies by the block
     // below's, 0.6 by default.
-    let friction = f64::from(if on_ground { 0.98f32 * 0.6 } else { 0.98 });
+    let friction = f64::from(if e.on_ground { 0.98f32 * 0.6 } else { 0.98 });
     e.velocity *= friction;
-    let vertical_collision_below = movement.y < 0.0 && delta.y != movement.y;
     // `getGravity()` is 0 for a weightless orb.
     let gravity = if e.no_gravity { 0.0 } else { GRAVITY };
-    if vertical_collision_below && fall_speed < -gravity {
+    if e.vertical_collision_below && fall_speed < -gravity {
         e.velocity.y = -fall_speed * 0.4;
     }
 }
@@ -1065,6 +1115,10 @@ mod tests {
         store.apply_entity_data(1, 10, MetaValue::Bool(false));
         store.apply_entity_data(1, 10, MetaValue::Bool(true));
         assert_eq!(store.get(1).unwrap().shake_time, SHAKE_TIME);
+        // The server's value quivers it again, unchanged or not.
+        store.entities.get_mut(&1).unwrap().shake_time = 0;
+        store.apply_entity_data(1, 10, MetaValue::Bool(true));
+        assert_eq!(store.get(1).unwrap().shake_time, SHAKE_TIME);
     }
 
     /// A block appearing around a flying arrow lands it, quivering.
@@ -1135,6 +1189,52 @@ mod tests {
         store.teleport(1, Position::new(5.0, 64.0, 5.0), None);
         store.move_delta(1, DVec3::new(1.0, 0.0, 0.0));
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(6.0, 64.0, 5.0));
+    }
+
+    /// `ItemFrame.recalculateBoundingBox` moves the decoding base to the
+    /// frame's centre, so a move lands from there.
+    #[test]
+    fn item_frames_decode_moves_from_their_centre() {
+        // Facing north on block (4, 70, -3): centred at x 4.5.
+        let mut store = spawn(EntityKind::ItemFrame, DVec3::new(4.0, 70.0, -3.0), 2);
+        store.move_delta(1, DVec3::new(0.6, 0.0, 0.0));
+        // 4.5 + 0.6 is in block 5, where the corner's 4.6 isn't.
+        assert_eq!(store.get(1).unwrap().position.x, 5.5);
+    }
+
+    /// `Projectile.recreateFromPacket` keeps an owner only for a projectile.
+    #[test]
+    fn only_projectiles_take_an_owner() {
+        let mut store = spawn(EntityKind::Trident, DVec3::ZERO, 7);
+        assert_eq!(store.get(1).unwrap().owner, None);
+        store.set_owner(1, 7);
+        assert_eq!(store.get(1).unwrap().owner, Some(7));
+        let mut orbs = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 7);
+        orbs.set_owner(1, 7);
+        assert_eq!(orbs.get(1).unwrap().owner, None);
+    }
+
+    /// `Entity.move` stops an orb along the axis it hit.
+    #[test]
+    fn an_orb_stops_at_a_wall() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let stone = BlockStateTable::native().find_state("stone", &[]);
+        chunks.set_block_state(9, 64, 8, stone, BlockStateTable::native());
+        let mut store = spawn(EntityKind::ExperienceOrb, DVec3::new(8.6, 64.0, 8.5), 1);
+        let orb = store.entities.get_mut(&1).unwrap();
+        orb.first_tick = false;
+        orb.velocity = DVec3::new(0.5, 0.0, 0.0);
+        let world = TickWorld {
+            chunks: &chunks,
+            block_state_table: BlockStateTable::native(),
+            players: &[],
+            owner_of: &|_| None,
+            pickup_target_of: &|_| None,
+        };
+        store.tick(&world);
+        let orb = store.get(1).unwrap();
+        assert_eq!(orb.position.x, 8.75);
+        assert_eq!(orb.velocity.x, 0.0);
     }
 
     #[test]

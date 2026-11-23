@@ -3301,21 +3301,45 @@ fn native_entity_kind(
 }
 
 /// 1.21.4 spawned XP orbs with `add_experience_orb`, which 1.21.5 dropped for
-/// `add_entity`: the orb's value rides in the data field.
+/// `add_entity`: a UUID from the id, the wire's orb type, zero velocity and
+/// rotations, and the orb's value in the data field.
 #[test]
 fn translate_add_experience_orb_769() {
+    let position: Vec<u8> = [1.5f64, 64.0, -2.5]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect();
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
         old_id(769, Direction::Clientbound, "add_experience_orb"),
     );
     wire::write_varint(&mut old, 42); // entity id
-    old.extend_from_slice(&1.5f64.to_be_bytes());
-    old.extend_from_slice(&64.0f64.to_be_bytes());
-    old.extend_from_slice(&(-2.5f64).to_be_bytes());
+    old.extend_from_slice(&position);
     old.extend_from_slice(&37i16.to_be_bytes());
 
     let translation = translation_for(769);
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "add_entity")
+            .unwrap(),
+    );
+    expected.push(42);
+    expected.extend(43u128.to_be_bytes()); // UUID
+    wire::write_varint(&mut expected, wire_entity_type(769, "experience_orb"));
+    expected.extend(&position);
+    expected.push(0); // zero `LpVec3` velocity
+    expected.extend([0, 0, 0]); // rotations
+    expected.push(37); // data
+    assert_eq!(
+        *translation
+            .translate_game_frame(old.clone().into_boxed_slice())
+            .unwrap(),
+        *expected
+    );
+
     let pomme_protocol::entity::EntityPacket::Add {
         id,
         entity_type,
@@ -4147,15 +4171,20 @@ fn lowers_26_3_serverbound_layouts_to_the_games_26_2_bytes() {
     );
 }
 
-/// A wire `add_entity` (1.21.5 and older: velocity as trailing shorts) for
-/// entity 9 of entity type `kind`.
-fn old_add_entity(protocol: i32, kind: &str) -> Vec<u8> {
-    let types = pomme_protocol::RegistryTable::for_protocol(protocol).unwrap();
-    let wire_type = types
+/// The id `protocol` gives entity type `kind`.
+fn wire_entity_type(protocol: i32, kind: &str) -> u32 {
+    pomme_protocol::RegistryTable::for_protocol(protocol)
+        .unwrap()
         .names(pomme_protocol::ClientRegistry::EntityType)
         .iter()
         .position(|n| n == kind)
-        .unwrap() as u32;
+        .unwrap() as u32
+}
+
+/// A wire `add_entity` (1.21.5 and older: velocity as trailing shorts) for
+/// entity 9 of entity type `kind`.
+fn old_add_entity(protocol: i32, kind: &str) -> Vec<u8> {
+    let wire_type = wire_entity_type(protocol, kind);
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,

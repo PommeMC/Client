@@ -101,6 +101,8 @@ fn push_entity(
     // TODO: a burning entity's flame (`EntityRenderDispatcher.submit`'s
     // `submitFlame`), which every fireball shows: `AbstractHurtingProjectile`
     // sets itself alight each tick. Pomme draws no entity fire yet.
+    // TODO: a glowing painting's or orb's outline; the custom geometry has no
+    // outline pass.
     if let Some(style) = non_living::thrown_item_style(e.kind) {
         // `ThrowableProjectile.shouldRenderAtSqrDistance`'s first two ticks,
         // and `Fireball`'s and `EyeOfEnder`'s copies of it.

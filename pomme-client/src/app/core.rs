@@ -3253,6 +3253,11 @@ impl AppCore {
                             x_rot_deg,
                             data,
                         );
+                        if data == game.player.entity_id
+                            || game.entity_store.living.contains_key(&data)
+                        {
+                            game.non_living_store.set_owner(id, data);
+                        }
                         // `Painting.defineSynchedData`'s default, registry
                         // entry 0, which the server never sends.
                         if entity_type == pomme_registry::builtin::EntityKind::Painting {
