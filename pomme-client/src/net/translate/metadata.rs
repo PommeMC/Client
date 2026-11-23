@@ -9,10 +9,12 @@ use super::*;
 /// a serializer the native version dropped (1.21.8's `compound_tag`) is
 /// stripped rather than failing the packet. An item-stack value can't
 /// always be walked without full component codecs — the remainder is copied
-/// verbatim, which is correct unless a shifted serializer follows one (no
-/// vanilla entity sends one after an untranslatable stack). `lift` is the
-/// index from which the entity's wire numbers its values one lower than 26.3
-/// (`SessionState::index_lifts`).
+/// verbatim, which is correct unless a shifted serializer or a lifted index
+/// follows one. `lift` is the index from which the entity's wire numbers its
+/// values one lower than 26.3 (`SessionState::index_lifts`).
+/// TODO: an item frame's rotation after an unwalkable stack (1.20.4 and
+/// older) keeps its wire index, where it reads as the frame's item and is
+/// ignored; the item itself still lands.
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
 /// TODO: rewrite `painting_variant` values before 1.21.2: a plain registry

@@ -3749,8 +3749,9 @@ pub fn update_game(
             BarChoice::Empty => hud::ContextualBarKind::Empty,
         };
         // Vanilla `renderMaxAttackIndicator`: the picked entity is living
-        // (implicit: pomme entity hits only come from `living`), alive, at
-        // full charge, and the weapon is slow enough to matter (delay > 5).
+        // (the `living` lookup, as frames and fireballs are picked too),
+        // alive, at full charge, and the weapon is slow enough to matter
+        // (delay > 5).
         // TODO: vanilla also skips it when the active item's ATTACK_RANGE
         // component says the hit is out of range (spears).
         let delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);

@@ -72,8 +72,8 @@ pub fn build(
     out
 }
 
-/// `live` is false for a pickup's frozen copy, which has no outline or
-/// shadow and isn't culled.
+/// `live` is false for a pickup's frozen copy, which isn't culled, has no
+/// outline, and keeps the light it had where it was picked up.
 fn push_entity(
     out: &mut NonLivingRenders,
     renderer: &mut Renderer,
@@ -93,7 +93,8 @@ fn push_entity(
         None
     };
     let light = || {
-        let eye = position + DVec3::Y * f64::from(EntityDimensions::eye_height(e.kind));
+        let lit_at = if live { position } else { e.position };
+        let eye = lit_at + DVec3::Y * f64::from(EntityDimensions::eye_height(e.kind));
         entity_light(frame.world_light, e.kind, eye, e.is_on_fire(), 0)
     };
     let relative = (*position - frame.anchor).as_vec3();
@@ -135,7 +136,7 @@ fn push_entity(
             out.quads
                 .push(orb(e, relative, frame.orientation, partial, light()));
             // `extractShadow` skips an invisible entity.
-            if live && !e.is_invisible() {
+            if !e.is_invisible() {
                 out.shadows.push(ShadowCaster {
                     position: *position,
                     radius: ORB_SHADOW.0,

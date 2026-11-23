@@ -1040,7 +1040,8 @@ fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
 // TODO: once these kinds are modeled: Vex ticks with noPhysics (no push),
 // and Warden / Creaking gate the reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
-    // `Parrot.doPush` skips players; `ArmorStand.doPush` does nothing.
+    // `Parrot.doPush` skips players; `ArmorStand.isPushable` keeps stands out
+    // of the player's `getPushableEntities`.
     !matches!(
         entity.entity_type,
         EntityKind::Bat | EntityKind::Parrot | EntityKind::ArmorStand
