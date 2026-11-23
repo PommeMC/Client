@@ -566,32 +566,27 @@ impl NonLivingStore {
         }
     }
 
-    /// `handleEntityPositionSync` (no velocity) or `handleTeleportEntity`.
-    pub fn teleport(
-        &mut self,
-        id: i32,
-        position: Position,
-        velocity: Option<DVec3>,
-        on_ground: bool,
-    ) {
+    /// `handleEntityPositionSync` (no velocity) or `handleTeleportEntity`;
+    /// [`Self::rotate`] follows with the rest.
+    pub fn teleport(&mut self, id: i32, position: Position, velocity: Option<DVec3>) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.server_pos = *position;
             e.set_position(position, true);
             if let Some(velocity) = velocity {
                 e.velocity = velocity;
             }
-            e.on_ground = on_ground;
         }
     }
 
-    /// A move packet's rotation: these entities snap
-    /// (`InterpolationHandler.NO_OP`).
-    pub fn rotate(&mut self, id: i32, y_rot: f32, x_rot: f32) {
-        if let Some(e) = self.entities.get_mut(&id)
-            && !e.is_hanging()
-        {
-            e.y_rot = y_rot;
-            e.x_rot = x_rot;
+    /// A move packet's rotation, which these entities snap to
+    /// (`InterpolationHandler.NO_OP`), and its `setOnGround`.
+    pub fn rotate(&mut self, id: i32, y_rot: f32, x_rot: f32, on_ground: bool) {
+        if let Some(e) = self.entities.get_mut(&id) {
+            e.on_ground = on_ground;
+            if !e.is_hanging() {
+                e.y_rot = y_rot;
+                e.x_rot = x_rot;
+            }
         }
     }
 
@@ -1476,7 +1471,7 @@ mod tests {
     #[test]
     fn a_new_orb_eases_to_its_first_move() {
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
-        store.teleport(1, Position::from(DVec3::X), None, false);
+        store.teleport(1, Position::from(DVec3::X), None);
         let orb = store.get(1).unwrap();
         assert_eq!(*orb.position, DVec3::ZERO);
         assert_eq!(orb.interpolation, Some((DVec3::X, INTERPOLATION_STEPS)));
@@ -1517,7 +1512,7 @@ mod tests {
         store.entities.get_mut(&1).unwrap().position = Position::new(0.0, 64.0, 3.0);
         store.move_delta(1, DVec3::new(0.0, 0.0, 1.5), false);
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(0.0, 64.0, 1.5));
-        store.teleport(1, Position::new(5.0, 64.0, 5.0), None, false);
+        store.teleport(1, Position::new(5.0, 64.0, 5.0), None);
         store.move_delta(1, DVec3::new(1.0, 0.0, 0.0), false);
         assert_eq!(*store.get(1).unwrap().position, DVec3::new(6.0, 64.0, 5.0));
     }
@@ -1565,7 +1560,7 @@ mod tests {
     #[test]
     fn a_far_teleport_snaps() {
         let mut store = spawn(EntityKind::ExperienceOrb, DVec3::ZERO, 1);
-        store.teleport(1, Position::new(100.0, 0.0, 0.0), None, false);
+        store.teleport(1, Position::new(100.0, 0.0, 0.0), None);
         let orb = store.get(1).unwrap();
         assert_eq!(orb.position.x, 100.0);
         assert_eq!(orb.prev_position.x, 100.0);

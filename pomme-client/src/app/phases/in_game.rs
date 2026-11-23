@@ -7251,8 +7251,8 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
                 position: *e.position,
                 aabb: crate::entity::living_entity_aabb(e),
                 root: root(id),
-                // `VehicleEntity.hurtClient`.
-                takes_arrow: boat,
+                // `VehicleEntity.hurtClient` and `RemotePlayer.hurtClient`.
+                takes_arrow: boat || e.entity_type == EntityKind::Player,
             });
         }
     }
