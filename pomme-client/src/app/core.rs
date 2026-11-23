@@ -2954,7 +2954,7 @@ impl AppCore {
                     fill_color,
                     collision_rule,
                     name_tag_visibility,
-                    see_friendly_invisibles,
+                    options,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -2966,7 +2966,7 @@ impl AppCore {
                         fill_color,
                         collision_rule,
                         name_tag_visibility,
-                        see_friendly_invisibles,
+                        options,
                         members,
                     );
                 }

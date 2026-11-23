@@ -3097,7 +3097,7 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
-        let discarded = tick_non_living(game);
+        let discarded = tick_non_living(game, core.user.uuid);
         core.remove_entities(&mut gfx.renderer, game, &discarded);
         if !game.deterministic {
             game.level_runtime.animate_tick(
@@ -7240,6 +7240,7 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
             position: *game.player.position,
             aabb: game.player.bounding_box(),
             root: root(game.player.entity_id),
+            is_player: true,
             takes_arrow: false,
         });
     }
@@ -7251,6 +7252,7 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
                 position: *e.position,
                 aabb: crate::entity::living_entity_aabb(e),
                 root: root(id),
+                is_player: e.entity_type == EntityKind::Player,
                 // `VehicleEntity.hurtClient` and `RemotePlayer.hurtClient`.
                 takes_arrow: boat || e.entity_type == EntityKind::Player,
             });
@@ -7265,6 +7267,7 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
                     .bounding_box()
                     .unwrap_or_else(|| e.dimensions_box(*e.position)),
                 root: root(id),
+                is_player: false,
                 // `BlockAttachedEntity.hurtClient`.
                 takes_arrow: e.is_hanging(),
             });
@@ -7275,7 +7278,7 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
 
 /// The non-living entities' client tick, after the item entities'; the ids
 /// it discarded.
-fn tick_non_living(game: &mut GameState) -> Vec<i32> {
+fn tick_non_living(game: &mut GameState, local_uuid: uuid::Uuid) -> Vec<i32> {
     use crate::entity::non_living::OrbTarget;
     // `ExperienceOrb.followNearbyPlayer` skips spectators.
     let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| OrbTarget {
@@ -7328,6 +7331,25 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
     let entities = &game.entity_store;
     let pickup_target_of = |id: i32| pickup_target(local_player, entities, id);
     let targets = hit_targets(game);
+    // Players' scoreboard names, for their teams.
+    let player_name = |id: i32| {
+        if id == player_id {
+            Some(crate::entity::glowing::scoreboard_name(
+                &game.tab_list,
+                local_uuid,
+                Some(local_uuid),
+            ))
+        } else {
+            living.get(&id).map(|e| e.scoreboard_name(&game.tab_list))
+        }
+    };
+    let teams_allow_damage =
+        |attacker: i32, target: i32| match (player_name(attacker), player_name(target)) {
+            (Some(attacker), Some(target)) => {
+                game.scoreboard.teams_allow_damage(&attacker, &target)
+            }
+            _ => true,
+        };
     let world = crate::entity::non_living::TickWorld {
         chunks: &game.chunk_store,
         block_state_table: game.block_registry.block_state_table(),
@@ -7335,6 +7357,7 @@ fn tick_non_living(game: &mut GameState) -> Vec<i32> {
         owner_of: &owner_of,
         pickup_target_of: &pickup_target_of,
         targets: &targets,
+        teams_allow_damage: &teams_allow_damage,
     };
     game.non_living_store.tick(&world)
 }

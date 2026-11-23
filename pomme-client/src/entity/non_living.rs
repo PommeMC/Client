@@ -466,6 +466,8 @@ pub struct TickWorld<'a> {
     /// What a projectile can hit (`canBeHitByProjectile`: alive and
     /// pickable), as the tick began.
     pub targets: &'a [HitTarget],
+    /// `Entity.doTeamsAllowDamage` between two players, by id.
+    pub teams_allow_damage: &'a dyn Fn(i32, i32) -> bool,
 }
 
 /// An entity a projectile can hit.
@@ -476,6 +478,7 @@ pub struct HitTarget {
     pub aabb: Aabb,
     /// `getRootVehicle`'s id.
     pub root: i32,
+    pub is_player: bool,
     /// Its `hurtClient` takes an arrow's hit: a hanging entity's or a
     /// vehicle's, so a non-piercing arrow goes.
     pub takes_arrow: bool,
@@ -1030,18 +1033,39 @@ fn hit_margin(e: &NonLivingEntity) -> f64 {
     f64::from(((e.tick_count as f32 - 2.0) / 20.0).clamp(0.0, 0.3))
 }
 
-/// The targets `Projectile.canHitEntity` (and an arrow's pierced ids) let
-/// through: not itself, nor its owner's vehicle and riders until it has
-/// left them.
+/// The targets in the projectile's search box (its box swept by its
+/// velocity, grown by 1) that `Projectile.canHitEntity` lets through: not
+/// itself, nor its owner's vehicle and riders until it has left them; for an
+/// arrow, not what it has pierced, nor a player its owning player's team
+/// spares (`AbstractArrow.canHitEntity`).
 fn hit_candidates<'w>(
     e: &'w NonLivingEntity,
     id: i32,
     world: &'w TickWorld<'_>,
 ) -> impl Iterator<Item = HitTarget> + 'w {
+    let search = search_box(e);
     let owner_root = owner_root(e, world).filter(|_| !e.left_owner);
+    let owning_player = e
+        .owner
+        .filter(|&owner| world.targets.iter().any(|t| t.id == owner && t.is_player));
     world.targets.iter().copied().filter(move |target| {
-        target.id != id && Some(target.root) != owner_root && !e.pierced.contains(&target.id)
+        let spared = is_arrow(e.kind)
+            && target.is_player
+            && owning_player.is_some_and(|owner| !(world.teams_allow_damage)(owner, target.id));
+        target.id != id
+            && target.aabb.intersects(&search)
+            && Some(target.root) != owner_root
+            && !e.pierced.contains(&target.id)
+            && !spared
     })
+}
+
+/// Its box swept by its velocity and grown by 1: where it looks for
+/// targets, and for its owner while it leaves them.
+fn search_box(e: &NonLivingEntity) -> Aabb {
+    e.dimensions_box(*e.position)
+        .expand(e.velocity)
+        .inflate(DVec3::ONE)
 }
 
 /// The root vehicle of the projectile's owner, or the owner alone when the
@@ -1062,10 +1086,7 @@ fn check_left_owner(e: &mut NonLivingEntity, id: i32, world: &TickWorld<'_>) {
     if e.left_owner {
         return;
     }
-    let reach = e
-        .dimensions_box(*e.position)
-        .expand(e.velocity)
-        .inflate(DVec3::ONE);
+    let reach = search_box(e);
     e.left_owner = match owner_root(e, world) {
         None => true,
         Some(root) => !world
@@ -1306,6 +1327,7 @@ mod tests {
             owner_of: &|_| None,
             pickup_target_of: &|_| None,
             targets: &[],
+            teams_allow_damage: &|_, _| true,
         }
     }
 
@@ -1317,6 +1339,7 @@ mod tests {
             position,
             aabb: Aabb::from_center(position, 0.45, 0.45),
             root: id,
+            is_player: false,
             takes_arrow: false,
         }
     }
@@ -1667,6 +1690,42 @@ mod tests {
         let arrow = store.get(1).unwrap();
         assert!(arrow.in_ground);
         assert_eq!((arrow.pierce_level, arrow.arrow_flags), (0, 0));
+    }
+
+    /// `AbstractArrow.canHitEntity`: a teammate of the owning player is
+    /// spared; a target past the swept search box isn't looked at.
+    #[test]
+    fn arrows_spare_teammates_and_look_only_nearby() {
+        let chunks = ChunkStore::with_origin_chunk();
+        let owner = HitTarget {
+            is_player: true,
+            ..pig_at(7, -20.0)
+        };
+        let mate = HitTarget {
+            is_player: true,
+            takes_arrow: true,
+            ..pig_at(2, 2.0)
+        };
+        let targets = [owner, mate];
+        let world = TickWorld {
+            targets: &targets,
+            teams_allow_damage: &|_, _| false,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Arrow, 1);
+        assert!(store.tick(&world).is_empty());
+        assert_eq!(store.get(1).unwrap().position.x, 2.5);
+
+        // Outside the box swept by its velocity and grown by 1.
+        let far = [pig_at(2, 4.0)];
+        let world = TickWorld {
+            targets: &far,
+            ..quiet_world(&chunks)
+        };
+        let mut store = flying(EntityKind::Arrow, 1);
+        store.entities.get_mut(&1).unwrap().velocity = DVec3::new(0.5, 0.0, 0.0);
+        let e = store.get(1).unwrap();
+        assert!(hit_candidates(e, 1, &world).next().is_none());
     }
 
     /// `Projectile.canHitEntity`: the owner is passed until the projectile

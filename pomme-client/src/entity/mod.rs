@@ -1810,10 +1810,9 @@ impl LivingEntity {
                 turn_body(self.body_y_rot_deg, y_rot, dx, dz, self.swing_time > 0);
             return;
         }
-        // `ArmorStand.tickHeadTurn`: body and head follow the yaw.
+        // `ArmorStand.tickHeadTurn`: the body follows the yaw.
         if self.entity_type == EntityKind::ArmorStand {
             self.body_y_rot_deg = y_rot;
-            self.head_y_rot_deg = y_rot;
             return;
         }
         // A scared armadillo's control skips its client tick.
