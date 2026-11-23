@@ -110,10 +110,19 @@ impl Item {
     }
 }
 
-/// Vanilla `TeleportToPlayerMenuCategory`: drop spectators, sort by UUID.
+/// Java `UUID.compareTo` as a sort key: the most and least significant halves
+/// compare as signed longs, so a UUID starting `8`-`f` sorts before one
+/// starting `0`-`7`, unlike `Uuid`'s own unsigned byte order.
+fn java_uuid_order(uuid: Uuid) -> (i64, i64) {
+    let (most, least) = uuid.as_u64_pair();
+    (most as i64, least as i64)
+}
+
+/// Vanilla `TeleportToPlayerMenuCategory`: drop spectators, sort by UUID the
+/// way Java compares them.
 fn player_items(players: Vec<&TabListPlayer>) -> Vec<Item> {
     let mut players: Vec<_> = players.into_iter().filter(|p| p.game_mode != 3).collect();
-    players.sort_by_key(|p| p.uuid);
+    players.sort_by_key(|p| java_uuid_order(p.uuid));
     players
         .into_iter()
         .map(|p| Item::Player {
@@ -489,4 +498,34 @@ pub fn build_spectator_menu(
         centered: true,
         shadow: true,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuids_sort_as_java_compares_them() {
+        let uuid = |text: &str| Uuid::parse_str(text).unwrap();
+        let mut uuids = [
+            uuid("00000000-0000-0000-0000-000000000001"),
+            uuid("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            uuid("7fffffff-ffff-ffff-ffff-ffffffffffff"),
+            uuid("80000000-0000-0000-0000-000000000000"),
+            uuid("00000000-0000-0000-8000-000000000000"),
+        ];
+        uuids.sort_by_key(|&id| java_uuid_order(id));
+        // Negative halves come first, in signed order; a set high bit in the
+        // least half only matters between equal most halves.
+        assert_eq!(
+            uuids.map(|id| id.to_string()),
+            [
+                "80000000-0000-0000-0000-000000000000",
+                "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                "00000000-0000-0000-8000-000000000000",
+                "00000000-0000-0000-0000-000000000001",
+                "7fffffff-ffff-ffff-ffff-ffffffffffff",
+            ]
+        );
+    }
 }
