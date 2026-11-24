@@ -1,0 +1,195 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use glam::DVec3;
+
+use super::super::particle::{Particle, ParticleRef, bounds_at, resized_bounds, set_particle_size};
+use super::super::particle_provider::ParticleProvider;
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
+use super::super::resources::particle_resources::SpriteParticleRegistration;
+use super::super::resources::sprite_set::SpriteSet;
+use super::super::single_quad_particle::{
+    SingleQuadParticle, extract_quantized_camera_quad, randomized_quad_size,
+};
+use super::super::types::SimpleParticleType;
+use crate::renderer::chunk::atlas::AtlasRegion;
+use crate::util::random_source::RandomSource;
+use crate::world::level::LevelContext;
+
+// Source FallingParticle configured by NectarFallProvider, not a separate Java
+// class.
+#[pomme_particle_macros::particle_accessors(exclude(friction, speed_up_when_y_motion_is_blocked,))]
+#[pomme_particle_macros::quad_accessors]
+pub struct NectarFallParticle {}
+
+impl NectarFallParticle {
+    fn new(position: DVec3, sprite: AtlasRegion) -> Self {
+        let mut random = fastrand::Rng::new();
+        let lifetime = (4.0_f32 / (random.f32() * 0.9_f32 + 0.1_f32)) as u32;
+        let quad_size = randomized_quad_size(&mut random);
+        Self {
+            position,
+            previous_position: position,
+            velocity: DVec3::ZERO,
+            bounds: resized_bounds(bounds_at(position, 0.2_f32, 0.2_f32), 0.01_f32, 0.01_f32),
+            width: 0.01,
+            height: 0.01,
+            removed: false,
+            on_ground: false,
+            stopped_by_collision: false,
+            has_physics: true,
+            age: 0,
+            lifetime,
+            quad_size,
+            color: [1.0; 3],
+            alpha: 1.0,
+            roll: 0.0,
+            previous_roll: 0.0,
+            sprite,
+            gravity: 0.06_f32,
+        }
+    }
+}
+
+impl Particle for NectarFallParticle {
+    crate::particles::accessors::forward_particle_accessors!(NectarFallParticle);
+
+    fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle> {
+        Some(self)
+    }
+
+    fn tick(&mut self, context: &mut LevelContext<'_>) {
+        if self.removed {
+            return;
+        }
+        self.previous_position = self.position;
+        if self.lifetime == 0 {
+            self.remove();
+            return;
+        }
+        self.lifetime -= 1;
+        self.velocity.y -= f64::from(self.gravity);
+        self.move_by(context, self.velocity);
+        if self.on_ground {
+            self.remove();
+        }
+        if !self.removed {
+            self.velocity *= f64::from(0.98_f32);
+        }
+    }
+
+    fn move_by(&mut self, world: &LevelContext<'_>, displacement: DVec3) {
+        if self.stopped_by_collision {
+            return;
+        }
+        let allowed = if self.has_physics
+            && displacement != DVec3::ZERO
+            && displacement.length_squared() < 10000.0
+        {
+            world.collide(&self.bounds, displacement, self.position.y)
+        } else {
+            displacement
+        };
+        if allowed != DVec3::ZERO {
+            self.bounds = self.bounds.offset(allowed);
+            self.position = DVec3::new(
+                (self.bounds.min.x + self.bounds.max.x) / 2.0,
+                self.bounds.min.y,
+                (self.bounds.min.z + self.bounds.max.z) / 2.0,
+            );
+        }
+        if displacement.y.abs() >= f64::from(1.0e-5_f32) && allowed.y.abs() < f64::from(1.0e-5_f32)
+        {
+            self.stopped_by_collision = true;
+        }
+        self.on_ground = displacement.y != allowed.y && displacement.y < 0.0;
+        if displacement.x != allowed.x {
+            self.velocity.x = 0.0;
+        }
+        if displacement.z != allowed.z {
+            self.velocity.z = 0.0;
+        }
+    }
+
+    fn get_group(&self) -> ParticleRenderType {
+        ParticleRenderType::SingleQuads
+    }
+    fn set_pos(&mut self, position: DVec3) {
+        self.position = position;
+        self.bounds = bounds_at(position, self.width, self.height);
+    }
+    fn set_size(&mut self, width: f32, height: f32) {
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
+    }
+    fn scale(&mut self, factor: f32) {
+        self.quad_size *= factor;
+        self.set_size(0.2_f32 * factor, 0.2_f32 * factor);
+    }
+}
+
+impl SingleQuadParticle for NectarFallParticle {
+    crate::particles::accessors::forward_quad_accessors!(NectarFallParticle);
+
+    fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet) {
+        if !self.removed {
+            self.sprite = sprites.get(self.age, self.lifetime);
+        }
+    }
+    fn get_quad_size(&self, _partial_tick: f32) -> f32 {
+        self.quad_size
+    }
+    fn get_layer(&self) -> ParticleLayer {
+        ParticleLayer::Opaque
+    }
+    fn extract(
+        &self,
+        world: &LevelContext<'_>,
+        view: &ParticleView<'_>,
+        output: &mut Vec<QuadParticleRenderState>,
+    ) {
+        extract_quantized_camera_quad(self, self.previous_roll, world, view, output);
+    }
+}
+
+pub struct NectarFallProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for NectarFallProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        _auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = NectarFallParticle::new(position, sprite);
+        particle.set_lifetime((16.0_f64 / (f64::from(random.next_float()) * 0.8 + 0.2)) as u32);
+        particle.gravity = 0.007_f32;
+        particle.set_color([0.92, 0.782, 0.72]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct NectarFallParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for NectarFallParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(NectarFallProvider {
+            sprites: sprite_set,
+        })
+    }
+}

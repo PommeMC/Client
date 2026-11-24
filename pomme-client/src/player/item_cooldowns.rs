@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use pomme_item::ItemStackData;
 use pomme_item::components::UseCooldown;
 use pomme_registry::builtin::ItemKind;
+use pomme_registry::identifier::Identifier;
 
 /// A cooldown group's identifier. An item's id is held as the item, so the
 /// common lookup (an item without a `use_cooldown` group) doesn't allocate.
@@ -19,13 +20,14 @@ impl CooldownGroup {
     fn parse(id: String) -> Self {
         match id.parse() {
             Ok(kind) => Self::Item(kind),
-            Err(_) => Self::Other(id),
+            Err(_) => Self::Other(Identifier::new(id).to_string()),
         }
     }
 
     /// Vanilla `ItemCooldowns.getCooldownGroup`: the `use_cooldown` group,
     /// else the item's id.
     pub fn of(stack: &ItemStackData) -> Self {
+        // An explicit removal suppresses the default component too.
         match stack
             .component::<UseCooldown>()
             .and_then(|c| c.cooldown_group)

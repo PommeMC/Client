@@ -1,0 +1,302 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use glam::DVec3;
+
+use super::super::particle::{
+    Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, resized_bounds,
+    set_particle_size,
+};
+use super::super::particle_provider::ParticleProvider;
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
+use super::super::resources::particle_resources::SpriteParticleRegistration;
+use super::super::resources::sprite_set::SpriteSet;
+use super::super::single_quad_particle::{
+    SingleQuadParticle, extract_camera_quad, randomized_quad_size,
+};
+use super::super::types::SimpleParticleType;
+use crate::renderer::chunk::atlas::AtlasRegion;
+use crate::util::random_source::RandomSource;
+use crate::world::level::LevelContext;
+
+#[pomme_particle_macros::particle_accessors(exclude(
+    on_ground,
+    stopped_by_collision,
+    gravity,
+    friction,
+    speed_up_when_y_motion_is_blocked,
+))]
+#[pomme_particle_macros::quad_accessors]
+pub struct SuspendedTownParticle {}
+
+impl SuspendedTownParticle {
+    fn new(position: DVec3, auxiliary: DVec3, sprite: AtlasRegion) -> Self {
+        let mut random = fastrand::Rng::new();
+        let bounds = bounds_at(position, 0.2, 0.2);
+        // Preserve the overwritten base lifetime in the constructor's own RNG stream.
+        let _base_lifetime = (4.0_f32 / (random.f32() * 0.9_f32 + 0.1_f32)) as u32;
+        let mut velocity = randomized_motion(&mut random, auxiliary);
+        let mut quad_size = randomized_quad_size(&mut random);
+        let brightness = random.f32() * 0.1_f32 + 0.2_f32;
+        let bounds = resized_bounds(bounds, 0.02, 0.02);
+        quad_size *= random.f32() * 0.6_f32 + 0.5_f32;
+        velocity *= f64::from(0.02_f32);
+        let lifetime = (20.0_f64 / (f64::from(random.f32()) * 0.8_f64 + 0.2_f64)) as u32;
+        Self {
+            position,
+            previous_position: position,
+            velocity,
+            bounds,
+            width: 0.02,
+            height: 0.02,
+            removed: false,
+            has_physics: true,
+            age: 0,
+            lifetime,
+            quad_size,
+            color: [brightness; 3],
+            alpha: 1.0,
+            roll: 0.0,
+            previous_roll: 0.0,
+            sprite,
+        }
+    }
+}
+
+impl Particle for SuspendedTownParticle {
+    crate::particles::accessors::forward_particle_accessors!(SuspendedTownParticle);
+
+    fn as_single_quad(&self) -> Option<&dyn SingleQuadParticle> {
+        Some(self)
+    }
+
+    fn tick(&mut self, context: &mut LevelContext<'_>) {
+        self.previous_position = self.position;
+        // The unsigned remaining counter preserves post-decrement expiry at zero.
+        if self.lifetime == 0 {
+            self.remove();
+        } else {
+            self.lifetime -= 1;
+            self.move_by(context, self.velocity);
+            self.velocity *= 0.99_f64;
+        }
+    }
+
+    fn move_by(&mut self, _world: &LevelContext<'_>, displacement: DVec3) {
+        move_without_collision(&mut self.bounds, &mut self.position, displacement);
+    }
+
+    fn get_group(&self) -> ParticleRenderType {
+        ParticleRenderType::SingleQuads
+    }
+    fn set_pos(&mut self, position: DVec3) {
+        self.position = position;
+        self.bounds = bounds_at(position, self.width, self.height);
+    }
+    fn set_size(&mut self, width: f32, height: f32) {
+        set_particle_size(
+            &mut self.width,
+            &mut self.height,
+            &mut self.bounds,
+            width,
+            height,
+        );
+    }
+    fn scale(&mut self, factor: f32) {
+        self.quad_size *= factor;
+        self.set_size(0.2 * factor, 0.2 * factor);
+    }
+}
+
+impl SingleQuadParticle for SuspendedTownParticle {
+    crate::particles::accessors::forward_quad_accessors!(SuspendedTownParticle);
+
+    fn set_sprite_from_age(&mut self, sprites: &dyn SpriteSet) {
+        if !self.removed {
+            self.sprite = sprites.get(self.age, self.lifetime);
+        }
+    }
+    fn get_quad_size(&self, _partial_tick: f32) -> f32 {
+        self.quad_size
+    }
+    fn get_layer(&self) -> ParticleLayer {
+        ParticleLayer::Opaque
+    }
+    fn extract(
+        &self,
+        world: &LevelContext<'_>,
+        view: &ParticleView<'_>,
+        output: &mut Vec<QuadParticleRenderState>,
+    ) {
+        extract_camera_quad(self, self.previous_roll, world, view, output);
+    }
+}
+
+pub struct SuspendedTownProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for SuspendedTownProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct SuspendedTownParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for SuspendedTownParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(SuspendedTownProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct HappyVillagerProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for HappyVillagerProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct HappyVillagerParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for HappyVillagerParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(HappyVillagerProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct ComposterFillProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for ComposterFillProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        particle.set_lifetime(3 + world.get_random().next_int(5) as u32);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct ComposterFillParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for ComposterFillParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(ComposterFillProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct EggCrackProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for EggCrackProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([1.0_f32; 3]);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct EggCrackParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for EggCrackParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(EggCrackProvider {
+            sprites: sprite_set,
+        })
+    }
+}
+
+pub struct DolphinSpeedProvider {
+    sprites: Rc<dyn SpriteSet>,
+}
+
+impl ParticleProvider<SimpleParticleType> for DolphinSpeedProvider {
+    fn create_particle(
+        &self,
+        _options: &SimpleParticleType,
+        _world: &mut LevelContext<'_>,
+        position: DVec3,
+        auxiliary: DVec3,
+        random: &RandomSource,
+    ) -> Option<ParticleRef> {
+        let sprite = self.sprites.get_random(random);
+        let mut particle = SuspendedTownParticle::new(position, auxiliary, sprite);
+        particle.set_color([0.3, 0.5, 1.0]);
+        particle.set_alpha(1.0_f32 - random.next_float() * 0.7_f32);
+        particle.set_lifetime(particle.get_lifetime() / 2);
+        Some(Rc::new(RefCell::new(particle)))
+    }
+}
+
+pub(in crate::particles) struct DolphinParticleRegistration;
+
+impl SpriteParticleRegistration<SimpleParticleType> for DolphinParticleRegistration {
+    fn create(
+        &self,
+        sprite_set: Rc<dyn SpriteSet>,
+    ) -> Rc<dyn ParticleProvider<SimpleParticleType>> {
+        Rc::new(DolphinSpeedProvider {
+            sprites: sprite_set,
+        })
+    }
+}

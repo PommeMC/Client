@@ -10,11 +10,14 @@
 //! current world queries and a per-pass RNG, independent of coordinate
 //! sampling.
 
+pub(crate) mod block_colors;
 pub(crate) mod block_registry;
 mod block_state_table;
+mod blocks;
 mod condition;
 pub mod json_bundle;
 pub mod model;
+pub(crate) mod particle_appearance;
 pub mod render_assets;
 mod render_props;
 pub mod sound;
@@ -24,6 +27,7 @@ use std::sync::OnceLock;
 
 pub use block_registry::{Block, BlockData};
 pub(crate) use block_state_table::BlockStateTable;
+pub(crate) use blocks::tick_campfires;
 use glam::{DVec3, dvec3};
 use pomme_block::BlockState;
 pub(crate) use render_props::{FaceCover, MeshKind, RenderProps};
