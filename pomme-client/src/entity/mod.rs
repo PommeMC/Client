@@ -2,6 +2,7 @@ pub mod boat;
 pub mod body_rotation;
 pub mod components;
 pub mod dimensions;
+pub mod ender_dragon;
 pub mod glowing;
 pub mod light;
 pub mod non_living;
@@ -938,6 +939,7 @@ pub struct LivingEntity {
     pub axolotl: AxolotlSim,
     pub armadillo: ArmadilloSim,
     pub goat: GoatSim,
+    pub ender_dragon: ender_dragon::EnderDragonSim,
     pub wither: wither::WitherSim,
     body_control: body_rotation::BodyRotationControl,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
@@ -1051,10 +1053,10 @@ pub(crate) fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
 // and Warden / Creaking gate the reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
     // `Parrot.doPush` skips players; `ArmorStand.isPushable` keeps stands out
-    // of the player's `getPushableEntities`.
+    // of the player's `getPushableEntities`; the dragon has `noPhysics`.
     !matches!(
         entity.entity_type,
-        EntityKind::Bat | EntityKind::Parrot | EntityKind::ArmorStand
+        EntityKind::Bat | EntityKind::Parrot | EntityKind::ArmorStand | EntityKind::EnderDragon
     )
 }
 
@@ -1107,6 +1109,7 @@ impl LivingEntity {
         // something changes it.
         let default_health = match entity_type {
             EntityKind::IronGolem => 100.0,
+            EntityKind::EnderDragon => 200.0,
             EntityKind::Wither => 300.0,
             _ => 20.0,
         };
@@ -1223,6 +1226,7 @@ impl LivingEntity {
             axolotl: AxolotlSim::default(),
             armadillo: ArmadilloSim::default(),
             goat: GoatSim::default(),
+            ender_dragon: ender_dragon::EnderDragonSim::default(),
             wither: wither::WitherSim::default(),
             body_control: body_rotation::BodyRotationControl::default(),
             has_egg: false,
@@ -1273,7 +1277,8 @@ impl LivingEntity {
 
     /// `Entity.isPickable`: a marker armor stand can't be targeted.
     pub fn is_pickable(&self) -> bool {
-        !self.is_marker_stand()
+        // `EnderDragon.isPickable`: only its parts are.
+        !self.is_marker_stand() && self.entity_type != EntityKind::EnderDragon
     }
 
     fn is_marker_stand(&self) -> bool {
@@ -1354,8 +1359,15 @@ impl LivingEntity {
     pub fn tick_interpolation(&mut self) {
         self.prev_position = self.position;
         self.prev_look_dir = self.look_dir;
+        self.prev_head_y_rot_deg = self.head_y_rot_deg;
+        self.prev_body_y_rot_deg = self.body_y_rot_deg;
 
-        if !self.interpolate() {
+        let interpolated = self.interpolate();
+        // `EnderDragon.aiStep` replaces `LivingEntity.aiStep`.
+        if self.entity_type == EntityKind::EnderDragon {
+            return;
+        }
+        if !interpolated {
             // `LivingEntity.aiStep` for an entity that can't simulate movement.
             self.velocity *= 0.98;
         }
@@ -1378,7 +1390,6 @@ impl LivingEntity {
             v.y = 0.0;
         }
 
-        self.prev_head_y_rot_deg = self.head_y_rot_deg;
         if self.interp_head_y_rot_steps > 0 {
             self.head_y_rot_deg = lerp_angle(
                 self.head_y_rot_deg,
@@ -1387,8 +1398,6 @@ impl LivingEntity {
             );
             self.interp_head_y_rot_steps -= 1;
         }
-
-        self.prev_body_y_rot_deg = self.body_y_rot_deg;
     }
 
     /// Arm-swing progress 0..1 for the current frame. `swing_time` counts down,
@@ -2239,6 +2248,14 @@ impl EntityStore {
         }
     }
 
+    /// Every dragon's parts, as (id, position, pick box).
+    pub fn dragon_parts(&self) -> impl Iterator<Item = (i32, DVec3, Aabb)> + '_ {
+        self.living
+            .iter()
+            .filter(|(_, e)| e.entity_type == EntityKind::EnderDragon)
+            .flat_map(|(&id, e)| e.ender_dragon.part_boxes(id))
+    }
+
     pub fn spawn_living(
         &mut self,
         id: i32,
@@ -2450,6 +2467,7 @@ impl EntityStore {
             }
             (EntityKind::Axolotl, 19, Bool(b)) => entity.axolotl.playing_dead = b,
             (EntityKind::PolarBear, 18, Bool(b)) => entity.is_standing = b,
+            (EntityKind::EnderDragon, 16, Int(phase)) => entity.ender_dragon.phase = phase,
             (EntityKind::Wither, 16..=18, Int(id)) => {
                 entity.wither.targets[usize::from(index - 16)] = id;
             }
@@ -2838,11 +2856,18 @@ impl EntityStore {
             if entity.hurt_time > 0 {
                 entity.hurt_time -= 1;
             }
-            tick_death_time(
-                entity.health,
-                within_simulation_distance(entity.position, player_position, simulation_distance),
-                &mut entity.death_time,
-            );
+            // `EnderDragon.tickDeath` keeps its own clock.
+            if entity.entity_type != EntityKind::EnderDragon {
+                tick_death_time(
+                    entity.health,
+                    within_simulation_distance(
+                        entity.position,
+                        player_position,
+                        simulation_distance,
+                    ),
+                    &mut entity.death_time,
+                );
+            }
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
@@ -3037,6 +3062,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Wither
                 | EntityKind::Ghast
                 | EntityKind::HappyGhast
+                | EntityKind::EnderDragon
         )
 }
 
@@ -3644,6 +3670,7 @@ mod tests {
             (4, EntityKind::Zombie),
             (5, EntityKind::Zombie),
             (6, EntityKind::Parrot),
+            (7, EntityKind::EnderDragon),
         ] {
             spawn(&mut store, id, kind, Position::new(0.25, 64.0, 0.0));
         }
@@ -3664,12 +3691,14 @@ mod tests {
         let expected = f64::from(0.05_f32) * 0.5;
 
         // A normal mob, a remote player, and a dying mob all push the local
-        // player. Bat and Parrot override the vanilla push path and don't.
+        // player. Bat and Parrot override the vanilla push path and don't, and
+        // the dragon has `noPhysics`.
         assert_eq!(impulse, DVec3::new(-expected * 3.0, 0.0, 0.0));
         assert_eq!(store.living[&1].velocity, DVec3::new(expected, 0.0, 0.0));
         assert_eq!(store.living[&2].velocity, DVec3::new(expected, 0.0, 0.0));
         assert_eq!(store.living[&3].velocity, DVec3::ZERO);
         assert_eq!(store.living[&6].velocity, DVec3::ZERO);
+        assert_eq!(store.living[&7].velocity, DVec3::ZERO);
         // Dead LivingEntity::isPushable is false, so it does not receive the
         // reciprocal impulse even though its tick still pushes the local player.
         assert_eq!(store.living[&4].velocity, DVec3::ZERO);
@@ -3694,6 +3723,35 @@ mod tests {
         entity.interp_steps = 0;
         tick(&mut store);
         assert_eq!(store.living[&1].velocity, DVec3::new(0.98, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_dragon_keeps_its_synced_velocity() {
+        let mut store = EntityStore::new();
+        spawn(
+            &mut store,
+            1,
+            EntityKind::EnderDragon,
+            Position::new(0.0, 64.0, 0.0),
+        );
+        let velocity = DVec3::new(0.002, 0.5, 0.0);
+        store.set_living_motion(1, velocity);
+        tick(&mut store);
+        assert_eq!(store.living[&1].velocity, velocity);
+    }
+
+    #[test]
+    fn the_dragon_itself_is_not_pickable() {
+        let entity = |kind| {
+            LivingEntity::new(
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            )
+        };
+        assert!(entity(EntityKind::Zombie).is_pickable());
+        assert!(!entity(EntityKind::EnderDragon).is_pickable());
     }
 
     #[test]

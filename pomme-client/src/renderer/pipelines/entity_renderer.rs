@@ -202,6 +202,7 @@ pub struct EntityRenderInfo {
     pub panda: entity_model::PandaAnims,
     pub armadillo: entity_model::ArmadilloAnims,
     pub goat: entity_model::GoatAnims,
+    pub ender_dragon: entity_model::EnderDragonAnims,
     pub wither: entity_model::WitherAnims,
     pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
@@ -222,8 +223,8 @@ pub struct EntityRenderInfo {
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
-    /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
-    /// the camera and must never blink out).
+    /// Skip frustum/distance culling: the 3rd-person self entity, which sits at
+    /// the camera and must never blink out, and the dragon.
     pub skip_cull: bool,
     pub shadow: super::entity_shadow::ShadowCaster,
     /// The glowing outline's colour (vanilla `EntityRenderState.outlineColor`),
@@ -303,6 +304,7 @@ impl Default for EntityRenderInfo {
             panda: entity_model::PandaAnims::default(),
             armadillo: entity_model::ArmadilloAnims::default(),
             goat: entity_model::GoatAnims::default(),
+            ender_dragon: entity_model::EnderDragonAnims::default(),
             wither: entity_model::WitherAnims::default(),
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
@@ -969,6 +971,7 @@ enum AnimationType {
     Panda,
     Armadillo,
     Goat,
+    EnderDragon,
     Wither,
     /// Ghast and happy ghast tentacles, plus the happy ghast's harness poses.
     Ghast,
@@ -1309,6 +1312,8 @@ fn mob_definitions() -> Vec<MobDef> {
     const WITHER_ARMOR_TEX: &[&[ResourceId]] = tex_table!("wither" => "wither_armor");
     const SPIDER_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider");
     const SPIDER_EYES_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider_eyes");
+    const DRAGON_TEX: &[&[ResourceId]] = tex_table!("enderdragon" => "dragon");
+    const DRAGON_EYES_TEX: &[&[ResourceId]] = tex_table!("enderdragon" => "dragon_eyes");
     const ENDERMAN_TEX: &[&[ResourceId]] = tex_table!("enderman" => "enderman");
     const ENDERMAN_EYES_TEX: &[&[ResourceId]] = tex_table!("enderman" => "enderman_eyes");
     const SLIME_TEX: &[&[ResourceId]] = tex_table!("slime" => "slime");
@@ -1346,6 +1351,18 @@ fn mob_definitions() -> Vec<MobDef> {
     ) -> VariantDef {
         VariantDef {
             overlay_kind: OverlayKind::BodyTranslucent,
+            ..opaque(model, tex_variants, tex_size)
+        }
+    }
+
+    // Vanilla `RenderTypes.eyes`: an `EyesLayer`, or the dragon's eyes.
+    fn eyes(
+        model: BakedEntityModel,
+        tex_variants: &'static [&'static [ResourceId]],
+        tex_size: u32,
+    ) -> VariantDef {
+        VariantDef {
+            overlay_kind: OverlayKind::EyesTranslucent,
             ..opaque(model, tex_variants, tex_size)
         }
     }
@@ -1500,6 +1517,23 @@ fn mob_definitions() -> Vec<MobDef> {
             )),
             adult_overlays: vec![happy_ghast_ropes(false)],
             baby_overlays: vec![happy_ghast_ropes(true)],
+        },
+        // Vanilla `EnderDragonRenderer`: the body, then its eyes.
+        MobDef {
+            kind: EntityKind::EnderDragon,
+            anim: AnimationType::EnderDragon,
+            adult: vec![opaque(
+                entity_model::bake_ender_dragon_model(),
+                DRAGON_TEX,
+                256,
+            )],
+            baby: None,
+            adult_overlays: vec![eyes(
+                entity_model::bake_ender_dragon_model(),
+                DRAGON_EYES_TEX,
+                256,
+            )],
+            baby_overlays: vec![],
         },
         MobDef {
             kind: EntityKind::Axolotl,
@@ -1878,13 +1912,7 @@ fn mob_definitions() -> Vec<MobDef> {
             adult: vec![opaque(entity_model::bake_spider_model(), SPIDER_TEX, 64)],
             baby: None,
             // Slot 0: glowing eyes (translucent, full-bright), always visible.
-            adult_overlays: vec![VariantDef {
-                model: entity_model::bake_spider_model(),
-                tex_variants: SPIDER_EYES_TEX,
-                tex_size: 64,
-                overlay_kind: OverlayKind::EyesTranslucent,
-                invisible_outline: false,
-            }],
+            adult_overlays: vec![eyes(entity_model::bake_spider_model(), SPIDER_EYES_TEX, 64)],
             baby_overlays: vec![],
         },
         MobDef {
@@ -1896,13 +1924,11 @@ fn mob_definitions() -> Vec<MobDef> {
                 64,
             )],
             baby: None,
-            adult_overlays: vec![VariantDef {
-                model: entity_model::bake_enderman_model(),
-                tex_variants: ENDERMAN_EYES_TEX,
-                tex_size: 64,
-                overlay_kind: OverlayKind::EyesTranslucent,
-                invisible_outline: false,
-            }],
+            adult_overlays: vec![eyes(
+                entity_model::bake_enderman_model(),
+                ENDERMAN_EYES_TEX,
+                64,
+            )],
             baby_overlays: vec![],
         },
         MobDef {
@@ -2181,13 +2207,11 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
             baby: None,
             // Slot 0: the glowing eyes, same variant as the body.
-            adult_overlays: vec![VariantDef {
-                model: entity_model::bake_copper_golem_model(),
-                tex_variants: COPPER_GOLEM_EYES_TEX,
-                tex_size: 64,
-                overlay_kind: OverlayKind::EyesTranslucent,
-                invisible_outline: false,
-            }],
+            adult_overlays: vec![eyes(
+                entity_model::bake_copper_golem_model(),
+                COPPER_GOLEM_EYES_TEX,
+                64,
+            )],
             baby_overlays: vec![],
         },
         // TODO: `CustomHeadLayer` and `CrossedArmsItemLayer` need a
@@ -2982,6 +3006,9 @@ impl EntityRenderer {
             ),
             AnimationType::Ghast => {
                 entity_model::compute_ghast_anim(model, info.age_in_ticks, &info.happy_ghast)
+            }
+            AnimationType::EnderDragon => {
+                entity_model::compute_ender_dragon_anim(model, &info.ender_dragon)
             }
             AnimationType::Axolotl => entity_model::compute_axolotl_anim(
                 model,

@@ -4041,6 +4041,7 @@ impl AppCore {
         }
         game.position_remote_riders();
         super::sniffer::tick(&mut self.audio, game, renderer.camera_render_position());
+        super::ender_dragon::tick(&self.audio, game);
         super::copper_golem::tick(&self.audio, game);
         panda_eating_particles(game, renderer.camera_render_position());
     }

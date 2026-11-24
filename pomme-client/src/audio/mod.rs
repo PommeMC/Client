@@ -54,6 +54,9 @@ pub const CATEGORY_BLOCKS: u8 = SoundCategory::Blocks as u8;
 /// pickup).
 pub const CATEGORY_PLAYERS: u8 = SoundCategory::Players as u8;
 
+/// `SoundSource::HOSTILE` index, for client-side monster sounds.
+pub const CATEGORY_HOSTILE: u8 = SoundCategory::Hostile as u8;
+
 /// `SoundSource::NEUTRAL` index, for client-side mob sounds.
 pub const CATEGORY_NEUTRAL: u8 = SoundCategory::Neutral as u8;
 

@@ -686,17 +686,20 @@ impl ChunkStore {
 
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
     /// surface, i.e. one above the highest solid block). Used to position
-    /// weather columns. Returns `min_y` when the chunk or its heightmap is
-    /// missing.
+    /// weather columns.
     pub fn motion_blocking_height(&self, x: i32, z: i32) -> i32 {
+        self.heightmap_y(HeightmapKind::MotionBlocking, x, z)
+    }
+
+    /// Vanilla `getHeight(kind, x, z)`: the first free Y above the column's
+    /// `kind` surface, or `min_y` when the chunk or its heightmap is missing.
+    pub fn heightmap_y(&self, kind: HeightmapKind, x: i32, z: i32) -> i32 {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
             return self.min_y();
         };
         let chunk = chunk_lock.read();
-        chunk
-            .first_available(HeightmapKind::MotionBlocking, x, z)
-            .unwrap_or(self.min_y())
+        chunk.first_available(kind, x, z).unwrap_or(self.min_y())
     }
 
     /// The biome at a quart (4-block) cell, vanilla `getNoiseBiomeAtQuart`:

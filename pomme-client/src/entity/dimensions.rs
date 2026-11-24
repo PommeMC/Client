@@ -15,6 +15,11 @@ pub struct EntityDimensions {
 }
 
 impl EntityDimensions {
+    /// `EntityDimensions.scalable`.
+    pub const fn scalable(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+
     /// The type's standing size; types not in the table take
     /// `EntityType.Builder`'s default.
     pub fn of(kind: EntityKind) -> Self {
