@@ -23,6 +23,14 @@ const UI_CLICK_EVENT: &str = "ui.button.click";
 /// Vanilla `SimpleSoundInstance.forUI` plays the click at this fixed volume.
 const UI_CLICK_VOLUME: f32 = 0.25;
 
+/// What to do when OpenAL can't be loaded. No library is staged or embedded
+/// for a musl build, which uses the system's.
+#[cfg(target_env = "musl")]
+const OPENAL_HINT: &str = "Install your distribution's OpenAL Soft (libopenal).";
+#[cfg(not(target_env = "musl"))]
+const OPENAL_HINT: &str = "Releases ship the library next to the binary; for a dev build run \
+                           `just openal` to stage it.";
+
 const SOUND_TICK_SECONDS: f32 = 1.0 / 20.0;
 const LOGICAL_SOUND_RETENTION_TICKS: i32 = 20;
 const MENU_MUSIC_STARTING_DELAY_TICKS: i32 = 100;
@@ -245,9 +253,7 @@ impl AudioEngine {
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
-                        "audio disabled: failed to initialize OpenAL ({e}). \
-                         Releases ship the library next to the binary; for a dev \
-                         build run `just openal` to stage it."
+                        "audio disabled: failed to initialize OpenAL ({e}). {OPENAL_HINT}"
                     );
                     let _ = handle.join();
                     (None, None)

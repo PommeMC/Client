@@ -2,3 +2,7 @@
 # msvc's link.exe is the slow one, so swap in the toolchain-bundled lld there.
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# musl: link dynamically. Pomme dlopens Vulkan, X11/Wayland and OpenAL.
+[target.'cfg(target_env = "musl")']
+rustflags = ["-C", "target-feature=-crt-static"]
