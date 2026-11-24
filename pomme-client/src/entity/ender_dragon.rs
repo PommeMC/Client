@@ -1,0 +1,211 @@
+//! The client half of vanilla `EnderDragon`: its synced phase, the wing
+//! flap clock and `DragonFlightHistory`, which pose the neck and tail.
+
+use crate::physics::movement::mth_cos;
+
+/// `EnderDragonPhase` ids.
+const LANDING: i32 = 3;
+const TAKEOFF: i32 = 4;
+const SITTING_FLAMING: i32 = 5;
+const SITTING_ATTACKING: i32 = 7;
+const HOVERING: i32 = 10;
+
+/// A `DragonFlightHistory.Sample`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlightSample {
+    pub y: f64,
+    pub y_rot: f32,
+}
+
+/// Vanilla `DragonFlightHistory`: the last 64 ticks of height and yaw.
+#[derive(Clone)]
+pub struct FlightHistory {
+    samples: [FlightSample; 64],
+    head: i32,
+}
+
+impl Default for FlightHistory {
+    fn default() -> Self {
+        Self {
+            samples: [FlightSample::default(); 64],
+            head: -1,
+        }
+    }
+}
+
+impl FlightHistory {
+    pub fn record(&mut self, y: f64, y_rot: f32) {
+        let sample = FlightSample { y, y_rot };
+        if self.head < 0 {
+            self.samples = [sample; 64];
+        }
+        self.head = (self.head + 1) % 64;
+        self.samples[self.head as usize] = sample;
+    }
+
+    pub fn get(&self, delay: i32) -> FlightSample {
+        self.samples[((self.head - delay) & 63) as usize]
+    }
+
+    /// `get(delay, partialTicks)`: eased from the sample a tick older.
+    pub fn get_lerped(&self, delay: i32, partial: f32) -> FlightSample {
+        let sample = self.get(delay);
+        let old = self.get(delay + 1);
+        FlightSample {
+            y: old.y + f64::from(partial) * (sample.y - old.y),
+            y_rot: crate::entity::lerp_angle(old.y_rot, sample.y_rot, partial),
+        }
+    }
+}
+
+/// What a tick of [`EnderDragonSim::tick`] asks the client to play.
+#[derive(Clone, Copy, Default)]
+pub struct DragonSounds {
+    /// `onFlap`: `ENDER_DRAGON_FLAP`.
+    pub flap: bool,
+    /// `aiStep`'s `ENDER_DRAGON_GROWL`.
+    pub growl: bool,
+}
+
+#[derive(Clone)]
+pub struct EnderDragonSim {
+    /// `DATA_PHASE`.
+    pub phase: i32,
+    pub flap_time: f32,
+    pub prev_flap_time: f32,
+    pub history: FlightHistory,
+    /// Squared distance to the top of the exit portal's podium, as of the
+    /// last tick.
+    pub distance_to_egg: f64,
+    growl_time: i32,
+}
+
+impl Default for EnderDragonSim {
+    fn default() -> Self {
+        Self {
+            phase: HOVERING,
+            flap_time: 0.0,
+            prev_flap_time: 0.0,
+            history: FlightHistory::default(),
+            distance_to_egg: 0.0,
+            growl_time: 100,
+        }
+    }
+}
+
+impl EnderDragonSim {
+    /// `DragonPhaseInstance.isSitting`: the three sitting phases and hover.
+    pub fn is_sitting(&self) -> bool {
+        matches!(self.phase, SITTING_FLAMING..=SITTING_ATTACKING | HOVERING)
+    }
+
+    pub fn is_landing_or_taking_off(&self) -> bool {
+        matches!(self.phase, LANDING | TAKEOFF)
+    }
+
+    /// `isFlapping`: the wing crossed the downstroke this tick.
+    fn is_flapping(&self) -> bool {
+        let flap = mth_cos(self.flap_time * std::f32::consts::TAU);
+        let old_flap = mth_cos(self.prev_flap_time * std::f32::consts::TAU);
+        old_flap <= -0.3 && flap >= -0.3
+    }
+
+    /// The client side of `EnderDragon.aiStep`, for a dragon at height `y`
+    /// facing `y_rot` and moving `velocity`. A `silent` one neither sounds
+    /// nor counts down its growl.
+    // TODO: `checkCrystals` (no end crystals yet), the phases'
+    // `doClientTick` particles, and `dragonDeathTime`'s dying.
+    pub fn tick(
+        &mut self,
+        y: f64,
+        y_rot: f32,
+        velocity: glam::DVec3,
+        dead: bool,
+        no_ai: bool,
+        silent: bool,
+    ) -> DragonSounds {
+        let mut sounds = DragonSounds {
+            flap: !silent && self.is_flapping(),
+            growl: false,
+        };
+        if !silent && !self.is_sitting() {
+            self.growl_time -= 1;
+            if self.growl_time < 0 {
+                sounds.growl = true;
+                self.growl_time = 200 + fastrand::i32(..200);
+            }
+        }
+        self.prev_flap_time = self.flap_time;
+        if dead {
+            return sounds;
+        }
+        let horizontal = (velocity.x * velocity.x + velocity.z * velocity.z).sqrt() as f32;
+        let flap_speed = 0.2 / (horizontal * 10.0 + 1.0);
+        self.flap_time += if self.is_sitting() {
+            0.1
+        } else {
+            flap_speed * 2f32.powf(velocity.y as f32)
+        };
+        if no_ai {
+            self.flap_time = 0.5;
+            return sounds;
+        }
+        self.history.record(y, crate::entity::wrap_degrees(y_rot));
+        sounds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_record_fills_the_history() {
+        let mut history = FlightHistory::default();
+        history.record(64.0, 90.0);
+        assert_eq!(history.get(0), history.get(63));
+        history.record(65.0, 100.0);
+        assert_eq!(history.get(0).y, 65.0);
+        assert_eq!(history.get(1).y, 64.0);
+        let mid = history.get_lerped(0, 0.5);
+        assert_eq!((mid.y, mid.y_rot), (64.5, 95.0));
+    }
+
+    #[test]
+    fn a_no_ai_dragon_holds_its_wings_mid_flap() {
+        let mut dragon = EnderDragonSim::default();
+        dragon.tick(64.0, 0.0, glam::DVec3::ZERO, false, true, false);
+        assert_eq!(dragon.flap_time, 0.5);
+        assert_eq!(dragon.history.get(0), FlightSample::default());
+    }
+
+    #[test]
+    fn hovering_flaps_a_tenth_a_tick_and_never_growls() {
+        let mut dragon = EnderDragonSim::default();
+        for _ in 0..300 {
+            assert!(
+                !dragon
+                    .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
+                    .growl
+            );
+        }
+        assert!((dragon.flap_time - 30.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_wingbeat_crosses_the_downstroke_once() {
+        let mut dragon = EnderDragonSim {
+            phase: 0,
+            ..Default::default()
+        };
+        let flaps = (0..20)
+            .filter(|_| {
+                dragon
+                    .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
+                    .flap
+            })
+            .count();
+        // 0.2 a tick: four wingbeats in twenty ticks.
+        assert_eq!(flaps, 4);
+    }
+}

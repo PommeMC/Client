@@ -4996,11 +4996,9 @@ pub fn update_game(
                             .x_rot_deg()
                             .lerp(e.look_dir.x_rot_deg(), partial_tick),
                     ),
-                    body_y_rot_deg: lerp_angle(
-                        e.prev_body_y_rot_deg,
-                        e.body_y_rot_deg,
-                        partial_tick,
-                    ),
+                    body_y_rot_deg: extras.body_y_rot_deg.unwrap_or_else(|| {
+                        lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick)
+                    }),
                     is_sleeping,
                     sleeping_direction: bed_orientation(game, e.sleeping_pos),
                     sleeping_eye_height: standing_eye_height(e.entity_type, e.is_baby),
@@ -5062,6 +5060,7 @@ pub fn update_game(
                     panda: extras.panda,
                     armadillo: extras.armadillo,
                     goat: extras.goat,
+                    ender_dragon: extras.ender_dragon,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
@@ -5072,7 +5071,8 @@ pub fn update_game(
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
-                    skip_cull: false,
+                    // `EnderDragonRenderer.affectedByCulling`.
+                    skip_cull: e.entity_type == EntityKind::EnderDragon,
                     shadow: ShadowCaster {
                         position: *interp_pos,
                         offset: extras.render_offset,
@@ -6181,6 +6181,9 @@ struct EntityExtras {
     panda: crate::renderer::entity_model::PandaAnims,
     armadillo: crate::renderer::entity_model::ArmadilloAnims,
     goat: crate::renderer::entity_model::GoatAnims,
+    ender_dragon: crate::renderer::entity_model::EnderDragonAnims,
+    /// A renderer's own yaw, in place of the interpolated body yaw.
+    body_y_rot_deg: Option<f32>,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
@@ -6388,6 +6391,7 @@ fn entity_extras(
             ..Default::default()
         },
         EntityKind::Panda => panda_extras(e, alpha),
+        EntityKind::EnderDragon => ender_dragon_extras(e, alpha),
         // `GhastRenderer.getTextureLocation`.
         EntityKind::Ghast => EntityExtras {
             variant_index: e.is_charging as u32,
@@ -6462,6 +6466,37 @@ fn happy_ghast_extras(
         } else {
             Default::default()
         },
+        ..Default::default()
+    }
+}
+
+/// Vanilla `EnderDragonRenderer.extractRenderState` and `submit`'s pose:
+/// turned by the yaw 7 ticks back and pitched by the climb, then pushed a
+/// block forward.
+fn ender_dragon_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    use crate::renderer::entity_model::{DRAGON_HISTORY, EnderDragonAnims};
+    let d = &e.ender_dragon;
+    let partial = if e.health <= 0.0 { 0.0 } else { alpha };
+    let history = std::array::from_fn::<_, DRAGON_HISTORY, _>(|delay| {
+        d.history.get_lerped(delay as i32, partial)
+    });
+    let climb = (history[5].y - history[10].y) as f32;
+    EntityExtras {
+        ender_dragon: EnderDragonAnims {
+            flap_time: lerp(alpha, d.prev_flap_time, d.flap_time),
+            history,
+            is_landing_or_taking_off: d.is_landing_or_taking_off(),
+            is_sitting: d.is_sitting(),
+            distance_to_egg: d.distance_to_egg,
+        },
+        // `entity_matrix` turns by 180 minus this: vanilla's `-yr`.
+        body_y_rot_deg: Some(180.0 + history[7].y_rot),
+        // The eyes.
+        overlay_tints: SLOT0_TINTS,
+        body_transform: Some(
+            glam::Mat4::from_rotation_x((climb * 10.0).to_radians())
+                * glam::Mat4::from_translation(glam::Vec3::Z),
+        ),
         ..Default::default()
     }
 }

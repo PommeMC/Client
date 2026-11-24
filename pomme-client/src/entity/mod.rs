@@ -2,6 +2,7 @@ pub mod boat;
 pub mod body_rotation;
 pub mod components;
 pub mod dimensions;
+pub mod ender_dragon;
 pub mod glowing;
 pub mod light;
 pub mod non_living;
@@ -937,6 +938,7 @@ pub struct LivingEntity {
     pub axolotl: AxolotlSim,
     pub armadillo: ArmadilloSim,
     pub goat: GoatSim,
+    pub ender_dragon: ender_dragon::EnderDragonSim,
     body_control: body_rotation::BodyRotationControl,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
@@ -1101,10 +1103,12 @@ impl LivingEntity {
         uuid: uuid::Uuid,
     ) -> Self {
         let y_rot_deg = look_dir.y_rot_deg();
-        let default_health = if entity_type == EntityKind::IronGolem {
-            100.0
-        } else {
-            20.0
+        // Each type's default `MAX_HEALTH`, which the server only syncs once
+        // something changes it.
+        let default_health = match entity_type {
+            EntityKind::IronGolem => 100.0,
+            EntityKind::EnderDragon => 200.0,
+            _ => 20.0,
         };
         Self {
             position,
@@ -1219,6 +1223,7 @@ impl LivingEntity {
             axolotl: AxolotlSim::default(),
             armadillo: ArmadilloSim::default(),
             goat: GoatSim::default(),
+            ender_dragon: ender_dragon::EnderDragonSim::default(),
             body_control: body_rotation::BodyRotationControl::default(),
             has_egg: false,
             laying_egg: false,
@@ -2445,6 +2450,7 @@ impl EntityStore {
             }
             (EntityKind::Axolotl, 19, Bool(b)) => entity.axolotl.playing_dead = b,
             (EntityKind::PolarBear, 18, Bool(b)) => entity.is_standing = b,
+            (EntityKind::EnderDragon, 16, Int(phase)) => entity.ender_dragon.phase = phase,
             (EntityKind::Ghast, 16, Bool(b)) => entity.is_charging = b,
             (EntityKind::HappyGhast, 18, Bool(b)) => entity.is_leash_holder = b,
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
@@ -2805,11 +2811,18 @@ impl EntityStore {
             if entity.hurt_time > 0 {
                 entity.hurt_time -= 1;
             }
-            tick_death_time(
-                entity.health,
-                within_simulation_distance(entity.position, player_position, simulation_distance),
-                &mut entity.death_time,
-            );
+            // `EnderDragon.tickDeath` keeps its own clock.
+            if entity.entity_type != EntityKind::EnderDragon {
+                tick_death_time(
+                    entity.health,
+                    within_simulation_distance(
+                        entity.position,
+                        player_position,
+                        simulation_distance,
+                    ),
+                    &mut entity.death_time,
+                );
+            }
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
@@ -3003,6 +3016,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::PolarBear
                 | EntityKind::Ghast
                 | EntityKind::HappyGhast
+                | EntityKind::EnderDragon
         )
 }
 

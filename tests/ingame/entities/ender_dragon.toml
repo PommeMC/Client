@@ -1,0 +1,78 @@
+# An ender dragon hovering over the flat world, from the front and the side.
+# NoAI holds its wings mid-flap and its neck in the hover pose, and records
+# no flight history, so it faces yaw 0 (south) whatever it was summoned at.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# Pillars to look out from: ahead of the dragon, and beside it.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/fill 24 -60 20 24 -58 20 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:ender_dragon 0.5 -54 16.5 {NoAI:1b}"
+
+[[step]]
+expect = { entity = "ender_dragon" }
+
+[[step]]
+look_at = [0.5, -53.0, 12.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "front"
+
+[[step]]
+chat = "/tp @s 24.5 -57 20.5 90 0"
+
+[[step]]
+expect = { player = { position = [24.5, -57.0, 20.5] } }
+
+[[step]]
+look_at = [0.5, -53.0, 18.0]
+
+[[step]]
+wait_ms = 1000
+
+[[step]]
+screenshot = "side"
+
+# A dragon takes 200 ticks to die; wait it out before clearing its orbs.
+[[step]]
+chat = "/kill @e[type=ender_dragon]"
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/fill 24 -60 20 24 -58 20 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"
