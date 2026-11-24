@@ -5,6 +5,7 @@ use std::f32::consts::PI;
 use glam::Vec3;
 
 use super::{BakedEntityModel, PartAnim, bake_model, deformed, part_index, rotated, vbox, vpart};
+use crate::physics::movement::{mth_cos, mth_sin};
 
 const RIBCAGE_X_ROT: f32 = 0.20420352;
 
@@ -12,8 +13,8 @@ const RIBCAGE_X_ROT: f32 = 0.20420352;
 fn tail_pivot(ribcage_x_rot: f32) -> Vec3 {
     Vec3::new(
         -2.0,
-        6.9 + ribcage_x_rot.cos() * 10.0,
-        -0.5 + ribcage_x_rot.sin() * 10.0,
+        6.9 + mth_cos(ribcage_x_rot) * 10.0,
+        -0.5 + mth_sin(ribcage_x_rot) * 10.0,
     )
 }
 
@@ -117,7 +118,7 @@ pub fn compute_wither_anim(
         anim.rotation
             .push((head, look(wither.x_head_rots[i], y_deg)));
     }
-    let breath = (age_in_ticks * 0.1).cos();
+    let breath = mth_cos(age_in_ticks * 0.1);
     let ribcage_x_rot = (0.065 + 0.05 * breath) * PI;
     let ribcage = part_index(&model.parts, "ribcage");
     anim.rotation

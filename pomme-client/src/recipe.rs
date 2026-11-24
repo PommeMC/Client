@@ -211,6 +211,15 @@ impl ItemTags {
     pub fn ordered(&self, tag: &str) -> Option<&[u32]> {
         self.ordered.get(tag).map(Vec::as_slice)
     }
+
+    /// `kind` is in `#minecraft:<tag>` as the server synced it, or as the
+    /// game's own data pack has it on a server that doesn't sync the tag.
+    pub fn is_tagged(&self, tag: &str, kind: pomme_registry::builtin::ItemKind) -> bool {
+        match self.get(&format!("minecraft:{tag}")) {
+            Some(synced) => synced.contains(&(kind as u32)),
+            None => pomme_registry::tags::items::named(tag).is_some_and(|tag| tag.contains(&kind)),
+        }
+    }
 }
 
 /// Per-session recipe state matching vanilla's `ClientRecipeBook` plus the

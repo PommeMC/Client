@@ -2041,8 +2041,13 @@ impl AppCore {
         for id in ids {
             game.vehicle_passengers.remove(id);
         }
-        for passengers in game.vehicle_passengers.values_mut() {
+        for (vehicle, passengers) in &mut game.vehicle_passengers {
             passengers.retain(|p| !ids.contains(p));
+            if passengers.is_empty()
+                && let Some(e) = game.entity_store.living.get_mut(vehicle)
+            {
+                e.is_vehicle = false;
+            }
         }
     }
 
@@ -2482,6 +2487,9 @@ impl AppCore {
                         if game.controlled_vehicle_id == Some(vehicle) {
                             game.controlled_vehicle_id = None;
                         }
+                    }
+                    if let Some(e) = game.entity_store.living.get_mut(&vehicle) {
+                        e.is_vehicle = !passengers.is_empty();
                     }
                     game.vehicle_passengers.insert(vehicle, passengers);
                 }
@@ -4075,6 +4083,8 @@ impl AppCore {
             if id == me {
                 return Some(my_eye);
             }
+            // TODO: kinds outside the living store have only their last
+            // server position, not the interpolated one vanilla aims at.
             let eye_height =
                 crate::entity::dimensions::EntityDimensions::eye_height(*kinds.get(&id)?);
             Some(**positions.get(&id)? + glam::DVec3::Y * f64::from(eye_height))

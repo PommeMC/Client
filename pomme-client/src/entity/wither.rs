@@ -4,6 +4,7 @@
 use glam::DVec3;
 
 use super::wrap_degrees;
+use crate::physics::movement::{mth_cos, mth_sin};
 use crate::world::waypoints::mth_atan2;
 
 /// `WitherBoss.aiStep`'s radians-to-degrees factor.
@@ -33,9 +34,9 @@ impl WitherSim {
         let angle = (body_y_rot_deg + 180.0 * i as f32).to_radians();
         position
             + DVec3::new(
-                f64::from(angle.cos()) * 1.3,
+                f64::from(mth_cos(angle)) * 1.3,
                 2.2,
-                f64::from(angle.sin()) * 1.3,
+                f64::from(mth_sin(angle)) * 1.3,
             )
     }
 

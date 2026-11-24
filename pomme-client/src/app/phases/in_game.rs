@@ -4952,8 +4952,13 @@ pub fn update_game(
             .filter(|&(&id, _)| !(first_person && game.camera_entity == Some(id)))
             .map(|(&entity_id, e)| {
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
-                let extras =
-                    entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
+                let extras = entity_extras(
+                    entity_id,
+                    e,
+                    partial_tick,
+                    game.sky_state.game_time as i64,
+                    game.recipe_book.item_tags(),
+                );
                 let is_sleeping = e.sleeping_pos.is_some();
                 let (radius, strength) = crate::entity::shadow::of_living(e);
 
@@ -5049,6 +5054,8 @@ pub fn update_game(
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
+                    happy_ghast_harness: extras.happy_ghast_harness,
+                    happy_ghast: extras.happy_ghast,
                     bee: extras.bee,
                     fox: extras.fox,
                     axolotl: extras.axolotl,
@@ -5453,7 +5460,13 @@ pub fn update_game(
             let position = entity
                 .prev_position
                 .lerp(entity.position, partial_tick as f64)
-                + entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64)
+                + entity_extras(
+                    entity_id,
+                    entity,
+                    partial_tick,
+                    game.sky_state.game_time as i64,
+                    game.recipe_book.item_tags(),
+                )
                     .render_offset
                 // `submitNameTag` lifts the tag half a block over its anchor.
                 + glam::DVec3::Y * (f64::from(entity.name_tag_height()) + 0.5);
@@ -6161,6 +6174,8 @@ struct EntityExtras {
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
+    happy_ghast_harness: Option<crate::renderer::pipelines::entity_renderer::ArmorRenderInfo>,
+    happy_ghast: crate::renderer::entity_model::HappyGhastAnims,
     bee: crate::renderer::entity_model::BeeAnims,
     fox: crate::renderer::entity_model::FoxAnims,
     axolotl: crate::renderer::entity_model::AxolotlAnims,
@@ -6198,15 +6213,19 @@ fn is_skull(item: &pomme_item::ItemStack) -> bool {
     })
 }
 
-/// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
-/// (`overlay_tints`, `overlay_variants`).
-fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
-    let tints = if id != 0 {
+/// The first overlay slot, untinted, when `shown`; no overlays otherwise.
+fn slot0_tints(shown: bool) -> [Option<[f32; 4]>; MAX_OVERLAYS] {
+    if shown {
         SLOT0_TINTS
     } else {
         [None; MAX_OVERLAYS]
-    };
-    (tints, [id.saturating_sub(1), 0, 0, 0])
+    }
+}
+
+/// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
+/// (`overlay_tints`, `overlay_variants`).
+fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
+    (slot0_tints(id != 0), [id.saturating_sub(1), 0, 0, 0])
 }
 
 fn entity_extras(
@@ -6214,6 +6233,7 @@ fn entity_extras(
     e: &crate::entity::LivingEntity,
     alpha: f32,
     game_time: i64,
+    item_tags: &crate::recipe::ItemTags,
 ) -> EntityExtras {
     match e.entity_type {
         EntityKind::Cow | EntityKind::Mooshroom => EntityExtras {
@@ -6375,6 +6395,12 @@ fn entity_extras(
         },
         EntityKind::Panda => panda_extras(e, alpha),
         EntityKind::Wither => wither_extras(e, alpha),
+        // `GhastRenderer.getTextureLocation`.
+        EntityKind::Ghast => EntityExtras {
+            variant_index: e.is_charging as u32,
+            ..Default::default()
+        },
+        EntityKind::HappyGhast => happy_ghast_extras(e, item_tags),
         EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
@@ -6400,11 +6426,7 @@ fn entity_extras(
             EntityExtras {
                 // `BoatRenderer.submitTypeAdditions`: the water patch, unless
                 // the boat is under water.
-                overlay_tints: if boat.is_under_water() {
-                    Default::default()
-                } else {
-                    SLOT0_TINTS
-                },
+                overlay_tints: slot0_tints(!boat.is_under_water()),
                 body_transform: Some(crate::renderer::entity_model::boat_body_transform(
                     boat.hurt_time as f32 - alpha,
                     boat.hurt_dir,
@@ -6438,12 +6460,32 @@ fn wither_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
             x_head_rots: w.x_rot_heads,
             y_head_rots: w.y_rot_heads,
         },
-        overlay_tints: if crate::entity::wither::is_powered(e.health, e.max_health) {
-            SLOT0_TINTS
-        } else {
-            Default::default()
-        },
+        overlay_tints: slot0_tints(crate::entity::wither::is_powered(e.health, e.max_health)),
         body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(scale))),
+        ..Default::default()
+    }
+}
+
+/// Vanilla `HappyGhastRenderer.extractRenderState`, its
+/// `SimpleEquipmentLayer` (any equippable body item with an asset) and
+/// `RopesLayer.submit` (a leash holder in a harness).
+fn happy_ghast_extras(
+    e: &crate::entity::LivingEntity,
+    item_tags: &crate::recipe::ItemTags,
+) -> EntityExtras {
+    let body = e.equipment(EquipmentSlot::Body);
+    let ropes = e.is_leash_holder
+        && body
+            .and_then(|stack| stack.as_present())
+            .is_some_and(|d| item_tags.is_tagged("harnesses", d.kind));
+    EntityExtras {
+        happy_ghast_harness: body
+            .and_then(crate::renderer::pipelines::entity_renderer::equipment_render_info),
+        happy_ghast: crate::renderer::entity_model::HappyGhastAnims {
+            has_body_item: body.is_some(),
+            is_ridden: e.is_vehicle,
+        },
+        overlay_tints: slot0_tints(ropes),
         ..Default::default()
     }
 }
