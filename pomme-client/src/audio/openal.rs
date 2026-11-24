@@ -263,11 +263,8 @@ fn library_names() -> &'static [&'static str] {
     }
     #[cfg(target_os = "macos")]
     {
-        &[
-            "libopenal.1.dylib",
-            "libopenal.dylib",
-            "/System/Library/Frameworks/OpenAL.framework/OpenAL",
-        ]
+        // Not Apple's OpenAL.framework: it lacks `AL_EXT_source_distance_model`.
+        &["libopenal.1.dylib", "libopenal.dylib"]
     }
     // Relative to the app bundle, which is the executable's directory.
     #[cfg(target_os = "ios")]
