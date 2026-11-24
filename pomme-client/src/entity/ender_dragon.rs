@@ -145,7 +145,7 @@ impl EnderDragonSim {
     /// facing `y_rot` and moving `velocity`. A `silent` one neither sounds
     /// nor counts down its growl.
     // TODO: `checkCrystals` (no end crystals yet), the phases'
-    // `doClientTick` particles, and `dragonDeathTime`'s dying.
+    // `doClientTick` particles, and `tickDeath`, which also lifts the parts.
     pub fn tick(
         &mut self,
         position: DVec3,
@@ -320,8 +320,10 @@ mod tests {
         assert!((flap_step(DVec3::new(0.0, 1.0, 0.0)) - 0.4).abs() < 1e-6);
     }
 
+    /// `aiStep`'s early return; `tickDeath` is the TODO on
+    /// [`EnderDragonSim::tick`].
     #[test]
-    fn a_dying_dragon_stops_flapping_recording_and_moving_its_parts() {
+    fn a_dying_dragon_skips_its_flight_step() {
         let mut dragon = flying();
         dragon.tick(AT, 0.0, DVec3::ZERO, false, false, false);
         let parts = dragon.parts;
