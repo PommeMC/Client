@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::types::{ParticleType, TypedParticleOptions};
 

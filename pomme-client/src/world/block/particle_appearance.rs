@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::BlockStateTable;
 use super::block_colors::BlockColors;

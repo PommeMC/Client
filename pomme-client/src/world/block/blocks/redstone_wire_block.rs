@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 use glam::DVec3;
 
 use super::super::{Block, BlockData};

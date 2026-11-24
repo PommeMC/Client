@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use super::super::{Block, BlockData};
 use super::falling_block::emit_falling_dust;

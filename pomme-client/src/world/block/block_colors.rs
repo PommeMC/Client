@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
+use pomme_block::BlockState;
 
 use crate::position::BlockPos;
 use crate::renderer::chunk::mesher::{
