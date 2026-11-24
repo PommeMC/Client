@@ -1,7 +1,12 @@
 //! The client half of vanilla `EnderDragon`: its synced phase, the wing
-//! flap clock and `DragonFlightHistory`, which pose the neck and tail.
+//! flap clock, `DragonFlightHistory`, which poses the neck and tail, and the
+//! `EnderDragonPart`s the player hits it through.
 
-use crate::physics::movement::mth_cos;
+use glam::DVec3;
+
+use crate::entity::wrap_degrees;
+use crate::physics::aabb::Aabb;
+use crate::physics::movement::{mth_cos, mth_sin};
 
 /// `EnderDragonPhase` ids.
 const LANDING: i32 = 3;
@@ -58,6 +63,19 @@ impl FlightHistory {
     }
 }
 
+/// `subEntities` as (width, height): head, neck, body, three tail segments
+/// and two wings.
+const PART_SIZES: [(f32, f32); 8] = [
+    (1.0, 1.0),
+    (3.0, 3.0),
+    (5.0, 3.0),
+    (2.0, 2.0),
+    (2.0, 2.0),
+    (2.0, 2.0),
+    (4.0, 2.0),
+    (4.0, 2.0),
+];
+
 /// What a tick of [`EnderDragonSim::tick`] asks the client to play.
 #[derive(Clone, Copy, Default)]
 pub struct DragonSounds {
@@ -77,6 +95,9 @@ pub struct EnderDragonSim {
     /// Squared distance to the top of the exit portal's podium, as of the
     /// last tick.
     pub distance_to_egg: f64,
+    /// Each part's position, in [`PART_SIZES`] order; a new part starts at
+    /// the origin.
+    pub parts: [DVec3; 8],
     growl_time: i32,
 }
 
@@ -88,6 +109,7 @@ impl Default for EnderDragonSim {
             prev_flap_time: 0.0,
             history: FlightHistory::default(),
             distance_to_egg: 0.0,
+            parts: [DVec3::ZERO; 8],
             growl_time: 100,
         }
     }
@@ -110,16 +132,28 @@ impl EnderDragonSim {
         old_flap <= -0.3 && flap >= -0.3
     }
 
-    /// The client side of `EnderDragon.aiStep`, for a dragon at height `y`
+    /// Each part's id, numbered after the dragon's own as the client does,
+    /// position and pick box.
+    pub fn part_boxes(&self, dragon_id: i32) -> impl Iterator<Item = (i32, DVec3, Aabb)> + '_ {
+        (dragon_id + 1..)
+            .zip(self.parts.iter().zip(PART_SIZES))
+            .map(|(id, (&position, (width, height)))| {
+                let half = |size: f32| f64::from(size / 2.0);
+                let aabb = Aabb::from_center(position, half(width), half(height));
+                (id, position, aabb)
+            })
+    }
+
+    /// The client side of `EnderDragon.aiStep`, for a dragon at `position`
     /// facing `y_rot` and moving `velocity`. A `silent` one neither sounds
     /// nor counts down its growl.
     // TODO: `checkCrystals` (no end crystals yet), the phases'
     // `doClientTick` particles, and `dragonDeathTime`'s dying.
     pub fn tick(
         &mut self,
-        y: f64,
+        position: DVec3,
         y_rot: f32,
-        velocity: glam::DVec3,
+        velocity: DVec3,
         dead: bool,
         no_ai: bool,
         silent: bool,
@@ -150,14 +184,70 @@ impl EnderDragonSim {
             self.flap_time = 0.5;
             return sounds;
         }
-        self.history.record(y, crate::entity::wrap_degrees(y_rot));
+        let y_rot = wrap_degrees(y_rot);
+        self.history.record(position.y, y_rot);
+        self.tick_parts(position, y_rot);
         sounds
+    }
+
+    /// `aiStep`'s `tickPart`s. `yRotA` only turns on the server, so the head
+    /// and neck face the body's way.
+    fn tick_parts(&mut self, position: DVec3, y_rot: f32) {
+        let deg = std::f32::consts::PI / 180.0;
+        let p5 = self.history.get(5);
+        let tilt = (p5.y - self.history.get(10).y) as f32 * 10.0 * deg;
+        let (cc_tilt, ss_tilt) = (mth_cos(tilt), mth_sin(tilt));
+        let (ss1, cc1) = (mth_sin(y_rot * deg), mth_cos(y_rot * deg));
+        // `getHeadYOffset`.
+        let head_y = if self.is_sitting() {
+            -1.0
+        } else {
+            (p5.y - self.history.get(0).y) as f32
+        };
+        let reach = |length: f32| {
+            DVec3::new(
+                f64::from(ss1 * length * cc_tilt),
+                f64::from(head_y + ss_tilt * length),
+                f64::from(-cc1 * length * cc_tilt),
+            )
+        };
+        let tail = |i: i32| {
+            let p0 = self.history.get(12 + i * 2);
+            let rot = y_rot * deg + wrap_degrees(p0.y_rot - p5.y_rot) * deg;
+            let (ss, cc) = (mth_sin(rot), mth_cos(rot));
+            let dd = (i + 1) as f32 * 2.0;
+            DVec3::new(
+                f64::from(-(ss1 * 1.5 + ss * dd) * cc_tilt),
+                p0.y - p5.y - f64::from((dd + 1.5) * ss_tilt) + 1.5,
+                f64::from((cc1 * 1.5 + cc * dd) * cc_tilt),
+            )
+        };
+        let wing = |side: f32| {
+            DVec3::new(
+                f64::from(cc1 * 4.5 * side),
+                2.0,
+                f64::from(ss1 * 4.5 * side),
+            )
+        };
+        let offsets = [
+            reach(6.5),
+            reach(5.5),
+            DVec3::new(f64::from(ss1 * 0.5), 0.0, f64::from(-cc1 * 0.5)),
+            tail(0),
+            tail(1),
+            tail(2),
+            wing(1.0),
+            wing(-1.0),
+        ];
+        self.parts = offsets.map(|offset| position + offset);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const AT: DVec3 = DVec3::new(0.0, 64.0, 0.0);
 
     fn flying() -> EnderDragonSim {
         EnderDragonSim {
@@ -181,20 +271,17 @@ mod tests {
     #[test]
     fn a_no_ai_dragon_holds_its_wings_mid_flap() {
         let mut dragon = EnderDragonSim::default();
-        dragon.tick(64.0, 0.0, glam::DVec3::ZERO, false, true, false);
+        dragon.tick(AT, 0.0, DVec3::ZERO, false, true, false);
         assert_eq!(dragon.flap_time, 0.5);
         assert_eq!(dragon.history.get(0), FlightSample::default());
+        assert_eq!(dragon.parts, [DVec3::ZERO; 8]);
     }
 
     #[test]
     fn hovering_flaps_a_tenth_a_tick_and_never_growls() {
         let mut dragon = EnderDragonSim::default();
         for _ in 0..300 {
-            assert!(
-                !dragon
-                    .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
-                    .growl
-            );
+            assert!(!dragon.tick(AT, 0.0, DVec3::ZERO, false, false, false).growl);
         }
         assert!((dragon.flap_time - 30.0).abs() < 1e-3);
     }
@@ -203,11 +290,7 @@ mod tests {
     fn a_wingbeat_crosses_the_downstroke_once() {
         let mut dragon = flying();
         let flaps = (0..20)
-            .filter(|_| {
-                dragon
-                    .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
-                    .flap
-            })
+            .filter(|_| dragon.tick(AT, 0.0, DVec3::ZERO, false, false, false).flap)
             .count();
         // 0.2 a tick: four wingbeats in twenty ticks.
         assert_eq!(flaps, 4);
@@ -216,11 +299,7 @@ mod tests {
     #[test]
     fn flight_growls_after_a_hundred_ticks() {
         let mut dragon = flying();
-        let mut growl = || {
-            dragon
-                .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
-                .growl
-        };
+        let mut growl = || dragon.tick(AT, 0.0, DVec3::ZERO, false, false, false).growl;
         assert!((0..100).all(|_| !growl()));
         assert!(growl());
     }
@@ -229,7 +308,7 @@ mod tests {
     fn a_silent_dragon_neither_flaps_nor_growls() {
         let mut dragon = flying();
         for _ in 0..300 {
-            let sounds = dragon.tick(64.0, 0.0, glam::DVec3::ZERO, false, false, true);
+            let sounds = dragon.tick(AT, 0.0, DVec3::ZERO, false, false, true);
             assert!(!sounds.flap && !sounds.growl);
         }
     }
@@ -238,17 +317,17 @@ mod tests {
     fn speed_slows_the_wings_and_climbing_quickens_them() {
         let flap_step = |velocity| {
             let mut dragon = flying();
-            dragon.tick(64.0, 0.0, velocity, false, false, false);
+            dragon.tick(AT, 0.0, velocity, false, false, false);
             dragon.flap_time
         };
-        assert!((flap_step(glam::DVec3::new(0.3, 0.0, 0.4)) - 0.2 / 6.0).abs() < 1e-6);
-        assert!((flap_step(glam::DVec3::new(0.0, 1.0, 0.0)) - 0.4).abs() < 1e-6);
+        assert!((flap_step(DVec3::new(0.3, 0.0, 0.4)) - 0.2 / 6.0).abs() < 1e-6);
+        assert!((flap_step(DVec3::new(0.0, 1.0, 0.0)) - 0.4).abs() < 1e-6);
     }
 
     #[test]
     fn a_dying_dragon_stops_flapping_and_recording() {
         let mut dragon = EnderDragonSim::default();
-        dragon.tick(64.0, 0.0, glam::DVec3::ZERO, true, false, false);
+        dragon.tick(AT, 0.0, DVec3::ZERO, true, false, false);
         assert_eq!(dragon.flap_time, 0.0);
         assert_eq!(dragon.history.get(0), FlightSample::default());
     }

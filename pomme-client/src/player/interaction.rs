@@ -2132,6 +2132,9 @@ fn nearest_entity_hit(
                 !swallowed,
             )
         });
+    let dragon_parts = entities
+        .dragon_parts()
+        .map(|(entity_id, entity_pos, aabb)| (entity_id, aabb, entity_pos, true));
     let non_living = non_living
         .entities()
         .filter(|(_, entity)| entity.is_pickable())
@@ -2139,6 +2142,7 @@ fn nearest_entity_hit(
             Some((entity_id, entity.pick_box()?, *entity.position, true))
         });
     let mut touched: Vec<_> = living
+        .chain(dragon_parts)
         .chain(non_living)
         .filter_map(|(entity_id, aabb, entity_pos, from_inside)| {
             let (location, dist_sq) = if aabb.contains(from) {
@@ -2875,6 +2879,42 @@ mod tests {
         };
         assert_eq!(pick(false), Some(2));
         assert_eq!(pick(true), None);
+    }
+
+    /// `EnderDragonPart.isPickable`: the ray hits a part, numbered after the
+    /// dragon, never the dragon's own box.
+    #[test]
+    fn the_dragon_is_picked_by_its_parts() {
+        let mut entities = EntityStore::new();
+        let position = Position::new(0.0, 64.0, 10.0);
+        entities.spawn_living(
+            10,
+            EntityKind::EnderDragon,
+            position,
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        let dragon = entities.living.get_mut(&10).unwrap();
+        dragon.ender_dragon.phase = 0;
+        dragon
+            .ender_dragon
+            .tick(*position, 0.0, DVec3::ZERO, false, false, false);
+        let none = crate::entity::non_living::NonLivingStore::new();
+        let pick = |x: f64, y: f64| {
+            nearest_entity_hit(
+                DVec3::new(x, y, 0.0),
+                DVec3::new(x, y, 20.0),
+                &entities,
+                &none,
+                &|_| false,
+            )
+            .map(|hit| hit.entity_id)
+        };
+        // At yaw 0 the head sits 6.5 toward -z, the first wing 4.5 toward +x.
+        assert_eq!(pick(0.0, 64.5), Some(11));
+        assert_eq!(pick(4.5, 67.0), Some(17));
+        // Inside the dragon's box but past every part.
+        assert_eq!(pick(7.5, 64.5), None);
     }
 
     #[test]

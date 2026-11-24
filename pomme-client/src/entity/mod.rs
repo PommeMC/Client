@@ -2248,6 +2248,16 @@ impl EntityStore {
         }
     }
 
+    /// Every dragon's parts, as (id, position, pick box).
+    pub fn dragon_parts(
+        &self,
+    ) -> impl Iterator<Item = (i32, DVec3, crate::physics::aabb::Aabb)> + '_ {
+        self.living
+            .iter()
+            .filter(|(_, e)| e.entity_type == EntityKind::EnderDragon)
+            .flat_map(|(&id, e)| e.ender_dragon.part_boxes(id))
+    }
+
     pub fn spawn_living(
         &mut self,
         id: i32,
@@ -3733,7 +3743,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_dragons_parts_are_pickable() {
+    fn the_dragon_itself_is_not_pickable() {
         let entity = |kind| {
             LivingEntity::new(
                 kind,

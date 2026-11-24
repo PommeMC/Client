@@ -20,7 +20,7 @@ pub(super) fn tick(audio: &AudioEngine, game: &mut GameState) {
             continue;
         }
         let sounds = e.ender_dragon.tick(
-            e.position.y,
+            *e.position,
             e.look_dir.y_rot_deg(),
             e.velocity,
             e.health <= 0.0,
