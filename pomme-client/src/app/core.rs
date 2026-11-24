@@ -4077,6 +4077,18 @@ impl AppCore {
             game.server_simulation_distance,
             game.controlled_vehicle_id,
         );
+        let (me, my_eye) = (game.player.entity_id, *game.player.eye_pos());
+        let (positions, kinds) = (&game.entity_positions, &game.entity_kinds);
+        game.entity_store.tick_wither_heads(|id| {
+            if id == me {
+                return Some(my_eye);
+            }
+            // TODO: kinds outside the living store have only their last
+            // server position, not the interpolated one vanilla aims at.
+            let eye_height =
+                crate::entity::dimensions::EntityDimensions::eye_height(*kinds.get(&id)?);
+            Some(**positions.get(&id)? + glam::DVec3::Y * f64::from(eye_height))
+        });
     }
 
     fn tick_local_player(
