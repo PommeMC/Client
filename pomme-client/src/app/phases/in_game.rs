@@ -7367,16 +7367,6 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
             });
         }
     }
-    for (id, position, aabb) in game.entity_store.dragon_parts() {
-        targets.push(HitTarget {
-            id,
-            position,
-            aabb,
-            root: root(id),
-            is_player: false,
-            takes_arrow: false,
-        });
-    }
     for (id, e) in game.non_living_store.entities() {
         if e.is_pickable() {
             targets.push(HitTarget {
@@ -7391,6 +7381,17 @@ fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
                 takes_arrow: e.is_hanging(),
             });
         }
+    }
+    // `Level.getEntities` lists dragon parts after the section entities.
+    for (id, position, aabb) in game.entity_store.dragon_parts() {
+        targets.push(HitTarget {
+            id,
+            position,
+            aabb,
+            root: root(id),
+            is_player: false,
+            takes_arrow: false,
+        });
     }
     targets
 }

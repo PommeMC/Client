@@ -2912,7 +2912,10 @@ mod tests {
             )
             .map(|hit| hit.entity_id)
         };
-        // At yaw 0 the neck sits 5.5 toward -z, the first wing 4.5 toward +x.
+        // At yaw 0 the head and neck sit 6.5 and 5.5 toward -z, the first wing
+        // 4.5 toward +x. The head and neck boxes both start at z = 3: the
+        // first listed wins the tie.
+        assert_eq!(pick(0.0, 64.5), Some(11));
         assert_eq!(pick(1.0, 66.0), Some(12));
         assert_eq!(pick(4.5, 67.0), Some(17));
         // Inside the dragon's box but past every part.

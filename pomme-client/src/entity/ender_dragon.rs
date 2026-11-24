@@ -67,20 +67,15 @@ impl FlightHistory {
 /// `subEntities`' sizes: head, neck, body, three tail segments and two
 /// wings.
 const PART_SIZES: [EntityDimensions; 8] = [
-    scalable(1.0, 1.0),
-    scalable(3.0, 3.0),
-    scalable(5.0, 3.0),
-    scalable(2.0, 2.0),
-    scalable(2.0, 2.0),
-    scalable(2.0, 2.0),
-    scalable(4.0, 2.0),
-    scalable(4.0, 2.0),
+    EntityDimensions::scalable(1.0, 1.0),
+    EntityDimensions::scalable(3.0, 3.0),
+    EntityDimensions::scalable(5.0, 3.0),
+    EntityDimensions::scalable(2.0, 2.0),
+    EntityDimensions::scalable(2.0, 2.0),
+    EntityDimensions::scalable(2.0, 2.0),
+    EntityDimensions::scalable(4.0, 2.0),
+    EntityDimensions::scalable(4.0, 2.0),
 ];
-
-/// `EntityDimensions.scalable`.
-const fn scalable(width: f32, height: f32) -> EntityDimensions {
-    EntityDimensions { width, height }
-}
 
 /// What a tick of [`EnderDragonSim::tick`] asks the client to play.
 #[derive(Clone, Copy, Default)]
