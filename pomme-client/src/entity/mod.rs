@@ -7,6 +7,7 @@ pub mod light;
 pub mod non_living;
 pub mod shadow;
 pub mod villager;
+pub mod wither;
 
 use std::collections::HashMap;
 
@@ -930,6 +931,7 @@ pub struct LivingEntity {
     pub axolotl: AxolotlSim,
     pub armadillo: ArmadilloSim,
     pub goat: GoatSim,
+    pub wither: wither::WitherSim,
     body_control: body_rotation::BodyRotationControl,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub has_egg: bool,
@@ -1093,10 +1095,12 @@ impl LivingEntity {
         uuid: uuid::Uuid,
     ) -> Self {
         let y_rot_deg = look_dir.y_rot_deg();
-        let default_health = if entity_type == EntityKind::IronGolem {
-            100.0
-        } else {
-            20.0
+        // Each type's default `MAX_HEALTH`, which the server only syncs once
+        // something changes it.
+        let default_health = match entity_type {
+            EntityKind::IronGolem => 100.0,
+            EntityKind::Wither => 300.0,
+            _ => 20.0,
         };
         Self {
             position,
@@ -1208,6 +1212,7 @@ impl LivingEntity {
             axolotl: AxolotlSim::default(),
             armadillo: ArmadilloSim::default(),
             goat: GoatSim::default(),
+            wither: wither::WitherSim::default(),
             body_control: body_rotation::BodyRotationControl::default(),
             has_egg: false,
             laying_egg: false,
@@ -2426,6 +2431,10 @@ impl EntityStore {
             }
             (EntityKind::Axolotl, 19, Bool(b)) => entity.axolotl.playing_dead = b,
             (EntityKind::PolarBear, 18, Bool(b)) => entity.is_standing = b,
+            (EntityKind::Wither, 16..=18, Int(id)) => {
+                entity.wither.targets[usize::from(index - 16)] = id;
+            }
+            (EntityKind::Wither, 19, Int(t)) => entity.wither.invulnerable_ticks = t,
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
             // outside 0/1 renders big (vanilla `switch` default).
             // `Sniffer.onSyncedDataUpdated`: every update stops all five
@@ -2698,6 +2707,29 @@ impl EntityStore {
         self.living
             .values()
             .find(|entity| entity.player_uuid == Some(*uuid))
+    }
+
+    /// `WitherBoss.aiStep`'s head turn, after [`Self::tick_living`]: it runs
+    /// before `tickHeadTurn`, so on the body yaw from before this tick's turn.
+    /// `other_eye` finds a target outside the store (the local player).
+    pub fn tick_wither_heads(&mut self, other_eye: impl Fn(i32) -> Option<DVec3>) {
+        let eye = |id| {
+            self.living
+                .get(&id)
+                .map(|e| *e.eye_position(1.0))
+                .or_else(|| other_eye(id))
+        };
+        let aims: Vec<_> = self
+            .living
+            .iter()
+            .filter(|(_, e)| e.entity_type == EntityKind::Wither)
+            .map(|(&id, e)| (id, [0, 1].map(|i| e.wither.head_target(i).and_then(eye))))
+            .collect();
+        for (id, target_eyes) in aims {
+            let e = self.living.get_mut(&id).expect("collected from the store");
+            e.wither
+                .tick_heads(*e.position, e.prev_body_y_rot_deg, target_eyes);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2980,6 +3012,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Turtle
                 | EntityKind::Axolotl
                 | EntityKind::PolarBear
+                | EntityKind::Wither
         )
 }
 

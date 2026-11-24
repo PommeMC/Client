@@ -21,6 +21,7 @@ mod polar_bear;
 mod projectile;
 mod sniffer_anim;
 mod turtle;
+mod wither;
 pub use armadillo::*;
 pub use armor_stand::*;
 pub use axolotl::*;
@@ -34,6 +35,7 @@ pub use parrot::*;
 pub use polar_bear::*;
 pub use projectile::*;
 pub use turtle::*;
+pub use wither::*;
 
 /// An entity or block-entity model vertex: its position, UV and face normal.
 #[repr(C)]

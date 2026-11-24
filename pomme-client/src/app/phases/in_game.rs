@@ -5055,6 +5055,7 @@ pub fn update_game(
                     panda: extras.panda,
                     armadillo: extras.armadillo,
                     goat: extras.goat,
+                    wither: extras.wither,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
@@ -6166,6 +6167,7 @@ struct EntityExtras {
     panda: crate::renderer::entity_model::PandaAnims,
     armadillo: crate::renderer::entity_model::ArmadilloAnims,
     goat: crate::renderer::entity_model::GoatAnims,
+    wither: crate::renderer::entity_model::WitherAnims,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
@@ -6372,6 +6374,7 @@ fn entity_extras(
             ..Default::default()
         },
         EntityKind::Panda => panda_extras(e, alpha),
+        EntityKind::Wither => wither_extras(e, alpha),
         EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
@@ -6413,6 +6416,35 @@ fn entity_extras(
             }
         }
         _ => EntityExtras::default(),
+    }
+}
+
+/// Vanilla `WitherBossRenderer.extractRenderState`, `getTextureLocation`
+/// and `scale` (2, shrinking while invulnerable), and `WitherArmorLayer`
+/// while powered.
+fn wither_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let w = &e.wither;
+    let invulnerable = if w.invulnerable_ticks > 0 {
+        w.invulnerable_ticks as f32 - alpha
+    } else {
+        0.0
+    };
+    let ticks = invulnerable.floor() as i32;
+    let plain_texture = ticks <= 0 || ticks <= 80 && ticks / 5 % 2 == 1;
+    let scale = 2.0 - invulnerable / 220.0 * 0.5;
+    EntityExtras {
+        variant_index: u32::from(!plain_texture),
+        wither: crate::renderer::entity_model::WitherAnims {
+            x_head_rots: w.x_rot_heads,
+            y_head_rots: w.y_rot_heads,
+        },
+        overlay_tints: if crate::entity::wither::is_powered(e.health, e.max_health) {
+            SLOT0_TINTS
+        } else {
+            Default::default()
+        },
+        body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(scale))),
+        ..Default::default()
     }
 }
 
