@@ -374,8 +374,9 @@ pub struct LivingInfo {
     /// Body yaw in degrees.
     pub y_rot: f32,
     pub variant: u32,
-    /// The variant's asset name, for the kinds with a texture pool.
-    pub variant_name: Option<&'static str>,
+    /// The variant's asset name, for the kinds with a texture pool, or a
+    /// painting's (`kebab`).
+    pub variant_name: Option<String>,
     pub baby: bool,
     pub glowing: bool,
     pub crouching: bool,
@@ -384,6 +385,8 @@ pub struct LivingInfo {
     /// Villagers' and zombie villagers' type, profession and level.
     pub villager: Option<VillagerInfo>,
     pub equipment: Vec<(String, StackInfo)>,
+    /// What a non-living entity shows: an item frame's item, a thrown one's.
+    pub item: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -436,7 +439,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
                 position: glam::DVec3::from(entity.position).to_array(),
                 y_rot: entity.look_dir.y_rot_deg(),
                 variant: entity.variant,
-                variant_name: order.get(entity.variant as usize).copied(),
+                variant_name: order.get(entity.variant as usize).map(|v| v.to_string()),
                 baby: entity.is_baby,
                 glowing: entity.is_glowing,
                 crouching: entity.is_crouching,
@@ -450,8 +453,29 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
                         Some((format!("{slot:?}").to_lowercase(), StackInfo::of(stack)?))
                     })
                     .collect(),
+                item: None,
             }
         })
+        .chain(
+            game.non_living_store
+                .entities()
+                .map(|(id, entity)| LivingInfo {
+                    id,
+                    kind: bare(&entity.kind.to_string()),
+                    position: glam::DVec3::from(entity.position).to_array(),
+                    y_rot: entity.y_rot,
+                    variant: 0,
+                    variant_name: entity.painting.as_ref().map(|shape| bare(&shape.asset_id)),
+                    baby: false,
+                    glowing: entity.is_glowing(),
+                    crouching: false,
+                    sleeping: false,
+                    custom_name: None,
+                    villager: None,
+                    equipment: Vec::new(),
+                    item: entity.item.as_ref().map(|(name, _)| name.clone()),
+                }),
+        )
         .collect();
     let items = game
         .item_entity_store

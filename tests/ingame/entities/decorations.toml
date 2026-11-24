@@ -1,0 +1,130 @@
+# Paintings, item frames and armor stands against a stone wall: a 1x1, 2x2
+# and 4x2 painting, one of the default variant (the server never sends it), a frame holding a flat item, a glow frame holding a block
+# turned one step, an invisible frame showing only its item, a frame lying
+# on the floor, and armor stands plain, posed with arms, armor and a sword,
+# and small without a base plate, and a hologram's floating name.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/tp @s 500.5 -60 489.5 0 10"
+
+[[step]]
+expect = { player = { position = [500.5, -60.0, 489.5] } }
+
+[[step]]
+expect = { block = "grass_block", at = [500, -61, 499] }
+
+[[step]]
+chat = "/fill 493 -60 500 507 -54 500 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [500, -57, 500] }
+
+# Facing north (2D id 2), hung on the wall's north face.
+[[step]]
+chat = "/summon minecraft:painting 495 -58 499 {facing:2b,variant:\"minecraft:kebab\"}"
+
+[[step]]
+chat = "/summon minecraft:painting 497 -58 499 {facing:2b,variant:\"minecraft:bust\"}"
+
+[[step]]
+chat = "/summon minecraft:painting 502 -57 499 {facing:2b,variant:\"minecraft:fighters\"}"
+
+[[step]]
+chat = "/summon minecraft:painting 505 -59 499 {facing:2b,variant:\"minecraft:alban\"}"
+
+# Item frames face north as 3D id 2; the floor one faces up (1).
+[[step]]
+chat = "/summon minecraft:item_frame 499 -59 499 {Facing:2b,Item:{id:\"minecraft:diamond\",count:1}}"
+
+[[step]]
+chat = "/summon minecraft:glow_item_frame 500 -59 499 {Facing:2b,ItemRotation:1b,Item:{id:\"minecraft:oak_log\",count:1}}"
+
+[[step]]
+chat = "/summon minecraft:item_frame 501 -59 499 {Facing:2b,Invisible:1b,Item:{id:\"minecraft:apple\",count:1}}"
+
+[[step]]
+chat = "/summon minecraft:item_frame 498 -60 496 {Facing:1b,Item:{id:\"minecraft:compass\",count:1}}"
+
+[[step]]
+chat = "/summon minecraft:armor_stand 494.5 -60 496.5 {Rotation:[160f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:armor_stand 506.5 -60 496.5 {Rotation:[200f,0f],ShowArms:1b,Pose:{Head:[-15f,20f,0f],RightArm:[-60f,0f,10f],LeftArm:[-20f,0f,-20f],LeftLeg:[10f,0f,0f],RightLeg:[-10f,0f,0f]},equipment:{head:{id:\"minecraft:diamond_helmet\",count:1},chest:{id:\"minecraft:iron_chestplate\",count:1},legs:{id:\"minecraft:golden_leggings\",count:1},feet:{id:\"minecraft:leather_boots\",count:1},mainhand:{id:\"minecraft:diamond_sword\",count:1}}}"
+
+[[step]]
+chat = "/summon minecraft:armor_stand 503.5 -60 496.5 {Rotation:[190f,0f],Small:1b,NoBasePlate:1b,ShowArms:1b,equipment:{chest:{id:\"minecraft:chainmail_chestplate\",count:1}}}"
+
+# A server hologram: an invisible marker stand whose name always shows.
+[[step]]
+chat = "/summon minecraft:armor_stand 500.5 -55.5 498.5 {Invisible:1b,Marker:1b,CustomNameVisible:1b,CustomName:\"Hologram\"}"
+
+[[step]]
+expect = { entity = "painting", variant = "kebab" }
+
+[[step]]
+expect = { entity = "painting", variant = "bust" }
+
+[[step]]
+expect = { entity = "painting", variant = "fighters" }
+
+[[step]]
+expect = { entity = "painting", variant = "alban" }
+
+[[step]]
+expect = { entity = "item_frame", item = "diamond" }
+
+[[step]]
+expect = { entity = "glow_item_frame", item = "oak_log" }
+
+[[step]]
+expect = { entity = "item_frame", item = "compass" }
+
+[[step]]
+expect = { entity = "armor_stand", baby = true }
+
+[[step]]
+expect = { entity = "armor_stand", name = "Hologram" }
+
+[[step]]
+look_at = [500.5, -58.0, 499.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "decorations"
+
+# From the side: the paintings' and frames' depth and edges.
+[[step]]
+chat = "/tp @s 509.5 -58 496.5 120 20"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+screenshot = "decorations_side"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/fill 493 -60 500 507 -54 500 minecraft:air"
+
+[[step]]
+expect = { gone = "armor_stand" }
+
+[[step]]
+chat = "/gamerule advance_time true"

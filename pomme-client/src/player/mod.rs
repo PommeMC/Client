@@ -70,13 +70,47 @@ pub(crate) fn is_water_block(
     block_state_table.block_state_data(state).fluid().kind == FluidKind::Water
 }
 
-#[inline]
-fn vanilla_vec3_normalize(v: glam::DVec3) -> glam::DVec3 {
-    let length = v.length();
-    if length < f64::from(1.0e-5_f32) {
-        glam::DVec3::ZERO
+/// Vanilla `EntityFluidInteraction.update`'s eye test for water: `eye` is in
+/// its block's water, below `FluidState.getHeightForCamera`, which a source
+/// under a sturdy face fills.
+// TODO: the local player's `eyes_in_water` still reads `getHeight`.
+pub(crate) fn eye_in_water(
+    chunks: &crate::world::chunk::ChunkStore,
+    block_state_table: BlockStateTable,
+    eye: glam::DVec3,
+) -> bool {
+    let block = eye.floor().as_ivec3();
+    let fluid = block_state_table
+        .block_state_data(chunks.get_block_state(block.x, block.y, block.z))
+        .fluid();
+    if fluid.kind != FluidKind::Water {
+        return false;
+    }
+    let above =
+        block_state_table.block_state_data(chunks.get_block_state(block.x, block.y + 1, block.z));
+    let source = fluid.amount == 8 && !fluid.falling;
+    let height = if source && above.is_full_face_sturdy(Direction::Down) == Some(true) {
+        1.0
     } else {
-        v / length
+        water_height(chunks, block_state_table, block.x, block.y, block.z, fluid)
+    };
+    eye.y <= f64::from(block.y) + height
+}
+
+/// Vanilla `FluidState.getHeight` for water: `amount / 9` of a block (in
+/// float math), or the whole block under more water.
+fn water_height(
+    chunks: &crate::world::chunk::ChunkStore,
+    block_state_table: BlockStateTable,
+    x: i32,
+    y: i32,
+    z: i32,
+    fluid: Fluid,
+) -> f64 {
+    if is_water_block(chunks.get_block_state(x, y + 1, z), block_state_table) {
+        1.0
+    } else {
+        f64::from(fluid.height())
     }
 }
 
@@ -88,8 +122,6 @@ pub(crate) fn water_contact(
     block_state_table: BlockStateTable,
     bounds: &crate::physics::aabb::Aabb,
 ) -> WaterContact {
-    // A block's fluid column is `amount / 9` of a block, or a full block when
-    // more water sits directly above.
     const MARGIN: f64 = 0.001;
     let feet_y = bounds.min.y;
     let x0 = (bounds.min.x + MARGIN).floor() as i32;
@@ -109,14 +141,8 @@ pub(crate) fn water_contact(
                 if f.kind != FluidKind::Water {
                     continue;
                 }
-                let block_height =
-                    if is_water_block(chunks.get_block_state(bx, by + 1, bz), block_state_table) {
-                        1.0
-                    } else {
-                        // f32 to match vanilla's float math.
-                        f64::from(f.amount as f32 / 9.0)
-                    };
-                let fluid_top = f64::from(by) + block_height;
+                let fluid_top =
+                    f64::from(by) + water_height(chunks, block_state_table, bx, by, bz, f);
                 if fluid_top < feet_y + MARGIN {
                     continue;
                 }
@@ -153,14 +179,14 @@ impl WaterContact {
         let mut impulse = if average {
             self.current * (1.0 / f64::from(self.count))
         } else {
-            vanilla_vec3_normalize(self.current)
+            crate::util::java_normalize(self.current)
         };
         impulse *= 0.014;
         if velocity.x.abs() < 0.003
             && velocity.z.abs() < 0.003
             && impulse.length() < 0.004_500_000_000_000_000_5
         {
-            impulse = vanilla_vec3_normalize(impulse) * 0.004_500_000_000_000_000_5;
+            impulse = crate::util::java_normalize(impulse) * 0.004_500_000_000_000_000_5;
         }
         impulse
     }
@@ -239,12 +265,12 @@ fn water_flow_at(
                     && block_state_data.is_full_face_sturdy(direction) == Some(true)
             };
             if solid_face(y) || solid_face(y + 1) {
-                flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
+                flow = crate::util::java_normalize(flow) + dvec3(0.0, -6.0, 0.0);
                 break;
             }
         }
     }
-    vanilla_vec3_normalize(flow)
+    crate::util::java_normalize(flow)
 }
 
 pub struct LocalPlayer {
@@ -1307,6 +1333,26 @@ mod tests {
             BlockStateTable::native().block_state_data(source).fluid(),
         );
         assert_eq!(flow, glam::DVec3::X);
+    }
+
+    /// The eye counts up to `getHeightForCamera`: the water's height, or the
+    /// whole block for a source under a sturdy face.
+    #[test]
+    fn eyes_are_in_water_below_its_camera_height() {
+        let chunks = crate::world::chunk::ChunkStore::with_origin_chunk();
+        let table = BlockStateTable::native();
+        let flowing = table.find_state("water", &[("level", "4")]);
+        chunks.set_block_state(8, 64, 8, flowing, table);
+        // Level 4 is 4/9 of a block.
+        assert!(eye_in_water(&chunks, table, glam::dvec3(8.5, 64.4, 8.5)));
+        assert!(!eye_in_water(&chunks, table, glam::dvec3(8.5, 64.5, 8.5)));
+
+        let source = table.find_state("water", &[("level", "0")]);
+        let stone = table.find_state("stone", &[]);
+        chunks.set_block_state(9, 64, 8, source, table);
+        assert!(!eye_in_water(&chunks, table, glam::dvec3(9.5, 64.95, 8.5)));
+        chunks.set_block_state(9, 65, 8, stone, table);
+        assert!(eye_in_water(&chunks, table, glam::dvec3(9.5, 64.95, 8.5)));
     }
 
     #[test]

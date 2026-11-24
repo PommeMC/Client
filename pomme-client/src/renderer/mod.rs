@@ -303,6 +303,9 @@ pub struct Renderer {
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     weather_pipeline: WeatherPipeline,
     world_border_pipeline: pipelines::world_border::WorldBorderPipeline,
+    custom_geometry_pipeline: pipelines::custom_geometry::CustomGeometryPipeline,
+    /// The next frame's paintings and orbs (`set_custom_geometry`).
+    custom_quads: Vec<pipelines::custom_geometry::CustomQuad>,
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
     world_text_pipeline: WorldTextPipeline,
@@ -524,6 +527,12 @@ impl Renderer {
             swapchain_state.targets(),
             resources,
         );
+        let custom_geometry_pipeline = pipelines::custom_geometry::CustomGeometryPipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            resources,
+            &lightmap,
+        );
 
         let particle_pipeline =
             ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
@@ -654,6 +663,8 @@ impl Renderer {
             held_item_pipeline,
             weather_pipeline,
             world_border_pipeline,
+            custom_geometry_pipeline,
+            custom_quads: Vec::new(),
             particle_pipeline,
             cloud_pipeline,
             world_text_pipeline,
@@ -1101,7 +1112,8 @@ impl Renderer {
         water(&mut pack, PackGeometry::Water, View::Camera);
         draw_particles(&mut pack, true);
         pack.run_full_screen(device, encoder, frame, false);
-        // TODO: weather, clouds, dropped items, the block-break
+        // TODO: weather, clouds, dropped items, thrown items, item frames,
+        // paintings, XP orbs, the block-break
         // overlay and entity shadows through their `gbuffers_*` programs; the
         // block outline and chunk borders over the pack's depth; name tags
         // and sign text through `gbuffers_entities_translucent` (Iris's `TEXT` and
@@ -1179,6 +1191,8 @@ impl Renderer {
             self.weather_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.world_border_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.custom_geometry_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.particle_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1414,6 +1428,11 @@ impl Renderer {
     /// Camera position used for rendering (eye plus any third-person offset).
     pub fn camera_render_position(&self) -> glam::DVec3 {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
+    }
+
+    /// `CameraRenderState.orientation`.
+    pub fn camera_orientation(&self) -> glam::Mat3 {
+        self.camera.orientation()
     }
 
     /// The render anchor (camera block position); world-space data uploaded
@@ -1923,6 +1942,8 @@ impl Renderer {
         self.world_border_pipeline.destroy(device);
         self.world_border_pipeline =
             pipelines::world_border::WorldBorderPipeline::new(device, targets, resources);
+        self.custom_geometry_pipeline
+            .reload_textures(device, resources);
         self.cloud_pipeline.destroy(device);
         self.cloud_pipeline = CloudPipeline::new(device, targets, resources);
         self.block_overlay_pipeline.destroy(device);
@@ -2182,6 +2203,31 @@ impl Renderer {
         self.menu_pipeline.geometry.spans_width(spans, scale)
     }
 
+    /// The paintings and orbs the next world frame draws.
+    pub fn set_custom_geometry(&mut self, quads: Vec<pipelines::custom_geometry::CustomQuad>) {
+        self.custom_quads = quads;
+    }
+
+    pub fn has_custom_texture(&self, texture: &pipelines::custom_geometry::CustomTexture) -> bool {
+        self.custom_geometry_pipeline.has_texture(texture)
+    }
+
+    /// `item_name`'s `display.fixed` transform (`ItemDisplayContext.FIXED`),
+    /// none when its model sets none.
+    pub fn item_fixed_transform(&self, item_name: &str) -> glam::Mat4 {
+        self.held_item_pipeline.fixed_display(item_name).to_matrix()
+    }
+
+    /// The mesh key and tint palette `stack` draws with.
+    pub fn item_draw(
+        &mut self,
+        name: &str,
+        stack: &pomme_item::ItemStackData,
+    ) -> (std::sync::Arc<str>, std::sync::Arc<[u32]>) {
+        let item = self.held_item(name.to_string(), stack, None);
+        (item.model.into(), item.item_tints.into())
+    }
+
     /// Local item-mesh classification and bounds used by dropped-item layout.
     pub fn item_mesh_info(&self, name: &str) -> Option<pipelines::item_entity::ItemMeshInfo> {
         self.item_entity_pipeline.mesh_info(name)
@@ -2297,6 +2343,7 @@ impl Renderer {
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
             self.world_border_pipeline.update_camera(frame, &uniform);
+            self.custom_geometry_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
             self.world_text_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
@@ -2527,6 +2574,10 @@ impl Renderer {
         {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
+            let camera = (self.camera_render_position() - self.camera.anchor()).as_vec3();
+            let custom = std::mem::take(&mut self.custom_quads);
+            self.custom_geometry_pipeline
+                .prepare(&self.ctx.device, frame, camera, &custom);
             let mut text = WorldTextVertices::default();
             if let Some(glyph_map) = self.menu_pipeline.mc_glyph_map() {
                 let anchor = self.camera.anchor();
@@ -2722,6 +2773,8 @@ impl Renderer {
                         frame,
                         item_entities,
                     );
+
+                    self.custom_geometry_pipeline.draw(&mut pass, frame);
 
                     // Break particles draw after entities but before translucent
                     // water: they write depth, and pomme's water doesn't, so this
@@ -3130,6 +3183,7 @@ impl Drop for Renderer {
         self.held_item_pipeline.destroy(&self.ctx.device);
         self.weather_pipeline.destroy(&self.ctx.device);
         self.world_border_pipeline.destroy(&self.ctx.device);
+        self.custom_geometry_pipeline.destroy(&self.ctx.device);
         self.particle_pipeline.destroy(&self.ctx.device);
         self.world_text_pipeline.destroy(&self.ctx.device);
         self.cloud_pipeline.destroy(&self.ctx.device);

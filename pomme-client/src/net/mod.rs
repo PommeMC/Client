@@ -367,7 +367,7 @@ pub enum NetworkEvent {
         fill_color: Option<u32>,
         collision_rule: crate::ui::hud::CollisionRule,
         name_tag_visibility: crate::ui::hud::NameTagVisibility,
-        see_friendly_invisibles: bool,
+        options: crate::ui::hud::TeamOptions,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {
@@ -492,6 +492,9 @@ pub enum NetworkEvent {
         x_rot_deg: f32,
         y_rot_deg: f32,
         head_y_rot_deg: f32,
+        /// `ClientboundAddEntityPacket.data`: a projectile's owner id, a
+        /// hanging entity's 3D direction.
+        data: i32,
     },
     EntityMoved {
         id: i32,
@@ -559,13 +562,30 @@ pub enum NetworkEvent {
     EntitiesRemoved {
         ids: Vec<i32>,
     },
+    /// An item stack entity-data value; `index` tells an item entity's or
+    /// thrown item's (8) from an item frame's (9).
     EntityItemData {
         id: i32,
+        index: u8,
         item_name: String,
         item_id: u32,
         damage: i32,
         count: i32,
         stack: pomme_item::ItemStackData,
+    },
+    /// An empty item stack entity-data value at `index`.
+    EntityItemCleared {
+        id: i32,
+        index: u8,
+    },
+    /// `Painting.DATA_PAINTING_VARIANT_ID`.
+    PaintingVariant {
+        id: i32,
+        variant: pomme_protocol::entity_data::PaintingVariant,
+    },
+    /// Entity event 32, `ArmorStand.handleEntityEvent`'s wobble.
+    ArmorStandHit {
+        id: i32,
     },
     EntityHeadRotation {
         id: i32,

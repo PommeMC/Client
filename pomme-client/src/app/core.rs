@@ -530,6 +530,7 @@ impl GameState {
     fn clear_entities(&mut self) {
         self.entity_store = crate::entity::EntityStore::new();
         self.item_entity_store = crate::entity::ItemEntityStore::new();
+        self.non_living_store.clear();
         self.entity_positions.clear();
         self.entity_kinds.clear();
         self.vehicle_passengers.clear();
@@ -2009,6 +2010,61 @@ impl AppCore {
         }
     }
 
+    /// Drops `ids` from every entity store and the state keyed by them, for a
+    /// server's `remove_entities` and for what the client discards itself.
+    pub(crate) fn remove_entities(
+        &mut self,
+        renderer: &mut Renderer,
+        game: &mut GameState,
+        ids: &[i32],
+    ) {
+        for id in ids {
+            if let Some(entity) = game.entity_store.remove_living(*id)
+                && let Some(uuid) = entity.player_uuid
+                && !game.entity_store.has_player_uuid(&uuid)
+            {
+                self.remove_player_skin(renderer, &uuid);
+            }
+            game.entity_positions.remove(id);
+            game.entity_kinds.remove(id);
+            game.silent_entities.remove(id);
+            self.audio.stop_entity_sounds(*id);
+        }
+        game.item_entity_store.remove(ids);
+        game.non_living_store.remove(ids);
+        if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+            game.controlled_vehicle_id = None;
+        }
+        if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+            game.riding_vehicle_id = None;
+        }
+        for id in ids {
+            game.vehicle_passengers.remove(id);
+        }
+        for passengers in game.vehicle_passengers.values_mut() {
+            passengers.retain(|p| !ids.contains(p));
+        }
+    }
+
+    /// A server move's delta for the non-living store and `entity_positions`;
+    /// a hanging entity's position re-derives from its block.
+    fn move_tracked_entity(
+        &mut self,
+        game: &mut GameState,
+        id: i32,
+        delta: glam::DVec3,
+        on_ground: bool,
+    ) {
+        game.non_living_store.move_delta(id, delta, on_ground);
+        if let Some(pos) = game.entity_positions.get_mut(&id) {
+            *pos += delta;
+        }
+        sync_hanging_position(game, id);
+        if let Some(pos) = game.entity_positions.get(&id) {
+            self.audio.update_entity_sound_position(id, *pos);
+        }
+    }
+
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
         let removed = self.player_faces.remove(uuid).is_some();
@@ -2898,7 +2954,7 @@ impl AppCore {
                     fill_color,
                     collision_rule,
                     name_tag_visibility,
-                    see_friendly_invisibles,
+                    options,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -2910,7 +2966,7 @@ impl AppCore {
                         fill_color,
                         collision_rule,
                         name_tag_visibility,
-                        see_friendly_invisibles,
+                        options,
                         members,
                     );
                 }
@@ -3161,7 +3217,12 @@ impl AppCore {
                     x_rot_deg,
                     y_rot_deg,
                     head_y_rot_deg,
+                    data,
                 } => {
+                    // `ClientLevel.addEntity` drops whatever held the id.
+                    if game.entity_kinds.contains_key(&id) {
+                        self.remove_entities(renderer, game, &[id]);
+                    }
                     game.entity_positions.insert(id, position);
                     game.entity_kinds.insert(id, entity_type);
                     game.silent_entities.remove(&id);
@@ -3191,6 +3252,35 @@ impl AppCore {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
                     }
+                    if crate::entity::non_living::is_non_living(entity_type) {
+                        game.non_living_store.spawn(
+                            id,
+                            entity_type,
+                            uuid,
+                            position,
+                            velocity,
+                            y_rot_deg,
+                            x_rot_deg,
+                            data,
+                        );
+                        if data == game.player.entity_id
+                            || game.entity_store.living.contains_key(&data)
+                        {
+                            game.non_living_store.set_owner(id, data);
+                        }
+                        // `Painting.defineSynchedData`'s default, registry
+                        // entry 0, which the server never sends.
+                        if entity_type == pomme_registry::builtin::EntityKind::Painting {
+                            let shape = painting_shape(&game.registries, &DEFAULT_PAINTING);
+                            game.non_living_store.set_painting(id, shape);
+                        }
+                        sync_hanging_position(game, id);
+                        if let Some((name, _)) =
+                            game.non_living_store.get(id).and_then(|e| e.item.as_ref())
+                        {
+                            renderer.ensure_item_mesh(name);
+                        }
+                    }
                 }
                 NetworkEvent::EntityMoved {
                     id,
@@ -3208,10 +3298,7 @@ impl AppCore {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        if let Some(pos) = game.entity_positions.get_mut(&id) {
-                            *pos += dvec3(dx, dy, dz);
-                            self.audio.update_entity_sound_position(id, *pos);
-                        }
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz), on_ground);
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -3230,11 +3317,10 @@ impl AppCore {
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.non_living_store
+                            .rotate(id, y_rot_deg, x_rot_deg, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                        if let Some(pos) = game.entity_positions.get_mut(&id) {
-                            *pos += dvec3(dx, dy, dz);
-                            self.audio.update_entity_sound_position(id, *pos);
-                        }
+                        self.move_tracked_entity(game, id, dvec3(dx, dy, dz), on_ground);
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -3246,6 +3332,8 @@ impl AppCore {
                     if game.steered_boat() != Some(id) {
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.non_living_store
+                            .rotate(id, y_rot_deg, x_rot_deg, on_ground);
                     }
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
@@ -3256,6 +3344,7 @@ impl AppCore {
                     } else {
                         game.item_entity_store.set_motion(id, velocity);
                         game.entity_store.set_living_motion(id, velocity);
+                        game.non_living_store.set_motion(id, velocity);
                     }
                 }
                 NetworkEvent::PlayerKnockback { delta } => {
@@ -3287,8 +3376,13 @@ impl AppCore {
                         }
                         game.item_entity_store
                             .teleport(id, position, velocity, on_ground);
+                        game.non_living_store.teleport(id, position, velocity);
+                        game.non_living_store
+                            .rotate(id, y_rot_deg, x_rot_deg, on_ground);
                         game.entity_positions.insert(id, position);
-                        self.audio.update_entity_sound_position(id, position);
+                        sync_hanging_position(game, id);
+                        self.audio
+                            .update_entity_sound_position(id, game.entity_positions[&id]);
                     }
                 }
                 NetworkEvent::LevelEvent {
@@ -3334,31 +3428,7 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
-                    for id in &ids {
-                        if let Some(entity) = game.entity_store.remove_living(*id)
-                            && let Some(uuid) = entity.player_uuid
-                            && !game.entity_store.has_player_uuid(&uuid)
-                        {
-                            self.remove_player_skin(renderer, &uuid);
-                        }
-                        game.entity_positions.remove(id);
-                        game.entity_kinds.remove(id);
-                        game.silent_entities.remove(id);
-                        self.audio.stop_entity_sounds(*id);
-                    }
-                    game.item_entity_store.remove(&ids);
-                    if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
-                        game.controlled_vehicle_id = None;
-                    }
-                    if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
-                        game.riding_vehicle_id = None;
-                    }
-                    for id in &ids {
-                        game.vehicle_passengers.remove(id);
-                    }
-                    for passengers in game.vehicle_passengers.values_mut() {
-                        passengers.retain(|p| !ids.contains(p));
-                    }
+                    self.remove_entities(renderer, game, &ids);
                 }
                 NetworkEvent::EntityHeadRotation {
                     id,
@@ -3368,6 +3438,7 @@ impl AppCore {
                 }
                 NetworkEvent::EntityItemData {
                     id,
+                    index,
                     item_name,
                     item_id,
                     damage,
@@ -3375,8 +3446,27 @@ impl AppCore {
                     stack,
                 } => {
                     renderer.ensure_item_mesh(&item_name);
-                    game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count, stack);
+                    if game.non_living_store.contains(id) {
+                        game.non_living_store
+                            .set_item(id, index, Some((item_name, stack)));
+                        sync_hanging_position(game, id);
+                    } else if index == 8 {
+                        // `ItemEntity.DATA_ITEM`.
+                        game.item_entity_store
+                            .set_item_data(id, item_name, item_id, damage, count, stack);
+                    }
+                }
+                NetworkEvent::EntityItemCleared { id, index } => {
+                    if index == 8 {
+                        game.item_entity_store.clear_item(id);
+                    }
+                    game.non_living_store.set_item(id, index, None);
+                    sync_hanging_position(game, id);
+                }
+                NetworkEvent::PaintingVariant { id, variant } => {
+                    let shape = painting_shape(&game.registries, &variant);
+                    game.non_living_store.set_painting(id, shape);
+                    sync_hanging_position(game, id);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
@@ -3406,6 +3496,9 @@ impl AppCore {
                         game.item_entity_store.set_shared_flags(id, flags);
                     }
                     game.entity_store.apply_entity_data(id, index, value);
+                    game.non_living_store.apply_entity_data(id, index, value);
+                    // `HangingEntity.DATA_DIRECTION` moves its centre.
+                    sync_hanging_position(game, id);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
@@ -3497,6 +3590,20 @@ impl AppCore {
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }
+                // `ArmorStand.handleEntityEvent` plays it even for a silent stand.
+                NetworkEvent::ArmorStandHit { id } => {
+                    let game_time = game.sky_state.game_time as i64;
+                    if let Some(pos) = game.entity_store.armor_stand_hit(id, game_time) {
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.armor_stand.hit"),
+                            crate::audio::CATEGORY_NEUTRAL,
+                            pos,
+                            0.3,
+                            1.0,
+                            fastrand::u64(..),
+                        );
+                    }
+                }
                 NetworkEvent::GolemPunch { id } => {
                     game.entity_store.golem_punch(id);
                 }
@@ -3542,30 +3649,46 @@ impl AppCore {
                     collector_id,
                     amount,
                 } => {
-                    let target_pos = game
-                        .entity_store
-                        .living
-                        .get(&collector_id)
-                        .map(|e| e.position + dvec3(0.0, 0.81, 0.0))
-                        .unwrap_or_else(|| {
-                            Position::new(
-                                game.player.position.x,
-                                game.player.position.y + 0.81,
-                                game.player.position.z,
-                            )
-                        });
-                    if let Some(item_pos) =
-                        game.item_entity_store.pickup(item_id, target_pos, amount)
+                    // No flight when the client lacks the collector.
+                    let target_pos = super::phases::in_game::pickup_target(
+                        &game.player,
+                        &game.entity_store,
+                        collector_id,
+                    );
+                    // An orb or arrow here, else an item entity.
+                    let orb = game
+                        .non_living_store
+                        .get(item_id)
+                        .map(|e| e.kind == pomme_registry::builtin::EntityKind::ExperienceOrb);
+                    let from = match orb {
+                        Some(_) => game
+                            .non_living_store
+                            .pickup(item_id, target_pos.map(|target| (collector_id, target))),
+                        None => game.item_entity_store.pickup(item_id, target_pos, amount),
+                    };
+                    // `handleTakeItemEntity` plays these client-side: an orb's,
+                    // else the item one.
+                    if let Some(from) = from
+                        && !game.silent_entities.contains(&item_id)
                     {
-                        // Vanilla plays this client-side in handleTakeItemEntity.
+                        let (sound, volume, spread, pitch) = if orb == Some(true) {
+                            ("entity.experience_orb.pickup", 0.1, 0.35, 0.9)
+                        } else {
+                            ("entity.item.pickup", 0.2, 1.4, 2.0)
+                        };
+                        let pitch = (fastrand::f32() - fastrand::f32()) * spread + pitch;
                         self.audio.play_world_sound(
-                            &crate::audio::SoundRef::event("entity.item.pickup"),
+                            &crate::audio::SoundRef::event(sound),
                             crate::audio::CATEGORY_PLAYERS,
-                            item_pos,
-                            0.2,
-                            (fastrand::f32() - fastrand::f32()) * 1.4 + 2.0,
+                            from,
+                            volume,
+                            pitch,
                             fastrand::u64(..),
                         );
+                    }
+                    // Picking an arrow up removes it; an orb waits for the server.
+                    if orb == Some(false) {
+                        self.remove_entities(renderer, game, &[item_id]);
                     }
                 }
                 NetworkEvent::PlayerLogin {
@@ -4193,6 +4316,8 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.non_living_store,
+            &|e| game.tab_list.is_spectator(e),
             &game.player.attributes,
             creative,
             held_item.as_deref(),
@@ -4247,7 +4372,9 @@ impl AppCore {
             game.player.eyes_in_water,
             legacy_mining,
             crate::player::interaction::EntityUse {
+                spectator: crate::player::is_spectator(game.player.game_mode),
                 entities: &game.entity_store,
+                non_living: &game.non_living_store,
                 passengers: &game.vehicle_passengers,
                 item_tags: game.recipe_book.item_tags(),
             },
@@ -4712,6 +4839,56 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     }
     // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
     1.0_f32.lerp(modifier, effect_scale)
+}
+
+const DEFAULT_PAINTING: pomme_protocol::entity_data::PaintingVariant =
+    pomme_protocol::entity_data::PaintingVariant::Registered(0);
+
+/// The shared position map takes a painting's or frame's centre, which its
+/// block, facing and contents set.
+fn sync_hanging_position(game: &mut GameState, id: i32) {
+    if let Some(e) = game.non_living_store.get(id)
+        && e.is_hanging()
+    {
+        game.entity_positions.insert(id, e.position);
+    }
+}
+
+/// A painting's `Holder<PaintingVariant>`: a synced `painting_variant` entry
+/// by id, or the variant sent inline.
+fn painting_shape(
+    registries: &crate::net::registry_holder::RegistryHolder,
+    variant: &pomme_protocol::entity_data::PaintingVariant,
+) -> Option<crate::entity::non_living::PaintingShape> {
+    use pomme_protocol::entity_data::PaintingVariant;
+
+    use crate::entity::non_living::PaintingShape;
+    match variant {
+        PaintingVariant::Registered(id) => {
+            let (_, entry) =
+                registries.entry(&crate::net::PAINTING_VARIANT_REGISTRY.into(), *id)?;
+            Some(PaintingShape {
+                width: entry.int("width")?,
+                height: entry.int("height")?,
+                asset_id: full_identifier(&entry.string("asset_id")?.to_str()),
+            })
+        }
+        PaintingVariant::Direct {
+            width,
+            height,
+            asset_id,
+        } => Some(PaintingShape {
+            width: *width,
+            height: *height,
+            asset_id: full_identifier(asset_id),
+        }),
+    }
+}
+
+/// An asset id as the painting textures key it: namespace and path in full.
+fn full_identifier(id: &str) -> String {
+    let id = pomme_registry::Identifier::new(id);
+    format!("{}:{}", id.namespace(), id.path())
 }
 
 #[cfg(test)]

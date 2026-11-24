@@ -3277,11 +3277,8 @@ fn translate_add_player_763() {
     };
     assert_eq!(id, 42);
     assert_eq!(wire_uuid, uuid.as_u128());
-    let native =
-        translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
     assert_eq!(
-        native
-            .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32),
+        native_entity_kind(&translation, entity_type),
         Some(pomme_registry::builtin::EntityKind::Player)
     );
     assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
@@ -3291,6 +3288,75 @@ fn translate_add_player_763() {
         (angle(10), angle(20), angle(20))
     );
     assert_eq!(data, 0);
+}
+
+/// The native kind of a wire entity type, as the entity reader resolves it.
+fn native_entity_kind(
+    translation: &crate::net::translate::TranslationSession,
+    wire_type: u32,
+) -> Option<pomme_registry::builtin::EntityKind> {
+    translation
+        .remap_to_native(pomme_protocol::ClientRegistry::EntityType, wire_type)
+        .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32)
+}
+
+/// 1.21.4 spawned XP orbs with `add_experience_orb`, which 1.21.5 dropped for
+/// `add_entity`: a UUID from the id, the wire's orb type, zero velocity and
+/// rotations, and the orb's value in the data field.
+#[test]
+fn translate_add_experience_orb_769() {
+    let position: Vec<u8> = [1.5f64, 64.0, -2.5]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect();
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "add_experience_orb"),
+    );
+    wire::write_varint(&mut old, 42); // entity id
+    old.extend_from_slice(&position);
+    old.extend_from_slice(&37i16.to_be_bytes());
+
+    let translation = translation_for(769);
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "add_entity")
+            .unwrap(),
+    );
+    expected.push(42);
+    expected.extend(43u128.to_be_bytes()); // UUID
+    wire::write_varint(&mut expected, wire_entity_type(769, "experience_orb"));
+    expected.extend(&position);
+    expected.push(0); // zero `LpVec3` velocity
+    expected.extend([0, 0, 0]); // rotations
+    expected.push(37); // data
+    assert_eq!(
+        *translation
+            .translate_game_frame(old.clone().into_boxed_slice())
+            .unwrap(),
+        *expected
+    );
+
+    let pomme_protocol::entity::EntityPacket::Add {
+        id,
+        entity_type,
+        position,
+        data,
+        ..
+    } = translate_and_read(769, old, "add_entity", pomme_protocol::entity::read)
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(id, 42);
+    assert_eq!(
+        native_entity_kind(&translation, entity_type),
+        Some(pomme_registry::builtin::EntityKind::ExperienceOrb)
+    );
+    assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
+    assert_eq!(data, 37);
 }
 
 /// 1.20.2 made the serverbound login hello's profile id mandatory; 763 wraps
@@ -4103,4 +4169,115 @@ fn lowers_26_3_serverbound_layouts_to_the_games_26_2_bytes() {
         t.use_swing_frame(pomme_protocol::serverbound::InteractionHand::OffHand),
         Some(old_case("swing"))
     );
+}
+
+/// The id `protocol` gives entity type `kind`.
+fn wire_entity_type(protocol: i32, kind: &str) -> u32 {
+    pomme_protocol::RegistryTable::for_protocol(protocol)
+        .unwrap()
+        .names(pomme_protocol::ClientRegistry::EntityType)
+        .iter()
+        .position(|n| n == kind)
+        .unwrap() as u32
+}
+
+/// A wire `add_entity` (1.21.5 and older: velocity as trailing shorts) for
+/// entity 9 of entity type `kind`.
+fn old_add_entity(protocol: i32, kind: &str) -> Vec<u8> {
+    let wire_type = wire_entity_type(protocol, kind);
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "add_entity"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[0; 16]); // uuid
+    wire::write_varint(&mut old, wire_type);
+    old.extend_from_slice(&[0; 24]); // position
+    old.extend_from_slice(&[0; 3]); // rotation
+    wire::write_varint(&mut old, 2); // data
+    old.extend_from_slice(&[0; 6]); // velocity
+    old
+}
+
+/// The index an int entity-data value at `index` reaches 26.3 at, sent for
+/// entity 9 after it spawned as `kind` on the same connection.
+fn lifted_index(protocol: i32, kind: &str, index: u8) -> u8 {
+    entity_nine_index(&spawned_nine(protocol, kind), protocol, index)
+}
+
+/// A connection on which entity 9 spawned as `kind`.
+fn spawned_nine(protocol: i32, kind: &str) -> crate::net::translate::TranslationSession {
+    let session = translation_for(protocol);
+    session
+        .translate_game_frame(old_add_entity(protocol, kind).into_boxed_slice())
+        .unwrap();
+    session
+}
+
+/// The index entity 9's int value at `index` reaches 26.3 at on `session`.
+fn entity_nine_index(
+    session: &crate::net::translate::TranslationSession,
+    protocol: i32,
+    index: u8,
+) -> u8 {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "set_entity_data"),
+    );
+    old.extend_from_slice(&[9, index, 1, 3, 0xFF]); // entity 9, int 3
+    let native = session
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut at = 0;
+    wire::read_varint(&native, &mut at).unwrap(); // packet id
+    assert_eq!(native[at], 9);
+    native[at + 1]
+}
+
+/// 1.21.6 gave hanging entities a synced direction at 8 and 1.21.2 arrows
+/// `in_ground` at 10; older wires' later values move up one, for the
+/// entities `add_entity` named only.
+#[test]
+fn older_entity_data_indices_lift_by_kind() {
+    // An item frame's rotation, a tipped arrow's colour.
+    assert_eq!(lifted_index(770, "item_frame", 9), 10);
+    assert_eq!(lifted_index(767, "arrow", 10), 11);
+    // Before the inserted field, and for other kinds, nothing moves.
+    assert_eq!(lifted_index(767, "arrow", 8), 8);
+    assert_eq!(lifted_index(770, "snowball", 9), 9);
+    // A 1.21.4 arrow already has `in_ground`.
+    assert_eq!(lifted_index(769, "arrow", 10), 10);
+}
+
+/// A removed entity's lift goes with it.
+#[test]
+fn removed_entities_forget_their_index_lift() {
+    let session = spawned_nine(767, "arrow");
+    let mut remove = Vec::new();
+    wire::write_varint(
+        &mut remove,
+        old_id(767, Direction::Clientbound, "remove_entities"),
+    );
+    remove.extend_from_slice(&[1, 9]);
+    session
+        .translate_game_frame(remove.into_boxed_slice())
+        .unwrap();
+    assert_eq!(entity_nine_index(&session, 767, 10), 10);
+}
+
+/// Entering configuration (a proxy's server switch) forgets every lift, as
+/// the client forgets every entity.
+#[test]
+fn configuration_forgets_every_index_lift() {
+    let session = spawned_nine(767, "arrow");
+    let mut keep_alive = Vec::new();
+    wire::write_varint(
+        &mut keep_alive,
+        config_id(767, Direction::Clientbound, "keep_alive"),
+    );
+    keep_alive.extend_from_slice(&[0; 8]);
+    session.translate_config_frame(keep_alive.into_boxed_slice());
+    assert_eq!(entity_nine_index(&session, 767, 10), 10);
 }

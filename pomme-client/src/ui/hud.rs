@@ -104,8 +104,24 @@ pub(crate) struct ScoreboardTeam {
     pub(crate) fill_color: Option<u32>,
     collision_rule: CollisionRule,
     name_tag_visibility: NameTagVisibility,
-    see_friendly_invisibles: bool,
+    options: TeamOptions,
     pub(crate) members: HashSet<String>,
+}
+
+/// `PlayerTeam.unpackOptions`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TeamOptions {
+    pub friendly_fire: bool,
+    pub see_friendly_invisibles: bool,
+}
+
+impl TeamOptions {
+    pub fn unpack(options: u8) -> Self {
+        Self {
+            friendly_fire: options & 1 != 0,
+            see_friendly_invisibles: options & 2 != 0,
+        }
+    }
 }
 
 impl Scoreboard {
@@ -184,7 +200,7 @@ impl Scoreboard {
         fill_color: Option<u32>,
         collision_rule: CollisionRule,
         name_tag_visibility: NameTagVisibility,
-        see_friendly_invisibles: bool,
+        options: TeamOptions,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -203,7 +219,7 @@ impl Scoreboard {
             fill_color: None,
             collision_rule,
             name_tag_visibility,
-            see_friendly_invisibles,
+            options,
             members: HashSet::new(),
         });
         team.display_name = display_name;
@@ -213,7 +229,7 @@ impl Scoreboard {
         team.fill_color = fill_color;
         team.collision_rule = collision_rule;
         team.name_tag_visibility = name_tag_visibility;
-        team.see_friendly_invisibles = see_friendly_invisibles;
+        team.options = options;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -298,9 +314,19 @@ impl Scoreboard {
     /// team whose formatting carries one, otherwise no owner-derived color.
     /// `Entity.isInvisibleTo`'s team rule: `viewer` sees an invisible
     /// `target` on its own team when the team allows it.
+    /// `Entity.doTeamsAllowDamage`: `attacker` may hurt `target` unless they
+    /// share a team that has friendly fire off.
+    pub fn teams_allow_damage(&self, attacker: &str, target: &str) -> bool {
+        match self.team_of(attacker) {
+            Some((_, team)) if team.members.contains(target) => team.options.friendly_fire,
+            _ => true,
+        }
+    }
+
     pub fn sees_friendly_invisible(&self, viewer: &str, target: &str) -> bool {
-        self.team_of(target)
-            .is_some_and(|(_, team)| team.see_friendly_invisibles && team.members.contains(viewer))
+        self.team_of(target).is_some_and(|(_, team)| {
+            team.options.see_friendly_invisibles && team.members.contains(viewer)
+        })
     }
 
     /// `LivingEntityRenderer.shouldShowName`'s team rule for `target`'s name
@@ -314,7 +340,7 @@ impl Scoreboard {
             NameTagVisibility::Never => false,
             NameTagVisibility::HideForOtherTeams => match allied {
                 None => visible,
-                Some(allied) => allied && (team.see_friendly_invisibles || visible),
+                Some(allied) => allied && (team.options.see_friendly_invisibles || visible),
             },
             NameTagVisibility::HideForOwnTeam => match allied {
                 None => visible,
@@ -1839,9 +1865,36 @@ mod tests {
             None,
             rule,
             NameTagVisibility::Always,
-            true,
+            TeamOptions {
+                see_friendly_invisibles: true,
+                ..Default::default()
+            },
             Some(members.iter().map(|m| (*m).into()).collect()),
         );
+    }
+
+    /// `Entity.doTeamsAllowDamage`: teammates are spared unless friendly
+    /// fire is on; anyone else may be hurt.
+    #[test]
+    fn teammates_are_spared_without_friendly_fire() {
+        let mut scoreboard = Scoreboard::default();
+        add_team(&mut scoreboard, "red", CollisionRule::Always, &["a", "b"]);
+        assert!(!scoreboard.teams_allow_damage("a", "b"));
+        assert!(scoreboard.teams_allow_damage("a", "c"));
+        assert!(scoreboard.teams_allow_damage("c", "a"));
+        scoreboard.set_team(
+            "red".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WHITE,
+            None,
+            CollisionRule::Always,
+            NameTagVisibility::Always,
+            TeamOptions::unpack(1),
+            None,
+        );
+        assert!(scoreboard.teams_allow_damage("a", "b"));
     }
 
     #[test]
@@ -1898,7 +1951,10 @@ mod tests {
             None,
             CollisionRule::Always,
             NameTagVisibility::Always,
-            false,
+            TeamOptions {
+                see_friendly_invisibles: false,
+                ..Default::default()
+            },
             None,
         );
         assert!(!scoreboard.sees_friendly_invisible("viewer", "mate"));
@@ -1952,7 +2008,10 @@ mod tests {
             fill,
             CollisionRule::Always,
             NameTagVisibility::Always,
-            true,
+            TeamOptions {
+                see_friendly_invisibles: true,
+                ..Default::default()
+            },
             Some(vec!["Player".into()]),
         );
     }

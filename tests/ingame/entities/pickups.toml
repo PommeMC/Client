@@ -1,0 +1,66 @@
+# A survival player picking up an arrow and an experience orb dropped at
+# their feet: the arrow lands, stops shaking and goes into the hotbar, the
+# orb's experience lifts the player a level, and both leave the world.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/tp @s 640.5 -60 640.5 0 30"
+
+[[step]]
+expect = { player = { position = [640.5, -60.0, 640.5] } }
+
+[[step]]
+expect = { block = "grass_block", at = [640, -61, 640] }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/experience set @s 0 levels"
+
+[[step]]
+chat = "/experience set @s 0 points"
+
+[[step]]
+expect = { player = { level = 0 } }
+
+# `pickup:1b`: any player may take it once it lands.
+[[step]]
+chat = "/summon minecraft:arrow 640.5 -59 640.5 {pickup:1b}"
+
+[[step]]
+expect = { slot = 36, item = "arrow", count = 1 }
+
+[[step]]
+expect = { gone = "arrow" }
+
+# Ten points finish level 0's seven.
+[[step]]
+chat = "/summon minecraft:experience_orb 640.5 -59.5 640.5 {Value:10}"
+
+[[step]]
+expect = { player = { level = 1 } }
+
+[[step]]
+expect = { gone = "experience_orb" }
+
+# The hand finishes swapping to the arrow.
+[[step]]
+wait_ticks = 20
+
+[[step]]
+screenshot = "picked_up"
+
+[[step]]
+chat = "/experience set @s 0 levels"
+
+[[step]]
+chat = "/experience set @s 0 points"
+
+[[step]]
+chat = "/clear @s"

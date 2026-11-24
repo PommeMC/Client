@@ -248,7 +248,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | Check | Fields |
 |---|---|
 | A menu slot | `slot`, `item` (`air` for empty), optional `count`, `components` (types present) and `absent` (types not present) |
-| A living entity | `entity` (kind), optional `variant` (asset name, e.g. `cold`), `name`, `baby`, `glowing`, `villager_type` and `profession` |
+| An entity | `entity` (kind), optional `variant` (asset name, e.g. `cold`, or a painting's, e.g. `kebab`), `name`, `baby`, `glowing`, `villager_type`, `profession` and `item` (what an item frame holds or a thrown item shows) |
 | A dropped item | `item_entity`, optional `count` |
 | An advancement | `advancement` (id) |
 | A chat line | `chat` (text it contains) |

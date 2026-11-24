@@ -140,6 +140,8 @@ struct EntityExpect {
     /// A villager's type, e.g. `desert`.
     villager_type: Option<String>,
     profession: Option<String>,
+    /// What a non-living entity shows: an item frame's item, a thrown one's.
+    item: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -858,6 +860,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             glowing,
             villager_type,
             profession,
+            item,
         }) => {
             let living = protocol::entities(game).living;
             let villager = |e: &protocol::LivingInfo,
@@ -873,7 +876,10 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                             e.position.iter().zip(at).all(|(p, a)| (p - a).abs() <= 0.5)
                         })
                         && y_rot.is_none_or(|y| angle_between(e.y_rot, y) <= 1.0)
-                        && variant.as_deref().is_none_or(|v| e.variant_name == Some(v))
+                        && variant
+                            .as_deref()
+                            .is_none_or(|v| e.variant_name.as_deref() == Some(v))
+                        && item.as_deref().is_none_or(|i| e.item.as_deref() == Some(i))
                         && name
                             .as_deref()
                             .is_none_or(|n| e.custom_name.as_deref() == Some(n))

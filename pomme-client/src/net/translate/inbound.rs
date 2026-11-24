@@ -67,11 +67,43 @@ impl Translation {
         &self,
         id: u32,
         payload: &[u8],
-        _state: &mut SessionState,
+        state: &mut SessionState,
     ) -> Option<Vec<u8>> {
         let ids = self.game_ids.as_ref()?;
+        let entity = var_u32(&mut Cursor::new(payload))?;
+        let lift = state.index_lifts.get(&entity).copied();
 
-        translate_entity_data(id, payload, ids, self.to_native)
+        translate_entity_data(id, payload, ids, self.to_native, lift)
+    }
+
+    /// Notes a wire `add_entity` whose kind syncs a field this wire lacks:
+    /// 1.21.6 gave hanging entities a `direction` at 8, 1.21.2 arrows an
+    /// `in_ground` at 10, each moving what followed up one. A spawn of any
+    /// other kind clears what its id held.
+    fn record_index_lift(&self, ids: &GameIds, payload: &[u8], state: &mut SessionState) {
+        use pomme_registry::builtin::EntityKind;
+
+        use crate::entity::non_living::{is_arrow, is_item_frame};
+
+        let mut cur = Cursor::new(payload);
+        let Some(entity) = var_u32(&mut cur) else {
+            return;
+        };
+        state.index_lifts.remove(&entity);
+        let kind = advance(&mut cur, 16)
+            .and_then(|()| var_u32(&mut cur))
+            .and_then(|wire| self.remap_to_native(ClientRegistry::EntityType, wire))
+            .and_then(<EntityKind as pomme_registry::Registry>::from_u32);
+        let inserted_at = match kind {
+            Some(kind) if is_item_frame(kind) || kind == EntityKind::Painting => {
+                ids.v770.is_some().then_some(8)
+            }
+            Some(kind) if is_arrow(kind) => ids.v767.is_some().then_some(10),
+            _ => None,
+        };
+        if let Some(at) = inserted_at {
+            state.index_lifts.insert(entity, at);
+        }
     }
 
     /// Rewrites the chunk 774 payload into the native layout.
@@ -344,6 +376,8 @@ impl Translation {
         raw: Box<[u8]>,
         state: &mut SessionState,
     ) -> Vec<Box<[u8]>> {
+        // The client drops every entity on entering configuration.
+        state.index_lifts.clear();
         let Some(ids) = self.config_ids.as_ref().filter(|ids| !ids.inbound_identity) else {
             return vec![raw];
         };
@@ -403,6 +437,13 @@ impl Translation {
             let frame = translate_add_player_763(v, &raw[id_end..])?;
             return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
         }
+        // So does add_experience_orb before 1.21.5.
+        if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v769.as_ref())
+            && wire_id == v.add_experience_orb_old_id
+        {
+            let frame = translate_add_experience_orb(v, &raw[id_end..])?;
+            return self.translate_game_frame_with_state(frame.into_boxed_slice(), state);
+        }
         let id = match &self.game_ids {
             Some(ids) => {
                 let Some(native) = ids.inbound.get(wire_id as usize).copied().flatten() else {
@@ -447,6 +488,18 @@ impl Translation {
             None => None,
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
+        if let Some(ids) = self.game_ids.as_ref()
+            && let Some(v772) = ids.v772.as_ref()
+        {
+            if id == v772.add_entity_id {
+                self.record_index_lift(ids, payload, state);
+            } else if id == v772.remove_entities_id {
+                forget_index_lifts(payload, state);
+            } else if ids.v776.as_ref().is_some_and(|v| id == v.login_id) {
+                // A new level holds none of the old entities.
+                state.index_lifts.clear();
+            }
+        }
         let Some(rewrite) = self.rewrites.get(id as usize).copied().flatten() else {
             if let Some(upgraded) = self.upgrade(id, payload) {
                 return upgraded;
@@ -502,5 +555,19 @@ impl Translation {
             tracing::warn!("Dropping game packet {id} with an unparsable 26.2 layout");
         }
         Some(upgraded.map(Vec::into_boxed_slice))
+    }
+}
+
+/// Drops the `index_lifts` of the entities a wire `remove_entities` names.
+fn forget_index_lifts(payload: &[u8], state: &mut SessionState) {
+    let mut cur = Cursor::new(payload);
+    let Some(count) = var_u32(&mut cur) else {
+        return;
+    };
+    for _ in 0..count {
+        let Some(entity) = var_u32(&mut cur) else {
+            return;
+        };
+        state.index_lifts.remove(&entity);
     }
 }

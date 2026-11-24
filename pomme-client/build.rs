@@ -158,6 +158,8 @@ fn main() {
         ("cull.comp", shaderc::ShaderKind::Compute),
         ("blur.vert", shaderc::ShaderKind::Vertex),
         ("entity.vert", shaderc::ShaderKind::Vertex),
+        ("custom_geometry.vert", shaderc::ShaderKind::Vertex),
+        ("custom_geometry.frag", shaderc::ShaderKind::Fragment),
         ("entity.frag", shaderc::ShaderKind::Fragment),
         ("entity_outline.frag", shaderc::ShaderKind::Fragment),
         ("entity_sobel.frag", shaderc::ShaderKind::Fragment),

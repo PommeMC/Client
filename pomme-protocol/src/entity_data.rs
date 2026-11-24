@@ -32,6 +32,14 @@ pub enum Serializer {
     VillagerData,
     Pose,
     Variant(Variant),
+    /// `Rotations.STREAM_CODEC`: three floats, degrees.
+    Rotations,
+    /// `Direction.STREAM_CODEC`: the 3D data value.
+    Direction,
+    /// `OPTIONAL_UNSIGNED_INT`: 0 for none, else the value + 1.
+    OptionalUnsignedInt,
+    /// `PaintingVariant.STREAM_CODEC`, a direct-capable holder.
+    PaintingVariant,
     Skip(Shape),
 }
 
@@ -49,7 +57,13 @@ impl Serializer {
                 r.varlong()?;
                 return Ok(true);
             }
-            Self::Int | Self::Pose | Self::Variant(_) => &Shape::VarInt,
+            Self::Int
+            | Self::Pose
+            | Self::Variant(_)
+            | Self::Direction
+            | Self::OptionalUnsignedInt => &Shape::VarInt,
+            Self::Rotations => &Shape::Struct(&[Shape::Float, Shape::Float, Shape::Float]),
+            Self::PaintingVariant => &PAINTING_VARIANT,
             Self::Float => &Shape::Float,
             Self::OptionalComponent => &Shape::Optional(&TEXT),
             Self::OptionalBlockPos => &Shape::Optional(&Shape::Long),
@@ -88,8 +102,27 @@ pub enum Value {
     Pose(u32),
     /// A registry id.
     Variant(Variant, u32),
+    /// An armor stand pose, in degrees.
+    Rotations([f32; 3]),
+    /// `Direction.get3DDataValue`.
+    Direction(u32),
+    OptionalUnsignedInt(Option<u32>),
+    PaintingVariant(PaintingVariant),
     /// A value the client doesn't read.
     Other,
+}
+
+/// `PaintingVariant.STREAM_CODEC`'s holder.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaintingVariant {
+    /// An index into the synced `painting_variant` registry.
+    Registered(u32),
+    /// `PaintingVariant.DIRECT_STREAM_CODEC`; the title and author aren't kept.
+    Direct {
+        width: i32,
+        height: i32,
+        asset_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +133,16 @@ pub struct DataValue {
 
 use Serializer as S;
 use Shape::*;
+
+/// `PaintingVariant.java:30-32`: a direct-capable holder of width, height,
+/// asset id, title and author.
+static PAINTING_VARIANT: Shape = Holder(&Struct(&[
+    VarInt,
+    VarInt,
+    Utf(MAX_STRING_LENGTH),
+    Optional(&TEXT),
+    Optional(&TEXT),
+]));
 
 /// `ComponentSerialization.TRUSTED_STREAM_CODEC`: NBT.
 const TEXT: Shape = Nbt;
@@ -123,13 +166,11 @@ macro_rules! serializers_26_2 {
     S::OptionalComponent,
     S::ItemStack,
     S::Bool,
-    // Rotations.java:18
-    S::Skip(Struct(&[Float, Float, Float])),
+    S::Rotations,
     // BlockPos
     S::Skip(Long),
     S::OptionalBlockPos,
-    // Direction
-    S::Skip(ENUM),
+    S::Direction,
     // OPTIONAL_LIVING_ENTITY_REFERENCE: EntityReference.java:34
     S::Skip(Optional(&Uuid)),
     // BLOCK_STATE
@@ -139,8 +180,7 @@ macro_rules! serializers_26_2 {
     S::Skip(Ref(&PARTICLE)),
     S::Skip(List(usize::MAX, &PARTICLE)),
     S::VillagerData,
-    // OPTIONAL_UNSIGNED_INT: 0 for none, else the value + 1.
-    S::Skip(VarInt),
+    S::OptionalUnsignedInt,
     S::Pose,
     S::Variant(Variant::Cat),
     // CAT_SOUND_VARIANT
@@ -164,14 +204,7 @@ macro_rules! serializers_26_2 {
     S::Skip(REGISTRY_ID),
     // OPTIONAL_GLOBAL_POS: GlobalPos.java:29, a dimension then a BlockPos.
     S::Skip(Optional(&Struct(&[Utf(MAX_STRING_LENGTH), Long]))),
-    // PAINTING_VARIANT: PaintingVariant.java:30-32, a direct-capable holder.
-    S::Skip(Holder(&Struct(&[
-        VarInt,
-        VarInt,
-        Utf(MAX_STRING_LENGTH),
-        Optional(&TEXT),
-        Optional(&TEXT),
-    ]))),
+    S::PaintingVariant,
     // SNIFFER_STATE: an idMapper VarInt, read like INT.
     S::Int,
     // ARMADILLO_STATE: an idMapper VarInt, read like INT.
@@ -239,6 +272,26 @@ impl ItemCodec {
             },
             S::Pose => Value::Pose(r.varint()?),
             S::Variant(variant) => Value::Variant(*variant, r.varint()?),
+            S::Rotations => Value::Rotations([r.f32()?, r.f32()?, r.f32()?]),
+            S::Direction => Value::Direction(r.varint()?),
+            S::OptionalUnsignedInt => Value::OptionalUnsignedInt(r.varint()?.checked_sub(1)),
+            // `ByteBufCodecs.holder`: 0, then a direct value, else the id + 1.
+            S::PaintingVariant => Value::PaintingVariant(match r.varint()? {
+                0 => {
+                    let width = r.var_i32()?;
+                    let height = r.var_i32()?;
+                    let asset_id = r.utf(MAX_STRING_LENGTH)?.to_owned();
+                    for _ in 0..2 {
+                        r.optional(|r| self.skip(r, &TEXT))?;
+                    }
+                    PaintingVariant::Direct {
+                        width,
+                        height,
+                        asset_id,
+                    }
+                }
+                id => PaintingVariant::Registered(id - 1),
+            }),
             S::Skip(shape) => {
                 self.skip(r, shape)?;
                 Value::Other
@@ -318,6 +371,7 @@ mod tests {
                 })),
             ),
             (8, Value::Bool(true)),
+            (9, Value::Rotations([1.0, 2.0, 3.0])),
             (11, Value::OptionalBlockPos(Some((-12, 70, 345)))),
             (
                 18,
@@ -327,6 +381,9 @@ mod tests {
                     level: 3,
                 },
             ),
+            // `Direction.NORTH`
+            (12, Value::Direction(2)),
+            (19, Value::OptionalUnsignedInt(Some(4))),
             // `Pose.SLEEPING`
             (20, Value::Pose(2)),
             (21, Value::Variant(Variant::Cat, last("cat_variant"))),
@@ -335,6 +392,10 @@ mod tests {
             (
                 30,
                 Value::Variant(Variant::Chicken, last("chicken_variant")),
+            ),
+            (
+                34,
+                Value::PaintingVariant(PaintingVariant::Registered(last("painting_variant"))),
             ),
             // DIGGING, UNROLLING, DROPPING_ITEM, WEATHERED
             (35, Value::Int(5)),
@@ -396,6 +457,23 @@ mod tests {
                 Value::Variant(Variant::Cow, 7),
                 Value::Item(None),
             ]
+        );
+    }
+
+    /// A painting's inline variant (`Holder.direct`) at 9, by vanilla's
+    /// encoder: the title is read past.
+    #[test]
+    fn direct_painting_variant_matches_vanilla_encoder() {
+        assert_eq!(
+            vanilla("painting_direct", 7),
+            [DataValue {
+                index: 9,
+                value: Value::PaintingVariant(PaintingVariant::Direct {
+                    width: 2,
+                    height: 1,
+                    asset_id: "minecraft:kebab".into(),
+                }),
+            }]
         );
     }
 
@@ -475,13 +553,24 @@ mod tests {
             (0, 15, &[0]),
             (1, 19, &[0]),
             (2, 17, &particles),
-            (3, 34, &painting),
-            (4, 41, &[0; 8]),
-            (5, 1, &[9]),
+            (3, 41, &[0; 8]),
+            (4, 1, &[9]),
+            (5, 34, &painting),
         ]);
         let decoded = values(&bytes);
-        assert_eq!(decoded[..5], [const { Value::Other }; 5]);
-        assert_eq!(decoded[5], Value::Int(9));
+        assert_eq!(decoded[0], Value::Other);
+        assert_eq!(decoded[1], Value::OptionalUnsignedInt(None));
+        assert_eq!(decoded[2..4], [const { Value::Other }; 2]);
+        assert_eq!(decoded[4], Value::Int(9));
+        // The direct painting's title is read past, not kept.
+        assert_eq!(
+            decoded[5],
+            Value::PaintingVariant(PaintingVariant::Direct {
+                width: 2,
+                height: 1,
+                asset_id: "a".into(),
+            })
+        );
     }
 
     #[test]

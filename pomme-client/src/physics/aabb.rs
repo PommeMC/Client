@@ -86,6 +86,11 @@ impl Aabb {
         }
     }
 
+    /// Vanilla `AABB.getCenter`.
+    pub fn center(&self) -> DVec3 {
+        (self.min + self.max) / 2.0
+    }
+
     /// Vanilla `AABB.inflate(x, y, z)`.
     pub fn inflate(self, by: DVec3) -> Self {
         Self {

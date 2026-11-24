@@ -329,6 +329,37 @@ impl Direction {
         }
     }
 
+    /// Vanilla `Direction.from3DDataValue`: `abs(id % 6)`, Java's remainder.
+    pub fn from_3d(id: i32) -> Self {
+        Self::VALUES[(id % 6).unsigned_abs() as usize]
+    }
+
+    pub fn is_horizontal(self) -> bool {
+        self.axis() != 1
+    }
+
+    /// Vanilla `Direction.get2DDataValue`; -1 for up and down.
+    pub fn data_2d(self) -> i32 {
+        match self {
+            Direction::South => 0,
+            Direction::West => 1,
+            Direction::North => 2,
+            Direction::East => 3,
+            Direction::Down | Direction::Up => -1,
+        }
+    }
+
+    /// Vanilla `Direction.getCounterClockWise` about Y; up and down stay.
+    pub fn counter_clockwise(self) -> Self {
+        match self {
+            Direction::North => Direction::West,
+            Direction::West => Direction::South,
+            Direction::South => Direction::East,
+            Direction::East => Direction::North,
+            vertical => vertical,
+        }
+    }
+
     /// The index of the direction's axis: 0 for X, 1 for Y, 2 for Z.
     pub fn axis(self) -> usize {
         match self {
@@ -876,6 +907,15 @@ fn parse_item_tint_sources(
         .collect()
 }
 
+/// `blockstates/(glow_)item_frame.json`'s model for `map=false`.
+pub fn item_frame_model_key(glow: bool) -> &'static str {
+    if glow {
+        "block/glow_item_frame"
+    } else {
+        "block/item_frame"
+    }
+}
+
 pub fn bake_item_models(
     inputs: &ModelInputs,
     bundle: Option<&JsonBundle>,
@@ -1093,6 +1133,17 @@ pub fn bake_item_models(
         shield.gui_light,
     );
     register_special("shield", &shield, model);
+
+    // `BlockStateDefinitions.getItemFrameFakeState`'s models, which
+    // `ItemFrameRenderer` draws the frame with; the `block/` keys can't
+    // collide with an item's name.
+    for glow in [false, true] {
+        let key = item_frame_model_key(glow);
+        let resolved = resolve_model(key, inputs, &mut model_cache);
+        if let Some(baked) = bake_resolved_model(&resolved, 0, 0, false, Tint::None) {
+            item_models.insert(key.to_string(), baked);
+        }
+    }
 
     tracing::info!(
         "Baked {} item models, {} flat items, and registered {} generated-item textures",

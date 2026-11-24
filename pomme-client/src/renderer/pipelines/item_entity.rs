@@ -174,7 +174,7 @@ fn runs<'a>(
 
 /// A host buffer per frame in flight, filled from the start each frame. It
 /// only grows in `begin_frame`, before any draw reading it is recorded.
-struct FrameArena<T> {
+pub(super) struct FrameArena<T> {
     buffers: Vec<Option<rhi::backend::Buffer>>,
     capacities: Vec<usize>,
     cursors: Vec<usize>,
@@ -184,7 +184,11 @@ struct FrameArena<T> {
 }
 
 impl<T: bytemuck::Pod> FrameArena<T> {
-    fn new(device: &rhi::backend::Device, usage: rhi::BufferUsages, label: String) -> Self {
+    pub(super) fn new(
+        device: &rhi::backend::Device,
+        usage: rhi::BufferUsages,
+        label: String,
+    ) -> Self {
         let mut arena = Self {
             buffers: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
             capacities: vec![0; MAX_FRAMES_IN_FLIGHT],
@@ -201,7 +205,7 @@ impl<T: bytemuck::Pod> FrameArena<T> {
 
     /// Restarts `frame`'s buffer, growing it to hold `required` elements;
     /// true if it was replaced.
-    fn begin_frame(
+    pub(super) fn begin_frame(
         &mut self,
         device: &rhi::backend::Device,
         frame: usize,
@@ -226,7 +230,7 @@ impl<T: bytemuck::Pod> FrameArena<T> {
     }
 
     /// Appends `elements`, returning the index of the first.
-    fn push(&mut self, frame: usize, elements: &[T]) -> u32 {
+    pub(super) fn push(&mut self, frame: usize, elements: &[T]) -> u32 {
         let base = self.cursors[frame];
         let end = base + elements.len();
         debug_assert!(end <= self.capacities[frame]);
@@ -238,7 +242,7 @@ impl<T: bytemuck::Pod> FrameArena<T> {
         base as u32
     }
 
-    fn buffer(&self, frame: usize) -> &rhi::backend::Buffer {
+    pub(super) fn buffer(&self, frame: usize) -> &rhi::backend::Buffer {
         self.buffers[frame].as_ref().expect("allocated in new")
     }
 
@@ -246,7 +250,7 @@ impl<T: bytemuck::Pod> FrameArena<T> {
         (self.capacities[frame] * size_of::<T>()) as u64
     }
 
-    fn destroy(&mut self, device: &rhi::backend::Device) {
+    pub(super) fn destroy(&mut self, device: &rhi::backend::Device) {
         for buffer in self.buffers.iter_mut().filter_map(Option::take) {
             buffer.destroy(device);
         }

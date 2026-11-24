@@ -1,0 +1,123 @@
+# Right-clicking an item frame and an armor stand with ender pearls in hand:
+# the frame takes one pearl and the stand takes the click, so neither throws
+# one (which would hurt the player and use up another).
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/tp @s 520.5 -60 520.5 0 0"
+
+[[step]]
+expect = { player = { position = [520.5, -60.0, 520.5] } }
+
+[[step]]
+expect = { block = "grass_block", at = [520, -61, 523] }
+
+[[step]]
+chat = "/fill 518 -60 523 522 -57 523 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [520, -58, 523] }
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/give @s minecraft:ender_pearl 16"
+
+[[step]]
+expect = { slot = 36, item = "ender_pearl", count = 16 }
+
+# Facing north (3D id 2), hung on the wall's north face at eye height.
+[[step]]
+chat = "/summon minecraft:item_frame 520 -59 522 {Facing:2b}"
+
+[[step]]
+expect = { entity = "item_frame" }
+
+[[step]]
+look_at = [520.5, -58.5, 522.97]
+
+[[step]]
+wait_ticks = 5
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+wait_ticks = 20
+
+# A thrown pearl would hurt the player and knock the frame's pearl out.
+[[step]]
+expect = { entity = "item_frame", item = "ender_pearl" }
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+expect = { slot = 36, item = "ender_pearl", count = 15 }
+
+[[step]]
+screenshot = "frame"
+
+[[step]]
+chat = "/kill @e[type=item_frame,x=520,y=-59,z=522,distance=..3]"
+
+[[step]]
+chat = "/kill @e[type=item,x=520,y=-59,z=522,distance=..5]"
+
+# An armless stand refuses the pearl; the click still ends there.
+[[step]]
+chat = "/summon minecraft:armor_stand 520.5 -60 522.0 {Rotation:[180f,0f]}"
+
+[[step]]
+expect = { entity = "armor_stand" }
+
+[[step]]
+look_at = [520.5, -59.0, 522.0]
+
+[[step]]
+wait_ticks = 5
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+wait_ticks = 20
+
+[[step]]
+expect = { player = { health = 20.0 } }
+
+[[step]]
+expect = { slot = 36, item = "ender_pearl", count = 15 }
+
+[[step]]
+screenshot = "stand"
+
+[[step]]
+chat = "/kill @e[type=armor_stand,x=520,y=-60,z=522,distance=..3]"
+
+[[step]]
+chat = "/kill @e[type=item,x=520,y=-60,z=522,distance=..5]"
+
+[[step]]
+chat = "/fill 518 -60 523 522 -57 523 minecraft:air"
+
+[[step]]
+chat = "/clear @s"

@@ -17,7 +17,7 @@ use crate::app::input::{self, InputState};
 use crate::attribute::{AttributeKind, AttributeMap};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
-use crate::entity::{EntityStore, living_entity_dimensions};
+use crate::entity::{EntityStore, living_entity_aabb};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
@@ -78,7 +78,11 @@ pub enum HitResult {
 /// What a right click on an entity reads beyond the player's own state.
 #[derive(Clone, Copy)]
 pub struct EntityUse<'a> {
+    /// The local player is a spectator, for whom `MultiPlayerGameMode`'s
+    /// `interact` and `useItem` pass.
+    pub spectator: bool,
     pub entities: &'a EntityStore,
+    pub non_living: &'a crate::entity::non_living::NonLivingStore,
     /// Every vehicle's passengers.
     pub passengers: &'a HashMap<i32, Vec<i32>>,
     pub item_tags: &'a ItemTags,
@@ -431,6 +435,8 @@ impl InteractionState {
         look_dir: LookDirection,
         chunks: &ChunkStore,
         entities: &EntityStore,
+        non_living: &crate::entity::non_living::NonLivingStore,
+        is_spectator: &dyn Fn(&crate::entity::LivingEntity) -> bool,
         attributes: &AttributeMap,
         creative: bool,
         held_item: Option<&str>,
@@ -457,7 +463,7 @@ impl InteractionState {
             .unwrap_or(max_dist * max_dist);
         let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
 
-        if let Some(hit) = nearest_entity_hit(from, to, entities) {
+        if let Some(hit) = nearest_entity_hit(from, to, entities, non_living, is_spectator) {
             let dist_sq = hit.location.distance_squared(from);
             if dist_sq < block_dist_sq {
                 self.target =
@@ -855,8 +861,7 @@ impl InteractionState {
                 // Vanilla `MultiPlayerGameMode.interact`: the packet goes
                 // out whatever the entity answers, and an entity that passes
                 // leaves the click to `useItem` (a shield raised at a zombie).
-                // TODO: the world border and a spectator's pass aren't
-                // checked.
+                // TODO: the world border isn't checked.
                 Some(HitResult::Entity(hit)) => {
                     sender.send_raw(wire::encode_interact(
                         hit.entity_id,
@@ -864,34 +869,36 @@ impl InteractionState {
                         hit.location - hit.entity_pos,
                         sneaking,
                     ));
+                    if entity_use.spectator {
+                        continue;
+                    }
                     let golden_dandelion = |h: &HandItem| {
                         h.stack
                             .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
                     };
-                    let taken = entity_use
-                        .entities
-                        .living
-                        .get(&hit.entity_id)
-                        .and_then(|entity| {
-                            entity_interact::interact_on(
-                                Target {
-                                    entity,
-                                    passengers: entity_use
-                                        .passengers
-                                        .get(&hit.entity_id)
-                                        .map_or(0, Vec::len),
-                                },
-                                Clicker {
-                                    held: held.stack,
-                                    hand,
-                                    item_tags: entity_use.item_tags,
-                                    sneaking,
-                                    holding_golden_dandelion: hands.iter().any(golden_dandelion),
-                                    position: player_pos,
-                                    thundering: entity_use.entities.thundering,
-                                },
-                            )
-                        });
+                    let taken = match entity_use.entities.living.get(&hit.entity_id) {
+                        None => entity_use.non_living.get(hit.entity_id).and_then(|entity| {
+                            entity_interact::non_living_interact(entity, held.stack)
+                        }),
+                        Some(entity) => entity_interact::interact_on(
+                            Target {
+                                entity,
+                                passengers: entity_use
+                                    .passengers
+                                    .get(&hit.entity_id)
+                                    .map_or(0, Vec::len),
+                            },
+                            Clicker {
+                                held: held.stack,
+                                hand,
+                                item_tags: entity_use.item_tags,
+                                sneaking,
+                                holding_golden_dandelion: hands.iter().any(golden_dandelion),
+                                position: player_pos,
+                                thundering: entity_use.entities.thundering,
+                            },
+                        ),
+                    };
                     match taken {
                         Some(taken) => UseResult::Success {
                             swing: taken == Taken::Swing,
@@ -919,7 +926,7 @@ impl InteractionState {
             // eating at the ground works.
             let result = match (result, held.stack) {
                 (UseResult::Fail, _) => return false,
-                (UseResult::Pass, Some(stack)) => self.use_item(
+                (UseResult::Pass, Some(stack)) if !entity_use.spectator => self.use_item(
                     sender, audio, player_pos, eye_pos, look, hand, stack, held.worn, food,
                     creative, effects,
                 ),
@@ -2073,83 +2080,23 @@ pub fn raycast(
     block_state_table: BlockStateTable,
     held_item: Option<&str>,
 ) -> Option<BlockHitResult> {
-    let dir = dir.as_dvec3();
-    let mut bx = origin.x.floor() as i32;
-    let mut by = origin.y.floor() as i32;
-    let mut bz = origin.z.floor() as i32;
-
-    let step_x = if dir.x > 0.0 { 1 } else { -1 };
-    let step_y = if dir.y > 0.0 { 1 } else { -1 };
-    let step_z = if dir.z > 0.0 { 1 } else { -1 };
-
-    let t_delta_x = if dir.x != 0.0 {
-        (1.0 / dir.x).abs()
-    } else {
-        f64::INFINITY
-    };
-    let t_delta_y = if dir.y != 0.0 {
-        (1.0 / dir.y).abs()
-    } else {
-        f64::INFINITY
-    };
-    let t_delta_z = if dir.z != 0.0 {
-        (1.0 / dir.z).abs()
-    } else {
-        f64::INFINITY
-    };
-
-    let mut t_max_x = if dir.x > 0.0 {
-        (bx as f64 + 1.0 - origin.x) * t_delta_x
-    } else {
-        (origin.x - bx as f64) * t_delta_x
-    };
-    let mut t_max_y = if dir.y > 0.0 {
-        (by as f64 + 1.0 - origin.y) * t_delta_y
-    } else {
-        (origin.y - by as f64) * t_delta_y
-    };
-    let mut t_max_z = if dir.z > 0.0 {
-        (bz as f64 + 1.0 - origin.z) * t_delta_z
-    } else {
-        (origin.z - bz as f64) * t_delta_z
-    };
-
-    let reach_end = origin + dir * max_dist as f64;
-    let mut t = 0.0_f64;
-    while t <= max_dist as f64 {
-        let state = chunks.get_block_state(bx, by, bz);
+    let reach_end = origin + dir.as_dvec3() * max_dist as f64;
+    crate::physics::collision::traverse_blocks(origin, reach_end, |block_pos| {
+        let state = chunks.get_block_state(block_pos.x, block_pos.y, block_pos.z);
         let block_state_data = block_state_table.block_state_data(state);
-        if !block_state_data.is_air() {
-            let block_pos = BlockPos {
-                x: bx,
-                y: by,
-                z: bz,
-            };
-            let outline = block_shape::outline_shape_holding_data(block_state_data, held_item);
-            let shape_offset = block_state_data.outline_shape_position(bx, by, bz);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, shape_offset, outline) {
-                return Some(BlockHitResult {
-                    block_pos,
-                    face,
-                    hit_point,
-                });
-            }
+        if block_state_data.is_air() {
+            return None;
         }
-        if t_max_x < t_max_y && t_max_x < t_max_z {
-            t = t_max_x;
-            t_max_x += t_delta_x;
-            bx += step_x;
-        } else if t_max_y < t_max_z {
-            t = t_max_y;
-            t_max_y += t_delta_y;
-            by += step_y;
-        } else {
-            t = t_max_z;
-            t_max_z += t_delta_z;
-            bz += step_z;
-        }
-    }
-    None
+        let outline = block_shape::outline_shape_holding_data(block_state_data, held_item);
+        let shape_offset =
+            block_state_data.outline_shape_position(block_pos.x, block_pos.y, block_pos.z);
+        let (hit_point, face) = clip_shape(origin, reach_end, shape_offset, outline)?;
+        Some(BlockHitResult {
+            block_pos,
+            face,
+            hit_point,
+        })
+    })
 }
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
@@ -2160,18 +2107,42 @@ pub fn raycast(
 /// for that, so equally near entities don't resolve at random.
 // TODO: vanilla skips the player's own vehicle unless the ray starts inside
 // a box.
-fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
-    let mut touched: Vec<_> = entities
+fn nearest_entity_hit(
+    from: DVec3,
+    to: DVec3,
+    entities: &EntityStore,
+    non_living: &crate::entity::non_living::NonLivingStore,
+    is_spectator: &dyn Fn(&crate::entity::LivingEntity) -> bool,
+) -> Option<EntityHitResult> {
+    // (id, box, position, `canBePickedFromInside`).
+    let living = entities
         .living
         .iter()
-        .filter_map(|(&entity_id, entity)| {
+        // `Player.isPickable`: never a spectator.
+        .filter(|(_, entity)| entity.is_pickable() && !is_spectator(entity))
+        .map(|(&entity_id, entity)| {
             let entity_pos: DVec3 = entity.position.into();
-            let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
+            // `SulfurCube.canBePickedFromInside`: not around its block.
+            let swallowed = entity.entity_type == EntityKind::SulfurCube
+                && entity.equipment(EquipmentSlot::Body).is_some();
+            (
+                entity_id,
+                living_entity_aabb(entity),
+                entity_pos,
+                !swallowed,
+            )
+        });
+    let non_living = non_living
+        .entities()
+        .filter(|(_, entity)| entity.is_pickable())
+        .filter_map(|(entity_id, entity)| {
+            Some((entity_id, entity.pick_box()?, *entity.position, true))
+        });
+    let mut touched: Vec<_> = living
+        .chain(non_living)
+        .filter_map(|(entity_id, aabb, entity_pos, from_inside)| {
             let (location, dist_sq) = if aabb.contains(from) {
-                // `SulfurCube.canBePickedFromInside`: not around its block.
-                let swallowed = entity.entity_type == EntityKind::SulfurCube
-                    && entity.equipment(EquipmentSlot::Body).is_some();
-                if swallowed {
+                if !from_inside {
                     return None;
                 }
                 (from, 0.0)
@@ -2205,20 +2176,19 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
 const INSIDE_PROBE_FRACTION: f64 = 0.001;
 
 /// Ports vanilla `VoxelShape.clip`: a ray starting inside the shape hits it at
-/// the probe point, otherwise the nearest box entry wins. An empty shape is
-/// never hit, so the caller walks on to the next block. Vanilla's
-/// degenerate-ray guard is dropped; `raycast` always passes a scaled unit
-/// direction.
-fn clip_shape(
+/// the probe point, otherwise the nearest box entry wins. An empty shape, or
+/// a ray too short to have a direction, is never hit, so the caller walks on
+/// to the next block.
+pub(crate) fn clip_shape(
     from: DVec3,
     to: DVec3,
     offset: DVec3,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction)> {
-    if boxes.is_empty() {
+    let ray = to - from;
+    if boxes.is_empty() || ray.length_squared() < 1.0e-7 {
         return None;
     }
-    let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
     let starts_inside = boxes
@@ -2824,6 +2794,89 @@ mod tests {
         }
     }
 
+    /// Frames and paintings take the pick like any entity
+    /// (`BlockAttachedEntity.isPickable`).
+    /// `Projectile.isPickable` for a `#redirectable_projectile`, its box
+    /// grown by a pick radius of 1.
+    #[test]
+    fn a_fireball_is_picked_within_its_pick_radius() {
+        let mut store = crate::entity::non_living::NonLivingStore::new();
+        for (id, kind, x) in [
+            (4, EntityKind::Fireball, 0.0),
+            (5, EntityKind::Snowball, 3.0),
+        ] {
+            store.spawn(
+                id,
+                kind,
+                uuid::Uuid::nil(),
+                Position::new(x, 1.0, 3.0),
+                DVec3::ZERO,
+                0.0,
+                0.0,
+                0,
+            );
+        }
+        let pick = |from: DVec3| {
+            nearest_entity_hit(
+                from,
+                from + DVec3::Z * 6.0,
+                &EntityStore::new(),
+                &store,
+                &|_| false,
+            )
+            .map(|hit| hit.entity_id)
+        };
+        // 1.4 blocks to the side: outside the 1x1 box, inside the pick radius.
+        assert_eq!(pick(DVec3::new(1.4, 1.5, 0.0)), Some(4));
+        // A snowball isn't pickable.
+        assert_eq!(pick(DVec3::new(3.0, 1.1, 0.0)), None);
+    }
+
+    #[test]
+    fn item_frames_are_picked() {
+        let mut hanging = crate::entity::non_living::NonLivingStore::new();
+        // Facing south (3), on the block at z = 2: its box sits at z 2.0..2.0625.
+        hanging.spawn(
+            4,
+            EntityKind::ItemFrame,
+            uuid::Uuid::nil(),
+            Position::new(0.0, 1.0, 2.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            3,
+        );
+        let from = DVec3::new(0.5, 1.5, 5.0);
+        let hit = nearest_entity_hit(
+            from,
+            from - DVec3::Z * 5.0,
+            &EntityStore::new(),
+            &hanging,
+            &|_| false,
+        );
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(4));
+    }
+
+    /// `Player.isPickable`: a spectator lets the ray through.
+    #[test]
+    fn spectators_are_not_picked() {
+        let mut entities = EntityStore::new();
+        entities.spawn_living(
+            2,
+            EntityKind::Player,
+            Position::new(0.0, 0.0, 3.0),
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        let none = crate::entity::non_living::NonLivingStore::new();
+        let (from, to) = (DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 1.0, 6.0));
+        let pick = |spectating: bool| {
+            nearest_entity_hit(from, to, &entities, &none, &|_| spectating).map(|h| h.entity_id)
+        };
+        assert_eq!(pick(false), Some(2));
+        assert_eq!(pick(true), None);
+    }
+
     #[test]
     fn equally_near_entities_resolve_to_the_lower_id() {
         let mut entities = EntityStore::new();
@@ -2836,17 +2889,21 @@ mod tests {
                 uuid::Uuid::nil(),
             );
         }
+        let none = crate::entity::non_living::NonLivingStore::new();
         let hit = nearest_entity_hit(
             DVec3::new(0.0, 1.0, 0.0),
             DVec3::new(0.0, 1.0, 6.0),
             &entities,
+            &none,
+            &|_| false,
         );
         assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
 
         // From inside their boxes the last one wins.
         let inside = DVec3::new(0.0, 0.2, 3.0);
         let pick = |entities: &EntityStore| {
-            nearest_entity_hit(inside, inside + DVec3::Z, entities).map(|hit| hit.entity_id)
+            nearest_entity_hit(inside, inside + DVec3::Z, entities, &none, &|_| false)
+                .map(|hit| hit.entity_id)
         };
         assert_eq!(pick(&entities), Some(12));
 
@@ -2934,6 +2991,19 @@ mod tests {
             clip_shape(inside_the_slab, inside_the_slab + ray, block, &bottom_slab).unwrap();
         assert_eq!(hit_point, inside_the_slab + ray * INSIDE_PROBE_FRACTION);
         assert_eq!(face, Direction::Up);
+    }
+
+    /// A ray starting on a face it travels into stops there (the probe is
+    /// inside), where a plain box clip rejects the zero-length entry.
+    #[test]
+    fn ray_starting_on_a_face_stops_there() {
+        let cube: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+        let on_face = DVec3::new(0.5, 0.5, 0.0);
+        let ray = DVec3::new(0.0, 0.0, 1.0);
+        let (hit_point, _) = clip_shape(on_face, on_face + ray, DVec3::ZERO, &cube).unwrap();
+        assert_eq!(hit_point, on_face + ray * INSIDE_PROBE_FRACTION);
+        // Too short a ray has no direction to clip along.
+        assert!(clip_shape(on_face, on_face + ray * 1.0e-4, DVec3::ZERO, &cube).is_none());
     }
 
     /// Vanilla clips straight through an empty shape (`LiquidBlock.getShape`),

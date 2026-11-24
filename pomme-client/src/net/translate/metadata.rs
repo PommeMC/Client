@@ -9,18 +9,24 @@ use super::*;
 /// a serializer the native version dropped (1.21.8's `compound_tag`) is
 /// stripped rather than failing the packet. An item-stack value can't
 /// always be walked without full component codecs — the remainder is copied
-/// verbatim, which is correct unless a shifted serializer follows one (no
-/// vanilla entity sends one after an untranslatable stack).
+/// verbatim, which is correct unless a shifted serializer or a lifted index
+/// follows one. `lift` is the index from which the entity's wire numbers its
+/// values one lower than 26.3 (`SessionState::index_lifts`).
+/// TODO: an item frame's rotation after an unwalkable stack (1.20.4 and
+/// older) keeps its wire index, where it reads as the frame's item and is
+/// ignored; the item itself still lands.
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
-/// TODO: lift pre-1.21.6 hanging-entity indices (an item frame's item/rotation
-/// at 8/9, a painting's variant at 8) into 26.2's numbering instead of passing
-/// the index byte through, so those entities can render on those wires.
+/// TODO: rewrite `painting_variant` values before 1.21.2: a plain registry
+/// id through 1.20.6 (an unsynced registry before 1.21), an inline variant
+/// without title and author on 1.21/1.21.1. Read as 26.2's holder, a
+/// painting misreads its packet or draws nothing.
 pub(super) fn translate_entity_data(
     id: u32,
     payload: &[u8],
     ids: &GameIds,
     remaps: &RegistryRemaps,
+    lift: Option<u8>,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
@@ -58,7 +64,10 @@ pub(super) fn translate_entity_data(
             }
             return None;
         };
-        out.push(index);
+        out.push(match lift {
+            Some(at) if index >= at => index + 1,
+            _ => index,
+        });
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
         if ids.v764.is_some() && matches!(new, 5 | 6) {

@@ -58,7 +58,10 @@ fn block_light_level(kind: EntityKind, block: u8, dark_ticks: i32) -> u8 {
         Allay | Blaze | DragonFireball | MagmaCube | ShulkerBullet | Vex | Wither | WitherSkull => {
             15
         }
+        kind if super::non_living::thrown_item_style(kind).is_some_and(|s| s.full_bright) => 15,
         ExperienceOrb => (block + 7).min(15),
+        // `ItemFrameRenderer.GLOW_FRAME_BRIGHTNESS`.
+        GlowItemFrame => block.max(5),
         // `Mth.clampedLerp` truncated to an int.
         GlowSquid => match ((1.0 - dark_ticks as f32 / 10.0).clamp(0.0, 1.0) * 15.0) as u8 {
             15 => 15,
@@ -137,6 +140,18 @@ mod tests {
         assert_eq!(
             light(EntityKind::ExperienceOrb, 1.5, false, 0),
             LightLevels::new(12, 10)
+        );
+        assert_eq!(
+            light(EntityKind::Fireball, 1.5, false, 0),
+            LightLevels::new(12, 15)
+        );
+        assert_eq!(
+            light(EntityKind::GlowItemFrame, 1.5, false, 0),
+            LightLevels::new(12, 5)
+        );
+        assert_eq!(
+            light(EntityKind::GlowItemFrame, 0.5, false, 0),
+            LightLevels::new(0, 9)
         );
         assert_eq!(
             light(EntityKind::ExperienceOrb, 0.5, false, 0),

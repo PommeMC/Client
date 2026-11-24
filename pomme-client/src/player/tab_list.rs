@@ -90,6 +90,13 @@ pub struct TabList {
 }
 
 impl TabList {
+    /// Whether `e` is a player listed in spectator mode.
+    pub fn is_spectator(&self, e: &crate::entity::LivingEntity) -> bool {
+        e.player_uuid
+            .and_then(|uuid| self.players.get(&uuid))
+            .is_some_and(|p| crate::player::is_spectator(p.game_mode))
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

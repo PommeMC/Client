@@ -318,6 +318,12 @@ public final class CodecOracle {
         encode("set_entity_data/sniffer_state", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
                 new ClientboundSetEntityDataPacket(7, List.of(SynchedEntityData.DataValue.create(
                         new EntityDataAccessor<>(18, EntityDataSerializers.SNIFFER_STATE), Sniffer.State.DIGGING))));
+        encode("set_entity_data/painting_direct", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
+                new ClientboundSetEntityDataPacket(7, List.of(SynchedEntityData.DataValue.create(
+                        new EntityDataAccessor<>(9, EntityDataSerializers.PAINTING_VARIANT),
+                        Holder.direct(new net.minecraft.world.entity.decoration.painting.PaintingVariant(2, 1,
+                                Identifier.withDefaultNamespace("kebab"), Optional.of(Component.literal("t")),
+                                Optional.empty()))))));
         encode("set_entity_data/copper_golem", ClientboundSetEntityDataPacket.STREAM_CODEC::encode,
                 new ClientboundSetEntityDataPacket(7, List.of(
                         SynchedEntityData.DataValue.create(new EntityDataAccessor<>(16,
@@ -436,7 +442,7 @@ public final class CodecOracle {
         sizes.addProperty("block_state", Block.BLOCK_STATE_REGISTRY.size());
         sizes.addProperty("worldgen/biome", biomes.size());
         for (ResourceKey<? extends Registry<?>> key : List.of(Registries.CAT_VARIANT, Registries.CHICKEN_VARIANT,
-                Registries.COW_VARIANT, Registries.WOLF_VARIANT)) {
+                Registries.COW_VARIANT, Registries.WOLF_VARIANT, Registries.PAINTING_VARIANT)) {
             sizes.addProperty(key.identifier().getPath(), registries.lookupOrThrow(key).size());
         }
         out.add("registry_sizes", sizes);

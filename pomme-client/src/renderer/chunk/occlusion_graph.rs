@@ -455,7 +455,7 @@ pub fn section_mask(n: i32) -> u32 {
 
 /// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
 /// `cull.comp`): true unless the box is fully behind some plane.
-fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool {
+pub(crate) fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool {
     for p in planes {
         let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
             + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }

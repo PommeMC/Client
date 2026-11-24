@@ -396,6 +396,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub non_living_store: crate::entity::non_living::NonLivingStore,
     pub particle_store: crate::particle::ParticleStore,
     pub level_runtime: crate::world::level::LevelRuntime,
     pub block_entity_anim: BlockEntityAnimStore,
@@ -579,6 +580,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            non_living_store: crate::entity::non_living::NonLivingStore::new(),
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
@@ -936,14 +938,7 @@ impl GameState {
     fn is_pushable(&self, e: &crate::entity::LivingEntity) -> bool {
         e.health > 0.0
             && !matches!(e.entity_type, EntityKind::ArmorStand | EntityKind::Bat)
-            && !self.is_spectator(e)
-    }
-
-    /// Whether `e` is a player in spectator mode.
-    fn is_spectator(&self, e: &crate::entity::LivingEntity) -> bool {
-        e.player_uuid
-            .and_then(|uuid| self.tab_list.players.get(&uuid))
-            .is_some_and(|p| crate::player::is_spectator(p.game_mode))
+            && !self.tab_list.is_spectator(e)
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`
@@ -3102,6 +3097,8 @@ fn run_ticks(
         }
         game.item_entity_store
             .tick(&game.chunk_store, game.block_registry.block_state_table());
+        let discarded = tick_non_living(game, core.user.uuid);
+        core.remove_entities(&mut gfx.renderer, game, &discarded);
         if !game.deterministic {
             game.level_runtime.animate_tick(
                 &game.block_registry,
@@ -3716,22 +3713,12 @@ pub fn update_game(
             let store = &game.entity_store;
             let entity_eye_pos = |uuid: &uuid::Uuid| {
                 store.player_by_uuid(uuid).map(|e| {
-                    let feet = e.prev_position.lerp(e.position, partial_tick as f64);
-                    // TODO: swimming/gliding eye height needs entity pose data.
-                    let eye_height = if e.is_crouching {
-                        crate::player::CROUCH_EYE_HEIGHT
-                    } else {
-                        crate::player::STANDING_EYE_HEIGHT
-                    };
                     let block_pos = glam::IVec3::new(
                         e.position.x.floor() as i32,
                         e.position.y.floor() as i32,
                         e.position.z.floor() as i32,
                     );
-                    (
-                        block_pos,
-                        *feet + glam::DVec3::new(0.0, f64::from(eye_height), 0.0),
-                    )
+                    (block_pos, *e.eye_position(partial_tick))
                 })
             };
             game.waypoints.extract_dots(
@@ -3755,8 +3742,9 @@ pub fn update_game(
             BarChoice::Empty => hud::ContextualBarKind::Empty,
         };
         // Vanilla `renderMaxAttackIndicator`: the picked entity is living
-        // (implicit: pomme entity hits only come from `living`), alive, at
-        // full charge, and the weapon is slow enough to matter (delay > 5).
+        // (the `living` lookup, as frames and fireballs are picked too, less
+        // a boat, which that store keeps), alive, at full charge, and the
+        // weapon is slow enough to matter (delay > 5).
         // TODO: vanilla also skips it when the active item's ATTACK_RANGE
         // component says the hit is out of range (spears).
         let delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);
@@ -3768,7 +3756,7 @@ pub fn update_game(
                     .entity_store
                     .living
                     .get(&hit.entity_id)
-                    .is_some_and(|e| e.health > 0.0));
+                    .is_some_and(|e| !crate::entity::is_boat(e.entity_type) && e.health > 0.0));
         let attack = hud::AttackIndicatorState {
             mode: core.menu.attack_indicator,
             scale,
@@ -4980,7 +4968,7 @@ pub fn update_game(
                     visibility: visibility(e.is_invisible, &name),
                     pack_shadow: if game.riding_vehicle_id == Some(entity_id) {
                         PackShadow::Player
-                    } else if game.is_spectator(e) {
+                    } else if game.tab_list.is_spectator(e) {
                         PackShadow::Spectator
                     } else {
                         PackShadow::Entity
@@ -5070,6 +5058,8 @@ pub fn update_game(
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
+                    arrow_shake: 0.0,
+                    armor_stand: extras.armor_stand,
                     golem_attack_ticks: extras.golem_attack_ticks,
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
@@ -5192,7 +5182,7 @@ pub fn update_game(
         );
     }
 
-    let item_renders = if benchmark_running {
+    let mut item_renders = if benchmark_running {
         Vec::new()
     } else {
         build_item_render_infos(
@@ -5213,7 +5203,29 @@ pub fn update_game(
     let moving_block_renders =
         moving_block_renders(game, gfx.renderer.camera_render_position(), partial_tick);
 
-    let shadow_casters = if core.menu.entity_shadows && !benchmark_running {
+    let non_living = if benchmark_running {
+        super::non_living::NonLivingRenders::default()
+    } else {
+        let frame = super::non_living::Frame {
+            world_light: &world_light,
+            camera: gfx.renderer.camera_render_position(),
+            frustum: gfx.renderer.frustum_planes(),
+            anchor: gfx.renderer.camera_anchor(),
+            orientation: gfx.renderer.camera_orientation(),
+            partial: partial_tick,
+            outline: &|glowing, uuid| {
+                outline(glowing, false, &|| {
+                    scoreboard_name(&game.tab_list, uuid, None)
+                })
+            },
+        };
+        super::non_living::build(&game.non_living_store, &mut gfx.renderer, &frame)
+    };
+    entity_renders.extend(non_living.entities);
+    item_renders.extend(non_living.items);
+    gfx.renderer.set_custom_geometry(non_living.quads);
+
+    let mut shadow_casters = if core.menu.entity_shadows && !benchmark_running {
         shadow_casters(
             &entity_renders,
             &game.item_entity_store,
@@ -5223,6 +5235,9 @@ pub fn update_game(
     } else {
         Vec::new()
     };
+    if core.menu.entity_shadows {
+        shadow_casters.extend(non_living.shadows);
+    }
 
     // `BlockEntityRenderer.shouldRender` at the default view distance, 64.
     let sign_renders: Vec<SignRenderInfo> = if benchmark_running {
@@ -5384,8 +5399,9 @@ pub fn update_game(
     // `EntityRenderer.extractNameTags` with the living renderers'
     // `shouldShowName`.
     // TODO: an entity carrying passengers hides its name (Pomme doesn't link
-    // passengers yet), the below-name score (`belowNameDisplay`), and custom
-    // names on entities that aren't living.
+    // passengers yet), the below-name score (`belowNameDisplay`), custom
+    // names on entities that aren't living, and an armor stand set to show a
+    // name it doesn't have (its type name).
     let nameplate_renders = if benchmark_running {
         Vec::new()
     } else {
@@ -5401,12 +5417,17 @@ pub fn update_game(
                 continue;
             }
             let name = entity.scoreboard_name(&game.tab_list);
+            // `ArmorStandRenderer.shouldShowName`: exactly when its name is
+            // set to show, with no crosshair, invisibility or team rule.
+            let stand = entity.entity_type == EntityKind::ArmorStand;
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {
                 Some(_) => game.scoreboard.line(&name, None),
                 None => match &entity.custom_name_spans {
-                    Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                    Some(custom)
+                        if entity.custom_name_visible || !stand && target == Some(entity_id) =>
+                    {
                         game.scoreboard.line(&name, Some(custom))
                     }
                     _ => continue,
@@ -5416,15 +5437,17 @@ pub fn update_game(
             if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
                 continue;
             }
-            let visible = !entity.is_invisible
-                || spectating
-                || game.scoreboard.sees_friendly_invisible(&viewer, &name);
-            let shown = game
-                .scoreboard
-                .name_tag_shown(&viewer, &name, visible)
-                .unwrap_or(!game.hide_gui && visible);
-            if !shown {
-                continue;
+            if !stand {
+                let visible = !entity.is_invisible
+                    || spectating
+                    || game.scoreboard.sees_friendly_invisible(&viewer, &name);
+                let shown = game
+                    .scoreboard
+                    .name_tag_shown(&viewer, &name, visible)
+                    .unwrap_or(!game.hide_gui && visible);
+                if !shown {
+                    continue;
+                }
             }
             let position = entity
                 .prev_position
@@ -5844,7 +5867,10 @@ fn held_stack(stack: &pomme_item::ItemStack) -> Option<(String, pomme_item::Item
     (name != "air").then(|| (name, data.clone()))
 }
 
-fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
+pub(super) fn dropped_item_geometry(
+    renderer: &Renderer,
+    item_name: &str,
+) -> (glam::Mat4, f32, f32) {
     let mesh = renderer.item_mesh_info(item_name);
     let is_block_model = mesh
         .map(|mesh| mesh.is_block_model)
@@ -6111,6 +6137,7 @@ struct EntityExtras {
     flap_speed: f32,
     body_transform: Option<glam::Mat4>,
     render_offset: glam::DVec3,
+    armor_stand: crate::renderer::entity_model::ArmorStandPose,
     nose_wobble_speed: f32,
     is_angry: bool,
     tail_angle: f32,
@@ -6191,6 +6218,30 @@ fn entity_extras(
             variant_index: e.variant,
             ..Default::default()
         },
+        EntityKind::ArmorStand => {
+            let stand = &e.armor_stand;
+            // `ArmorStandRenderer.setupRotations`: a hit wobbles it for five
+            // ticks.
+            let wiggle = (game_time - stand.last_hit) as f32 + alpha;
+            EntityExtras {
+                armor_stand: crate::renderer::entity_model::ArmorStandPose {
+                    poses: stand.poses,
+                    show_arms: stand.show_arms(),
+                    show_base_plate: stand.show_base_plate(),
+                    y_rot_deg: lerp_angle(
+                        e.prev_look_dir.y_rot_deg(),
+                        e.look_dir.y_rot_deg(),
+                        alpha,
+                    ),
+                },
+                body_transform: (wiggle < 5.0).then(|| {
+                    glam::Mat4::from_rotation_y(
+                        ((wiggle / 1.5 * std::f32::consts::PI).sin() * 3.0).to_radians(),
+                    )
+                }),
+                ..Default::default()
+            }
+        }
         EntityKind::Chicken => EntityExtras {
             variant_index: e.variant,
             flap: e.prev_flap.lerp(e.flap, alpha),
@@ -7142,4 +7193,171 @@ mod debug_release_tests {
             );
         }
     }
+}
+
+/// `ItemPickupParticle.updatePosition`'s target on collector `id`: halfway
+/// up to its eyes. `None` when the client doesn't have it.
+pub(crate) fn pickup_target(
+    player: &crate::player::LocalPlayer,
+    entities: &crate::entity::EntityStore,
+    id: i32,
+) -> Option<Position> {
+    let (feet, eye) = if id == player.entity_id {
+        (player.position, player.eye_pos())
+    } else {
+        let entity = entities.living.get(&id)?;
+        (entity.position, entity.eye_position(1.0))
+    };
+    Some(feet.lerp(eye, 0.5))
+}
+
+/// What a projectile can hit this tick (`canBeHitByProjectile`): every
+/// alive, pickable entity, with the vehicle it rides at the root.
+fn hit_targets(game: &GameState) -> Vec<crate::entity::non_living::HitTarget> {
+    use crate::entity::non_living::HitTarget;
+    let mut vehicle_of: HashMap<i32, i32> = game
+        .vehicle_passengers
+        .iter()
+        .flat_map(|(&vehicle, riders)| riders.iter().map(move |&rider| (rider, vehicle)))
+        .collect();
+    if let Some(vehicle) = game.riding_vehicle_id {
+        vehicle_of.insert(game.player.entity_id, vehicle);
+    }
+    // `getRootVehicle`, bounded against a malformed loop.
+    let root = |mut id: i32| {
+        for _ in 0..vehicle_of.len() {
+            match vehicle_of.get(&id) {
+                Some(&vehicle) => id = vehicle,
+                None => break,
+            }
+        }
+        id
+    };
+    let mut targets = Vec::new();
+    if !crate::player::is_spectator(game.player.game_mode) && !game.dead {
+        targets.push(HitTarget {
+            id: game.player.entity_id,
+            position: *game.player.position,
+            aabb: game.player.bounding_box(),
+            root: root(game.player.entity_id),
+            is_player: true,
+            takes_arrow: false,
+        });
+    }
+    for (&id, e) in &game.entity_store.living {
+        let boat = crate::entity::is_boat(e.entity_type);
+        if (boat || e.health > 0.0) && e.is_pickable() && !game.tab_list.is_spectator(e) {
+            targets.push(HitTarget {
+                id,
+                position: *e.position,
+                aabb: crate::entity::living_entity_aabb(e),
+                root: root(id),
+                is_player: e.entity_type == EntityKind::Player,
+                // `VehicleEntity.hurtClient` and `RemotePlayer.hurtClient`.
+                takes_arrow: boat || e.entity_type == EntityKind::Player,
+            });
+        }
+    }
+    for (id, e) in game.non_living_store.entities() {
+        if e.is_pickable() {
+            targets.push(HitTarget {
+                id,
+                position: *e.position,
+                aabb: e
+                    .bounding_box()
+                    .unwrap_or_else(|| e.dimensions_box(*e.position)),
+                root: root(id),
+                is_player: false,
+                // `BlockAttachedEntity.hurtClient`.
+                takes_arrow: e.is_hanging(),
+            });
+        }
+    }
+    targets
+}
+
+/// The non-living entities' client tick, after the item entities'; the ids
+/// it discarded.
+fn tick_non_living(game: &mut GameState, local_uuid: uuid::Uuid) -> Vec<i32> {
+    use crate::entity::non_living::OrbTarget;
+    // `ExperienceOrb.followNearbyPlayer` skips spectators.
+    let local = (!crate::player::is_spectator(game.player.game_mode)).then(|| OrbTarget {
+        id: game.player.entity_id,
+        position: *game.player.position,
+        eye_height: f64::from(game.player.target_eye_height()),
+        dead: game.dead,
+    });
+    let players: Vec<_> = local
+        .into_iter()
+        .chain(
+            game.entity_store
+                .living
+                .iter()
+                .filter(|(_, e)| {
+                    e.entity_type == EntityKind::Player && !game.tab_list.is_spectator(e)
+                })
+                .map(|(&id, e)| OrbTarget {
+                    id,
+                    position: *e.position,
+                    eye_height: f64::from(e.player_eye_height()),
+                    dead: e.health <= 0.0,
+                }),
+        )
+        .collect();
+    let player_id = game.player.entity_id;
+    let player = crate::entity::non_living::TridentOwner {
+        eye: *game.player.eye_pos(),
+        is_player: true,
+        alive: !game.dead,
+        width: f64::from(crate::entity::dimensions::EntityDimensions::of(EntityKind::Player).width),
+    };
+    let living = &game.entity_store.living;
+    let owner_of = |id: i32| {
+        if id == player_id {
+            return Some(player);
+        }
+        living
+            .get(&id)
+            .map(|e| crate::entity::non_living::TridentOwner {
+                eye: *e.eye_position(1.0),
+                is_player: e.entity_type == EntityKind::Player,
+                alive: e.health > 0.0,
+                width: f64::from(
+                    crate::entity::dimensions::EntityDimensions::of(e.entity_type).width,
+                ),
+            })
+    };
+    let local_player = &game.player;
+    let entities = &game.entity_store;
+    let pickup_target_of = |id: i32| pickup_target(local_player, entities, id);
+    let targets = hit_targets(game);
+    // Players' scoreboard names, for their teams.
+    let player_name = |id: i32| {
+        if id == player_id {
+            Some(crate::entity::glowing::scoreboard_name(
+                &game.tab_list,
+                local_uuid,
+                Some(local_uuid),
+            ))
+        } else {
+            living.get(&id).map(|e| e.scoreboard_name(&game.tab_list))
+        }
+    };
+    let teams_allow_damage =
+        |attacker: i32, target: i32| match (player_name(attacker), player_name(target)) {
+            (Some(attacker), Some(target)) => {
+                game.scoreboard.teams_allow_damage(&attacker, &target)
+            }
+            _ => true,
+        };
+    let world = crate::entity::non_living::TickWorld {
+        chunks: &game.chunk_store,
+        block_state_table: game.block_registry.block_state_table(),
+        players: &players,
+        owner_of: &owner_of,
+        pickup_target_of: &pickup_target_of,
+        targets: &targets,
+        teams_allow_damage: &teams_allow_damage,
+    };
+    game.non_living_store.tick(&world)
 }

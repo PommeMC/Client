@@ -4,6 +4,7 @@ pub mod components;
 pub mod dimensions;
 pub mod glowing;
 pub mod light;
+pub mod non_living;
 pub mod shadow;
 pub mod villager;
 
@@ -61,6 +62,67 @@ pub enum MetaValue {
     Byte(u8),
     Float(f32),
     Long(i64),
+    /// An armor stand pose, degrees.
+    Rotations([f32; 3]),
+    /// `Direction.get3DDataValue`.
+    Direction(u32),
+    OptionalUnsignedInt(Option<u32>),
+}
+
+/// `ArmorStand`'s synced client flags and poses, and its last hit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmorStandState {
+    /// `DATA_CLIENT_FLAGS`: 0x01 small, 0x04 arms, 0x08 no base plate,
+    /// 0x10 marker.
+    // TODO: a marker's render types (`ArmorStandRenderer.getRenderType`:
+    // no outline, nothing while invisible) and its brightest-block light
+    // probe.
+    pub flags: u8,
+    /// Head, body, left arm, right arm, left leg, right leg, in degrees.
+    pub poses: [[f32; 3]; 6],
+    /// `ArmorStand.lastHit`, the game time of the last wobble.
+    pub last_hit: i64,
+}
+
+impl Default for ArmorStandState {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            // `DEFAULT_*_POSE`.
+            poses: [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [-10.0, 0.0, -10.0],
+                [-15.0, 0.0, 10.0],
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, 1.0],
+            ],
+            last_hit: 0,
+        }
+    }
+}
+
+impl ArmorStandState {
+    pub fn is_small(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
+    pub fn show_arms(&self) -> bool {
+        self.flags & 0x04 != 0
+    }
+
+    pub fn show_base_plate(&self) -> bool {
+        self.flags & 0x08 == 0
+    }
+
+    pub fn is_marker(&self) -> bool {
+        self.flags & 0x10 != 0
+    }
+
+    /// The `Rotations` constructor: each angle `% 360`, a non-finite one 0.
+    fn rotations(r: [f32; 3]) -> [f32; 3] {
+        r.map(|a| if a.is_finite() { a % 360.0 } else { 0.0 })
+    }
 }
 
 /// Vanilla `Sniffer.State`, in id order.
@@ -878,6 +940,7 @@ pub struct LivingEntity {
     /// Iron golem punch / flower-offer countdowns (entity events 4, 11, 34).
     pub golem_attack_ticks: u8,
     pub golem_offer_flower_ticks: u16,
+    pub armor_stand: ArmorStandState,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -944,6 +1007,12 @@ pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32
 
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
     let mut dims = EntityDimensions::of(entity.entity_type);
+    // `ArmorStand.MARKER_DIMENSIONS`.
+    if entity.is_marker_stand() {
+        dims.width = 0.0;
+        dims.height = 0.0;
+        return dims;
+    }
     // `Sniffer.DIGGING_DIMENSIONS`, then the same age scale.
     if entity.entity_type == EntityKind::Sniffer && entity.sniffer_state == SnifferState::Digging {
         dims.height -= 0.4;
@@ -957,7 +1026,7 @@ pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimension
     dims
 }
 
-fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
+pub(crate) fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
     let dims = living_entity_dimensions(entity);
     Aabb::from_center(
         entity.position.into(),
@@ -968,12 +1037,15 @@ fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
 
 /// Per-kind `pushEntities` / `doPush` overrides. Team rules, spectators and
 /// shared vehicles are the caller's `pusher_allowed` filter.
-// TODO: once these kinds are modeled: ArmorStand no-ops doPush/pushEntities,
-// Vex ticks with noPhysics (no push), and Warden / Creaking gate the
-// reciprocal impulse in isPushable.
+// TODO: once these kinds are modeled: Vex ticks with noPhysics (no push),
+// and Warden / Creaking gate the reciprocal impulse in isPushable.
 fn pushes_local_player(entity: &LivingEntity) -> bool {
-    // `Parrot.doPush` skips players.
-    !matches!(entity.entity_type, EntityKind::Bat | EntityKind::Parrot)
+    // `Parrot.doPush` skips players; `ArmorStand.isPushable` keeps stands out
+    // of the player's `getPushableEntities`.
+    !matches!(
+        entity.entity_type,
+        EntityKind::Bat | EntityKind::Parrot | EntityKind::ArmorStand
+    )
 }
 
 /// The pusher's `isPushable`, which gates only the reciprocal impulse.
@@ -1143,6 +1215,7 @@ impl LivingEntity {
             dark_ticks: 0,
             golem_attack_ticks: 0,
             golem_offer_flower_ticks: 0,
+            armor_stand: ArmorStandState::default(),
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -1180,6 +1253,15 @@ impl LivingEntity {
             interp_head_y_rot_deg: y_rot_deg,
             interp_head_y_rot_steps: 0,
         }
+    }
+
+    /// `Entity.isPickable`: a marker armor stand can't be targeted.
+    pub fn is_pickable(&self) -> bool {
+        !self.is_marker_stand()
+    }
+
+    fn is_marker_stand(&self) -> bool {
+        self.entity_type == EntityKind::ArmorStand && self.armor_stand.is_marker()
     }
 
     pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {
@@ -1302,12 +1384,31 @@ impl LivingEntity {
             .clamp(0.0, 1.0)
     }
 
-    /// Vanilla `getEyePosition(partialTick)`, at the standing eye height.
+    /// A player's `getEyeHeight` for its pose.
+    // TODO: swimming, gliding and sleeping eye heights need the synced pose,
+    // which pomme reads only as crouching.
+    pub fn player_eye_height(&self) -> f32 {
+        if self.is_crouching {
+            crate::player::CROUCH_EYE_HEIGHT
+        } else {
+            crate::player::STANDING_EYE_HEIGHT
+        }
+    }
+
+    /// Vanilla `getEyePosition(partialTick)`: a player's eye for its pose,
+    /// any other entity's standing one.
     pub fn eye_position(&self, partial: f32) -> Position {
-        let eye = crate::renderer::pipelines::entity_renderer::standing_eye_height(
-            self.entity_type,
-            self.is_baby,
-        );
+        let eye = if self.entity_type == EntityKind::Player {
+            self.player_eye_height()
+        } else if self.is_marker_stand() {
+            // `ArmorStand.MARKER_DIMENSIONS`.
+            0.0
+        } else {
+            crate::renderer::pipelines::entity_renderer::standing_eye_height(
+                self.entity_type,
+                self.is_baby,
+            )
+        };
         self.prev_position.lerp(self.position, f64::from(partial))
             + DVec3::new(0.0, f64::from(eye * self.stand_height_scale()), 0.0)
     }
@@ -1342,6 +1443,9 @@ impl LivingEntity {
             1.5
         } else if self.entity_type == EntityKind::Sniffer {
             2.05 * bounds(self.is_baby) / bounds(false)
+        } else if self.entity_type == EntityKind::ArmorStand {
+            // A marker's `MARKER_DIMENSIONS` are 0 by 0; a small stand's half.
+            living_entity_dimensions(self).height
         } else {
             bounds(self.is_baby) * self.stand_height_scale()
         };
@@ -1706,6 +1810,11 @@ impl LivingEntity {
                 turn_body(self.body_y_rot_deg, y_rot, dx, dz, self.swing_time > 0);
             return;
         }
+        // `ArmorStand.tickHeadTurn`: the body follows the yaw.
+        if self.entity_type == EntityKind::ArmorStand {
+            self.body_y_rot_deg = y_rot;
+            return;
+        }
         // A scared armadillo's control skips its client tick.
         if self.entity_type == EntityKind::Armadillo && self.armadillo.is_scared() {
             return;
@@ -1854,6 +1963,15 @@ impl ItemEntityStore {
         }
     }
 
+    /// `ItemEntity.DATA_ITEM` set empty: nothing draws.
+    pub fn clear_item(&mut self, id: i32) {
+        if let Some(entity) = self.items.get_mut(&id) {
+            entity.item_name.clear();
+            entity.count = 0;
+            entity.stack = None;
+        }
+    }
+
     /// The shared entity flags byte (index 0) of item `id`.
     pub fn set_shared_flags(&mut self, id: i32, flags: u8) {
         if let Some(entity) = self.items.get_mut(&id) {
@@ -1902,18 +2020,24 @@ impl ItemEntityStore {
         }
     }
 
-    /// Handle a take-item packet: animate the (pre-shrink) cluster flying to
-    /// the collector, then shrink the stack by `amount`, removing it only
-    /// when empty (vanilla `handleTakeItemEntity`). Returns the item's
-    /// position for the pickup sound, or `None` if there's nothing to pick
-    /// up.
-    pub fn pickup(&mut self, item_id: i32, target_pos: Position, amount: i32) -> Option<Position> {
+    /// `handleTakeItemEntity` for an item entity: the pre-shrink cluster flies
+    /// to the collector when the client has one, then the stack shrinks by
+    /// `amount` and goes once empty. Returns where it was, for the sound, or
+    /// `None` for an id the client doesn't have.
+    pub fn pickup(
+        &mut self,
+        item_id: i32,
+        target_pos: Option<Position>,
+        amount: i32,
+    ) -> Option<Position> {
         let entity = self.items.get_mut(&item_id)?;
-        if entity.item_name.is_empty() {
-            return None;
-        }
         let start_pos = entity.position;
-        let anim = PickupAnimation {
+        // An empty stack has nothing to shrink or fly, and goes.
+        if entity.item_name.is_empty() {
+            self.items.remove(&item_id);
+            return Some(start_pos);
+        }
+        let anim = target_pos.map(|target_pos| PickupAnimation {
             item_name: entity.item_name.clone(),
             item_id: entity.item_id,
             damage: entity.damage,
@@ -1924,10 +2048,10 @@ impl ItemEntityStore {
             bob_offset: entity.bob_offset,
             age: entity.age,
             life: 0,
-        };
+        });
         entity.count -= amount;
         let empty = entity.count <= 0;
-        self.pickups.push(anim);
+        self.pickups.extend(anim);
         if empty {
             self.items.remove(&item_id);
         }
@@ -1988,6 +2112,13 @@ impl ItemEntityStore {
     }
 }
 
+/// Whether the chunk holding `pos` is loaded; entities there don't move.
+fn chunk_loaded(chunks: &ChunkStore, pos: DVec3) -> bool {
+    chunks
+        .get_chunk(&ChunkPos::containing(BlockPos::containing(pos)))
+        .is_some()
+}
+
 /// Vanilla `ItemEntity.getDefaultGravity`.
 const ITEM_GRAVITY: f64 = 0.04;
 /// Vanilla `Entity.getAirDrag`.
@@ -2004,14 +2135,13 @@ fn tick_item_physics(
     chunk_store: &ChunkStore,
     block_state_table: crate::world::block::BlockStateTable,
 ) {
+    // Don't simulate (and fall) through unloaded terrain.
+    if !chunk_loaded(chunk_store, *entity.position) {
+        return;
+    }
     let block_x = entity.position.x.floor() as i32;
     let block_y = entity.position.y.floor() as i32;
     let block_z = entity.position.z.floor() as i32;
-    let chunk_pos = ChunkPos::new(block_x.div_euclid(16), block_z.div_euclid(16));
-    if chunk_store.get_chunk(&chunk_pos).is_none() {
-        // Don't simulate (and fall) through unloaded terrain.
-        return;
-    }
 
     let state = chunk_store.get_block_state(block_x, block_y, block_z);
     let fluid = block_state_table.block_state_data(state).fluid();
@@ -2138,6 +2268,16 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
+            // `ArmorStand.DATA_CLIENT_FLAGS` and its six poses, ahead of the
+            // mob flags it would otherwise read as.
+            // `ArmorStand.isBaby` is `isSmall`.
+            (EntityKind::ArmorStand, 15, Byte(f)) => {
+                entity.armor_stand.flags = f;
+                entity.is_baby = entity.armor_stand.is_small();
+            }
+            (EntityKind::ArmorStand, 16..=21, MetaValue::Rotations(r)) => {
+                entity.armor_stand.poses[usize::from(index - 16)] = ArmorStandState::rotations(r);
+            }
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => {
                 entity.is_on_fire = shared_flags_on_fire(f);
@@ -2489,6 +2629,15 @@ impl EntityStore {
         }
     }
 
+    /// `ArmorStand.handleEntityEvent(32)`: the hit wobble starts now.
+    pub fn armor_stand_hit(&mut self, id: i32, game_time: i64) -> Option<Position> {
+        let entity = self.living.get_mut(&id)?;
+        (entity.entity_type == EntityKind::ArmorStand).then(|| {
+            entity.armor_stand.last_hit = game_time;
+            entity.position
+        })
+    }
+
     /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
     pub fn golem_punch(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
@@ -2784,6 +2933,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
         || matches!(
             kind,
             EntityKind::Player
+                | EntityKind::ArmorStand
                 | EntityKind::Bee
                 | EntityKind::Parrot
                 | EntityKind::Pig
@@ -2934,6 +3084,17 @@ mod tests {
         assert_eq!(sniffer.name_tag_height(), 2.05);
         sniffer.is_baby = true;
         assert!((sniffer.name_tag_height() - 1.025).abs() < 1e-5);
+
+        // `ArmorStand.MARKER_DIMENSIONS` are 0 by 0; a small stand is half.
+        let mut stand = entity(EntityKind::ArmorStand);
+        assert_eq!(stand.name_tag_height(), 1.975);
+        stand.is_baby = true;
+        assert_eq!(stand.name_tag_height(), 1.975 / 2.0);
+        // `BABY_DIMENSIONS.withEyeHeight(0.9875f)`.
+        assert_eq!(*stand.eye_position(1.0), DVec3::Y * f64::from(0.9875f32));
+        stand.armor_stand.flags = 0x10;
+        assert_eq!(stand.name_tag_height(), 0.0);
+        assert_eq!(*stand.eye_position(1.0), DVec3::ZERO);
     }
 
     #[test]

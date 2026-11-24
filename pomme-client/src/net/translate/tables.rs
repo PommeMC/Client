@@ -242,6 +242,7 @@ impl GameIds {
             }),
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),
+                remove_entities_id: id(Clientbound, "remove_entities"),
                 set_entity_motion_id: id(Clientbound, "set_entity_motion"),
                 player_rotation_id: id(Clientbound, "player_rotation"),
                 set_default_spawn_id: id(Clientbound, "set_default_spawn_position"),
@@ -259,6 +260,14 @@ impl GameIds {
             }),
             v769: (protocol <= 769).then(|| Ids769 {
                 player_chat_id: id(Clientbound, "player_chat"),
+                add_experience_orb_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Clientbound,
+                    "add_experience_orb",
+                ),
+                add_entity_old_id: required_id(table, Phase::Game, Clientbound, "add_entity"),
+                experience_orb_entity_type: wire_entity_type(protocol, "experience_orb"),
                 creative_slot_id: id(Serverbound, "set_creative_mode_slot"),
                 creative_slot_old_id: required_id(
                     table,
@@ -384,13 +393,7 @@ impl GameIds {
                 tag_query_id: id(Clientbound, "tag_query"),
                 add_player_old_id: required_id(table, Phase::Game, Clientbound, "add_player"),
                 add_entity_old_id: required_id(table, Phase::Game, Clientbound, "add_entity"),
-                player_entity_type: RegistryTable::for_protocol(protocol)
-                    .and_then(|r| {
-                        r.names(ClientRegistry::EntityType)
-                            .iter()
-                            .position(|n| n == "player")
-                    })
-                    .expect("player entity type") as u32,
+                player_entity_type: wire_entity_type(protocol, "player"),
             }),
             quiet_suppressed: [
                 "client_tick_end",
@@ -406,4 +409,15 @@ impl GameIds {
             .collect(),
         })
     }
+}
+
+/// The wire version's id for entity type `name`.
+fn wire_entity_type(protocol: i32, name: &str) -> u32 {
+    RegistryTable::for_protocol(protocol)
+        .and_then(|r| {
+            r.names(ClientRegistry::EntityType)
+                .iter()
+                .position(|n| n == name)
+        })
+        .unwrap_or_else(|| panic!("{name} entity type")) as u32
 }
