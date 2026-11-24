@@ -692,6 +692,7 @@ pub fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Turtle
             | EntityKind::Axolotl
             | EntityKind::PolarBear
+            | EntityKind::HappyGhast
     ) || is_equine(&kind)
         || is_llama(kind)
 }
@@ -880,6 +881,12 @@ pub struct LivingEntity {
     pub is_eating: bool,
     pub is_standing: bool,
     pub is_open_mouth: bool,
+    /// `Ghast.DATA_IS_CHARGING`: the shooting face.
+    pub is_charging: bool,
+    /// `HappyGhast.IS_LEASH_HOLDER`: shows the ropes over a harness.
+    pub is_leash_holder: bool,
+    /// Vanilla `isVehicle`: carrying a passenger, from `SetPassengers`.
+    pub is_vehicle: bool,
     pub eat_anim: f32,
     pub prev_eat_anim: f32,
     /// Equine rear spring (0..1); the polar bear's
@@ -1000,6 +1007,7 @@ pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32
         // Their `getAgeScale`.
         EntityKind::Dolphin => 0.65,
         EntityKind::Turtle => 0.3,
+        EntityKind::HappyGhast => 0.2375,
         _ => 0.5,
     };
     (width * scale, height * scale)
@@ -1174,6 +1182,9 @@ impl LivingEntity {
             is_eating: false,
             is_standing: false,
             is_open_mouth: false,
+            is_charging: false,
+            is_leash_holder: false,
+            is_vehicle: false,
             eat_anim: 0.0,
             prev_eat_anim: 0.0,
             stand_anim: 0.0,
@@ -1819,6 +1830,14 @@ impl LivingEntity {
         if self.entity_type == EntityKind::Armadillo && self.armadillo.is_scared() {
             return;
         }
+        // `HappyGhastBodyRotationControl.clientTick`: a ridden happy ghast
+        // turns body and head to its yaw first.
+        // TODO: piloting one as the local player (`HappyGhast.tickRidden`,
+        // `getRiddenInput`, `getRiddenSpeed`).
+        if self.entity_type == EntityKind::HappyGhast && self.is_vehicle {
+            self.body_y_rot_deg = y_rot;
+            self.head_y_rot_deg = y_rot;
+        }
         self.body_control.client_tick(
             &mut self.body_y_rot_deg,
             &mut self.head_y_rot_deg,
@@ -2426,6 +2445,8 @@ impl EntityStore {
             }
             (EntityKind::Axolotl, 19, Bool(b)) => entity.axolotl.playing_dead = b,
             (EntityKind::PolarBear, 18, Bool(b)) => entity.is_standing = b,
+            (EntityKind::Ghast, 16, Bool(b)) => entity.is_charging = b,
+            (EntityKind::HappyGhast, 18, Bool(b)) => entity.is_leash_holder = b,
             // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
             // outside 0/1 renders big (vanilla `switch` default).
             // `Sniffer.onSyncedDataUpdated`: every update stops all five
@@ -2980,6 +3001,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Turtle
                 | EntityKind::Axolotl
                 | EntityKind::PolarBear
+                | EntityKind::Ghast
+                | EntityKind::HappyGhast
         )
 }
 
@@ -3466,6 +3489,36 @@ mod tests {
             living_entity_dimensions(&store.living[&1]).height,
             1.4 * 2.0
         );
+    }
+
+    /// `Ghast.DATA_IS_CHARGING` (16), and `HappyGhast.IS_LEASH_HOLDER` (18)
+    /// past `AgeableMob`'s baby and age-locked flags; a baby happy ghast is
+    /// 0.2375 of the adult.
+    #[test]
+    fn ghast_data_and_baby_happy_ghast_size() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::Ghast, Position::default());
+        spawn(&mut store, 2, EntityKind::HappyGhast, Position::default());
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        store.apply_entity_data(2, 16, MetaValue::Bool(true));
+        store.apply_entity_data(2, 18, MetaValue::Bool(true));
+        assert!(store.living[&1].is_charging);
+        let happy = &store.living[&2];
+        assert!(happy.is_baby && happy.is_leash_holder);
+        assert_eq!(living_entity_dimensions(happy).width, 4.0 * 0.2375);
+    }
+
+    /// `HappyGhastBodyRotationControl`: a ridden happy ghast's body and head
+    /// snap to its yaw.
+    #[test]
+    fn a_ridden_happy_ghast_faces_its_yaw() {
+        let mut store = EntityStore::new();
+        spawn(&mut store, 1, EntityKind::HappyGhast, Position::default());
+        let e = store.living.get_mut(&1).unwrap();
+        e.look_dir = LookDirection::new(90.0, 0.0);
+        e.is_vehicle = true;
+        e.tick_body_rotation(0.0, 0.0);
+        assert_eq!((e.body_y_rot_deg, e.head_y_rot_deg), (90.0, 90.0));
     }
 
     fn tick(store: &mut EntityStore) {

@@ -5049,6 +5049,8 @@ pub fn update_game(
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
+                    happy_ghast_harness: extras.happy_ghast_harness,
+                    happy_ghast: extras.happy_ghast,
                     bee: extras.bee,
                     fox: extras.fox,
                     axolotl: extras.axolotl,
@@ -6160,6 +6162,8 @@ struct EntityExtras {
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
+    happy_ghast_harness: Option<crate::renderer::pipelines::entity_renderer::ArmorRenderInfo>,
+    happy_ghast: crate::renderer::entity_model::HappyGhastAnims,
     bee: crate::renderer::entity_model::BeeAnims,
     fox: crate::renderer::entity_model::FoxAnims,
     axolotl: crate::renderer::entity_model::AxolotlAnims,
@@ -6372,6 +6376,12 @@ fn entity_extras(
             ..Default::default()
         },
         EntityKind::Panda => panda_extras(e, alpha),
+        // `GhastRenderer.getTextureLocation`.
+        EntityKind::Ghast => EntityExtras {
+            variant_index: e.is_charging as u32,
+            ..Default::default()
+        },
+        EntityKind::HappyGhast => happy_ghast_extras(e),
         EntityKind::Parrot => parrot_extras(e, alpha),
         EntityKind::Sniffer => EntityExtras {
             sniffer: sniffer_anims(e, alpha),
@@ -6413,6 +6423,31 @@ fn entity_extras(
             }
         }
         _ => EntityExtras::default(),
+    }
+}
+
+/// Vanilla `HappyGhastRenderer.extractRenderState`, its
+/// `SimpleEquipmentLayer` (any equippable body item with an asset) and
+/// `RopesLayer.submit` (a leash holder in a harness).
+fn happy_ghast_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
+    let body = e.equipment(EquipmentSlot::Body);
+    let ropes = e.is_leash_holder
+        && body
+            .and_then(|stack| stack.as_present())
+            .is_some_and(|d| pomme_registry::tags::items::HARNESSES.contains(&d.kind));
+    EntityExtras {
+        happy_ghast_harness: body
+            .and_then(crate::renderer::pipelines::entity_renderer::equipment_render_info),
+        happy_ghast: crate::renderer::entity_model::HappyGhastAnims {
+            has_body_item: body.is_some(),
+            is_ridden: e.is_vehicle,
+        },
+        overlay_tints: if ropes {
+            SLOT0_TINTS
+        } else {
+            Default::default()
+        },
+        ..Default::default()
     }
 }
 

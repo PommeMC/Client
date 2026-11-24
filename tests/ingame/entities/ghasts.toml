@@ -1,0 +1,111 @@
+# Ghasts from a pillar: a ghast, an adult and a baby happy ghast, then
+# harnessed happy ghasts: goggles raised, lowered under a rider (a pig), the
+# ropes while a boat is leashed to it, and a harnessed baby.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look out from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 20"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:ghast -6 -60 16 {NoAI:1b,Rotation:[160f,0f]}"
+
+[[step]]
+expect = { entity = "ghast" }
+
+[[step]]
+chat = "/summon minecraft:happy_ghast 1 -60 16 {NoAI:1b,Rotation:[200f,0f]}"
+
+[[step]]
+expect = { entity = "happy_ghast", baby = false }
+
+[[step]]
+chat = "/summon minecraft:happy_ghast 6 -60 13 {NoAI:1b,Age:-24000,Rotation:[200f,0f]}"
+
+[[step]]
+expect = { entity = "happy_ghast", baby = true }
+
+[[step]]
+look_at = [0.5, -58.0, 16.0]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "ghasts"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+# Harnessed: idle, ridden by a pig, holding a leashed boat, and a baby.
+[[step]]
+chat = '/summon minecraft:happy_ghast -6 -60 16 {NoAI:1b,Rotation:[180f,0f],equipment:{body:{id:"minecraft:red_harness",count:1}}}'
+
+[[step]]
+chat = '/summon minecraft:happy_ghast -1 -60 16 {NoAI:1b,Rotation:[180f,0f],Tags:["ridden"],equipment:{body:{id:"minecraft:light_blue_harness",count:1}}}'
+
+[[step]]
+chat = '/summon minecraft:happy_ghast 4 -60 16 {NoAI:1b,Rotation:[180f,0f],UUID:[I;7,7,7,7],equipment:{body:{id:"minecraft:lime_harness",count:1}}}'
+
+[[step]]
+chat = '/summon minecraft:happy_ghast 8 -60 12 {NoAI:1b,Age:-24000,Rotation:[180f,0f],equipment:{body:{id:"minecraft:yellow_harness",count:1}}}'
+
+[[step]]
+expect = { entity = "happy_ghast", baby = true }
+
+[[step]]
+chat = "/summon minecraft:pig -1 -60 12 {NoAI:1b}"
+
+[[step]]
+expect = { entity = "pig" }
+
+[[step]]
+chat = "/ride @e[type=pig,limit=1] mount @e[type=happy_ghast,tag=ridden,limit=1]"
+
+[[step]]
+chat = "/summon minecraft:oak_boat 4 -60 10 {leash:{UUID:[I;7,7,7,7]}}"
+
+[[step]]
+expect = { entity = "oak_boat" }
+
+[[step]]
+look_at = [1.0, -58.0, 16.0]
+
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "harnessed_happy_ghasts"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

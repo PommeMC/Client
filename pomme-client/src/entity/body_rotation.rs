@@ -12,7 +12,7 @@ const HOW_LONG_IT_TAKES_TO_FACE_FORWARD: f32 = 10.0;
 
 // TODO: `BodyRotationControl.notCarryingMobPassengers` (no client-side
 // vehicle tracking for other entities yet), and the Camel, Creaking,
-// HappyGhast, Phantom and Shulker controls once those mobs are modeled.
+// Phantom and Shulker controls once those mobs are modeled.
 #[derive(Default)]
 pub struct BodyRotationControl {
     head_stable_time: i32,

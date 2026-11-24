@@ -191,6 +191,10 @@ pub struct EntityRenderInfo {
     pub copper_golem: entity_model::CopperGolemAnims,
     /// Llama carpet or trader decor.
     pub llama_decor: Option<LlamaDecor>,
+    /// Vanilla `HappyGhastRenderer`'s `SimpleEquipmentLayer`: the body
+    /// item's `happy_ghast_body` layers on the harness model.
+    pub happy_ghast_harness: Option<ArmorRenderInfo>,
+    pub happy_ghast: entity_model::HappyGhastAnims,
     pub bee: entity_model::BeeAnims,
     pub fox: entity_model::FoxAnims,
     /// Axolotl animator factors and baby animation clocks.
@@ -290,6 +294,8 @@ impl Default for EntityRenderInfo {
             allay: entity_model::AllayAnims::default(),
             copper_golem: entity_model::CopperGolemAnims::default(),
             llama_decor: None,
+            happy_ghast_harness: None,
+            happy_ghast: entity_model::HappyGhastAnims::default(),
             bee: entity_model::BeeAnims::default(),
             fox: entity_model::FoxAnims::default(),
             axolotl: entity_model::AxolotlAnims::default(),
@@ -437,6 +443,7 @@ struct ArmorAssetDef {
     humanoid: Vec<ArmorLayerDef>,
     leggings: Vec<ArmorLayerDef>,
     llama_body: Vec<ArmorLayerDef>,
+    happy_ghast_body: Vec<ArmorLayerDef>,
 }
 
 struct ArmorTextureLayer {
@@ -479,6 +486,7 @@ struct ArmorAsset {
     humanoid: Vec<ArmorTextureLayer>,
     leggings: Vec<ArmorTextureLayer>,
     llama_body: Vec<ArmorTextureLayer>,
+    happy_ghast_body: Vec<ArmorTextureLayer>,
 }
 
 struct ArmorMesh {
@@ -495,6 +503,8 @@ struct ArmorMeshes {
     /// `LLAMA_DECOR` chestless and chested; the baby never shows a chest.
     llama_decor: [ArmorMesh; 2],
     baby_llama_decor: ArmorMesh,
+    /// `HAPPY_GHAST_HARNESS` adult and baby.
+    happy_ghast_harness: [ArmorMesh; 2],
 }
 
 impl MobEntry {
@@ -714,12 +724,18 @@ fn load_armor_asset_defs(resources: &dyn ResourceManager) -> HashMap<String, Arm
             let humanoid = layers("humanoid");
             let leggings = layers("humanoid_leggings");
             let llama_body = layers("llama_body");
-            (!humanoid.is_empty() || !leggings.is_empty() || !llama_body.is_empty()).then_some((
+            let happy_ghast_body = layers("happy_ghast_body");
+            (!humanoid.is_empty()
+                || !leggings.is_empty()
+                || !llama_body.is_empty()
+                || !happy_ghast_body.is_empty())
+            .then_some((
                 id,
                 ArmorAssetDef {
                     humanoid,
                     leggings,
                     llama_body,
+                    happy_ghast_body,
                 },
             ))
         })
@@ -775,6 +791,7 @@ fn load_armor_assets(
                     humanoid: def.humanoid.into_iter().map(build).collect(),
                     leggings: def.leggings.into_iter().map(build).collect(),
                     llama_body: def.llama_body.into_iter().map(build).collect(),
+                    happy_ghast_body: def.happy_ghast_body.into_iter().map(build).collect(),
                 },
             )
         })
@@ -807,6 +824,9 @@ fn build_armor_meshes(device: &rhi::backend::Device) -> ArmorMeshes {
         llama_decor: [false, true]
             .map(|chest| build_armor_mesh(device, entity_model::bake_llama_decor_model(chest))),
         baby_llama_decor: build_armor_mesh(device, entity_model::bake_baby_llama_decor_model()),
+        happy_ghast_harness: [false, true].map(|baby| {
+            build_armor_mesh(device, entity_model::bake_happy_ghast_harness_model(baby))
+        }),
     }
 }
 
@@ -817,6 +837,7 @@ fn destroy_armor_assets(device: &rhi::backend::Device, assets: &mut HashMap<Stri
             .into_iter()
             .chain(asset.leggings)
             .chain(asset.llama_body)
+            .chain(asset.happy_ghast_body)
     }) {
         layer.texture.destroy(device);
         layer.set.destroy(device);
@@ -946,6 +967,8 @@ enum AnimationType {
     Panda,
     Armadillo,
     Goat,
+    /// Ghast and happy ghast tentacles, plus the happy ghast's harness poses.
+    Ghast,
     Bee,
     Parrot,
     Dolphin,
@@ -1241,6 +1264,11 @@ fn mob_definitions() -> Vec<MobDef> {
     const ARMADILLO_BABY_TEX: &[&[ResourceId]] = tex_table!("armadillo" => "armadillo_baby");
     const GOAT_TEX: &[&[ResourceId]] = tex_table!("goat" => "goat");
     const GOAT_BABY_TEX: &[&[ResourceId]] = tex_table!("goat" => "goat_baby");
+    // Indexed by `GhastRenderState.isCharging`.
+    const GHAST_TEX: &[&[ResourceId]] = tex_table!("ghast" => "ghast", "ghast_shooting");
+    const HAPPY_GHAST_TEX: &[&[ResourceId]] = tex_table!("ghast" => "happy_ghast");
+    const HAPPY_GHAST_BABY_TEX: &[&[ResourceId]] = tex_table!("ghast" => "happy_ghast_baby");
+    const HAPPY_GHAST_ROPES_TEX: &[&[ResourceId]] = tex_table!("ghast" => "happy_ghast_ropes");
     // Indexed by `Llama.Variant` id.
     const LLAMA_TEX: &[&[ResourceId]] =
         tex_table!("llama" => "llama_creamy", "llama_white", "llama_brown", "llama_gray");
@@ -1374,6 +1402,14 @@ fn mob_definitions() -> Vec<MobDef> {
         baby_overlays: vec![],
     };
 
+    let happy_ghast_ropes = |baby| {
+        opaque(
+            entity_model::bake_happy_ghast_ropes_model(baby),
+            HAPPY_GHAST_ROPES_TEX,
+            64,
+        )
+    };
+
     let mut defs = vec![
         llama(EntityKind::Llama),
         llama(EntityKind::TraderLlama),
@@ -1420,6 +1456,32 @@ fn mob_definitions() -> Vec<MobDef> {
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Ghast,
+            anim: AnimationType::Ghast,
+            adult: vec![opaque(entity_model::bake_ghast_model(), GHAST_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Vanilla `HappyGhastRenderer`. Slot 0 is `RopesLayer`; the harness
+        // draws in the equipment pass (`EntityRenderInfo::happy_ghast_harness`).
+        MobDef {
+            kind: EntityKind::HappyGhast,
+            anim: AnimationType::Ghast,
+            adult: vec![opaque(
+                entity_model::bake_happy_ghast_model(),
+                HAPPY_GHAST_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_happy_ghast_model(),
+                HAPPY_GHAST_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![happy_ghast_ropes(false)],
+            baby_overlays: vec![happy_ghast_ropes(true)],
         },
         MobDef {
             kind: EntityKind::Axolotl,
@@ -2642,6 +2704,11 @@ impl EntityRenderer {
                 let layers = self.equipment_layers(&decor.equipment, |asset| &asset.llama_body);
                 self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
             }
+            if let Some(harness) = &v.info.happy_ghast_harness {
+                let mesh = &self.armor_meshes.happy_ghast_harness[v.info.is_baby as usize];
+                let layers = self.equipment_layers(harness, |asset| &asset.happy_ghast_body);
+                self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
+            }
             for slot in ARMOR_SUBMIT_ORDER {
                 let Some(armor) = &v.info.armor[slot] else {
                     continue;
@@ -2881,6 +2948,9 @@ impl EntityRenderer {
                 info.is_baby,
                 &info.goat,
             ),
+            AnimationType::Ghast => {
+                entity_model::compute_ghast_anim(model, info.age_in_ticks, &info.happy_ghast)
+            }
             AnimationType::Axolotl => entity_model::compute_axolotl_anim(
                 model,
                 info.is_baby,
@@ -3473,6 +3543,7 @@ impl EntityRenderer {
             .chain(self.armor_meshes.small_armor_stand.iter_mut())
             .chain(self.armor_meshes.llama_decor.iter_mut())
             .chain([&mut self.armor_meshes.baby_llama_decor])
+            .chain(self.armor_meshes.happy_ghast_harness.iter_mut())
         {
             std::mem::take(&mut mesh.vertex_buffer).destroy(device);
         }
@@ -3807,6 +3878,7 @@ pub(crate) fn standing_eye_height(kind: EntityKind, is_baby: bool) -> f32 {
         EntityKind::Panda if is_baby => 0.28125,
         EntityKind::Armadillo if is_baby => 0.21875,
         EntityKind::Goat if is_baby => 0.59375,
+        EntityKind::HappyGhast if is_baby => 0.46875,
         EntityKind::Axolotl | EntityKind::Dolphin if is_baby => 0.09375,
         EntityKind::Mooshroom if is_baby => 0.69,
         EntityKind::ArmorStand if is_baby => 0.9875,
@@ -3919,7 +3991,14 @@ fn entity_visible(
         EntityKind::Sniffer => 0.6,
         _ => 0.0,
     };
-    let (cw, ch) = (w + 2.0 * inflate, h + 2.0 * inflate);
+    // `HappyGhastRenderer.getBoundingBoxForCulling` drops the box's floor by
+    // half its height.
+    let drop = if info.entity_kind == EntityKind::HappyGhast {
+        h * 0.5
+    } else {
+        0.0
+    };
+    let (cw, ch) = (w + 2.0 * inflate, h + drop + 2.0 * inflate);
     // A body transform (slime size/squish) can grow the entity well past its
     // base bounds: scale the sphere and its center by the largest axis scale,
     // and pad the radius by the translation (pure-rotation transforms still
@@ -3936,7 +4015,7 @@ fn entity_visible(
     });
     let radius = (0.5 * (2.0 * cw * cw + ch * ch).sqrt() + ANIM_MARGIN) * scale + shift;
     let mut q = (*info.position - eye).as_vec3();
-    q.y += h * 0.5 * scale;
+    q.y += (h - drop) * 0.5 * scale;
     // Distance-cull with the radius as margin so an oversized entity stays
     // visible while any of its body is in range.
     let max_dist = cull_dist + radius;
