@@ -7,6 +7,7 @@
 use glam::Vec3;
 
 use super::{BakedEntityModel, PartAnim, bake_root_scaled, deformed, find_part, vbox, vpart};
+use crate::physics::movement::mth_sin;
 use crate::util::JavaRandom;
 
 /// `PartNames.tentacle(i)`.
@@ -160,7 +161,7 @@ pub fn compute_ghast_anim(
     let mut anim = PartAnim::default();
     for (i, name) in TENTACLES.into_iter().enumerate() {
         if let Some(idx) = find_part(&model.parts, name) {
-            anim.rotation_mut(model, idx).x = 0.2 * (age_in_ticks * 0.3 + i as f32).sin() + 0.4;
+            anim.rotation_mut(model, idx).x = 0.2 * mth_sin(age_in_ticks * 0.3 + i as f32) + 0.4;
         }
     }
     if happy.has_body_item
@@ -240,6 +241,6 @@ mod tests {
         let model = bake_ghast_model();
         let anim = compute_ghast_anim(&model, 10.0, &HappyGhastAnims::default());
         let x = anim.rotation_of(&model, "tentacle2").x;
-        assert!((x - (0.2 * (3.0f32 + 2.0).sin() + 0.4)).abs() < 1e-6);
+        assert_eq!(x, 0.2 * mth_sin(3.0 + 2.0) + 0.4);
     }
 }
