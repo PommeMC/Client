@@ -72,16 +72,8 @@ impl Clicker<'_> {
     }
 
     fn in_tag(&self, tag: &str) -> bool {
-        self.held.is_some_and(|stack| self.tagged(stack, tag))
-    }
-
-    /// `stack` is in `#minecraft:<tag>` as the server synced it, or as the
-    /// game's own data pack has it on a server that doesn't sync the tag.
-    fn tagged(&self, stack: &ItemStackData, tag: &str) -> bool {
-        match self.item_tags.get(&format!("minecraft:{tag}")) {
-            Some(synced) => synced.contains(&(stack.kind as u32)),
-            None => tags::items::named(tag).is_some_and(|tag| tag.contains(&stack.kind)),
-        }
+        self.held
+            .is_some_and(|stack| self.item_tags.is_tagged(tag, stack.kind))
     }
 
     fn equippable(&self) -> Option<Equippable> {
@@ -368,9 +360,10 @@ fn kind_interact(target: Target, clicker: Clicker) -> Option<Taken> {
         E::SnowGolem => swing_if(c.holds(I::Shears) && entity.has_pumpkin),
         E::CopperGolem => {
             // The antenna flower rides in the saddle slot.
-            let antenna = t
-                .wears(EquipmentSlot::Saddle)
-                .is_some_and(|flower| c.tagged(flower, "shearable_from_copper_golem"));
+            let antenna = t.wears(EquipmentSlot::Saddle).is_some_and(|flower| {
+                c.item_tags
+                    .is_tagged("shearable_from_copper_golem", flower.kind)
+            });
             swing_if((c.held.is_none() && carrying) || (c.holds(I::Shears) && antenna))
         }
         E::Creeper => swing_if(c.in_tag("creeper_igniters")),
