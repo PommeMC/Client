@@ -256,27 +256,24 @@ impl Api {
     }
 }
 
+const WINDOWS_LIBRARIES: &[&str] = &["OpenAL.dll", "OpenAL32.dll", "soft_oal.dll"];
+// Not Apple's OpenAL.framework: it lacks `AL_EXT_source_distance_model`.
+const MACOS_LIBRARIES: &[&str] = &["libopenal.1.dylib", "libopenal.dylib"];
+// Relative to the app bundle, which is the executable's directory.
+const IOS_LIBRARIES: &[&str] = &["Frameworks/soft_oal.framework/soft_oal"];
+const UNIX_LIBRARIES: &[&str] = &["libopenal.so.1", "libopenal.so"];
+
+/// Names to try beside the executable and then through the system's search.
 fn library_names() -> &'static [&'static str] {
-    #[cfg(target_os = "windows")]
-    {
-        &["OpenAL.dll", "OpenAL32.dll", "soft_oal.dll"]
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Not Apple's OpenAL.framework: it lacks `AL_EXT_source_distance_model`.
-        &["libopenal.1.dylib", "libopenal.dylib"]
-    }
-    // Relative to the app bundle, which is the executable's directory.
-    #[cfg(target_os = "ios")]
-    {
-        &["Frameworks/soft_oal.framework/soft_oal"]
-    }
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    {
-        &["libopenal.so.1", "libopenal.so"]
-    }
-    #[cfg(not(any(unix, target_os = "windows")))]
-    {
+    if cfg!(target_os = "windows") {
+        WINDOWS_LIBRARIES
+    } else if cfg!(target_os = "macos") {
+        MACOS_LIBRARIES
+    } else if cfg!(target_os = "ios") {
+        IOS_LIBRARIES
+    } else if cfg!(unix) {
+        UNIX_LIBRARIES
+    } else {
         &[]
     }
 }
@@ -308,6 +305,8 @@ pub(super) struct Context {
 }
 
 impl Context {
+    // TODO: a library that loads but fails here (no device, context or
+    // required extension) disables audio instead of trying the next one.
     pub fn open_default(use_hrtf: bool) -> Result<Self, String> {
         let api = Api::load()?;
         // SAFETY: A null name requests OpenAL's default playback device.
@@ -811,6 +810,24 @@ impl Drop for Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An absolute name joined onto the executable's directory stays
+    /// absolute and jumps ahead of the bundled library.
+    #[test]
+    fn every_library_name_is_relative() {
+        let names = [
+            WINDOWS_LIBRARIES,
+            MACOS_LIBRARIES,
+            IOS_LIBRARIES,
+            UNIX_LIBRARIES,
+        ];
+        for name in names.concat() {
+            assert!(
+                !name.starts_with('/') && std::path::Path::new(name).is_relative(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn source_distance_model_capability_and_property_are_distinct() {
