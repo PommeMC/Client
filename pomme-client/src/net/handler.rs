@@ -431,7 +431,7 @@ fn parse_level_particles(r: &mut Reader) -> DecodeResult<Option<NetworkEvent>> {
     let max_speed = r.f32()?;
     let _y_max_speed = r.f32()?;
     let _z_max_speed = r.f32()?;
-    let count = r.varint()?;
+    let count = r.var_i32()?.max(0) as u32;
     let _randomization = r.varint()?;
     let Some(kind) = crate::particle::ServerParticleKind::from_id(type_id) else {
         return Ok(None);
