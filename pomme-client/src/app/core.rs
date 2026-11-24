@@ -4261,6 +4261,14 @@ impl AppCore {
                 }
             }
         }
+        let clicks = if input_live {
+            crate::player::interaction::Clicks {
+                attack: self.input.take_clicks(Action::Destroy),
+                use_item: self.input.take_clicks(Action::Use),
+            }
+        } else {
+            Default::default()
+        };
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
@@ -4375,6 +4383,7 @@ impl AppCore {
         let dirty = game.interaction.tick_actions(
             &game.block_registry,
             input,
+            clicks,
             &game.chunk_store,
             &connection.packet_tx,
             &self.audio,

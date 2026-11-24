@@ -69,6 +69,14 @@ pub struct EntityHitResult {
     pub entity_pos: DVec3,
 }
 
+/// The attack and use key presses queued since the last tick, vanilla's
+/// `KeyMapping.clickCount`s.
+#[derive(Clone, Copy, Default)]
+pub struct Clicks {
+    pub attack: u32,
+    pub use_item: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HitResult {
     Block(BlockHitResult),
@@ -484,6 +492,7 @@ impl InteractionState {
         &mut self,
         block_registry: &BlockRegistry,
         input: &InputState,
+        clicks: Clicks,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
@@ -518,67 +527,72 @@ impl InteractionState {
             return dirty_chunks;
         }
 
-        // Vanilla `handleKeybinds` drains attack clicks while an item is in
-        // use, and `continueAttack` early-returns on `isUsingItem`.
-        let using = self.using_item.is_some();
-
-        if !using && input.action_just_pressed(input::Action::Destroy) {
-            self.start_attack(
-                block_registry,
-                chunks,
-                sender,
-                audio,
-                input,
-                player_pos,
-                on_ground,
-                creative,
-                held_stack,
-                attributes,
-                mob_effects,
-                eyes_in_water,
-                legacy_mining,
-                effects,
-                &mut dirty_chunks,
-            );
-        }
-
-        // Vanilla `handleKeybinds`: while an item is in use, holding the use
-        // key continues it and releasing sends RELEASE_USE_ITEM (an early
-        // cancel; consumables finish on the server's own timer, never on
-        // release).
-        if using {
+        let use_item =
+            |this: &mut Self, effects: &mut BreakEffects, dirty_chunks: &mut Vec<BlockPos>| {
+                let success = this.start_use_item(
+                    block_registry,
+                    sender,
+                    audio,
+                    chunks,
+                    player_pos,
+                    player_aabb,
+                    eye_pos,
+                    look,
+                    hands,
+                    food,
+                    creative,
+                    input.performing_action(input::Action::Sneak),
+                    entity_use,
+                    effects,
+                    dirty_chunks,
+                );
+                if success {
+                    let _ = input.weak_rumble_for_instant();
+                }
+            };
+        // Vanilla `handleKeybinds`: while an item is in use, letting go of
+        // use sends RELEASE_USE_ITEM (an early cancel; consumables finish on
+        // the server's own timer) and the queued clicks are dropped.
+        // Otherwise each click attacks, then each uses.
+        if self.using_item.is_some() {
             if !input.performing_action(input::Action::Use) {
                 self.release_using_item(sender);
             }
-        } else if input.action_just_pressed(input::Action::Use)
-            || (input.performing_action(input::Action::Use) && self.use_delay == 0)
-        {
-            let success = self.start_use_item(
-                block_registry,
-                sender,
-                audio,
-                chunks,
-                player_pos,
-                player_aabb,
-                eye_pos,
-                look,
-                hands,
-                food,
-                creative,
-                input.performing_action(input::Action::Sneak),
-                entity_use,
-                effects,
-                &mut dirty_chunks,
-            );
-            if success {
-                let _ = input.weak_rumble_for_instant();
+        } else {
+            for _ in 0..clicks.attack {
+                self.start_attack(
+                    block_registry,
+                    chunks,
+                    sender,
+                    audio,
+                    input,
+                    player_pos,
+                    on_ground,
+                    creative,
+                    held_stack,
+                    attributes,
+                    mob_effects,
+                    eyes_in_water,
+                    legacy_mining,
+                    effects,
+                    &mut dirty_chunks,
+                );
+            }
+            for _ in 0..clicks.use_item {
+                use_item(self, effects, &mut dirty_chunks);
+            }
+            // Vanilla checks `isUsingItem` once before the attack/use/pick
+            // loops, so a use started above does not suppress a pick.
+            if input.middle_just_pressed() {
+                self.pick_block_or_entity(sender, input.ctrl_held());
             }
         }
-
-        // Vanilla checks `isUsingItem` once before the attack/use/pick loops,
-        // so a use started above does not suppress a pick from the same tick.
-        if !using && input.middle_just_pressed() {
-            self.pick_block_or_entity(sender, input.ctrl_held());
+        // Holding use repeats it every `rightClickDelay`.
+        if input.performing_action(input::Action::Use)
+            && self.use_delay == 0
+            && self.using_item.is_none()
+        {
+            use_item(self, effects, &mut dirty_chunks);
         }
 
         let attack_down = input.performing_action(input::Action::Destroy);

@@ -505,9 +505,8 @@ impl InputState {
                 Action::PreviousHotbarSlot if pressed && !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
-                Action::Destroy
-                | Action::Use
-                | Action::ToggleInventory
+                Action::Destroy | Action::Use if pressed => self.click(action),
+                Action::ToggleInventory
                 | Action::OpenMenu
                 | Action::ChangePerspective
                 | Action::OpenChat
@@ -724,6 +723,11 @@ impl InputState {
         }
     }
 
+    /// Every queued press of `action`, for a caller that loops over them.
+    pub fn take_clicks(&mut self, action: Action) -> u32 {
+        self.click_counts.remove(&action).unwrap_or(0)
+    }
+
     pub fn clear_click_counts(&mut self) {
         self.click_counts.clear();
         self.spectator_slot_presses.clear();
@@ -933,7 +937,11 @@ impl InputState {
                 Action::ToggleInventory if !self.text_capture => {
                     self.recent_actions.insert(action, true);
                 }
-                Action::DropItem | Action::SwapOffhand | Action::ToggleSpectatorShaderEffects
+                Action::Destroy
+                | Action::Use
+                | Action::DropItem
+                | Action::SwapOffhand
+                | Action::ToggleSpectatorShaderEffects
                     if gameplay =>
                 {
                     self.click(action);
@@ -1218,15 +1226,14 @@ impl InputState {
                 }
                 TouchOutput::DestroyStart => {
                     self.touch_actions_down.insert(Action::Destroy);
-                    self.recent_actions.insert(Action::Destroy, true);
+                    self.click(Action::Destroy);
                 }
                 TouchOutput::DestroyEnd | TouchOutput::DestroyCancel => {
                     self.touch_actions_down.remove(&Action::Destroy);
-                    self.recent_actions.remove(&Action::Destroy);
                 }
                 TouchOutput::Use => {
                     self.touch_actions_down.insert(Action::Use);
-                    self.recent_actions.insert(Action::Use, true);
+                    self.click(Action::Use);
                     self.tap_releases.push(Action::Use);
                 }
                 TouchOutput::Tap(action) => {
@@ -1282,12 +1289,8 @@ impl InputState {
             self.press_bound_actions(InputKey::Mouse(button));
         }
         for action in self.bound_actions(InputKey::Mouse(button)) {
-            match action {
-                Action::Destroy | Action::Use => {
-                    self.recent_actions.insert(action, was_pressed);
-                }
-                Action::PickBlock if !was_pressed => self.middle_click.set(false),
-                _ => {}
+            if action == Action::PickBlock && !was_pressed {
+                self.middle_click.set(false);
             }
         }
     }
@@ -1426,7 +1429,7 @@ mod binding_capture_tests {
     fn a_use_tap_is_seen_before_it_releases() {
         let mut input = InputState::released();
         input.apply_touch(vec![TouchOutput::Use]);
-        assert!(input.action_just_pressed(Action::Use));
+        assert_eq!(input.take_clicks(Action::Use), 1);
         assert!(input.performing_action(Action::Use));
 
         input.clear_just_pressed_actions();
@@ -1641,7 +1644,7 @@ mod binding_lookup_tests {
         input.key_bindings.set(Action::ToggleInventory, Vec::new());
         input.apply_touch(vec![TouchOutput::DestroyStart]);
         assert!(input.performing_action(Action::Destroy));
-        assert!(input.action_just_pressed(Action::Destroy));
+        assert_eq!(input.take_clicks(Action::Destroy), 1);
         assert!(!input.left_just_pressed());
         assert!(!input.left_held());
         input.clear_just_pressed_actions();
@@ -1690,16 +1693,15 @@ mod binding_lookup_tests {
         input.key_bindings.set(Action::PickBlock, vec![mouse]);
         input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
         assert!(input.left_just_pressed());
-        assert!(!input.action_just_pressed(Action::Destroy));
+        assert_eq!(input.take_clicks(Action::Destroy), 0);
         assert!(!input.middle_just_pressed());
         input.on_mouse_button(MouseButton::Left, ElementState::Released);
         input.clear_just_pressed_actions();
 
         input.on_mouse_button(button, ElementState::Pressed);
-        assert!(input.action_just_pressed(Action::Destroy));
         assert!(!input.left_just_pressed());
         input.on_mouse_button(button, ElementState::Released);
-        assert!(!input.action_just_pressed(Action::Destroy));
+        assert_eq!(input.take_clicks(Action::Destroy), 1);
         assert!(!input.input_pressed(&mouse));
         assert!(input.input_just_pressed(&mouse));
         input.end_frame();
@@ -1708,6 +1710,19 @@ mod binding_lookup_tests {
         assert!(input.middle_just_pressed());
         input.clear_just_pressed_actions();
         assert!(!input.middle_just_pressed());
+    }
+
+    /// Vanilla `KeyMapping.click`: each press queues one attack for the next
+    /// tick, however soon it is let go.
+    #[test]
+    fn every_attack_press_before_a_tick_counts() {
+        let mut input = InputState::released();
+        for _ in 0..2 {
+            input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+            input.on_mouse_button(MouseButton::Left, ElementState::Released);
+        }
+        assert_eq!(input.take_clicks(Action::Destroy), 2);
+        assert_eq!(input.take_clicks(Action::Destroy), 0);
     }
 
     #[test]
