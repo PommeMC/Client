@@ -4,9 +4,10 @@
 
 use glam::DVec3;
 
+use crate::entity::dimensions::EntityDimensions;
 use crate::entity::wrap_degrees;
 use crate::physics::aabb::Aabb;
-use crate::physics::movement::{mth_cos, mth_sin};
+use crate::physics::movement::{DEG_TO_RAD as DEG, mth_cos, mth_sin};
 
 /// `EnderDragonPhase` ids.
 const LANDING: i32 = 3;
@@ -63,18 +64,23 @@ impl FlightHistory {
     }
 }
 
-/// `subEntities` as (width, height): head, neck, body, three tail segments
-/// and two wings.
-const PART_SIZES: [(f32, f32); 8] = [
-    (1.0, 1.0),
-    (3.0, 3.0),
-    (5.0, 3.0),
-    (2.0, 2.0),
-    (2.0, 2.0),
-    (2.0, 2.0),
-    (4.0, 2.0),
-    (4.0, 2.0),
+/// `subEntities`' sizes: head, neck, body, three tail segments and two
+/// wings.
+const PART_SIZES: [EntityDimensions; 8] = [
+    scalable(1.0, 1.0),
+    scalable(3.0, 3.0),
+    scalable(5.0, 3.0),
+    scalable(2.0, 2.0),
+    scalable(2.0, 2.0),
+    scalable(2.0, 2.0),
+    scalable(4.0, 2.0),
+    scalable(4.0, 2.0),
 ];
+
+/// `EntityDimensions.scalable`.
+const fn scalable(width: f32, height: f32) -> EntityDimensions {
+    EntityDimensions { width, height }
+}
 
 /// What a tick of [`EnderDragonSim::tick`] asks the client to play.
 #[derive(Clone, Copy, Default)]
@@ -137,11 +143,7 @@ impl EnderDragonSim {
     pub fn part_boxes(&self, dragon_id: i32) -> impl Iterator<Item = (i32, DVec3, Aabb)> + '_ {
         (dragon_id + 1..)
             .zip(self.parts.iter().zip(PART_SIZES))
-            .map(|(id, (&position, (width, height)))| {
-                let half = |size: f32| f64::from(size / 2.0);
-                let aabb = Aabb::from_center(position, half(width), half(height));
-                (id, position, aabb)
-            })
+            .map(|(id, (&position, size))| (id, position, size.make_bounding_box(position)))
     }
 
     /// The client side of `EnderDragon.aiStep`, for a dragon at `position`
@@ -193,11 +195,10 @@ impl EnderDragonSim {
     /// `aiStep`'s `tickPart`s. `yRotA` only turns on the server, so the head
     /// and neck face the body's way.
     fn tick_parts(&mut self, position: DVec3, y_rot: f32) {
-        let deg = std::f32::consts::PI / 180.0;
         let p5 = self.history.get(5);
-        let tilt = (p5.y - self.history.get(10).y) as f32 * 10.0 * deg;
+        let tilt = (p5.y - self.history.get(10).y) as f32 * 10.0 * DEG;
         let (cc_tilt, ss_tilt) = (mth_cos(tilt), mth_sin(tilt));
-        let (ss1, cc1) = (mth_sin(y_rot * deg), mth_cos(y_rot * deg));
+        let (ss1, cc1) = (mth_sin(y_rot * DEG), mth_cos(y_rot * DEG));
         // `getHeadYOffset`.
         let head_y = if self.is_sitting() {
             -1.0
@@ -213,7 +214,7 @@ impl EnderDragonSim {
         };
         let tail = |i: i32| {
             let p0 = self.history.get(12 + i * 2);
-            let rot = y_rot * deg + wrap_degrees(p0.y_rot - p5.y_rot) * deg;
+            let rot = y_rot * DEG + wrap_degrees(p0.y_rot - p5.y_rot) * DEG;
             let (ss, cc) = (mth_sin(rot), mth_cos(rot));
             let dd = (i + 1) as f32 * 2.0;
             DVec3::new(
@@ -325,10 +326,44 @@ mod tests {
     }
 
     #[test]
-    fn a_dying_dragon_stops_flapping_and_recording() {
-        let mut dragon = EnderDragonSim::default();
-        dragon.tick(AT, 0.0, DVec3::ZERO, true, false, false);
-        assert_eq!(dragon.flap_time, 0.0);
-        assert_eq!(dragon.history.get(0), FlightSample::default());
+    fn a_dying_dragon_stops_flapping_recording_and_moving_its_parts() {
+        let mut dragon = flying();
+        dragon.tick(AT, 0.0, DVec3::ZERO, false, false, false);
+        let parts = dragon.parts;
+        let flap_time = dragon.flap_time;
+        dragon.tick(AT + DVec3::X, 90.0, DVec3::ZERO, true, false, false);
+        assert_eq!(dragon.flap_time, flap_time);
+        assert_eq!(dragon.history.get(0), dragon.history.get(1));
+        assert_eq!(dragon.parts, parts);
+    }
+
+    /// A climbing, turning flight, against the game's own `aiStep` maths.
+    #[test]
+    fn parts_follow_the_flight_history() {
+        let mut dragon = flying();
+        for t in 0..20 {
+            let position = DVec3::new(10.0, 60.0 + f64::from(t) * 0.5, -5.0);
+            dragon.tick(
+                position,
+                t as f32 * 7.0 - 30.0,
+                DVec3::ZERO,
+                false,
+                false,
+                false,
+            );
+        }
+        let expected = [
+            [15.740116596221924, 69.74695587158203, -3.6751245260238647],
+            [14.85702133178711, 69.32434749603271, -3.8789515495300293],
+            [10.487191259860992, 69.5, -4.887551456689835],
+            [7.208954572677612, 66.02086985111237, -4.2402501702308655],
+            [6.34529972076416, 64.17565250396729, -2.5284647941589355],
+            [6.29162335395813, 62.330435276031494, -0.41817617416381836],
+            [8.987963080406189, 71.5, -0.6152787208557129],
+            [11.012036919593811, 71.5, -9.384721279144287],
+        ];
+        for (part, expected) in dragon.parts.iter().zip(expected) {
+            assert!(part.distance(DVec3::from_array(expected)) < 1e-9, "{part}");
+        }
     }
 }

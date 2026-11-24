@@ -2249,9 +2249,7 @@ impl EntityStore {
     }
 
     /// Every dragon's parts, as (id, position, pick box).
-    pub fn dragon_parts(
-        &self,
-    ) -> impl Iterator<Item = (i32, DVec3, crate::physics::aabb::Aabb)> + '_ {
+    pub fn dragon_parts(&self) -> impl Iterator<Item = (i32, DVec3, Aabb)> + '_ {
         self.living
             .iter()
             .filter(|(_, e)| e.entity_type == EntityKind::EnderDragon)

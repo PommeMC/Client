@@ -2114,7 +2114,7 @@ fn nearest_entity_hit(
     non_living: &crate::entity::non_living::NonLivingStore,
     is_spectator: &dyn Fn(&crate::entity::LivingEntity) -> bool,
 ) -> Option<EntityHitResult> {
-    // (id, box, position, `canBePickedFromInside`).
+    // (id, box, position, `canBePickedFromInside`, is a dragon part).
     let living = entities
         .living
         .iter()
@@ -2130,21 +2130,22 @@ fn nearest_entity_hit(
                 living_entity_aabb(entity),
                 entity_pos,
                 !swallowed,
+                false,
             )
         });
     let dragon_parts = entities
         .dragon_parts()
-        .map(|(entity_id, entity_pos, aabb)| (entity_id, aabb, entity_pos, true));
+        .map(|(entity_id, entity_pos, aabb)| (entity_id, aabb, entity_pos, true, true));
     let non_living = non_living
         .entities()
         .filter(|(_, entity)| entity.is_pickable())
         .filter_map(|(entity_id, entity)| {
-            Some((entity_id, entity.pick_box()?, *entity.position, true))
+            Some((entity_id, entity.pick_box()?, *entity.position, true, false))
         });
     let mut touched: Vec<_> = living
         .chain(dragon_parts)
         .chain(non_living)
-        .filter_map(|(entity_id, aabb, entity_pos, from_inside)| {
+        .filter_map(|(entity_id, aabb, entity_pos, from_inside, part)| {
             let (location, dist_sq) = if aabb.contains(from) {
                 if !from_inside {
                     return None;
@@ -2159,14 +2160,15 @@ fn nearest_entity_hit(
                 location,
                 entity_pos,
             };
-            Some((hit, dist_sq))
+            Some((hit, dist_sq, part))
         })
         .collect();
-    touched.sort_unstable_by_key(|(hit, _)| hit.entity_id);
+    // `Level.getEntities` lists dragon parts after the section entities.
+    touched.sort_unstable_by_key(|(hit, _, part)| (*part, hit.entity_id));
 
     let mut nearest_dist_sq = f64::MAX;
     let mut nearest = None;
-    for (hit, dist_sq) in touched {
+    for (hit, dist_sq, _) in touched {
         if dist_sq == 0.0 || dist_sq < nearest_dist_sq || nearest_dist_sq == 0.0 {
             nearest_dist_sq = dist_sq;
             nearest = Some(hit);
@@ -2910,11 +2912,23 @@ mod tests {
             )
             .map(|hit| hit.entity_id)
         };
-        // At yaw 0 the head sits 6.5 toward -z, the first wing 4.5 toward +x.
-        assert_eq!(pick(0.0, 64.5), Some(11));
+        // At yaw 0 the neck sits 5.5 toward -z, the first wing 4.5 toward +x.
+        assert_eq!(pick(1.0, 66.0), Some(12));
         assert_eq!(pick(4.5, 67.0), Some(17));
         // Inside the dragon's box but past every part.
         assert_eq!(pick(7.5, 64.5), None);
+
+        // From inside both, the part wins over a higher id.
+        entities.spawn_living(
+            50,
+            EntityKind::Zombie,
+            Position::new(0.0, 64.0, 9.5),
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        let inside = DVec3::new(0.0, 65.0, 9.5);
+        let hit = nearest_entity_hit(inside, inside + DVec3::Z, &entities, &none, &|_| false);
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(13));
     }
 
     #[test]
