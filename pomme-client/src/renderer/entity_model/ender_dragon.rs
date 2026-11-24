@@ -245,7 +245,7 @@ pub fn compute_ender_dragon_anim(model: &BakedEntityModel, dragon: &EnderDragonA
     let mut pose = |name, offset: Vec3, rotation: Vec3| {
         let i = index(name);
         anim.rotation.push((i, rotation));
-        anim.translation.push((i, offset - rest(name)));
+        anim.translation.push((i, offset - model.parts[i].offset));
     };
 
     let flap = dragon.flap_time * TAU;

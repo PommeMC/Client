@@ -203,6 +203,7 @@ pub struct EntityRenderInfo {
     pub armadillo: entity_model::ArmadilloAnims,
     pub goat: entity_model::GoatAnims,
     pub ender_dragon: entity_model::EnderDragonAnims,
+    pub wither: entity_model::WitherAnims,
     pub parrot: entity_model::ParrotAnims,
     /// `DolphinRenderState.isMoving`.
     pub dolphin_moving: bool,
@@ -222,8 +223,8 @@ pub struct EntityRenderInfo {
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
-    /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
-    /// the camera and must never blink out).
+    /// Skip frustum/distance culling: the 3rd-person self entity, which sits at
+    /// the camera and must never blink out, and the dragon.
     pub skip_cull: bool,
     pub shadow: super::entity_shadow::ShadowCaster,
     /// The glowing outline's colour (vanilla `EntityRenderState.outlineColor`),
@@ -304,6 +305,7 @@ impl Default for EntityRenderInfo {
             armadillo: entity_model::ArmadilloAnims::default(),
             goat: entity_model::GoatAnims::default(),
             ender_dragon: entity_model::EnderDragonAnims::default(),
+            wither: entity_model::WitherAnims::default(),
             parrot: entity_model::ParrotAnims::default(),
             dolphin_moving: false,
             turtle: entity_model::TurtleAnims::default(),
@@ -970,6 +972,7 @@ enum AnimationType {
     Armadillo,
     Goat,
     EnderDragon,
+    Wither,
     /// Ghast and happy ghast tentacles, plus the happy ghast's harness poses.
     Ghast,
     Bee,
@@ -1304,6 +1307,9 @@ fn mob_definitions() -> Vec<MobDef> {
     const BOGGED_OVERLAY_TEX: &[&[ResourceId]] = tex_table!("skeleton" => "bogged_overlay");
     const CREEPER_TEX: &[&[ResourceId]] = tex_table!("creeper" => "creeper");
     const CREEPER_ARMOR_TEX: &[&[ResourceId]] = tex_table!("creeper" => "creeper_armor");
+    // Indexed by whether the invulnerable texture shows.
+    const WITHER_TEX: &[&[ResourceId]] = tex_table!("wither" => "wither", "wither_invulnerable");
+    const WITHER_ARMOR_TEX: &[&[ResourceId]] = tex_table!("wither" => "wither_armor");
     const SPIDER_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider");
     const SPIDER_EYES_TEX: &[&[ResourceId]] = tex_table!("spider" => "spider_eyes");
     const DRAGON_TEX: &[&[ResourceId]] = tex_table!("enderdragon" => "dragon");
@@ -1358,6 +1364,18 @@ fn mob_definitions() -> Vec<MobDef> {
         VariantDef {
             overlay_kind: OverlayKind::EyesTranslucent,
             ..opaque(model, tex_variants, tex_size)
+        }
+    }
+
+    // Vanilla `EnergySwirlLayer`: the charged creeper's and the powered
+    // wither's armor.
+    fn swirl(
+        model: BakedEntityModel,
+        tex_variants: &'static [&'static [ResourceId]],
+    ) -> VariantDef {
+        VariantDef {
+            overlay_kind: OverlayKind::SwirlAdditive,
+            ..opaque(model, tex_variants, 64)
         }
     }
 
@@ -1847,13 +1865,19 @@ fn mob_definitions() -> Vec<MobDef> {
             baby: None,
             // Slot 0: charged-creeper energy swirl (additive, scrolling), shown only
             // when `powered` (gated via overlay_tints in entity_extras).
-            adult_overlays: vec![VariantDef {
-                model: entity_model::bake_creeper_model(),
-                tex_variants: CREEPER_ARMOR_TEX,
-                tex_size: 64,
-                overlay_kind: OverlayKind::SwirlAdditive,
-                invisible_outline: false,
-            }],
+            adult_overlays: vec![swirl(entity_model::bake_creeper_model(), CREEPER_ARMOR_TEX)],
+            baby_overlays: vec![],
+        },
+        // Slot 0: `WitherArmorLayer`, shown while powered.
+        MobDef {
+            kind: EntityKind::Wither,
+            anim: AnimationType::Wither,
+            adult: vec![opaque(entity_model::bake_wither_model(), WITHER_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![swirl(
+                entity_model::bake_wither_armor_model(),
+                WITHER_ARMOR_TEX,
+            )],
             baby_overlays: vec![],
         },
         MobDef {
@@ -2972,6 +2996,14 @@ impl EntityRenderer {
                 info.is_baby,
                 &info.goat,
             ),
+            AnimationType::Wither => entity_model::compute_wither_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.body_y_rot_deg,
+                info.age_in_ticks,
+                &info.wither,
+            ),
             AnimationType::Ghast => {
                 entity_model::compute_ghast_anim(model, info.age_in_ticks, &info.happy_ghast)
             }
@@ -3853,10 +3885,8 @@ fn collect_overlays<'a>(
 ) -> VariantGroups<'a> {
     let mut groups = VariantGroups::default();
     for (vi, v) in vis.iter().enumerate() {
-        // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
         let uv = if kind == OverlayKind::SwirlAdditive {
-            let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
-            [o, o]
+            swirl_offset(v.info.entity_kind, v.info.age_in_ticks)
         } else {
             [0.0, 0.0]
         };
@@ -3881,6 +3911,16 @@ fn collect_overlays<'a>(
         }
     }
     groups
+}
+
+/// Vanilla `EnergySwirlLayer`'s UV scroll: each layer's `xOffset(t) % 1`,
+/// and `t * 0.01 % 1`.
+fn swirl_offset(kind: EntityKind, t: f32) -> [f32; 2] {
+    let x = match kind {
+        EntityKind::Wither => (t * 0.02).cos() * 3.0,
+        _ => t * 0.01,
+    };
+    [x % 1.0, t * 0.01 % 1.0]
 }
 
 fn hurt_color(info: &EntityRenderInfo) -> [f32; 4] {

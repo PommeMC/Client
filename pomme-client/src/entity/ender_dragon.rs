@@ -159,6 +159,13 @@ impl EnderDragonSim {
 mod tests {
     use super::*;
 
+    fn flying() -> EnderDragonSim {
+        EnderDragonSim {
+            phase: 0,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn the_first_record_fills_the_history() {
         let mut history = FlightHistory::default();
@@ -194,10 +201,7 @@ mod tests {
 
     #[test]
     fn a_wingbeat_crosses_the_downstroke_once() {
-        let mut dragon = EnderDragonSim {
-            phase: 0,
-            ..Default::default()
-        };
+        let mut dragon = flying();
         let flaps = (0..20)
             .filter(|_| {
                 dragon
@@ -207,5 +211,45 @@ mod tests {
             .count();
         // 0.2 a tick: four wingbeats in twenty ticks.
         assert_eq!(flaps, 4);
+    }
+
+    #[test]
+    fn flight_growls_after_a_hundred_ticks() {
+        let mut dragon = flying();
+        let mut growl = || {
+            dragon
+                .tick(64.0, 0.0, glam::DVec3::ZERO, false, false, false)
+                .growl
+        };
+        assert!((0..100).all(|_| !growl()));
+        assert!(growl());
+    }
+
+    #[test]
+    fn a_silent_dragon_neither_flaps_nor_growls() {
+        let mut dragon = flying();
+        for _ in 0..300 {
+            let sounds = dragon.tick(64.0, 0.0, glam::DVec3::ZERO, false, false, true);
+            assert!(!sounds.flap && !sounds.growl);
+        }
+    }
+
+    #[test]
+    fn speed_slows_the_wings_and_climbing_quickens_them() {
+        let flap_step = |velocity| {
+            let mut dragon = flying();
+            dragon.tick(64.0, 0.0, velocity, false, false, false);
+            dragon.flap_time
+        };
+        assert!((flap_step(glam::DVec3::new(0.3, 0.0, 0.4)) - 0.2 / 6.0).abs() < 1e-6);
+        assert!((flap_step(glam::DVec3::new(0.0, 1.0, 0.0)) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_dying_dragon_stops_flapping_and_recording() {
+        let mut dragon = EnderDragonSim::default();
+        dragon.tick(64.0, 0.0, glam::DVec3::ZERO, true, false, false);
+        assert_eq!(dragon.flap_time, 0.0);
+        assert_eq!(dragon.history.get(0), FlightSample::default());
     }
 }

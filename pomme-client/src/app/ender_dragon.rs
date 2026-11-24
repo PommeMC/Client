@@ -40,11 +40,11 @@ pub(super) fn tick(audio: &AudioEngine, game: &mut GameState) {
                 fastrand::u64(..),
             );
         };
-        if sounds.growl {
-            play("entity.ender_dragon.growl", 2.5);
-        }
         if sounds.flap {
             play("entity.ender_dragon.flap", 5.0);
+        }
+        if sounds.growl {
+            play("entity.ender_dragon.growl", 2.5);
         }
     }
 }

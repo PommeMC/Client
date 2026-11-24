@@ -1,0 +1,62 @@
+# Withers from a pillar: a plain one, one invulnerable (frozen at 100 ticks
+# by NoAI, so shrunk and blue), and one at a third of its health, powered
+# and wearing the armor swirl.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/gamerule advance_time false"
+
+[[step]]
+chat = "/time set 6000"
+
+# A pillar to look out from.
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 -57 0.5 0 20"
+
+[[step]]
+expect = { player = { position = [0.5, -57.0, 0.5] } }
+
+[[step]]
+chat = "/summon minecraft:wither 4.5 -60 10.5 {NoAI:1b,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:wither 0.5 -60 10.5 {NoAI:1b,Invul:100,Rotation:[180f,0f]}"
+
+[[step]]
+chat = "/summon minecraft:wither -3.5 -60 10.5 {NoAI:1b,Health:100f,Rotation:[180f,0f]}"
+
+[[step]]
+expect = { entity = "wither" }
+
+[[step]]
+look_at = [0.5, -57.0, 10.5]
+
+# Chat fades after 10 seconds.
+[[step]]
+wait_ms = 11000
+
+[[step]]
+screenshot = "withers"
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+wait_ms = 1500
+
+[[step]]
+chat = "/kill @e[type=item]"
+
+[[step]]
+chat = "/fill 0 -60 0 0 -58 0 minecraft:air"
+
+[[step]]
+chat = "/gamerule advance_time true"

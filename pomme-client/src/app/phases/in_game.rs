@@ -5061,6 +5061,7 @@ pub fn update_game(
                     armadillo: extras.armadillo,
                     goat: extras.goat,
                     ender_dragon: extras.ender_dragon,
+                    wither: extras.wither,
                     parrot: extras.parrot,
                     dolphin_moving: extras.dolphin_moving,
                     turtle: extras.turtle,
@@ -6184,6 +6185,7 @@ struct EntityExtras {
     ender_dragon: crate::renderer::entity_model::EnderDragonAnims,
     /// A renderer's own yaw, in place of the interpolated body yaw.
     body_y_rot_deg: Option<f32>,
+    wither: crate::renderer::entity_model::WitherAnims,
     parrot: crate::renderer::entity_model::ParrotAnims,
     dolphin_moving: bool,
     turtle: crate::renderer::entity_model::TurtleAnims,
@@ -6214,15 +6216,19 @@ fn is_skull(item: &pomme_item::ItemStack) -> bool {
     })
 }
 
-/// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
-/// (`overlay_tints`, `overlay_variants`).
-fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
-    let tints = if id != 0 {
+/// The first overlay slot, untinted, when `shown`; no overlays otherwise.
+fn slot0_tints(shown: bool) -> [Option<[f32; 4]>; MAX_OVERLAYS] {
+    if shown {
         SLOT0_TINTS
     } else {
         [None; MAX_OVERLAYS]
-    };
-    (tints, [id.saturating_sub(1), 0, 0, 0])
+    }
+}
+
+/// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
+/// (`overlay_tints`, `overlay_variants`).
+fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
+    (slot0_tints(id != 0), [id.saturating_sub(1), 0, 0, 0])
 }
 
 fn entity_extras(
@@ -6392,6 +6398,7 @@ fn entity_extras(
         },
         EntityKind::Panda => panda_extras(e, alpha),
         EntityKind::EnderDragon => ender_dragon_extras(e, alpha),
+        EntityKind::Wither => wither_extras(e, alpha),
         // `GhastRenderer.getTextureLocation`.
         EntityKind::Ghast => EntityExtras {
             variant_index: e.is_charging as u32,
@@ -6423,11 +6430,7 @@ fn entity_extras(
             EntityExtras {
                 // `BoatRenderer.submitTypeAdditions`: the water patch, unless
                 // the boat is under water.
-                overlay_tints: if boat.is_under_water() {
-                    Default::default()
-                } else {
-                    SLOT0_TINTS
-                },
+                overlay_tints: slot0_tints(!boat.is_under_water()),
                 body_transform: Some(crate::renderer::entity_model::boat_body_transform(
                     boat.hurt_time as f32 - alpha,
                     boat.hurt_dir,
@@ -6439,6 +6442,31 @@ fn entity_extras(
             }
         }
         _ => EntityExtras::default(),
+    }
+}
+
+/// Vanilla `WitherBossRenderer.extractRenderState`, `getTextureLocation`
+/// and `scale` (2, shrinking while invulnerable), and `WitherArmorLayer`
+/// while powered.
+fn wither_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let w = &e.wither;
+    let invulnerable = if w.invulnerable_ticks > 0 {
+        w.invulnerable_ticks as f32 - alpha
+    } else {
+        0.0
+    };
+    let ticks = invulnerable.floor() as i32;
+    let plain_texture = ticks <= 0 || ticks <= 80 && ticks / 5 % 2 == 1;
+    let scale = 2.0 - invulnerable / 220.0 * 0.5;
+    EntityExtras {
+        variant_index: u32::from(!plain_texture),
+        wither: crate::renderer::entity_model::WitherAnims {
+            x_head_rots: w.x_rot_heads,
+            y_head_rots: w.y_rot_heads,
+        },
+        overlay_tints: slot0_tints(crate::entity::wither::is_powered(e.health, e.max_health)),
+        body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(scale))),
+        ..Default::default()
     }
 }
 
@@ -6461,11 +6489,7 @@ fn happy_ghast_extras(
             has_body_item: body.is_some(),
             is_ridden: e.is_vehicle,
         },
-        overlay_tints: if ropes {
-            SLOT0_TINTS
-        } else {
-            Default::default()
-        },
+        overlay_tints: slot0_tints(ropes),
         ..Default::default()
     }
 }
