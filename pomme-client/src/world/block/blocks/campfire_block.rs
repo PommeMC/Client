@@ -1,5 +1,5 @@
-use pomme_block::BlockState;
 use glam::DVec3;
+use pomme_block::BlockState;
 use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 

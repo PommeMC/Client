@@ -8,16 +8,23 @@ use super::resources::{MappedParticleResources, ParticleResources};
 mod ash;
 mod attack_sweep;
 mod bubble_column;
+mod bubble_pop;
 mod campfire_smoke;
 mod crit;
 mod dragon_breath;
 mod drip;
+mod dripstone_fall;
 mod dust;
 mod dust_color_transition;
+mod dust_plume;
 mod end_rod;
 mod explode;
 mod falling_dust;
+mod falling_leaves;
+mod firefly;
+mod firework_spark;
 mod flame;
+mod fly_straight_towards;
 mod fly_towards_position;
 mod glow;
 mod gust;
@@ -26,41 +33,35 @@ mod heart;
 mod huge_explosion;
 mod huge_explosion_seed;
 mod lava;
+mod nectar_fall;
 mod note;
+mod noxious_gas;
 mod portal;
 mod reverse_portal;
+mod sculk_charge_pop;
+mod simple_vertical;
 mod smoke;
 mod snowflake;
-mod spit;
-mod bubble_pop;
 mod soul;
+mod spit;
 mod squid_ink;
 mod sulfur_bubble;
 mod suspended;
 mod suspended_town;
 mod terrain;
 mod totem;
+mod trial_spawner_detection;
+mod vault_connection;
+mod wake;
 mod water_drop;
 mod white_ash;
-mod firefly;
-mod fly_straight_towards;
-mod vault_connection;
-mod dripstone_fall;
-mod nectar_fall;
-mod simple_vertical;
-mod dust_plume;
-mod noxious_gas;
-mod falling_leaves;
-mod firework_spark;
-mod sculk_charge_pop;
-mod wake;
-mod trial_spawner_detection;
 
 use self::ash::AshParticleRegistration;
 use self::attack_sweep::AttackSweepParticleRegistration;
 use self::bubble_column::{
     BubbleColumnUpParticleRegistration, WaterCurrentDownParticleRegistration,
 };
+use self::bubble_pop::BubblePopParticleRegistration;
 use self::campfire_smoke::{CosyParticleRegistration, SignalParticleRegistration};
 use self::crit::{
     CritParticleRegistration, DamageIndicatorParticleRegistration, EnchantedHitParticleRegistration,
@@ -69,17 +70,24 @@ use self::dragon_breath::DragonBreathParticleRegistration;
 use self::drip::{
     DripFallParticleRegistration, DripHangParticleRegistration, DripLandParticleRegistration,
 };
+use self::dripstone_fall::DripstoneFallParticleRegistration;
 use self::dust::DustParticleRegistration;
 use self::dust_color_transition::DustColorTransitionParticleRegistration;
+use self::dust_plume::DustPlumeParticleRegistration;
 pub(super) use self::end_rod::EndRodParticleRegistration;
 use self::explode::ExplodeParticleRegistration;
 use self::falling_dust::FallingDustParticleRegistration;
+use self::falling_leaves::{CherryParticleRegistration, PaleOakParticleRegistration};
+use self::firefly::FireflyParticleRegistration;
+use self::firework_spark::SparkParticleRegistration;
 pub(super) use self::flame::FlameParticleRegistration;
 use self::flame::SmallFlameParticleRegistration;
 pub use self::flame::{FlameParticle, FlameProvider};
-use self::fly_towards_position::EnchantParticleRegistration;
+use self::fly_straight_towards::OminousSpawningParticleRegistration;
+use self::fly_towards_position::{EnchantParticleRegistration, NautilusParticleRegistration};
 use self::glow::{
-    ScrapeParticleRegistration, WaxOffParticleRegistration, WaxOnParticleRegistration,
+    GlowParticleRegistration, ScrapeParticleRegistration, WaxOffParticleRegistration,
+    WaxOnParticleRegistration,
 };
 use self::gust::{GustParticleRegistration, SmallGustParticleRegistration};
 use self::gust_seed::GustSeedProvider;
@@ -87,42 +95,37 @@ use self::heart::{AngryVillagerParticleRegistration, HeartParticleRegistration};
 use self::huge_explosion::HugeExplosionParticleRegistration;
 use self::huge_explosion_seed::HugeExplosionSeedProvider;
 use self::lava::LavaParticleRegistration;
+use self::nectar_fall::NectarFallParticleRegistration;
 use self::note::NoteParticleRegistration;
+use self::noxious_gas::NoxiousGasParticleRegistration;
 use self::portal::PortalParticleRegistration;
 use self::reverse_portal::ReversePortalParticleRegistration;
+use self::sculk_charge_pop::SculkChargePopParticleRegistration;
+use self::simple_vertical::{
+    PauseMobGrowthParticleRegistration, ResetMobGrowthParticleRegistration,
+};
 pub(super) use self::smoke::SmokeParticleRegistration;
 use self::smoke::{LargeSmokeParticleRegistration, WhiteSmokeParticleRegistration};
 pub use self::smoke::{SmokeParticle, SmokeProvider};
 use self::spit::SpitParticleRegistration;
-use self::bubble_pop::BubblePopParticleRegistration;
 use self::squid_ink::{GlowSquidInkParticleRegistration, SquidInkParticleRegistration};
 use self::sulfur_bubble::SulfurBubbleParticleRegistration;
-use self::suspended::{SporeBlossomAirParticleRegistration, UnderwaterParticleRegistration};
-use self::suspended_town::{HappyVillagerParticleRegistration, SuspendedTownParticleRegistration};
+use self::suspended::{
+    CrimsonSporeParticleRegistration, SporeBlossomAirParticleRegistration,
+    UnderwaterParticleRegistration, WarpedSporeParticleRegistration,
+};
+use self::suspended_town::{
+    DolphinParticleRegistration, HappyVillagerParticleRegistration,
+    SuspendedTownParticleRegistration,
+};
 pub(crate) use self::terrain::TerrainParticle;
 use self::terrain::{DustPillarProvider, TerrainProvider};
 use self::totem::TotemParticleRegistration;
+use self::trial_spawner_detection::TrialSpawnerDetectionParticleRegistration;
+use self::vault_connection::VaultConnectionParticleRegistration;
+use self::wake::WakeParticleRegistration;
 use self::water_drop::SplashParticleRegistration;
 use self::white_ash::WhiteAshParticleRegistration;
-use self::suspended::{CrimsonSporeParticleRegistration, WarpedSporeParticleRegistration};
-use self::suspended_town::DolphinParticleRegistration;
-use self::glow::GlowParticleRegistration;
-use self::firefly::FireflyParticleRegistration;
-use self::fly_towards_position::NautilusParticleRegistration;
-use self::vault_connection::VaultConnectionParticleRegistration;
-use self::fly_straight_towards::OminousSpawningParticleRegistration;
-use self::dripstone_fall::DripstoneFallParticleRegistration;
-use self::nectar_fall::NectarFallParticleRegistration;
-use self::simple_vertical::{
-    PauseMobGrowthParticleRegistration, ResetMobGrowthParticleRegistration,
-};
-use self::dust_plume::DustPlumeParticleRegistration;
-use self::noxious_gas::NoxiousGasParticleRegistration;
-use self::falling_leaves::{CherryParticleRegistration, PaleOakParticleRegistration};
-use self::firework_spark::SparkParticleRegistration;
-use self::sculk_charge_pop::SculkChargePopParticleRegistration;
-use self::wake::WakeParticleRegistration;
-use self::trial_spawner_detection::TrialSpawnerDetectionParticleRegistration;
 
 pub(crate) fn register_builtin_providers(
     types: &ParticleTypes,

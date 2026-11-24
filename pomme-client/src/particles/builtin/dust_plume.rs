@@ -9,7 +9,9 @@ use super::super::particle::{
     Particle, ParticleRef, bounds_at, move_without_collision, randomized_motion, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
@@ -85,8 +87,8 @@ impl Particle for DustPlumeParticle {
     }
 
     fn tick(&mut self, context: &mut LevelContext<'_>) {
-        self.gravity = 0.88_f32 * self.gravity;
-        self.friction = 0.92_f32 * self.friction;
+        self.gravity *= 0.88_f32;
+        self.friction *= 0.92_f32;
         self.previous_position = self.position;
         let age = self.age;
         self.age += 1;

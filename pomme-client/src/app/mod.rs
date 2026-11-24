@@ -25,7 +25,9 @@ use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, start_chunk_load, update_game};
 use crate::app::phases::in_menu::{self, MenuUpdateResult, update_menu};
 use crate::app::phases::saving::update_saving;
-use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Loading, Panorama};
+use crate::app::phases::{
+    AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Loading, Panorama,
+};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};

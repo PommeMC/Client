@@ -519,7 +519,7 @@ mod tests {
         ParticleLight, ParticleResources, ParticleTypes, PreparedParticleDescriptions,
         SimpleParticleType, register_builtin_providers,
     };
-    use crate::renderer::chunk::atlas::TextureAtlas;
+    use crate::renderer::chunk::atlas::{AtlasInputs, TextureAtlas};
     use crate::renderer::chunk::mesher::Colormap;
     use crate::resources::managers::ReloadableResourceManager;
     use crate::resources::pack_resources::PackType;
@@ -569,7 +569,8 @@ mod tests {
         );
         let biome_climate = HashMap::new();
         let manager = ReloadableResourceManager::new(PackType::ClientResources);
-        let atlas = TextureAtlas::build_cpu(&manager, &HashSet::new(), &HashSet::new()).uv_map;
+        let inputs = AtlasInputs::prepare(&manager).unwrap();
+        let atlas = TextureAtlas::build_cpu(&inputs, &HashSet::new(), &HashSet::new(), None).uv_map;
         let appearance =
             BlockParticleAppearance::new(registry.render_view(), &atlas, &colors, &biome_climate);
         let mut level = LevelContext::new(

@@ -1,5 +1,5 @@
-use pomme_block::BlockState;
 use glam::DVec3;
+use pomme_block::BlockState;
 
 use super::super::{Block, BlockData, BlockStateData};
 use crate::particles::types::SimpleParticleType;

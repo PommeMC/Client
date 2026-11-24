@@ -411,6 +411,10 @@ impl LevelRuntime {
     /// Vanilla `ClientLevel.animateTick`, called once per simulation tick.
     // TODO: vanilla gates this on `!pause && isLevelRunningNormally()`, as it
     // does the particle tick.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "pass the four distinct animation particle types used by fluid and drip callbacks"
+    )]
     pub(crate) fn animate_tick(
         &mut self,
         block_registry: &BlockRegistry,
@@ -515,6 +519,10 @@ impl LevelRuntime {
 // The drip and ambient steps draw from the level random between samples.
 // Coordinate draws release their random borrow before each block/fluid
 // callback.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "keep coordinate draws, the effect stream, and the four particle types explicit"
+)]
 fn animate_tick_with_draw(
     block_registry: &BlockRegistry,
     player_pos: DVec3,

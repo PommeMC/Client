@@ -5,7 +5,9 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size};
+use super::super::particle::{
+    Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size,
+};
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::ParticleRenderType;
 use super::super::single_quad_particle::SingleQuadParticle;
@@ -67,7 +69,7 @@ impl Particle for GustSeedParticle {
     }
 
     fn tick(&mut self, context: &mut LevelContext<'_>) {
-        if self.age as usize % (self.tick_delay + 1) == 0 {
+        if (self.age as usize).is_multiple_of(self.tick_delay + 1) {
             for _ in 0..3 {
                 let x =
                     self.position.x + (self.random.f64() - self.random.f64()) * self.scatter_scale;

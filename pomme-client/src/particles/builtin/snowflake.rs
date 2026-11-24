@@ -9,7 +9,9 @@ use super::super::particle::{
     Particle, ParticleRef, bounds_at, move_without_collision, set_particle_size,
 };
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{SingleQuadParticle, extract_camera_quad};

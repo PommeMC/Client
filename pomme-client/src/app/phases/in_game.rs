@@ -25,7 +25,9 @@ use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::particles::render::{ParticleView, ParticlesRenderState};
 use crate::player::LocalPlayer;
-use crate::player::interaction::{HANDS, HitResult, InteractionHand, InteractionState, send_use_swing};
+use crate::player::interaction::{
+    HANDS, HitResult, InteractionHand, InteractionState, send_use_swing,
+};
 use crate::player::menu_click::{BundleClick, ContainerKind};
 use crate::player::tab_list::TabList;
 use crate::position::{BlockPos, ChunkPos};

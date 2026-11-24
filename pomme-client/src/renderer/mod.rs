@@ -74,7 +74,9 @@ use crate::renderer::pipelines::held_item::{HandRenderSelection, HeldHand, Previ
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::resources::ResourceManager;
 use crate::ui::font::{FontOptions, FontSources};
-use crate::world::block::render_assets::{BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage};
+use crate::world::block::render_assets::{
+    BlockRenderAssets, BlockRenderView, LoadProgress, LoadStage,
+};
 
 /// CPU data prepared against a candidate view before it is published, so the
 /// GPU half of a reload has nothing left that can fail.

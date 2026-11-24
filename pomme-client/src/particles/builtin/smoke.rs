@@ -5,9 +5,13 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size};
+use super::super::particle::{
+    Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size,
+};
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{

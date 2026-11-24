@@ -2833,6 +2833,8 @@ mod tests {
             hit,
             InteractionHand::MainHand,
             None,
+            None,
+            false,
             false,
             dvec3(1.5, 64.0, -0.5),
             Aabb::new(dvec3(1.2, 64.0, -0.8), dvec3(1.8, 65.8, -0.2)),

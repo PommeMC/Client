@@ -21,7 +21,7 @@ pub(crate) fn shoot_particles(
     smoke: &SimpleParticleType,
 ) {
     // Vanilla takes the signed remainder before abs, including for i32::MIN.
-    let direction = Direction::VALUES[((data as i32) % 6).abs() as usize];
+    let direction = Direction::VALUES[((data as i32) % 6).unsigned_abs() as usize];
     let [nx, ny, nz] = direction.offset().map(f64::from);
     let random = level.get_random().clone();
 

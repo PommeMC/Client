@@ -6,7 +6,9 @@ use std::rc::Rc;
 
 use glam::DVec3;
 
-use super::super::particle::{Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size};
+use super::super::particle::{
+    Particle, ParticleRef, bounds_at, randomized_motion, set_particle_size,
+};
 use super::super::particle_provider::ParticleProvider;
 use super::super::render::ParticleRenderType;
 use super::super::single_quad_particle::SingleQuadParticle;

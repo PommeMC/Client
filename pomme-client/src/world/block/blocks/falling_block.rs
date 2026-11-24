@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use pomme_block::BlockState;
 use glam::DVec3;
+use pomme_block::BlockState;
 
 use super::super::{Block, BlockData};
 use crate::particles::block_particle_option::BlockParticleOption;

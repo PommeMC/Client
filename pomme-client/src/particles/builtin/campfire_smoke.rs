@@ -5,7 +5,9 @@ use glam::DVec3;
 
 use super::super::particle::{Particle, ParticleRef, bounds_at, set_particle_size};
 use super::super::particle_provider::ParticleProvider;
-use super::super::render::{ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState};
+use super::super::render::{
+    ParticleLayer, ParticleRenderType, ParticleView, QuadParticleRenderState,
+};
 use super::super::resources::particle_resources::SpriteParticleRegistration;
 use super::super::resources::sprite_set::SpriteSet;
 use super::super::single_quad_particle::{
@@ -73,7 +75,7 @@ impl Particle for CampfireSmokeParticle {
         self.previous_position = self.position;
         let age = self.age;
         self.age += 1;
-        if age < self.lifetime && !(self.alpha <= 0.0) {
+        if age < self.lifetime && (self.alpha > 0.0 || self.alpha.is_nan()) {
             self.velocity.x += f64::from(
                 self.random.f32() / 5000.0_f32
                     * if self.random.bool() {
