@@ -10,13 +10,58 @@ pub(crate) struct ServerPackRequest {
     pub hash: String,
 }
 
-/// Vanilla `ClientCommonPacketListenerImpl.parseResourcePackUrl`. Java's
-/// `new URL` takes nearly anything after an http or https scheme, so the
-/// scheme alone decides; a URL that can't be fetched fails its download.
+/// Vanilla `ClientCommonPacketListenerImpl.parseResourcePackUrl`: whether
+/// `new URL` takes it with an http or https scheme. One it takes but can't
+/// fetch fails its download instead.
 pub(crate) fn is_pack_url(url: &str) -> bool {
-    url.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    })
+    // `URL(String)`: surrounding whitespace and a `url:` prefix are skipped.
+    let spec = url.trim_matches(|c: char| c <= ' ');
+    let spec = match spec.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("url:") => &spec[4..],
+        _ => spec,
+    };
+    let Some((scheme, rest)) = spec.split_once(':') else {
+        return false;
+    };
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && authority_parses(rest.split('#').next().unwrap_or_default())
+}
+
+/// `URLStreamHandler.parseURL`'s authority checks: an IPv6 literal must be
+/// one, and a port must be a number of at least -1.
+fn authority_parses(rest: &str) -> bool {
+    let Some(rest) = rest.strip_prefix("//") else {
+        return true;
+    };
+    // The query is cut off first, so a `?` ends it as well as a `/`.
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    // Two `@`s leave the host empty, which parses.
+    let mut at = authority.split('@');
+    let host = match (at.next(), at.next(), at.next()) {
+        (Some(host), None, _) | (Some(_), Some(host), None) => host,
+        _ => return true,
+    };
+    let port = if let Some(literal) = host.strip_prefix('[') {
+        let Some(end) = literal.find(']').filter(|&end| end > 1) else {
+            return false;
+        };
+        let address = literal[..end].split('%').next().unwrap_or_default();
+        if address.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        match &literal[end + 1..] {
+            "" => None,
+            after => match after.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        }
+    } else {
+        host.split_once(':').map(|(_, port)| port)
+    };
+    // `Integer.parseInt` takes a sign; an empty port is none.
+    port.filter(|port| !port.is_empty())
+        .is_none_or(|port| port.parse::<i32>().is_ok_and(|port| port >= -1))
 }
 
 /// Vanilla `DownloadedPackSource.MAX_PACK_SIZE_BYTES`.
@@ -188,16 +233,33 @@ mod tests {
     }
 
     #[test]
+    /// What `java.net.URL` takes for an http or https URL.
     fn only_http_urls_are_pack_urls() {
-        assert!(is_pack_url("https://example.com/pack.zip"));
-        assert!(is_pack_url("http://127.0.0.1:8080/pack.zip"));
-        assert!(is_pack_url("HTTP://example.com/pack.zip"));
-        assert!(is_pack_url("http://"));
+        for good in [
+            "https://example.com/pack.zip",
+            "http://127.0.0.1:8080/pack.zip",
+            "HTTP://example.com/pack.zip",
+            "http://",
+            " https://example.com/pack.zip ",
+            "URL:https://example.com/pack.zip",
+            "http://example.com:/pack.zip",
+            "http://[::1]:25565/pack.zip",
+            "http://a@b@c/pack.zip",
+            "http://example.com/a:b",
+            "http://example.com?a:b/c",
+        ] {
+            assert!(is_pack_url(good), "{good}");
+        }
         for bad in [
             "",
             "not a url",
             "ftp://example.com/pack.zip",
             "file:///pack.zip",
+            "http://example.com:abc/pack.zip",
+            "http://example.com:-5/pack.zip",
+            "http://[::1/pack.zip",
+            "http://[nope]/pack.zip",
+            "http://[::1]x/pack.zip",
         ] {
             assert!(!is_pack_url(bad), "{bad}");
         }
