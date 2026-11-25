@@ -2464,6 +2464,7 @@ dependencies = [
  "sha1_smol",
  "toml",
  "uuid 1.29.2",
+ "zip 9.4.1",
 ]
 
 [[package]]

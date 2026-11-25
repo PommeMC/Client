@@ -9,12 +9,16 @@
 //! world, against the native version unless `--version` or `--versions all`
 //! picks others; `ingame-test --server-only` starts a server for live socket
 //! sessions. `--capture` also records each script's clientbound frames into
-//! its `wire-fixtures/` corpus entry.
+//! its `wire-fixtures/` corpus entry. A script naming a fixture pack in
+//! `server_resource_pack` runs on a server of its own that requires that pack,
+//! served over HTTP from here.
 
 use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
-use std::sync::{Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use md5::Digest as _;
@@ -136,7 +140,7 @@ fn run(
         let version = versions[0];
         let server = server_jar(&version)?;
         let java = java(server.java_major)?;
-        let mut server = Server::start(&java, &server.jar, &server.dir)?;
+        let mut server = Server::start(&java, &server.jar, &server.dir, "")?;
         println!(
             "Vanilla {} server ready on {HOST}:{}",
             version.name, server.port
@@ -199,6 +203,17 @@ fn run_version(
     };
     let failed = Mutex::new(Vec::new());
     let run = |script: &Path, server: &mut Server, game_dir: &Path| -> Result<(), String> {
+        let served = server_resource_pack(script)?
+            .map(|name| ServedPack::start(&name))
+            .transpose()?;
+        let mut own = served
+            .as_ref()
+            .map(|pack| {
+                let dir = server.dir.join("server-pack");
+                Server::start(&java, &jar.jar, &dir, &pack.properties())
+            })
+            .transpose()?;
+        let server = own.as_mut().unwrap_or(server);
         if !run_script(script, version, server.port, game_dir, capture)? {
             let name = script_name(Path::new(SCRIPT_DIR), script);
             failed
@@ -212,7 +227,7 @@ fn run_version(
     // The first client installs the version's assets into the shared
     // folders, so it runs alone rather than racing the others' installs.
     let dir = worker_dir(0);
-    let mut server = Server::start(&java, &jar.jar, &dir)?;
+    let mut server = Server::start(&java, &jar.jar, &dir, "")?;
     run(first, &mut server, &client_dir(&dir)?)?;
 
     let queue = Mutex::new(rest.iter());
@@ -227,7 +242,7 @@ fn run_version(
                     let dir = worker_dir(n);
                     let (mut server, game_dir) = match server {
                         Some(server) => (server, dir.join("client")),
-                        None => (Server::start(java, jar, &dir)?, client_dir(&dir)?),
+                        None => (Server::start(java, jar, &dir, "")?, client_dir(&dir)?),
                     };
                     loop {
                         let next = queue.lock().unwrap().next();
@@ -294,11 +309,25 @@ fn script_name(root: &Path, script: &Path) -> String {
 /// Whether `script` runs on `version`: its optional top-level `min_version`
 /// and `max_version` bound the versions it's valid on.
 fn script_runs_on(script: &Path, version: &ProtocolVersion) -> Result<bool, String> {
+    in_range(&script_table(script)?, version).map_err(|e| format!("{}: {e}", script.display()))
+}
+
+/// The fixture pack a script's server requires, if any.
+fn server_resource_pack(script: &Path) -> Result<Option<String>, String> {
+    match script_table(script)?.remove("server_resource_pack") {
+        None => Ok(None),
+        Some(toml::Value::String(name)) => Ok(Some(name)),
+        Some(_) => Err(format!(
+            "{}: server_resource_pack must be a fixture pack's name",
+            script.display()
+        )),
+    }
+}
+
+fn script_table(script: &Path) -> Result<toml::Table, String> {
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
-    let table: toml::Table = text
-        .parse()
-        .map_err(|e| format!("{}: {e}", script.display()))?;
-    in_range(&table, version).map_err(|e| format!("{}: {e}", script.display()))
+    text.parse()
+        .map_err(|e| format!("{}: {e}", script.display()))
 }
 
 /// Whether `version` lies within `table`'s `min_version`/`max_version`.
@@ -440,8 +469,9 @@ fn client_dir(dir: &Path) -> Result<PathBuf, String> {
     Ok(client)
 }
 
-/// A fresh flat world, offline, with the test player opped.
-fn prepare_server(dir: &Path, port: u16) -> Result<(), String> {
+/// A fresh flat world, offline, with the test player opped, plus `extra`
+/// server properties.
+fn prepare_server(dir: &Path, port: u16, extra: &str) -> Result<(), String> {
     let world = dir.join("world");
     if world.exists() {
         std::fs::remove_dir_all(&world).map_err(|e| format!("{}: {e}", world.display()))?;
@@ -456,7 +486,8 @@ fn prepare_server(dir: &Path, port: u16) -> Result<(), String> {
          spawn-protection=0\n\
          view-distance=4\n\
          simulation-distance=4\n\
-         motd=pomme in-game tests\n"
+         motd=pomme in-game tests\n\
+         {extra}"
     );
     let uuid = offline_uuid(PLAYER);
     let ops = serde_json::json!([{
@@ -611,11 +642,12 @@ struct Server {
 }
 
 impl Server {
-    /// Starts the server in `dir` on a fresh world and a free port.
-    fn start(java: &Path, jar: &Path, dir: &Path) -> Result<Self, String> {
+    /// Starts the server in `dir` on a fresh world and a free port, with
+    /// `extra` server properties.
+    fn start(java: &Path, jar: &Path, dir: &Path, extra: &str) -> Result<Self, String> {
         let port = free_port()?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        prepare_server(dir, port)?;
+        prepare_server(dir, port, extra)?;
         let jar = std::path::absolute(jar).map_err(|e| e.to_string())?;
         let mut child = Command::new(java)
             .args(["-Xmx2G", "-jar"])
@@ -741,6 +773,98 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A fixture resource pack, zipped and served over HTTP until dropped, for a
+/// script's server to require.
+struct ServedPack {
+    port: u16,
+    sha1: String,
+    stop: Arc<AtomicBool>,
+}
+
+impl ServedPack {
+    fn start(name: &str) -> Result<Self, String> {
+        let zip = zip_dir(&Path::new(SCRIPT_DIR).join(RESOURCE_PACKS).join(name))?;
+        let listener = TcpListener::bind((HOST, 0)).map_err(|e| e.to_string())?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let sha1 = sha1(&zip);
+        std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = respond(stream, &zip);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Ok(Self { port, sha1, stop })
+    }
+
+    fn properties(&self) -> String {
+        format!(
+            "resource-pack=http\\://{HOST}\\:{}/pack.zip\n\
+             resource-pack-sha1={}\n\
+             require-resource-pack=true\n",
+            self.port, self.sha1
+        )
+    }
+}
+
+impl Drop for ServedPack {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Answers any request with `body` as a ZIP.
+fn respond(mut stream: TcpStream, body: &[u8]) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    let mut request = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    // Up to the blank line that ends the headers.
+    while request.read_line(&mut line)? > 2 {
+        line.clear();
+    }
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)
+}
+
+/// `dir`'s files as a ZIP, named by their paths below it.
+fn zip_dir(dir: &Path) -> Result<Vec<u8>, String> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        let entries = std::fs::read_dir(&next).map_err(|e| format!("{}: {e}", next.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = path.strip_prefix(dir).expect("below dir").to_string_lossy();
+            zip.start_file(
+                name.replace('\\', "/"),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .map_err(|e| e.to_string())?;
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            zip.write_all(&bytes).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(zip.finish().map_err(|e| e.to_string())?.into_inner())
 }
 
 /// Copies `from`'s files into `to`, keeping what's already there; a missing

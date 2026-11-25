@@ -72,6 +72,11 @@ A script about a Pomme extension, which vanilla has no screen or option for,
 sets `pomme_only = true` the same way. The vanilla harness prints `SKIP` for
 it instead of failing.
 
+A script that needs a server resource pack names one of `fixtures/resourcepacks`
+in `server_resource_pack = "<name>"`. The runner zips and serves that pack over
+HTTP and runs the script on a server of its own that requires it; the vanilla
+harness does the same and trusts that server, so its pack prompt doesn't show.
+
 ## Wire fixtures
 
 `just wire-fixtures <version>...` runs `world/join` on each version with

@@ -14,3 +14,4 @@ serde_json = { workspace = true }
 sha1_smol = { workspace = true }
 toml = "1"
 uuid = "1"
+zip = { workspace = true }

@@ -38,6 +38,10 @@ struct ScriptFile {
     /// skips.
     #[serde(default, rename = "pomme_only")]
     _pomme_only: bool,
+    /// A fixture resource pack the script's own server requires;
+    /// `tools/ingame-test` serves it.
+    #[serde(default, rename = "server_resource_pack")]
+    _server_resource_pack: Option<String>,
 }
 
 /// One `[[step]]` table: exactly one action, plus an optional timeout.
