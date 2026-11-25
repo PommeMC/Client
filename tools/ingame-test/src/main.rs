@@ -761,8 +761,6 @@ impl Drop for Server {
     }
 }
 
-/// A fixture resource pack, zipped and served over HTTP until dropped, for a
-/// script's server to require.
 /// A script's `server_resource_pack`: a fixture pack's name, or a table with
 /// that `name` or a `url` to push as is, and `required` (true by default).
 struct ServerPack {

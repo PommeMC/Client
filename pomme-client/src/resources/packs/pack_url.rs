@@ -2,8 +2,9 @@
 //! `java.net.URL` whether a server's pack URL parses: a port of the checks
 //! JDK 25 makes for an http or https URL.
 
-/// The URL `new URL` makes of `url`, if it takes it with an http or https
-/// scheme. One it takes but can't fetch fails its download instead.
+/// The spec `new URL` parses out of `url`, trimmed and past any `url:`, if it
+/// takes it with an http or https scheme. One it takes but can't fetch fails
+/// its download instead.
 pub(crate) fn pack_url(url: &str) -> Option<&str> {
     // `URL(String)`: surrounding whitespace and a `url:` prefix are skipped.
     let spec = url.trim_matches(|c: char| c <= ' ');
