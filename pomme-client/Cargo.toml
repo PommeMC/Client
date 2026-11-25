@@ -9,8 +9,8 @@ default = ["singleplayer"]
 # Embeds SteelMC as the integrated server. Off, the world screens still list and
 # edit saves but nothing can open one.
 singleplayer = ["dep:pomme-singleplayer"]
-# Loads `ttf` font providers from resource packs through the system FreeType
-# (pkg-config). Off, those providers are skipped.
+# Loads `ttf` font providers from resource packs with FreeType 2.15.0 or newer.
+# Older runtimes and builds without this feature skip these providers.
 ttf-fonts = ["dep:freetype-rs"]
 # Headless CPU benchmarks (`just bench`): `--cpu-bench [filter]` runs criterion
 # over the mesher, fade rebuild and occlusion walk, then exits.
