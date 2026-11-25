@@ -4265,6 +4265,7 @@ impl AppCore {
             crate::player::interaction::Clicks {
                 attack: self.input.take_clicks(Action::Destroy),
                 use_item: self.input.take_clicks(Action::Use),
+                pick: self.input.take_clicks(Action::PickBlock),
             }
         } else {
             Default::default()

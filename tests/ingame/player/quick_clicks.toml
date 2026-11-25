@@ -1,0 +1,80 @@
+# A press let go before the next tick still acts: each tap below is pressed
+# and released in the same frame, between two ticks. A middle tap picks the
+# stone, a left tap breaks it and a right tap places it back.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/clear @s"
+
+[[step]]
+chat = "/tp @s 1170.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [1170.5, -60.0, 0.5] } }
+
+# The chunks are loaded once the client has them.
+[[step]]
+expect = { block = "grass_block", at = [1170, -61, 2] }
+
+[[step]]
+chat = "/setblock 1170 -60 2 minecraft:stone"
+
+[[step]]
+expect = { block = "stone", at = [1170, -60, 2] }
+
+[[step]]
+press = { key = "key.keyboard.1" }
+
+# Through the stone's north face; with it gone, the grass top behind it.
+[[step]]
+look_at = [1170.5, -60.0, 2.5]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_down = "middle"
+
+[[step]]
+mouse_up = "middle"
+
+[[step]]
+expect = { slot = 36, item = "stone" }
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { block = "air", at = [1170, -60, 2] }
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { block = "stone", at = [1170, -60, 2] }
+
+[[step]]
+chat = "/setblock 1170 -60 2 minecraft:air"
+
+[[step]]
+chat = "/clear @s"

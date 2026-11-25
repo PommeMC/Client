@@ -69,12 +69,13 @@ pub struct EntityHitResult {
     pub entity_pos: DVec3,
 }
 
-/// The attack and use key presses queued since the last tick, vanilla's
-/// `KeyMapping.clickCount`s.
+/// The attack, use and pick key presses queued since the last tick,
+/// vanilla's `KeyMapping.clickCount`s.
 #[derive(Clone, Copy, Default)]
 pub struct Clicks {
     pub attack: u32,
     pub use_item: u32,
+    pub pick: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -553,14 +554,14 @@ impl InteractionState {
         // Vanilla `handleKeybinds`: while an item is in use, letting go of
         // use sends RELEASE_USE_ITEM (an early cancel; consumables finish on
         // the server's own timer) and the queued clicks are dropped.
-        // Otherwise each click attacks, then each uses.
+        let mut instant_attack = false;
         if self.using_item.is_some() {
             if !input.performing_action(input::Action::Use) {
                 self.release_using_item(sender);
             }
         } else {
             for _ in 0..clicks.attack {
-                self.start_attack(
+                instant_attack |= self.start_attack(
                     block_registry,
                     chunks,
                     sender,
@@ -581,9 +582,7 @@ impl InteractionState {
             for _ in 0..clicks.use_item {
                 use_item(self, effects, &mut dirty_chunks);
             }
-            // Vanilla checks `isUsingItem` once before the attack/use/pick
-            // loops, so a use started above does not suppress a pick.
-            if input.middle_just_pressed() {
+            for _ in 0..clicks.pick {
                 self.pick_block_or_entity(sender, input.ctrl_held());
             }
         }
@@ -595,7 +594,8 @@ impl InteractionState {
             use_item(self, effects, &mut dirty_chunks);
         }
 
-        let attack_down = input.performing_action(input::Action::Destroy);
+        // Vanilla `continueAttack(!instantAttack && keyAttack.isDown())`.
+        let attack_down = !instant_attack && input.performing_action(input::Action::Destroy);
         if !attack_down {
             self.miss_time = 0;
         }
@@ -710,6 +710,8 @@ impl InteractionState {
         }
     }
 
+    /// Vanilla `Minecraft.startAttack`; returns its `endAttack`, true when the
+    /// click broke the block outright.
     #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
@@ -728,41 +730,38 @@ impl InteractionState {
         legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
-    ) {
+    ) -> bool {
         if self.miss_time > 0 {
-            return;
+            return false;
         }
 
         // TODO: full-charge spears take vanilla's PIERCING_WEAPON branch
-        // instead of the plain entity/block dispatch.
+        // (which returns true) instead of the plain entity/block dispatch.
         if self.cannot_attack_with_item(held_stack, attributes) {
-            return;
+            return false;
         }
 
+        let is_air = |pos: BlockPos| {
+            block_registry
+                .block_state_data(chunks.get_block_state(pos.x, pos.y, pos.z))
+                .is_air()
+        };
         let hit = match self.target {
-            None => {
-                // Vanilla `Minecraft.startAttack` MISS branch.
-                self.miss_time = MISS_COOLDOWN;
-                self.attack_strength_ticker = 0;
-                self.swing(sender);
-                return;
-            }
             Some(HitResult::Entity(hit)) => {
                 self.attack(sender, hit.entity_id, creative);
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
-                return;
+                return false;
             }
-            Some(HitResult::Block(hit)) => hit,
+            Some(HitResult::Block(hit)) if !is_air(hit.block_pos) => hit,
+            // Vanilla's MISS branch, which an air block falls through to.
+            _ => {
+                self.miss_time = MISS_COOLDOWN;
+                self.attack_strength_ticker = 0;
+                self.swing(sender);
+                return false;
+            }
         };
-
-        let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-        if block_registry.block_state_data(state).is_air() {
-            self.miss_time = MISS_COOLDOWN;
-            self.attack_strength_ticker = 0;
-            self.swing(sender);
-            return;
-        }
 
         self.start_destroy_block(
             block_registry,
@@ -782,6 +781,7 @@ impl InteractionState {
             dirty_chunks,
         );
         self.swing(sender);
+        is_air(hit.block_pos)
     }
 
     #[allow(clippy::too_many_arguments)]
