@@ -324,7 +324,7 @@ pub fn transition_image_to_shader_read(
 pub fn load_resource_png(
     content: &crate::resources::ResourceContent,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    load_png_reader(content.open().ok()?, content.id())
+    load_png_reader(content.open().ok()?, content.id(), MAX_PNG_RGBA_BYTES)
 }
 
 pub fn load_asset_png(
@@ -334,13 +334,24 @@ pub fn load_asset_png(
     load_resource_png(&crate::assets::resource_content(resources, key).ok()?)
 }
 
+/// Maximum size of a decoded pack texture in its final RGBA8 representation.
+const MAX_PNG_RGBA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Decodes a texture within the RGBA8 byte limit, including the caller-owned
+/// output allocation that the PNG decoder's limit does not cover.
 fn load_png_reader(
     reader: impl std::io::Read,
     name: impl std::fmt::Display,
+    max_rgba_bytes: u64,
 ) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
+    let (width, height) = reader.info().size();
+    if u64::from(width) * u64::from(height) > max_rgba_bytes / 4 {
+        tracing::warn!("PNG {name} exceeds the decoded texture limit ({width}x{height})");
+        return None;
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
 
@@ -478,4 +489,26 @@ fn record_image_upload(
         },
         &copies,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_png_reader;
+
+    /// The texture budget counts the expanded RGBA output for grayscale PNGs.
+    #[test]
+    fn png_limit_counts_expanded_rgba_bytes() {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[127; 4])
+            .unwrap();
+
+        let (pixels, width, height) = load_png_reader(bytes.as_slice(), "fixture", 16).unwrap();
+        assert_eq!((width, height, pixels.len()), (2, 2, 16));
+        assert!(load_png_reader(bytes.as_slice(), "fixture", 15).is_none());
+    }
 }
