@@ -10,10 +10,13 @@ pub(crate) struct ServerPackRequest {
     pub hash: String,
 }
 
-/// Vanilla `ClientCommonPacketListenerImpl.parseResourcePackUrl`: only an
-/// http or https URL can be downloaded.
+/// Vanilla `ClientCommonPacketListenerImpl.parseResourcePackUrl`. Java's
+/// `new URL` takes nearly anything after an http or https scheme, so the
+/// scheme alone decides; a URL that can't be fetched fails its download.
 pub(crate) fn is_pack_url(url: &str) -> bool {
-    reqwest::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+    url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
 }
 
 /// Vanilla `DownloadedPackSource.MAX_PACK_SIZE_BYTES`.
@@ -188,6 +191,8 @@ mod tests {
     fn only_http_urls_are_pack_urls() {
         assert!(is_pack_url("https://example.com/pack.zip"));
         assert!(is_pack_url("http://127.0.0.1:8080/pack.zip"));
+        assert!(is_pack_url("HTTP://example.com/pack.zip"));
+        assert!(is_pack_url("http://"));
         for bad in [
             "",
             "not a url",

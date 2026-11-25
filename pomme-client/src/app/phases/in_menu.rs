@@ -57,7 +57,7 @@ pub fn open_world(core: &mut AppCore, folder: &str, quick_play: bool) -> MenuUpd
 pub fn quick_play(core: &mut AppCore, play: QuickPlay) -> MenuUpdateResult {
     match play {
         QuickPlay::Multiplayer(server) => {
-            core.begin_server_packs(Some(core.menu.quick_play_server(&server)));
+            core.begin_server_packs(Some(core.menu.saved_server(&server)));
             MenuUpdateResult::Connect {
                 // TODO: read the saved server list's protocol for this address
                 // to skip the join-time probe.

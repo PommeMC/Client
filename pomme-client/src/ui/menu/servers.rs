@@ -1,18 +1,19 @@
 use super::*;
 
 impl MainMenu {
-    /// Vanilla `QuickPlay.joinMultiplayerWorld`'s `ServerList.get`: the saved
-    /// server at `address`, or a fresh one.
-    // TODO: vanilla also adds and saves a server it didn't find.
-    pub fn quick_play_server(&self, address: &str) -> JoinedServer {
+    /// Vanilla `ServerList.get`, as quick play and Direct Connection join:
+    /// the saved server at `address`, or a fresh one.
+    // TODO: vanilla then saves a server it didn't find, hidden for a direct
+    // connection.
+    pub fn saved_server(&self, address: &str) -> JoinedServer {
+        joined_server(self.saved_entry(address), address)
+    }
+
+    fn saved_entry(&self, address: &str) -> Option<&ServerEntry> {
         self.server_list
             .servers
             .iter()
             .find(|entry| entry.address == address)
-            .map_or_else(
-                || JoinedServer::unlisted(address.to_owned()),
-                JoinedServer::from_entry,
-            )
     }
 
     /// Vanilla `ServerList.saveSingleServer`.
@@ -653,16 +654,15 @@ impl MainMenu {
             || enter_submit
         {
             self.close_direct_connect(key_bindings);
-            let persisted = self
-                .server_list
-                .servers
-                .iter()
-                .find(|s| s.address == address)
-                .and_then(|s| s.protocol);
+            let saved = self.saved_entry(&address);
             action = MenuAction::Connect {
-                server: JoinedServer::unlisted(address.clone()),
+                server: joined_server(saved, &address),
                 username: self.username.clone(),
-                protocol: join_protocol(&self.ping_results.read(), &address, persisted),
+                protocol: join_protocol(
+                    &self.ping_results.read(),
+                    &address,
+                    saved.and_then(|entry| entry.protocol),
+                ),
             };
         }
         if push_button(
@@ -1166,6 +1166,14 @@ fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
 
 pub(super) fn write_clipboard(text: &str) -> bool {
     crate::ui::common::set_clipboard(text)
+}
+
+/// `entry` as the server a join targets, or a fresh one at `address`.
+fn joined_server(entry: Option<&ServerEntry>, address: &str) -> JoinedServer {
+    entry.map_or_else(
+        || JoinedServer::unlisted(address.to_owned()),
+        JoinedServer::from_entry,
+    )
 }
 
 /// The protocol to join `address` with: the completed ping's, else the

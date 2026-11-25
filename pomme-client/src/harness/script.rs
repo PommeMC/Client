@@ -699,7 +699,7 @@ impl Script {
                 return None;
             }
         }
-        if std::mem::take(&mut self.deterministic) {
+        if matches!(phase, AppPhase::InGame { .. }) && std::mem::take(&mut self.deterministic) {
             exec::run(&Command::Deterministic, core, phase);
         }
         let Some(step) = self.steps.get(self.next) else {

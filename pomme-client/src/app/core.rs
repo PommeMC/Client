@@ -3975,9 +3975,10 @@ impl AppCore {
                     game.clear_entities();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
-                    // `ServerReconfigScreen` replaces any dialog; the server
-                    // links carry over.
+                    // `ServerReconfigScreen` replaces any dialog or pack prompt,
+                    // whose packs go unanswered; the server links carry over.
                     game.server_dialog = None;
+                    game.pack_prompt = None;
                     game.configuring = true;
                     game.reset_sleep_for_level_teardown();
                     self.clear_server_ui(game, renderer);
