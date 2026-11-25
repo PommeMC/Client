@@ -246,8 +246,8 @@ impl AudioEngine {
                 Ok(Err(e)) => {
                     tracing::warn!(
                         "audio disabled: failed to initialize OpenAL ({e}). \
-                         Releases ship the library next to the binary; for a dev \
-                         build run `just openal` to stage it."
+                         Releases carry the library; for a dev build run \
+                         `just openal` to stage it."
                     );
                     let _ = handle.join();
                     (None, None)
