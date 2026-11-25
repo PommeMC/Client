@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::resources::{ResourceId, ResourceManager};
 
@@ -324,7 +326,11 @@ pub fn transition_image_to_shader_read(
 pub fn load_resource_png(
     content: &crate::resources::ResourceContent,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    load_png_reader(content.open().ok()?, content.id(), MAX_PNG_RGBA_BYTES)
+    load_png_reader(
+        content.open().ok()?,
+        content.id(),
+        MAX_TEXTURE_SIZE.load(Ordering::Relaxed),
+    )
 }
 
 pub fn load_asset_png(
@@ -334,22 +340,28 @@ pub fn load_asset_png(
     load_resource_png(&crate::assets::resource_content(resources, key).ok()?)
 }
 
-/// Maximum size of a decoded pack texture in its final RGBA8 representation.
-const MAX_PNG_RGBA_BYTES: u64 = 64 * 1024 * 1024;
+/// Vanilla `DeviceLimits.maxTextureSize`, which it reads through the global
+/// `RenderSystem.getDevice()`. Unlimited until the device exists.
+static MAX_TEXTURE_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Decodes a texture within the RGBA8 byte limit, including the caller-owned
-/// output allocation that the PNG decoder's limit does not cover.
+pub fn set_max_texture_size(size: u32) {
+    MAX_TEXTURE_SIZE.store(size, Ordering::Relaxed);
+}
+
+/// Decodes a texture no wider or taller than `max_size`, checked before the
+/// output is allocated. Vanilla decodes it and then fails at the GPU (a crash
+/// when an atlas can't stitch it); here it falls back as a missing texture.
 fn load_png_reader(
     reader: impl std::io::Read,
     name: impl std::fmt::Display,
-    max_rgba_bytes: u64,
+    max_size: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
     let (width, height) = reader.info().size();
-    if u64::from(width) * u64::from(height) > max_rgba_bytes / 4 {
-        tracing::warn!("PNG {name} exceeds the decoded texture limit ({width}x{height})");
+    if width > max_size || height > max_size {
+        tracing::error!("Image {name} is {width}x{height}, past the device's {max_size} limit");
         return None;
     }
     let mut buf = vec![0u8; reader.output_buffer_size()];
@@ -495,9 +507,9 @@ fn record_image_upload(
 mod tests {
     use super::load_png_reader;
 
-    /// The texture budget counts the expanded RGBA output for grayscale PNGs.
+    /// An image fits up to the device's texture size on either axis.
     #[test]
-    fn png_limit_counts_expanded_rgba_bytes() {
+    fn png_limit_is_the_device_texture_size() {
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
         encoder.set_color(png::ColorType::Grayscale);
@@ -507,8 +519,8 @@ mod tests {
             .write_image_data(&[127; 4])
             .unwrap();
 
-        let (pixels, width, height) = load_png_reader(bytes.as_slice(), "fixture", 16).unwrap();
+        let (pixels, width, height) = load_png_reader(bytes.as_slice(), "fixture", 2).unwrap();
         assert_eq!((width, height, pixels.len()), (2, 2, 16));
-        assert!(load_png_reader(bytes.as_slice(), "fixture", 15).is_none());
+        assert!(load_png_reader(bytes.as_slice(), "fixture", 1).is_none());
     }
 }
