@@ -37,7 +37,7 @@ use crate::resources::pack_resources::{FileResourcesSupplier, PackType};
 use crate::resources::packs::{
     BuiltinRepositorySource, FolderRepositorySource, Pack, PackEnablementConfig, PackId,
     PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
-    ServerPackRequest, SymlinkPolicy, ThemeSpecification, download_server_pack, is_pack_url,
+    ServerPackRequest, SymlinkPolicy, ThemeSpecification, download_server_pack, pack_url,
 };
 use crate::ui::common::HeadProfile;
 use crate::ui::menu::{
@@ -2171,27 +2171,43 @@ impl AppCore {
     }
 
     /// Vanilla `DownloadedPackSource.configureForServerControl` from
-    /// `ConnectScreen`, or `configureForLocalWorld` without a server.
+    /// `ConnectScreen`. A world keeps `cleanupAfterDisconnect`'s state, as
+    /// one without a `resources.zip` does.
     pub(crate) fn begin_server_packs(&mut self, server: Option<JoinedServer>) {
         self.pack_prompt_status = match server.as_ref().map(|server| server.pack_status) {
-            None | Some(ServerPackStatus::Enabled) => PackPromptStatus::Allowed,
+            Some(ServerPackStatus::Enabled) => PackPromptStatus::Allowed,
             Some(ServerPackStatus::Disabled) => PackPromptStatus::Declined,
-            Some(ServerPackStatus::Prompt) => PackPromptStatus::Pending,
+            None | Some(ServerPackStatus::Prompt) => PackPromptStatus::Pending,
         };
         self.joined_server = server;
+    }
+
+    /// Vanilla `DownloadedPackSource.packFeedback`: sent to a server, only
+    /// logged in a world.
+    fn report_pack_status(
+        &self,
+        connection: &ConnectionHandle,
+        id: uuid::Uuid,
+        action: ResourcePackAction,
+    ) {
+        if self.joined_server.is_some() {
+            send_pack_status(connection, id, action);
+        } else {
+            tracing::debug!("Downloaded pack {id} changed state to {action:?}");
+        }
     }
 
     /// Vanilla `ServerPackManager.pushPack`. A prompting server's pushes wait
     /// in the prompt, so they only arrive here once it's answered.
     fn push_server_pack(&mut self, connection: &ConnectionHandle, request: ServerPackRequest) {
         if self.pack_prompt_status == PackPromptStatus::Declined {
-            send_pack_status(connection, request.id, ResourcePackAction::Declined);
+            self.report_pack_status(connection, request.id, ResourcePackAction::Declined);
             return;
         }
         // `markExistingPacksAsRemoved`: a pending pack with this id is
         // replaced and never reports.
         self.cancel_server_pack_requests(Some(request.id));
-        send_pack_status(connection, request.id, ResourcePackAction::Accepted);
+        self.report_pack_status(connection, request.id, ResourcePackAction::Accepted);
         self.server_pack_queue.push_back(request);
     }
 
@@ -2301,6 +2317,20 @@ impl AppCore {
                 }
                 Err(error)
             }
+        }
+    }
+
+    /// Vanilla `handleResourcePackPop`, or every pack without an id.
+    fn pop_server_packs(
+        &mut self,
+        uuid: Option<uuid::Uuid>,
+        game: &mut GameState,
+        renderer: &mut Renderer,
+    ) {
+        match self.remove_server_resource_packs(uuid, Renderer::prepare_resources) {
+            Ok(Some(prepared)) => self.reload_live_resource_assets(game, renderer, prepared),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Failed to pop server resource assets"),
         }
     }
 
@@ -2446,7 +2476,9 @@ impl AppCore {
         // `ChunkBatchReceived` is answered on the network thread as vanilla
         // does, so this doesn't pace the server.
         let mut chunk_work = std::time::Duration::ZERO;
-        while !game.hold_packets
+        // Vanilla `Connection.disconnect` stops handling at once.
+        while disconnect_reason.is_none()
+            && !game.hold_packets
             && !defer_packets(chunk_work, self.tick_accumulator)
             && let Ok(event) = rx.try_recv()
         {
@@ -3939,11 +3971,15 @@ impl AppCore {
                     required,
                     prompt,
                 } => {
-                    if !is_pack_url(&url) {
+                    let Some(url) = pack_url(&url) else {
                         send_pack_status(connection, id, ResourcePackAction::InvalidUrl);
                         continue;
-                    }
-                    let request = ServerPackRequest { id, url, hash };
+                    };
+                    let request = ServerPackRequest {
+                        id,
+                        url: url.to_owned(),
+                        hash,
+                    };
                     let status = self
                         .joined_server
                         .as_ref()
@@ -3956,18 +3992,8 @@ impl AppCore {
                         self.push_server_pack(connection, request);
                     }
                 }
-                NetworkEvent::ResourcePackPop { id } => {
-                    // A server may pop an id it already popped, or never pushed.
-                    match self.remove_server_resource_packs(id, Renderer::prepare_resources) {
-                        Ok(Some(prepared)) => {
-                            self.reload_live_resource_assets(game, renderer, prepared);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "Failed to pop server resource assets");
-                        }
-                    }
-                }
+                // A server may pop an id it already popped, or never pushed.
+                NetworkEvent::ResourcePackPop { id } => self.pop_server_packs(id, game, renderer),
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
                     game.block_registry.clear_tags();
@@ -4038,12 +4064,12 @@ impl AppCore {
                 }
                 Ok(Ok(path)) => {
                     // Vanilla `ServerPackManager.onDownload`.
-                    send_pack_status(connection, pending.id, ResourcePackAction::Downloaded);
+                    self.report_pack_status(connection, pending.id, ResourcePackAction::Downloaded);
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
-                    // A failed preflight leaves the pack unregistered and the
-                    // old view active, as vanilla's `onFailure` drops it.
+                    // A failed preflight leaves the pack unregistered, as
+                    // vanilla's `onFailure` drops it.
                     let reload = self
                         .activate_server_resource_pack(
                             pending.id,
@@ -4066,7 +4092,12 @@ impl AppCore {
                     }
                 }
             };
-            send_pack_status(connection, pending.id, action);
+            self.report_pack_status(connection, pending.id, action);
+            // `markExistingPacksAsRemoved`: the pack this one replaced goes
+            // even when its replacement fails.
+            if action != ResourcePackAction::SuccessfullyLoaded {
+                self.pop_server_packs(Some(pending.id), game, renderer);
+            }
         }
 
         if disconnect_reason.is_none() {

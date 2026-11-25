@@ -9,9 +9,9 @@
 //! world, against the native version unless `--version` or `--versions all`
 //! picks others; `ingame-test --server-only` starts a server for live socket
 //! sessions. `--capture` also records each script's clientbound frames into
-//! its `wire-fixtures/` corpus entry. A script naming a fixture pack in
-//! `server_resource_pack` runs on a server of its own that requires that pack,
-//! served over HTTP from here.
+//! its `wire-fixtures/` corpus entry. A script with a `server_resource_pack`
+//! runs on a server of its own that pushes that pack, a fixture served over
+//! HTTP from here or a URL as given.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -203,10 +203,8 @@ fn run_version(
     };
     let failed = Mutex::new(Vec::new());
     let run = |script: &Path, server: &mut Server, game_dir: &Path| -> Result<(), String> {
-        let served = server_resource_pack(script)?
-            .map(|name| ServedPack::start(&name))
-            .transpose()?;
-        let mut own = served
+        let pack = ServerPack::start(script)?;
+        let mut own = pack
             .as_ref()
             .map(|pack| {
                 let dir = server.dir.join("server-pack");
@@ -310,18 +308,6 @@ fn script_name(root: &Path, script: &Path) -> String {
 /// and `max_version` bound the versions it's valid on.
 fn script_runs_on(script: &Path, version: &ProtocolVersion) -> Result<bool, String> {
     in_range(&script_table(script)?, version).map_err(|e| format!("{}: {e}", script.display()))
-}
-
-/// The fixture pack a script's server requires, if any.
-fn server_resource_pack(script: &Path) -> Result<Option<String>, String> {
-    match script_table(script)?.remove("server_resource_pack") {
-        None => Ok(None),
-        Some(toml::Value::String(name)) => Ok(Some(name)),
-        Some(_) => Err(format!(
-            "{}: server_resource_pack must be a fixture pack's name",
-            script.display()
-        )),
-    }
 }
 
 fn script_table(script: &Path) -> Result<toml::Table, String> {
@@ -777,14 +763,55 @@ impl Drop for Server {
 
 /// A fixture resource pack, zipped and served over HTTP until dropped, for a
 /// script's server to require.
-struct ServedPack {
-    port: u16,
-    sha1: String,
-    stop: Arc<AtomicBool>,
+/// A script's `server_resource_pack`: a fixture pack's name, or a table with
+/// that `name` or a `url` to push as is, and `required` (true by default).
+struct ServerPack {
+    url: String,
+    sha1: Option<String>,
+    required: bool,
+    stop: Option<Arc<AtomicBool>>,
 }
 
-impl ServedPack {
-    fn start(name: &str) -> Result<Self, String> {
+impl ServerPack {
+    fn start(script: &Path) -> Result<Option<Self>, String> {
+        let invalid = || {
+            format!(
+                "{}: server_resource_pack must be a fixture pack's name, or a table with a name or url",
+                script.display()
+            )
+        };
+        let (name, url, required) = match script_table(script)?.remove("server_resource_pack") {
+            None => return Ok(None),
+            Some(toml::Value::String(name)) => (Some(name), None, true),
+            Some(toml::Value::Table(mut table)) => {
+                let mut text = |key| match table.remove(key) {
+                    None => Ok(None),
+                    Some(toml::Value::String(value)) => Ok(Some(value)),
+                    Some(_) => Err(invalid()),
+                };
+                let (name, url) = (text("name")?, text("url")?);
+                let required = match table.remove("required") {
+                    None => true,
+                    Some(toml::Value::Boolean(required)) => required,
+                    Some(_) => return Err(invalid()),
+                };
+                (name, url, required)
+            }
+            Some(_) => return Err(invalid()),
+        };
+        match (name, url) {
+            (Some(name), None) => Self::serve(&name, required).map(Some),
+            (None, Some(url)) => Ok(Some(Self {
+                url,
+                sha1: None,
+                required,
+                stop: None,
+            })),
+            _ => Err(invalid()),
+        }
+    }
+
+    fn serve(name: &str, required: bool) -> Result<Self, String> {
         let zip = zip_dir(&Path::new(SCRIPT_DIR).join(RESOURCE_PACKS).join(name))?;
         let listener = TcpListener::bind((HOST, 0)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -805,22 +832,32 @@ impl ServedPack {
                 }
             }
         });
-        Ok(Self { port, sha1, stop })
+        Ok(Self {
+            url: format!("http://{HOST}:{port}/pack.zip"),
+            sha1: Some(sha1),
+            required,
+            stop: Some(stop),
+        })
     }
 
     fn properties(&self) -> String {
-        format!(
-            "resource-pack=http\\://{HOST}\\:{}/pack.zip\n\
-             resource-pack-sha1={}\n\
-             require-resource-pack=true\n",
-            self.port, self.sha1
-        )
+        let mut properties = format!(
+            "resource-pack={}\nrequire-resource-pack={}\n",
+            self.url.replace(':', "\\:"),
+            self.required
+        );
+        if let Some(sha1) = &self.sha1 {
+            properties += &format!("resource-pack-sha1={sha1}\n");
+        }
+        properties
     }
 }
 
-impl Drop for ServedPack {
+impl Drop for ServerPack {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Some(stop) = &self.stop {
+            stop.store(true, Ordering::Relaxed);
+        }
     }
 }
 

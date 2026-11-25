@@ -74,7 +74,9 @@ it instead of failing.
 
 A script that needs a server resource pack names one of `fixtures/resourcepacks`
 in `server_resource_pack = "<name>"`. The runner zips and serves that pack over
-HTTP and runs the script on a server of its own that requires it. The pack's
+HTTP and runs the script on a server of its own that requires it. The table
+form, `server_resource_pack = { name = "<name>", required = false }`, makes the
+pack optional, and `{ url = "<url>" }` pushes that URL as is instead. The pack's
 prompt comes up while the client is still connecting, so such a script sets
 `starts_connecting = true`: its steps then start on the connect screen, and the
 first one that needs the world waits for the join to finish. `expect = {

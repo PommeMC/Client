@@ -18,7 +18,7 @@ pub(crate) use download::{PackDownloadError, ServerPackRequest, download_server_
 pub(crate) use id::PackId;
 pub(crate) use location::PackLocationInfo;
 pub(crate) use pack::{Pack, PackEnablementConfig, PackMetadata, PackPosition, ResourcesSupplier};
-pub(crate) use pack_url::is_pack_url;
+pub(crate) use pack_url::pack_url;
 pub(crate) use repository::PackRepository;
 pub(crate) use sources::{
     BuiltinRepositorySource, FolderRepositorySource, InstallationLocation, PhysicalPack,

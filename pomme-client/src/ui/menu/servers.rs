@@ -770,7 +770,7 @@ impl MainMenu {
             tr("manageServer.resourcePack"),
             tr(self.edit_pack_status.lang_key())
         );
-        if push_button(
+        let pack_hovered = push_button(
             &mut elements,
             &mut any_hovered,
             cursor,
@@ -781,9 +781,15 @@ impl MainMenu {
             gs,
             &pack_label,
             true,
-        ) && clicked
-        {
-            self.edit_pack_status = self.edit_pack_status.cycle();
+        );
+        // `CycleButton`: shift-click and scrolling up cycle backwards.
+        if pack_hovered && (clicked || input.scroll_delta != 0.0) {
+            let forward = if clicked {
+                !input.shift
+            } else {
+                input.scroll_delta < 0.0
+            };
+            self.edit_pack_status = self.edit_pack_status.cycle(forward);
         }
 
         let name_val = self.edit_name.value().to_string();

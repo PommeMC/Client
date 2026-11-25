@@ -2156,8 +2156,6 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
     }
 }
 
-/// Drops the dialog if the input just handled finished it, then carries out
-/// the action it reported.
 /// Finished F2 captures announce in chat (vanilla `screenshot.success`: the
 /// bare filename, underlined), on the connect screen as in game.
 pub(crate) fn announce_screenshots(gfx: &mut Gfx, game: &mut GameState) {
@@ -2183,6 +2181,8 @@ pub(crate) fn announce_screenshots(gfx: &mut Gfx, game: &mut GameState) {
     }
 }
 
+/// Drops the dialog if the input just handled finished it, then carries out
+/// the action it reported.
 pub(crate) fn settle_server_dialog(
     action: Option<crate::ui::server_dialog::ServerDialogAction>,
     core: &mut AppCore,

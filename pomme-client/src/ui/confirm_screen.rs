@@ -141,8 +141,9 @@ impl ConfirmScreen {
         gs: f32,
         width0: &dyn Fn(&[TextSpan]) -> f32,
     ) -> Vec<[f32; 4]> {
-        // TODO: vanilla also blurs the world behind in-world screens
-        // (`Screen.extractBlurredBackground`).
+        // TODO: vanilla also blurs the world behind chat's link and command
+        // prompts (`Screen.extractBlurredBackground`); only the pack prompt
+        // does here.
         common::push_menu_background(elements, screen_w, screen_h);
         let layout = self.layout(
             (screen_w / gs).ceil() as i32,

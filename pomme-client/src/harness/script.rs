@@ -42,10 +42,10 @@ struct ScriptFile {
     /// skips.
     #[serde(default, rename = "pomme_only")]
     _pomme_only: bool,
-    /// A fixture resource pack the script's own server requires;
-    /// `tools/ingame-test` serves it.
+    /// The resource pack the script's own server pushes, a fixture's name or
+    /// a table; `tools/ingame-test` reads it.
     #[serde(default, rename = "server_resource_pack")]
-    _server_resource_pack: Option<String>,
+    _server_resource_pack: Option<toml::Value>,
 }
 
 /// One `[[step]]` table: exactly one action, plus an optional timeout.
@@ -496,7 +496,6 @@ fn starts_deterministic() -> bool {
     true
 }
 
-/// The script's steps, and whether it starts deterministic.
 /// A script's steps and its top-level switches.
 #[derive(Debug)]
 struct Parsed {

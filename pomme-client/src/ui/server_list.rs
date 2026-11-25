@@ -57,12 +57,12 @@ impl ServerPackStatus {
         }
     }
 
-    /// `CycleButton`'s next value.
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Enabled => Self::Disabled,
-            Self::Disabled => Self::Prompt,
-            Self::Prompt => Self::Enabled,
+    /// `CycleButton.cycleValue`: the next value, or the one before.
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Enabled, true) | (Self::Prompt, false) => Self::Disabled,
+            (Self::Disabled, true) | (Self::Enabled, false) => Self::Prompt,
+            (Self::Prompt, true) | (Self::Disabled, false) => Self::Enabled,
         }
     }
 
@@ -347,6 +347,20 @@ fn motd_spans(description: &serde_json::Value) -> Vec<TextSpan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CycleButton` steps through the values in order, either way.
+    #[test]
+    fn pack_status_cycles_both_ways() {
+        let order = [
+            ServerPackStatus::Enabled,
+            ServerPackStatus::Disabled,
+            ServerPackStatus::Prompt,
+        ];
+        for (i, &status) in order.iter().enumerate() {
+            assert_eq!(status.cycle(true), order[(i + 1) % 3]);
+            assert_eq!(status.cycle(false), order[(i + 2) % 3]);
+        }
+    }
 
     /// `acceptTextures` is absent to prompt, as vanilla's codec writes it.
     #[test]

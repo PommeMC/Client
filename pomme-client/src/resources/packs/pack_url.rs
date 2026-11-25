@@ -2,20 +2,20 @@
 //! `java.net.URL` whether a server's pack URL parses: a port of the checks
 //! JDK 25 makes for an http or https URL.
 
-/// Whether `new URL` takes `url` with an http or https scheme. One it takes
-/// but can't fetch fails its download instead.
-pub(crate) fn is_pack_url(url: &str) -> bool {
+/// The URL `new URL` makes of `url`, if it takes it with an http or https
+/// scheme. One it takes but can't fetch fails its download instead.
+pub(crate) fn pack_url(url: &str) -> Option<&str> {
     // `URL(String)`: surrounding whitespace and a `url:` prefix are skipped.
     let spec = url.trim_matches(|c: char| c <= ' ');
     let spec = match spec.get(..4) {
         Some(prefix) if prefix.eq_ignore_ascii_case("url:") => &spec[4..],
         _ => spec,
     };
-    let Some((scheme, rest)) = spec.split_once(':') else {
-        return false;
-    };
-    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
-        && authority_parses(rest.split('#').next().unwrap_or_default())
+    let (scheme, rest) = spec.split_once(':')?;
+    let rest = rest.find('#').map_or(rest, |end| &rest[..end]);
+    ((scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && authority_parses(rest))
+    .then_some(spec)
 }
 
 /// `URLStreamHandler.parseURL`'s authority: an IPv6 literal must be one, a
@@ -26,7 +26,7 @@ fn authority_parses(rest: &str) -> bool {
         return true;
     };
     // The query is cut off first, so a `?` ends it as well as a `/`.
-    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    let authority = rest.find(['/', '?']).map_or(rest, |end| &rest[..end]);
     // Two `@`s leave no user info and an empty host.
     let (user_info, host) = match authority.split_once('@') {
         None => (None, authority),
@@ -288,6 +288,10 @@ mod tests {
     /// checked against it.
     #[test]
     fn pack_urls_parse_as_java_does() {
+        assert_eq!(
+            pack_url(" URL:https://example.com/pack.zip "),
+            Some("https://example.com/pack.zip")
+        );
         for good in [
             "https://example.com/pack.zip",
             "http://127.0.0.1:8080/pack.zip",
@@ -311,7 +315,7 @@ mod tests {
             "http://h~!$/p",
             "http://user:pw@h/p",
         ] {
-            assert!(is_pack_url(good), "{good}");
+            assert!(pack_url(good).is_some(), "{good}");
         }
         for bad in [
             "",
@@ -332,7 +336,7 @@ mod tests {
             "http://u\u{0001}@h/p",
             "http://[::1%a#b]/p",
         ] {
-            assert!(!is_pack_url(bad), "{bad}");
+            assert_eq!(pack_url(bad), None, "{bad}");
         }
     }
 }

@@ -77,3 +77,9 @@ expect = { menu = "generic_3x3", title = "Pack Dispenser" }
 
 [[step]]
 close_menu = true
+
+[[step]]
+chat = "/setblock 43 -60 3 minecraft:air"
+
+[[step]]
+chat = "/fill 40 -61 0 46 -61 8 minecraft:grass_block"
