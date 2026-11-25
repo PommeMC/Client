@@ -172,18 +172,13 @@ impl RepositorySource for FolderRepositorySource {
 
 #[cfg(test)]
 mod repository_source_tests {
-    use std::fs::{self, File};
-    use std::io::Write;
-
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
+    use std::fs;
 
     use super::super::tests;
+    use super::super::tests::METADATA;
     use super::FolderRepositorySource;
     use crate::resources::pack_resources::PackType;
     use crate::resources::test_dir::TempDir;
-
-    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
 
     fn fixture() -> (TempDir, FolderRepositorySource) {
         let temp = TempDir::new().unwrap();
@@ -214,12 +209,7 @@ mod repository_source_tests {
     #[test]
     fn test_load_packs_zip() {
         let (temp, mut source) = fixture();
-        let mut archive = ZipWriter::new(File::create(temp.0.join("pack.zip")).unwrap());
-        archive
-            .start_file("pack.mcmeta", SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(METADATA).unwrap();
-        drop(archive.finish().unwrap());
+        tests::write_zip_pack(&temp.0.join("pack.zip"));
         tests::test_load_packs(&mut source, &["file/pack.zip"]);
     }
 }
@@ -232,11 +222,10 @@ mod path_validation {
     use std::os::unix::fs::symlink;
 
     use super::super::path_validation::assert_load_packs_catalog;
+    use super::super::tests::METADATA;
     use super::FolderRepositorySource;
     use crate::resources::pack_resources::PackType;
     use crate::resources::test_dir::TempDir;
-
-    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
 
     #[test]
     fn load_packs_omits_forbidden_symlinks() {

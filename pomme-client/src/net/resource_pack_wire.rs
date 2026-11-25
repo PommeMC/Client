@@ -41,15 +41,7 @@ pub(super) fn handle_resource_pack_packet(
         } => {
             let id = uuid::Uuid::from_u128(id);
             tracing::info!("Server pushing resource pack {id} (required: {required})");
-            send_ordered(
-                event_tx,
-                NetworkEvent::ResourcePackPush {
-                    id,
-                    url,
-                    hash,
-                    required,
-                },
-            );
+            send_ordered(event_tx, NetworkEvent::ResourcePackPush { id, url, hash });
             Some(GamePacket::ResourcePack {
                 id: id.as_u128(),
                 action: ResourcePackAction::Accepted,

@@ -734,7 +734,6 @@ pub enum NetworkEvent {
         id: uuid::Uuid,
         url: String,
         hash: String,
-        required: bool,
     },
     ResourcePackPop {
         id: Option<uuid::Uuid>,

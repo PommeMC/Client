@@ -33,9 +33,9 @@ use crate::renderer::chunk::mesh_source::MeshSource;
 use crate::renderer::chunk::occlusion_graph::Update as VisUpdate;
 use crate::resources::ResourceManager;
 use crate::resources::managers::ReloadableResourceManager;
-use crate::resources::pack_resources::PackType;
+use crate::resources::pack_resources::{FileResourcesSupplier, PackType};
 use crate::resources::packs::{
-    BuiltinRepositorySource, FolderRepositorySource, PackEnablementConfig, PackId,
+    BuiltinRepositorySource, FolderRepositorySource, Pack, PackEnablementConfig, PackId,
     PackLocationInfo, PackPosition, PackRepository, PhysicalPack, RegisteredRepositorySource,
     SymlinkPolicy, ThemeSpecification, download_server_pack,
 };
@@ -50,21 +50,17 @@ use crate::world::block::block_registry::BlockDefinitions;
 use crate::world::chunk::ChunkStore;
 use crate::world::environment::EnvironmentProbe;
 
-const MAX_QUEUED_SERVER_PACKS: usize = 16;
-
 struct ServerPackRequest {
     id: uuid::Uuid,
     url: String,
     hash: String,
-    required: bool,
 }
 
 struct PendingPackDownload {
     id: uuid::Uuid,
-    required: bool,
     hash: String,
-    // A popped or disconnected pack cannot mount, but retains the worker
-    // slot until it finishes.
+    // A popped, replaced or disconnected pack cannot mount, but keeps the
+    // worker slot until it finishes.
     cancelled: bool,
     handle: std::thread::JoinHandle<PackDownloadResult>,
 }
@@ -2157,8 +2153,9 @@ impl AppCore {
         }
     }
 
-    /// Drops requests for a popped pack and prevents a running download from
-    /// mounting it. With no UUID, cancels all requests for this connection.
+    /// Drops requests for a popped or replaced pack and prevents a running
+    /// download from mounting it. With no UUID, cancels all requests for this
+    /// connection.
     fn cancel_server_pack_requests(&mut self, uuid: Option<uuid::Uuid>) {
         self.server_pack_queue
             .retain(|request| uuid.is_some_and(|id| request.id != id));
@@ -2170,44 +2167,28 @@ impl AppCore {
     }
 
     /// Starts the oldest queued request once the previous worker has finished.
-    /// Reports spawn errors to the server and returns a reason to disconnect
-    /// when that pack was required.
-    fn start_next_server_pack(&mut self, connection: &ConnectionHandle) -> Option<String> {
+    fn start_next_server_pack(&mut self) {
         if self.pending_pack_download.is_some() {
-            return None;
+            return;
         }
-        let ServerPackRequest {
-            id,
-            url,
-            hash,
-            required,
-        } = self.server_pack_queue.pop_front()?;
-        let cache_dir = self.data_dirs.game_dir.join("resourcepacks/.server_cache");
+        let Some(ServerPackRequest { id, url, hash }) = self.server_pack_queue.pop_front() else {
+            return;
+        };
+        // Vanilla `DownloadQueue.runDownload`: `downloads/<pack id>/<sha1>`.
+        let cache_dir = self
+            .data_dirs
+            .game_dir
+            .join("downloads")
+            .join(id.to_string());
         let download_hash = hash.clone();
-        match std::thread::Builder::new()
-            .name("server-pack".to_owned())
-            .spawn(move || download_server_pack(&cache_dir, &url, &download_hash))
-        {
-            Ok(handle) => {
-                self.pending_pack_download = Some(PendingPackDownload {
-                    id,
-                    required,
-                    hash,
-                    cancelled: false,
-                    handle,
-                });
-                None
-            }
-            Err(error) => {
-                tracing::warn!(%error, %id, "Failed to start resource pack download");
-                connection.packet_tx.send(GamePacket::ResourcePack {
-                    id: id.as_u128(),
-                    action: ResourcePackAction::FailedDownload,
-                });
-                required
-                    .then(|| format!("Required resource pack download could not start: {error}"))
-            }
-        }
+        self.pending_pack_download = Some(PendingPackDownload {
+            id,
+            hash,
+            cancelled: false,
+            handle: std::thread::spawn(move || {
+                download_server_pack(&cache_dir, &url, &download_hash)
+            }),
+        });
     }
 
     /// Cancels pending requests and atomically removes the affected active
@@ -2259,17 +2240,32 @@ impl AppCore {
         path: std::path::PathBuf,
         prepare: impl FnOnce(&dyn crate::resources::ResourceManager) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
+        let location = PackLocationInfo {
+            id: uuid.to_string(),
+            title: crate::chat_component::Component::text(hash),
+            known_pack_info: None,
+        };
+        // Vanilla `DownloadedPackSource.loadRequestedPacks`: a pack without
+        // valid metadata fails the reload before anything changes.
+        let metadata = Pack::read_metadata(
+            &location,
+            &FileResourcesSupplier::new(path.clone()),
+            PackType::ClientResources,
+            self.builtin_resources.target_format(),
+        )?;
+        if metadata.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid pack metadata in {}, ignoring all", path.display()),
+            ));
+        }
         let previous = self
             .server_resource_ids
             .get(&uuid)
             .and_then(|id| self.registered_resources.take_registration(id));
         let id = self.registered_resources.register(
-            PackLocationInfo {
-                id: uuid.to_string(),
-                title: crate::chat_component::Component::text(hash),
-                known_pack_info: None,
-            },
-            PhysicalPack::Directory(path),
+            location,
+            PhysicalPack::Zip(path),
             // Vanilla `DownloadedPackSource.DOWNLOADED_PACK_SELECTION`: pinned
             // above the player's packs, so one enabled later can't cover it.
             PackEnablementConfig {
@@ -3861,29 +3857,12 @@ impl AppCore {
                         }
                     }
                 }
-                NetworkEvent::ResourcePackPush {
-                    id,
-                    url,
-                    hash,
-                    required,
-                } => {
-                    if self.server_pack_queue.len() >= MAX_QUEUED_SERVER_PACKS {
-                        tracing::warn!(%id, "Server resource pack queue is full");
-                        connection.packet_tx.send(GamePacket::ResourcePack {
-                            id: id.as_u128(),
-                            action: ResourcePackAction::FailedDownload,
-                        });
-                        if required {
-                            disconnect_reason = Some("Required resource pack queue is full".into());
-                        }
-                    } else {
-                        self.server_pack_queue.push_back(ServerPackRequest {
-                            id,
-                            url,
-                            hash,
-                            required,
-                        });
-                    }
+                NetworkEvent::ResourcePackPush { id, url, hash } => {
+                    // Vanilla `ServerPackManager.markExistingPacksAsRemoved`: a
+                    // pending pack with this id is replaced and never reports.
+                    self.cancel_server_pack_requests(Some(id));
+                    self.server_pack_queue
+                        .push_back(ServerPackRequest { id, url, hash });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
@@ -3953,26 +3932,27 @@ impl AppCore {
             && disconnect_reason.is_none()
         {
             let result = pending.handle.join();
+            let report = |action| {
+                connection.packet_tx.send(GamePacket::ResourcePack {
+                    id: pending.id.as_u128(),
+                    action,
+                });
+            };
 
+            // A failed required pack is left to the server: vanilla only
+            // disconnects when the player declines its prompt.
             let action = match result {
                 Err(_) => {
                     tracing::error!("Resource pack {} thread panicked", pending.id);
-                    if pending.required {
-                        disconnect_reason = Some(
-                            "Required resource pack failed: thread panicked (internal error)"
-                                .into(),
-                        );
-                    }
                     ResourcePackAction::FailedDownload
                 }
                 Ok(Err(e)) => {
                     tracing::error!("Resource pack {} failed: {e}", pending.id);
-                    if pending.required {
-                        disconnect_reason = Some(format!("Required resource pack failed: {e}"));
-                    }
                     ResourcePackAction::FailedDownload
                 }
                 Ok(Ok(path)) => {
+                    // Vanilla `ServerPackManager.onDownload`.
+                    report(ResourcePackAction::Downloaded);
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
@@ -3995,24 +3975,16 @@ impl AppCore {
                         }
                         Err(error) => {
                             tracing::error!(%error, id = %pending.id, "Resource pack reload failed");
-                            if pending.required {
-                                disconnect_reason =
-                                    Some(format!("Required resource pack failed: {error}"));
-                            }
                             ResourcePackAction::FailedReload
                         }
                     }
                 }
             };
-
-            connection.packet_tx.send(GamePacket::ResourcePack {
-                id: pending.id.as_u128(),
-                action,
-            });
+            report(action);
         }
 
         if disconnect_reason.is_none() {
-            disconnect_reason = self.start_next_server_pack(connection);
+            self.start_next_server_pack();
         }
 
         let player_chunk = game.player_chunk();
