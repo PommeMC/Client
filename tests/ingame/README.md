@@ -74,8 +74,11 @@ it instead of failing.
 
 A script that needs a server resource pack names one of `fixtures/resourcepacks`
 in `server_resource_pack = "<name>"`. The runner zips and serves that pack over
-HTTP and runs the script on a server of its own that requires it; the vanilla
-harness does the same and trusts that server, so its pack prompt doesn't show.
+HTTP and runs the script on a server of its own that requires it. The pack's
+prompt comes up while the client is still connecting, so such a script sets
+`starts_connecting = true`: its steps then start on the connect screen, and the
+first one that needs the world waits for the join to finish. `expect = {
+button = "Proceed" }` waits for a button to be drawn, in a world or not.
 
 ## Wire fixtures
 
@@ -264,6 +267,7 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
 | The local player | `player = { ... }` with any of `health`, `food`, `air` (the air supply in ticks, 300 when full), `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none), `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) and `using_item` (an item held in use, such as a raised shield) |
 | The screen outside a world | `screen` (`title`, `server_list`, `direct_connect`, `world_list`, `create_world`), optional `address` (the Direct Connection field) |
+| A drawn button | `button` (its label), in a world or not |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `sign` (the sign editor), `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | A scrolling list | `list`: where an options screen's or Key Binds' list sits, `top`, `end` or `middle` (other lists don't report it yet) |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom), `tab_list` (every listed player as `{ name, game_mode? }`, in tab order), `chat_open` and `action_bar` (`""` when none shows) |

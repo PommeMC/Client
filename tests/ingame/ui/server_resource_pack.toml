@@ -1,7 +1,25 @@
-# A server that requires a resource pack has it applied on join: stone turns
-# the pack's red and a container's title takes the pack's en_us.json. The
-# runner serves the fixture pack and starts this script's own server with it.
+# A server that requires a resource pack asks for it on join, and once the
+# player proceeds the pack applies: stone turns the pack's red and a
+# container's title takes the pack's en_us.json. The runner serves the
+# fixture pack and starts this script's own server with it.
 server_resource_pack = "pomme_test"
+starts_connecting = true
+
+[[step]]
+expect = { button = "Proceed" }
+timeout_ms = 60000
+
+[[step]]
+screenshot = "prompt"
+
+[[step]]
+cursor_to_button = "Proceed"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
 
 [[step]]
 wait_ms = 2000

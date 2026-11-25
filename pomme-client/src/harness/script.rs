@@ -28,6 +28,10 @@ struct ScriptFile {
     /// about that noise itself turns it off.
     #[serde(default = "starts_deterministic")]
     deterministic: bool,
+    /// Whether the steps start on the connect screen rather than in the
+    /// world, for a screen the join raises (a server pack's prompt).
+    #[serde(default)]
+    starts_connecting: bool,
     /// The versions the script is valid on; `tools/ingame-test` reads them
     /// to skip it elsewhere.
     #[serde(default, rename = "min_version")]
@@ -110,6 +114,7 @@ enum Expect {
     Distant(DistantExpect),
     Menu(MenuExpect),
     Screen(ScreenExpect),
+    Button(ButtonExpect),
     List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
@@ -289,6 +294,13 @@ struct DistantAt {
     gone: bool,
 }
 
+/// A button with this label drawn on the last frame, in a world or not.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ButtonExpect {
+    button: String,
+}
+
 /// The screen open outside a world (`title`, `server_list`,
 /// `direct_connect`), and optionally the Direct Connect address field's text.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -368,7 +380,9 @@ impl Step {
     fn runs_anywhere(&self) -> bool {
         match self {
             Step::Run(command) => exec::runs_anywhere(command),
-            Step::Wait(_) | Step::Screenshot { .. } | Step::Expect(Expect::Screen(_), _) => true,
+            Step::Wait(_)
+            | Step::Screenshot { .. }
+            | Step::Expect(Expect::Screen(_) | Expect::Button(_), _) => true,
             _ => false,
         }
     }
@@ -483,7 +497,15 @@ fn starts_deterministic() -> bool {
 }
 
 /// The script's steps, and whether it starts deterministic.
-fn parse(source: &str) -> Result<(Vec<Step>, bool), String> {
+/// A script's steps and its top-level switches.
+#[derive(Debug)]
+struct Parsed {
+    steps: Vec<Step>,
+    deterministic: bool,
+    starts_connecting: bool,
+}
+
+fn parse(source: &str) -> Result<Parsed, String> {
     let file: ScriptFile = toml::from_str(source).map_err(|e| e.to_string())?;
     let steps = file
         .steps
@@ -491,7 +513,11 @@ fn parse(source: &str) -> Result<(Vec<Step>, bool), String> {
         .enumerate()
         .map(|(i, step)| step.into_step().map_err(|e| format!("step {}: {e}", i + 1)))
         .collect::<Result<_, _>>()?;
-    Ok((steps, file.deterministic))
+    Ok(Parsed {
+        steps,
+        deterministic: file.deterministic,
+        starts_connecting: file.starts_connecting,
+    })
 }
 
 #[derive(Serialize)]
@@ -579,6 +605,7 @@ pub struct Script {
     /// Holds the frame's noise still from the first frame in game, as the
     /// `deterministic` step does, until applied.
     deterministic: bool,
+    starts_connecting: bool,
     out_dir: PathBuf,
     started: Instant,
     next: usize,
@@ -597,8 +624,11 @@ impl Script {
     pub fn load(path: &Path, out_dir: Option<PathBuf>) -> Result<Self, String> {
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let (steps, deterministic) =
-            parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Parsed {
+            steps,
+            deterministic,
+            starts_connecting,
+        } = parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path
             .file_stem()
             .map_or("script".into(), |s| s.to_string_lossy().into_owned());
@@ -607,6 +637,7 @@ impl Script {
             name,
             steps,
             deterministic,
+            starts_connecting,
             out_dir,
             started: Instant::now(),
             next: 0,
@@ -644,11 +675,18 @@ impl Script {
     /// Runs the current step; `Some(exit code)` once the script is done.
     fn advance(&mut self, core: &mut AppCore, phase: &mut AppPhase) -> Option<i32> {
         if !matches!(phase, AppPhase::InGame { .. }) {
-            let joined = self.next > 0 || self.step_started.is_some();
+            let connecting = matches!(phase, AppPhase::Connecting { .. });
+            let joined = self.next > 0
+                || self.step_started.is_some()
+                || (self.starts_connecting && connecting);
             if joined {
                 match self.steps.get(self.next) {
                     None => return Some(self.finish(true)),
                     Some(step) if step.runs_anywhere() => {}
+                    // A step that needs the world waits for the join to end.
+                    Some(_) if connecting && self.started.elapsed() <= JOIN_TIMEOUT => {
+                        return None;
+                    }
                     Some(_) => {
                         return Some(
                             self.fail(format!("left the game ({})", exec::phase_name(phase))),
@@ -829,11 +867,18 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             || format!("{} on {seen}, address {field:?}", exec::phase_name(phase)),
         );
     }
+    if let Expect::Button(ButtonExpect { button }) = expect {
+        return ensure(super::buttons::find(button).is_some(), || {
+            format!("no button {button:?} on screen")
+        });
+    }
     let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
     match expect {
-        Expect::Screen(_) => unreachable!("checked before the in-game gate"),
+        Expect::Screen(_) | Expect::Button(_) => {
+            unreachable!("checked before the in-game gate")
+        }
         Expect::Slot(SlotExpect {
             slot,
             item,
@@ -1112,14 +1157,36 @@ mod tests {
 
     #[test]
     fn parses_a_tick_wait() {
-        let (steps, _) = parse("[[step]]\nwait_ticks = 20").unwrap();
+        let steps = parse("[[step]]\nwait_ticks = 20").unwrap().steps;
         assert_eq!(steps, [Step::WaitTicks(20)]);
         assert!(!steps[0].runs_anywhere());
     }
 
+    /// A script about a screen the join raises starts on the connect screen,
+    /// and waiting for a button works there.
+    #[test]
+    fn a_script_can_start_while_connecting() {
+        let parsed = parse(
+            "starts_connecting = true
+[[step]]
+expect = { button = \"Proceed\" }",
+        )
+        .unwrap();
+        assert!(parsed.starts_connecting);
+        assert!(parsed.steps[0].runs_anywhere());
+        assert!(
+            !parse(
+                "[[step]]
+wait_ms = 1"
+            )
+            .unwrap()
+            .starts_connecting
+        );
+    }
+
     #[test]
     fn parses_every_step_kind() {
-        let (steps, _) = parse(
+        let Parsed { steps, .. } = parse(
             r#"
             [[step]]
             chat = "/give @s stone"
@@ -1287,17 +1354,19 @@ mod tests {
 
     #[test]
     fn scripts_start_deterministic_unless_turned_off() {
-        assert!(parse("[[step]]\nwait_ms = 1").unwrap().1);
+        assert!(parse("[[step]]\nwait_ms = 1").unwrap().deterministic);
         assert!(
             !parse("deterministic = false\n[[step]]\nwait_ms = 1")
                 .unwrap()
-                .1
+                .deterministic
         );
     }
 
     #[test]
     fn frame_times_parse_and_sum_up_with_the_slowest_hundredth() {
-        let (steps, _) = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
+        let steps = parse("[[step]]\nframe_times = { ms = 5000 }")
+            .unwrap()
+            .steps;
         assert_eq!(steps, [Step::FrameTimes(Duration::from_secs(5))]);
         // 198 frames of 10 ms and 2 of 50 ms: the 1% low is the slowest 2.
         let samples: Vec<FrameSample> = (0..200)

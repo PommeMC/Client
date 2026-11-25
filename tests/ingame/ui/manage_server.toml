@@ -1,0 +1,77 @@
+# The Add Server screen's Server Resource Packs button starts at Prompt and
+# steps to Enabled; cancelling leaves the list as it was.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+press = { action = "key.menu" }
+
+[[step]]
+expect = { menu = "pause" }
+
+[[step]]
+cursor_to_button = "Disconnect"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "server_list" }
+
+[[step]]
+cursor_to_button = "Add Server"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { button = "Server Resource Packs: Prompt" }
+
+[[step]]
+screenshot = "add_server"
+
+[[step]]
+cursor_to_button = "Server Resource Packs: Prompt"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { button = "Server Resource Packs: Enabled" }
+
+[[step]]
+screenshot = "enabled"
+
+[[step]]
+cursor_to_button = "Cancel"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { screen = "server_list" }

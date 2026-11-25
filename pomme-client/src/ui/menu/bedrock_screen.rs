@@ -636,6 +636,7 @@ impl MainMenu {
                 name: FEATURED_NAME.to_owned(),
                 address: FEATURED_ADDRESS.to_owned(),
                 protocol: None,
+                accept_textures: None,
                 extra: Default::default(),
             };
             let join_y = side_bottom - PROFILE_ROW_H - TILE_BUTTON_H;
@@ -654,7 +655,7 @@ impl MainMenu {
             if buttons.text(rect, Palette::Light, &server.name) {
                 any_clicked = true;
                 action = MenuAction::Connect {
-                    server: server.address.clone(),
+                    server: JoinedServer::from_entry(&server),
                     username: self.username.clone(),
                     protocol: servers::join_protocol(
                         &self.ping_results.read(),

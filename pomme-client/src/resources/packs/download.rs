@@ -2,6 +2,20 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// A server's pack push: vanilla `ServerPackManager.ServerPackData` before
+/// it downloads.
+pub(crate) struct ServerPackRequest {
+    pub id: uuid::Uuid,
+    pub url: String,
+    pub hash: String,
+}
+
+/// Vanilla `ClientCommonPacketListenerImpl.parseResourcePackUrl`: only an
+/// http or https URL can be downloaded.
+pub(crate) fn is_pack_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 /// Vanilla `DownloadedPackSource.MAX_PACK_SIZE_BYTES`.
 const MAX_DOWNLOAD_BYTES: u64 = 250 * 1024 * 1024;
 
@@ -168,6 +182,20 @@ mod tests {
             copy_hashed(&mut &b"pack!"[..], &mut Vec::new(), 4),
             Err(PackDownloadError::DownloadTooLarge)
         ));
+    }
+
+    #[test]
+    fn only_http_urls_are_pack_urls() {
+        assert!(is_pack_url("https://example.com/pack.zip"));
+        assert!(is_pack_url("http://127.0.0.1:8080/pack.zip"));
+        for bad in [
+            "",
+            "not a url",
+            "ftp://example.com/pack.zip",
+            "file:///pack.zip",
+        ] {
+            assert!(!is_pack_url(bad), "{bad}");
+        }
     }
 
     /// A cached file is reused only when its contents still match the hash.

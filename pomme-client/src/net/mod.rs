@@ -734,6 +734,9 @@ pub enum NetworkEvent {
         id: uuid::Uuid,
         url: String,
         hash: String,
+        required: bool,
+        /// The server's message for the prompt.
+        prompt: Option<crate::chat_component::Component>,
     },
     ResourcePackPop {
         id: Option<uuid::Uuid>,

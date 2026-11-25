@@ -1031,6 +1031,7 @@ impl ApplicationHandler for App {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else if game.server_dialog.is_some()
+                                    || game.pack_prompt.is_some()
                                     || (game.chat.has_pending_modal_prompt()
                                         && !game.chat.is_open())
                                 {

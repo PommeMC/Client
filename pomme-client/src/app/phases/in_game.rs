@@ -271,6 +271,7 @@ pub struct GameState {
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub pack_prompt: Option<crate::ui::pack_prompt::PackPrompt>,
     pub sign_editor: Option<crate::ui::sign_edit::SignEditState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
@@ -639,6 +640,7 @@ impl GameState {
                 chat
             },
             server_dialog: None,
+            pack_prompt: None,
             sign_editor: None,
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
@@ -962,7 +964,9 @@ impl GameState {
     /// Vanilla runs no key mapping while a screen is up, and the screens under
     /// it neither draw nor take input.
     pub fn dialog_open(&self) -> bool {
-        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+        self.server_dialog.is_some()
+            || self.pack_prompt.is_some()
+            || self.chat.has_pending_modal_prompt()
     }
 
     /// The world, not a screen, chat or the pause menu, takes pointer input.
@@ -2154,6 +2158,31 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
 
 /// Drops the dialog if the input just handled finished it, then carries out
 /// the action it reported.
+/// Finished F2 captures announce in chat (vanilla `screenshot.success`: the
+/// bare filename, underlined), on the connect screen as in game.
+pub(crate) fn announce_screenshots(gfx: &mut Gfx, game: &mut GameState) {
+    // TODO: vanilla makes the filename a clickable open-file link; pomme chat
+    // has no click handling yet.
+    use crate::ui::text::TextSpan;
+    for result in gfx.renderer.take_screenshot_messages() {
+        let spans = match result {
+            Ok(name) => {
+                let mut file = TextSpan::new(name, common::WHITE);
+                file.underline = true;
+                vec![
+                    TextSpan::new("Saved screenshot as ".into(), common::WHITE),
+                    file,
+                ]
+            }
+            Err(err) => vec![TextSpan::new(
+                format!("Couldn't save screenshot: {err}"),
+                common::WHITE,
+            )],
+        };
+        game.chat.push_message(spans);
+    }
+}
+
 pub(crate) fn settle_server_dialog(
     action: Option<crate::ui::server_dialog::ServerDialogAction>,
     core: &mut AppCore,
@@ -2225,6 +2254,26 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    // The pack prompt replaces whatever screen was up until it's answered.
+    if let Some(prompt) = game.pack_prompt.as_mut() {
+        elements.push(MenuElement::BlurBackground);
+        let cursor = core.input.cursor_pos();
+        if prompt.build(
+            elements,
+            sw,
+            sh,
+            gs,
+            cursor,
+            core.input.left_just_pressed(),
+            &|spans| gfx.renderer.menu_spans_width(spans, common::FONT_SIZE),
+        ) {
+            core.audio.play_ui_click();
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+        return;
+    }
+
     let modal_open = game.chat.has_pending_modal_prompt();
     if let Some(dialog) = game.server_dialog.as_mut() {
         // The dialog types while it is the top screen; a confirm screen over
@@ -2307,6 +2356,16 @@ pub(crate) fn server_dialog_key(
 ) {
     use winit::keyboard::KeyCode;
 
+    if let Some(prompt) = game.pack_prompt.as_mut() {
+        // `ConfirmScreen.keyPressed` answers Escape with `accept(false)`.
+        if core.input.key_bindings.matches_key(Action::Close, code) {
+            prompt.answer = Some(false);
+            core.input.clear_action(input::Action::OpenMenu);
+        } else {
+            core.input.on_menu_key_event(event);
+        }
+        return;
+    }
     if game.chat.has_pending_modal_prompt() {
         // `ConfirmScreen` answers Escape with `accept(false)`, which returns
         // to the screen under it.
@@ -3313,28 +3372,7 @@ pub fn update_game(
     // L advancements, P social interactions, O friends overlay (in-game),
     // G quick actions, C/X creative saved hotbars, spectator hotbar select.
 
-    // Finished F2 captures announce in chat (vanilla screenshot.success: bare
-    // filename, underlined).
-    // TODO: vanilla makes the filename a clickable open-file link; pomme chat
-    // has no click handling yet.
-    use crate::ui::text::TextSpan;
-    for result in gfx.renderer.take_screenshot_messages() {
-        let spans = match result {
-            Ok(name) => {
-                let mut file = TextSpan::new(name, common::WHITE);
-                file.underline = true;
-                vec![
-                    TextSpan::new("Saved screenshot as ".into(), common::WHITE),
-                    file,
-                ]
-            }
-            Err(err) => vec![TextSpan::new(
-                format!("Couldn't save screenshot: {err}"),
-                common::WHITE,
-            )],
-        };
-        game.chat.push_message(spans);
-    }
+    announce_screenshots(gfx, game);
 
     // F3+A: drop every mesh and re-enqueue all loaded columns.
     if game.pending_chunk_reload {

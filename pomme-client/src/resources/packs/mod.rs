@@ -13,7 +13,9 @@ mod pack;
 mod repository;
 mod sources;
 
-pub(crate) use download::{PackDownloadError, download_server_pack};
+pub(crate) use download::{
+    PackDownloadError, ServerPackRequest, download_server_pack, is_pack_url,
+};
 pub(crate) use id::PackId;
 pub(crate) use location::PackLocationInfo;
 pub(crate) use pack::{Pack, PackEnablementConfig, PackMetadata, PackPosition, ResourcesSupplier};

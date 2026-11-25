@@ -230,7 +230,7 @@ pub(crate) fn decode_raw_game_packet(
         claimed(
             "resource_pack",
             super::resource_pack_wire::handle_raw_resource_pack_packet(
-                packet_id, payload, sender, event_tx,
+                packet_id, payload, event_tx,
             ),
         )
     })

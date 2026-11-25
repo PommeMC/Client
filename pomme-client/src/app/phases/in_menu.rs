@@ -38,6 +38,7 @@ pub fn open_world(core: &mut AppCore, folder: &str, quick_play: bool) -> MenuUpd
     };
     core.menu.world_played(folder);
     core.audio.stop_menu_music();
+    core.begin_server_packs(None);
     let username = core.user.username.clone();
     MenuUpdateResult::Connect {
         connect_args: Box::new(connect_args(
@@ -55,19 +56,22 @@ pub fn open_world(core: &mut AppCore, folder: &str, quick_play: bool) -> MenuUpd
 /// Starts `--quick-access-multiplayer` or `--quick-access-singleplayer`.
 pub fn quick_play(core: &mut AppCore, play: QuickPlay) -> MenuUpdateResult {
     match play {
-        QuickPlay::Multiplayer(server) => MenuUpdateResult::Connect {
-            // TODO: read the saved server list's protocol for this address to
-            // skip the join-time probe.
-            connect_args: Box::new(connect_args(
-                core,
-                Transport::Remote {
-                    server,
-                    protocol: None,
-                },
-                core.user.username.clone(),
-            )),
-            world: None,
-        },
+        QuickPlay::Multiplayer(server) => {
+            core.begin_server_packs(Some(core.menu.quick_play_server(&server)));
+            MenuUpdateResult::Connect {
+                // TODO: read the saved server list's protocol for this address
+                // to skip the join-time probe.
+                connect_args: Box::new(connect_args(
+                    core,
+                    Transport::Remote {
+                        server,
+                        protocol: None,
+                    },
+                    core.user.username.clone(),
+                )),
+                world: None,
+            }
+        }
         QuickPlay::Singleplayer(folder) => open_world(core, &folder, true),
     }
 }
@@ -165,11 +169,16 @@ pub fn update_menu(
             protocol,
         } => {
             core.audio.stop_menu_music();
+            let address = server.address.clone();
+            core.begin_server_packs(Some(server));
 
             return MenuUpdateResult::Connect {
                 connect_args: Box::new(connect_args(
                     core,
-                    Transport::Remote { server, protocol },
+                    Transport::Remote {
+                        server: address,
+                        protocol,
+                    },
                     username,
                 )),
                 world: None,
