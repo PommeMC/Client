@@ -17,6 +17,12 @@ use crate::resources::{ResourceContent, ResourceId, ResourceManager};
 #[cfg(feature = "ttf-fonts")]
 unsafe extern "C" {
     fn FT_Get_Font_Format(face: freetype::ffi::FT_Face) -> *const c_char;
+    fn FT_Library_Version(
+        library: freetype::ffi::FT_Library,
+        major: *mut freetype::ffi::FT_Int,
+        minor: *mut freetype::ffi::FT_Int,
+        patch: *mut freetype::ffi::FT_Int,
+    );
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +101,8 @@ const DEFAULT_FONT: &str = "minecraft:default";
 const MAX_FONT_DEFINITION_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "ttf-fonts")]
 const MAX_TTF_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(feature = "ttf-fonts")]
+const MIN_PACK_FREETYPE_VERSION: (i32, i32, i32) = (2, 15, 0);
 const MAX_BITMAP_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_BITMAP_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UNIHEX_ZIP_BYTES: u64 = 64 * 1024 * 1024;
@@ -922,7 +930,7 @@ fn load_provider(
         } => load_unihex_provider(hex_file, overrides, ctx, &mut atlases.gray)?,
         #[cfg(feature = "ttf-fonts")]
         ProviderDefinition::Ttf(definition) => {
-            load_ttf_provider(definition, ctx, &mut atlases.gray)?
+            return load_ttf_provider(definition, ctx, &mut atlases.gray);
         }
         #[cfg(not(feature = "ttf-fonts"))]
         ProviderDefinition::Ttf(definition) => {
@@ -1135,12 +1143,35 @@ fn load_unihex_provider(
     Ok(LoadedProvider { glyphs })
 }
 
+/// Reads the version of the FreeType library actually linked at runtime.
+#[cfg(feature = "ttf-fonts")]
+fn freetype_version(library: &freetype::Library) -> (i32, i32, i32) {
+    let (mut major, mut minor, mut patch) = (0, 0, 0);
+    // SAFETY: library owns a live FT_Library and each output is writable.
+    unsafe { FT_Library_Version(library.raw(), &mut major, &mut minor, &mut patch) };
+    (major, minor, patch)
+}
+
+/// Bakes a TrueType provider using a patched FreeType. Older runtimes skip
+/// the provider so the rest of the font stack can still load.
 #[cfg(feature = "ttf-fonts")]
 fn load_ttf_provider(
     definition: &TtfDefinition,
     ctx: &LoadContext<'_>,
     atlas: &mut AtlasBuilder,
-) -> Result<LoadedProvider, String> {
+) -> Result<Option<LoadedProvider>, String> {
+    let library = freetype::Library::init()
+        .map_err(|error| format!("failed to initialize FreeType: {error:?}"))?;
+    let (major, minor, patch) = freetype_version(&library);
+    // Check before opening a pack font. The version bundled at build time
+    // and the version a dynamic linker loads can differ.
+    if (major, minor, patch) < MIN_PACK_FREETYPE_VERSION {
+        tracing::warn!(
+            "Skipping ttf font {}: FreeType {major}.{minor}.{patch} predates the Minecraft2Shell fix",
+            definition.file
+        );
+        return Ok(None);
+    }
     let TtfDefinition {
         size,
         oversample,
@@ -1159,8 +1190,6 @@ fn load_ttf_provider(
         .sources
         .resolve(&resource_id(&definition.file, "font/")?)?;
     let bytes = read_file_bounded(&path, MAX_TTF_BYTES, "TTF font")?;
-    let library = freetype::Library::init()
-        .map_err(|error| format!("failed to initialize FreeType: {error:?}"))?;
     let mut face = library
         .new_memory_face(bytes, 0)
         .map_err(|error| format!("failed to parse ttf font {}: {error:?}", path.id()))?;
@@ -1309,7 +1338,7 @@ fn load_ttf_provider(
         );
     }
 
-    Ok(LoadedProvider { glyphs })
+    Ok(Some(LoadedProvider { glyphs }))
 }
 
 #[cfg(feature = "ttf-fonts")]
@@ -2141,9 +2170,10 @@ mod tests {
         assert_eq!(map.random_glyph(99, set, |_| 0).advance, 123.0);
     }
 
+    /// Patched FreeType renders pack fonts and older FreeType skips them.
     #[cfg(feature = "ttf-fonts")]
     #[test]
-    fn ttf_provider_uses_font_prefix_list_skip_and_freetype_metrics() {
+    fn ttf_provider_uses_font_prefix_list_skip_and_patched_freetype() {
         let fixture = Fixture::new();
         fixture.write("jar_assets/minecraft/font/default.json", DEFAULT_SPACE);
         fixture.write(
@@ -2155,7 +2185,13 @@ mod tests {
             include_bytes!("../renderer/fonts/Montserrat-Medium.ttf"),
         );
         let (map, _) = fixture.load().unwrap();
-        let set = &map.font_sets["example:custom"];
+        let library = freetype::Library::init().unwrap();
+        let set = map.font_sets.get("example:custom");
+        if freetype_version(&library) < MIN_PACK_FREETYPE_VERSION {
+            assert!(set.is_none(), "old FreeType must never load the provider");
+            return;
+        }
+        let set = set.unwrap();
         assert!(!set.glyphs.contains_key(&'A'), "list-form skip must apply");
         let b = &set.glyphs[&'B'];
         assert!(b.advance > 0.0 && b.pixel_w > 0 && b.pixel_h > 0 && !b.colored);
