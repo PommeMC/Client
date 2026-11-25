@@ -103,6 +103,8 @@ const MAX_UNIHEX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_UNIHEX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UNIHEX_LINE_BYTES: usize = 512;
 const MAX_PROVIDER_GLYPHS: usize = 262_144;
+const MAX_FONT_REFERENCE_DEPTH: usize = 64;
+const MAX_RESOLVED_FONT_PROVIDERS: usize = 1024;
 
 fn read_file_bounded(
     content: &ResourceContent,
@@ -937,6 +939,8 @@ fn load_provider(
     }))
 }
 
+/// Resolves references in lookup order with limits on traversal depth and the
+/// number of providers materialized for a font.
 fn resolve_font_providers(
     id: &str,
     unresolved: &HashMap<String, Vec<UnresolvedProvider>>,
@@ -949,6 +953,11 @@ fn resolve_font_providers(
     let Some(entries) = unresolved.get(id) else {
         return Err(format!("font reference `{id}` does not exist"));
     };
+    if visiting.len() >= MAX_FONT_REFERENCE_DEPTH {
+        return Err(format!(
+            "font reference depth exceeds {MAX_FONT_REFERENCE_DEPTH} at `{id}`"
+        ));
+    }
     if !visiting.insert(id.to_owned()) {
         return Err(format!("font reference cycle includes `{id}`"));
     }
@@ -958,6 +967,7 @@ fn resolve_font_providers(
         for entry in entries {
             match entry {
                 UnresolvedProvider::Loaded { provider, filter } => {
+                    check_provider_count(resolved.len() + 1)?;
                     resolved.push(ResolvedProvider {
                         provider: provider.clone(),
                         filter: *filter,
@@ -967,13 +977,13 @@ fn resolve_font_providers(
                     id: referenced,
                     filter,
                 } => {
-                    for provider in resolve_font_providers(referenced, unresolved, cache, visiting)?
-                    {
-                        resolved.push(ResolvedProvider {
-                            provider: provider.provider,
-                            filter: filter.merge(provider.filter),
-                        });
-                    }
+                    let providers =
+                        resolve_font_providers(referenced, unresolved, cache, visiting)?;
+                    check_provider_count(resolved.len() + providers.len())?;
+                    resolved.extend(providers.into_iter().map(|provider| ResolvedProvider {
+                        provider: provider.provider,
+                        filter: filter.merge(provider.filter),
+                    }));
                 }
                 UnresolvedProvider::Invalid(error) => return Err(error.clone()),
             }
@@ -985,6 +995,17 @@ fn resolve_font_providers(
         cache.insert(id.to_owned(), resolved.clone());
     }
     result
+}
+
+/// Rejects a font whose references expand into more than the provider limit.
+fn check_provider_count(count: usize) -> Result<(), String> {
+    if count > MAX_RESOLVED_FONT_PROVIDERS {
+        Err(format!(
+            "font expands to more than {MAX_RESOLVED_FONT_PROVIDERS} providers"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn build_font_set(providers: &[ResolvedProvider]) -> FontSetData {
@@ -1845,6 +1866,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A font with too many expanded providers falls back without affecting
+    /// its referenced font or the default font.
+    #[test]
+    fn font_reference_expansion_has_a_provider_budget() {
+        let fixture = Fixture::new();
+        fixture.write("jar_assets/minecraft/font/default.json", DEFAULT_SPACE);
+        fixture.write("jar_assets/example/font/base.json", DEFAULT_SPACE);
+        let reference = serde_json::json!({"type": "reference", "id": "example:base"});
+        let providers = vec![reference; MAX_RESOLVED_FONT_PROVIDERS + 1];
+        fixture.write(
+            "jar_assets/example/font/repeated.json",
+            serde_json::to_vec(&serde_json::json!({ "providers": providers })).unwrap(),
+        );
+        let (map, _) = fixture.load().unwrap();
+        assert!(map.font_sets.contains_key("example:base"));
+        assert!(!map.font_sets.contains_key("example:repeated"));
     }
 
     #[test]
