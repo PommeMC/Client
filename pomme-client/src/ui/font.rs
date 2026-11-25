@@ -942,26 +942,34 @@ fn resolve_font_providers(
     unresolved: &HashMap<String, Vec<UnresolvedProvider>>,
     cache: &mut HashMap<String, Vec<ResolvedProvider>>,
 ) -> Result<Vec<ResolvedProvider>, String> {
-    let mut stack = vec![id];
+    // Each font with how many of its entries have been checked for an
+    // unresolved reference, so none is checked twice.
+    let mut stack = vec![(id, 0)];
     let mut visiting = HashSet::new();
-    while let Some(&current) = stack.last() {
+    while let Some((current, checked)) = stack.pop() {
         if cache.contains_key(current) {
-            stack.pop();
             continue;
         }
         let Some(entries) = unresolved.get(current) else {
             return Err(format!("font reference `{current}` does not exist"));
         };
-        let pending = entries.iter().find_map(|entry| match entry {
-            UnresolvedProvider::Reference { id, .. } if !cache.contains_key(id) => Some(id),
-            _ => None,
-        });
-        if let Some(next) = pending {
+        let pending =
+            entries[checked..]
+                .iter()
+                .enumerate()
+                .find_map(|(offset, entry)| match entry {
+                    UnresolvedProvider::Reference { id, .. } if !cache.contains_key(id) => {
+                        Some((checked + offset + 1, id))
+                    }
+                    _ => None,
+                });
+        if let Some((checked, next)) = pending {
             visiting.insert(current);
             if visiting.contains(next.as_str()) {
                 return Err(format!("font reference cycle includes `{next}`"));
             }
-            stack.push(next);
+            stack.push((current, checked));
+            stack.push((next, 0));
             continue;
         }
         let mut resolved = Vec::new();
@@ -993,7 +1001,6 @@ fn resolve_font_providers(
         resolved.reverse();
         visiting.remove(current);
         cache.insert(current.to_owned(), resolved);
-        stack.pop();
     }
     Ok(cache[id].clone())
 }
@@ -1849,6 +1856,23 @@ mod tests {
         assert!(
             resolve_font_providers("example:missing-wrapper", &unresolved, &mut cache).is_err()
         );
+    }
+
+    /// A font with tens of thousands of references resolves in linear time.
+    #[test]
+    fn wide_fonts_resolve() {
+        let mut unresolved = HashMap::new();
+        let mut top = Vec::new();
+        for i in 0..40_000 {
+            let id = format!("example:{i}");
+            top.extend(reference(&id));
+            unresolved.insert(id, Vec::new());
+        }
+        unresolved.insert("example:top".to_owned(), top);
+        let start = std::time::Instant::now();
+        let resolved = resolve_font_providers("example:top", &unresolved, &mut HashMap::new());
+        assert!(resolved.unwrap().is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// A reference chain resolves however deep it goes, without recursing.
