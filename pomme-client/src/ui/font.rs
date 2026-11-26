@@ -972,32 +972,35 @@ fn resolve_font_providers(
             stack.push((next, 0));
             continue;
         }
+        // Lookup runs the list backwards, so walking it that way keeps the copy
+        // lookup reaches first, and a repeated reference adds nothing.
         let mut resolved = Vec::new();
-        for entry in entries {
+        let mut seen = HashSet::new();
+        let mut seen_references = HashSet::new();
+        let mut add = |provider: &Arc<LoadedProvider>, filter: FontFilter| {
+            if seen.insert((Arc::as_ptr(provider), filter)) {
+                resolved.push(ResolvedProvider {
+                    provider: provider.clone(),
+                    filter,
+                });
+            }
+        };
+        for entry in entries.iter().rev() {
             match entry {
-                UnresolvedProvider::Loaded { provider, filter } => {
-                    resolved.push(ResolvedProvider {
-                        provider: provider.clone(),
-                        filter: *filter,
-                    });
-                }
+                UnresolvedProvider::Loaded { provider, filter } => add(provider, *filter),
                 UnresolvedProvider::Reference {
                     id: referenced,
                     filter,
                 } => {
-                    resolved.extend(cache[referenced].iter().map(|provider| ResolvedProvider {
-                        provider: provider.provider.clone(),
-                        filter: filter.merge(provider.filter),
-                    }));
+                    if seen_references.insert((referenced, *filter)) {
+                        for provider in cache[referenced].iter().rev() {
+                            add(&provider.provider, filter.merge(provider.filter));
+                        }
+                    }
                 }
                 UnresolvedProvider::Invalid(error) => return Err(error.clone()),
             }
         }
-        // The caller reverses into lookup order, so the last copy is the one
-        // lookup reaches first.
-        let mut seen = HashSet::new();
-        resolved.reverse();
-        resolved.retain(|p| seen.insert((Arc::as_ptr(&p.provider), p.filter)));
         resolved.reverse();
         visiting.remove(current);
         cache.insert(current.to_owned(), resolved);
@@ -1858,6 +1861,17 @@ mod tests {
         );
     }
 
+    /// Resolves `example:top`, failing if it takes anywhere near quadratic
+    /// time.
+    fn resolve_top_quickly(
+        unresolved: &HashMap<String, Vec<UnresolvedProvider>>,
+    ) -> Vec<ResolvedProvider> {
+        let start = std::time::Instant::now();
+        let resolved = resolve_font_providers("example:top", unresolved, &mut HashMap::new());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        resolved.unwrap()
+    }
+
     /// A font with tens of thousands of references resolves in linear time.
     #[test]
     fn wide_fonts_resolve() {
@@ -1869,10 +1883,30 @@ mod tests {
             unresolved.insert(id, Vec::new());
         }
         unresolved.insert("example:top".to_owned(), top);
-        let start = std::time::Instant::now();
-        let resolved = resolve_font_providers("example:top", &unresolved, &mut HashMap::new());
-        assert!(resolved.unwrap().is_empty());
-        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert!(resolve_top_quickly(&unresolved).is_empty());
+    }
+
+    /// A font referencing one large font thousands of times builds it once.
+    #[test]
+    fn repeated_references_to_a_large_font_resolve() {
+        let large = (0..20_000)
+            .map(|_| UnresolvedProvider::Loaded {
+                provider: Arc::new(LoadedProvider {
+                    glyphs: HashMap::new(),
+                }),
+                filter: FontFilter::default(),
+            })
+            .collect();
+        let unresolved = HashMap::from([
+            ("example:large".to_owned(), large),
+            (
+                "example:top".to_owned(),
+                (0..20_000)
+                    .flat_map(|_| reference("example:large"))
+                    .collect(),
+            ),
+        ]);
+        assert_eq!(resolve_top_quickly(&unresolved).len(), 20_000);
     }
 
     /// A reference chain resolves however deep it goes, without recursing.
