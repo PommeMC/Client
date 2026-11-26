@@ -1,0 +1,43 @@
+# The player hits a dragon through its parts, which the client numbers after
+# the dragon. A NoAI dragon never places them, so they stay at the world
+# origin, away from the dragon itself, on both sides: punching the origin
+# hurts it.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+chat = "/setblock 0 -1 -4 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 0.5 0 -3.5 0 0"
+
+[[step]]
+expect = { player = { position = [0.5, 0.0, -3.5] } }
+
+[[step]]
+chat = "/summon minecraft:ender_dragon 0.5 4 16.5 {NoAI:1b}"
+
+[[step]]
+expect = { entity = "ender_dragon" }
+
+[[step]]
+look_at = [0.0, 1.5, 0.0]
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { sound = "entity.ender_dragon.hurt" }
+
+[[step]]
+chat = "/kill @e[type=!player]"
+
+[[step]]
+chat = "/setblock 0 -1 -4 minecraft:air"

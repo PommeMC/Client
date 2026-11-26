@@ -45,6 +45,9 @@ pub struct ContainerInput {
     pub middle_pressed: bool,
     pub left_held: bool,
     pub right_held: bool,
+    /// The cursor moved this frame, which is when vanilla `mouseDragged`
+    /// runs.
+    pub cursor_moved: bool,
     pub shift: bool,
     /// Hotbar digit pressed this frame (vanilla `keyHotbarSlots` swap).
     pub hotbar_swap: Option<u8>,
@@ -229,6 +232,8 @@ pub struct SlotCtx<'e> {
     /// What each drag-covered slot would receive and the remainder left on the
     /// cursor. Read-only; the real change happens on release.
     preview: Option<(HashMap<u16, ItemStack>, ItemStack)>,
+    /// A one-slot drag's slot, which vanilla `extractSlot` leaves undrawn.
+    hidden: Option<u16>,
     hovered: Option<u16>,
 }
 
@@ -242,11 +247,16 @@ impl<'e> SlotCtx<'e> {
         cursor_item: &ItemStack,
         drag: &Option<DragState>,
     ) -> Self {
-        let preview = drag.as_ref().map(|(drag_kind, covered)| {
-            let (changed, remainder) =
-                menu_click::drag_distribution(kind, slots, cursor_item, drag_kind, covered);
-            (changed.into_iter().collect(), remainder)
-        });
+        // Vanilla previews a drag only once it covers two slots.
+        let (preview, hidden) = match drag {
+            Some((_, covered)) if covered.len() == 1 => (None, Some(covered[0])),
+            Some((drag_kind, covered)) if covered.len() > 1 => {
+                let (changed, remainder) =
+                    menu_click::drag_distribution(kind, slots, cursor_item, drag_kind, covered);
+                (Some((changed.into_iter().collect(), remainder)), None)
+            }
+            _ => (None, None),
+        };
         Self {
             elements,
             scale: panel.scale,
@@ -254,6 +264,7 @@ impl<'e> SlotCtx<'e> {
             oy: panel.oy,
             cursor,
             preview,
+            hidden,
             hovered: None,
         }
     }
@@ -287,11 +298,16 @@ impl<'e> SlotCtx<'e> {
         use_player_team: bool,
     ) {
         let (px, py, hovered) = self.place(x, y, num);
-        let shown = self
-            .preview
-            .as_ref()
-            .and_then(|(m, _)| m.get(&num))
-            .unwrap_or(item);
+        let (shown, empty) = if self.hidden == Some(num) {
+            (&ItemStack::Empty, None)
+        } else {
+            let shown = self
+                .preview
+                .as_ref()
+                .and_then(|(m, _)| m.get(&num))
+                .unwrap_or(item);
+            (shown, empty)
+        };
         super::common::push_slot_contents(
             self.elements,
             px,
@@ -513,37 +529,24 @@ pub fn resolve_gesture(
     let outside = !panel.contains(cursor);
     let mut ops = resolve_key_ops(input, hovered, slots, cursor_item);
 
-    if let Some((drag_kind, covered)) = drag {
-        let held = matches!(
-            (&drag_kind, input.left_held, input.right_held),
-            (QuickCraftKind::Left, true, _) | (QuickCraftKind::Right, _, true)
-        );
-        if held {
-            // Match vanilla's accumulation so our slot set (and split) equals the
-            // server's: only eligible slots, and only while items remain to share.
-            if let Some(slot) = hovered
-                && !covered.contains(&slot)
-                && (cursor_item.count() as usize) > covered.len()
-                && menu_click::drag_slot_eligible(kind, slots, cursor_item, slot)
-            {
-                covered.push(slot);
-            }
+    if let Some(active) = drag {
+        if extend_drag(active, input, hovered, kind, slots, cursor_item) {
             return (ops, false);
         }
-        // Released: distribute across 2+ slots; one covered slot converts to a
-        // normal click (vanilla quickCraftToSlots), none falls back to a click
-        // wherever the cursor is now (vanilla mouseReleased, -999 outside).
+        let (drag_kind, covered) = active;
+        // Released: any covered slot sends the drag (vanilla
+        // `quickCraftToSlots`; the server makes a one-slot drag a click), none
+        // falls back to a click wherever the cursor is now (vanilla
+        // `mouseReleased`, -999 outside).
         let drag_kind = *drag_kind;
         let covered = std::mem::take(covered);
         *drag = None;
-        if covered.len() >= 2 {
+        if !covered.is_empty() {
             ops.push(quick_craft(&drag_kind, QuickCraftStatus::Start));
             for s in covered {
                 ops.push(quick_craft(&drag_kind, QuickCraftStatus::Add { slot: s }));
             }
             ops.push(quick_craft(&drag_kind, QuickCraftStatus::End));
-        } else if let Some(&s) = covered.first() {
-            ops.push(pickup(&drag_kind, Some(s)));
         } else if carrying {
             // Vanilla only falls back to a click while still carrying.
             if let Some(s) = hovered {
@@ -604,19 +607,45 @@ pub fn resolve_gesture(
         }
         ops.push(ClickOperation::PickupAll(PickupAllClick { slot }));
     } else if carrying {
-        // Start a drag; only an eligible slot joins the covered set (vanilla
-        // gates every quick-craft slot on mayPlace). A single-slot or empty
-        // set resolves to a normal click on release.
-        let covered = if menu_click::drag_slot_eligible(kind, slots, cursor_item, slot) {
-            vec![slot]
-        } else {
-            Vec::new()
-        };
-        *drag = Some((click_kind, covered));
+        // Vanilla `mouseClicked` starts the drag with no slots; its
+        // `mouseDragged` runs later in the same frame, so a press while the
+        // cursor moves covers the slot at once.
+        let mut started = (click_kind, Vec::new());
+        extend_drag(&mut started, input, hovered, kind, slots, cursor_item);
+        *drag = Some(started);
     } else {
         ops.push(pickup(&click_kind, Some(slot)));
     }
     (ops, false)
+}
+
+/// Vanilla `mouseDragged`: on a frame the cursor moved with the drag's button
+/// held, the hovered slot joins it if eligible and items remain to share, so
+/// the slot set (and split) equals the server's. Returns whether the button
+/// is still held.
+fn extend_drag(
+    drag: &mut DragState,
+    input: &ContainerInput,
+    hovered: Option<u16>,
+    kind: ContainerKind,
+    slots: &[ItemStack],
+    cursor_item: &ItemStack,
+) -> bool {
+    let (drag_kind, covered) = drag;
+    let held = match drag_kind {
+        QuickCraftKind::Left => input.left_held,
+        QuickCraftKind::Right => input.right_held,
+    };
+    if held
+        && input.cursor_moved
+        && let Some(slot) = hovered
+        && !covered.contains(&slot)
+        && (cursor_item.count() as usize) > covered.len()
+        && menu_click::drag_slot_eligible(kind, slots, cursor_item, slot)
+    {
+        covered.push(slot);
+    }
+    held
 }
 
 /// Whether a left click on `slot` follows one on it within the double-click
@@ -648,6 +677,31 @@ mod tests {
 
     use super::*;
 
+    const PANEL: Panel = Panel {
+        scale: 1.0,
+        ox: 0.0,
+        oy: 0.0,
+        w: 176.0,
+        h: 166.0,
+    };
+
+    /// The left button pressed this frame, held, or neither.
+    fn left(pressed: bool, held: bool, cursor_moved: bool) -> ContainerInput {
+        ContainerInput {
+            left_pressed: pressed,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: held,
+            right_held: false,
+            cursor_moved,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        }
+    }
+
     /// The clicks sent for a press on `slot` straight after one, and for its
     /// release, and the time kept for the next click.
     fn double_click_ops(
@@ -660,32 +714,13 @@ mod tests {
         Option<(u16, Instant)>,
     ) {
         let slots = vec![ItemStack::Empty; kind.slot_count()];
-        let panel = Panel {
-            scale: 1.0,
-            ox: 0.0,
-            oy: 0.0,
-            w: 176.0,
-            h: 166.0,
-        };
-        let input = |down| ContainerInput {
-            left_pressed: down,
-            right_pressed: false,
-            middle_pressed: false,
-            left_held: down,
-            right_held: false,
-            shift: false,
-            hotbar_swap: None,
-            swap_offhand: false,
-            throw: false,
-            throw_all: false,
-        };
         let mut drag = None;
         let mut last_click = Some((slot, Instant::now()));
         let [press, release] = [true, false].map(|down| {
             resolve_gesture(
-                &input(down),
+                &left(down, down, false),
                 Some(slot),
-                &panel,
+                &PANEL,
                 (10.0, 10.0),
                 kind,
                 &slots,
@@ -740,5 +775,108 @@ mod tests {
     fn a_double_click_times_the_click_after_it() {
         let (_, _, last_click) = double_click_ops(ContainerKind::Furnace, 4, &ItemStack::Empty);
         assert!(matches!(last_click, Some((4, _))));
+    }
+
+    /// 16 cobblestone carried over an empty player inventory.
+    fn carrying() -> (Vec<ItemStack>, ItemStack) {
+        (
+            vec![ItemStack::Empty; ContainerKind::Player.slot_count()],
+            ItemStack::new(ItemKind::Cobblestone, 16),
+        )
+    }
+
+    /// One frame of `input` with the cursor over `slot`, carrying.
+    fn drag_frame(
+        input: ContainerInput,
+        slot: u16,
+        drag: &mut Option<DragState>,
+    ) -> Vec<ClickOperation> {
+        let (slots, carried) = carrying();
+        resolve_gesture(
+            &input,
+            Some(slot),
+            &PANEL,
+            (10.0, 10.0),
+            ContainerKind::Player,
+            &slots,
+            &carried,
+            drag,
+            &mut None,
+        )
+        .0
+    }
+
+    /// Whether `drag` draws a preview, and the slot it leaves undrawn.
+    fn drawn(drag: &Option<DragState>) -> (bool, Option<u16>) {
+        let (slots, carried) = carrying();
+        let mut elements = Vec::new();
+        let ctx = SlotCtx::new(
+            &mut elements,
+            &PANEL,
+            (10.0, 10.0),
+            ContainerKind::Player,
+            &slots,
+            &carried,
+            drag,
+        );
+        (ctx.preview.is_some(), ctx.hidden)
+    }
+
+    /// Vanilla `mouseClicked` starts a carrying drag with no slots, and
+    /// `mouseDragged` adds the hovered slot only when the cursor moves, so a
+    /// press held still on one slot previews nothing.
+    #[test]
+    fn a_drag_covers_a_slot_only_once_the_cursor_moves() {
+        let mut drag = None;
+        assert!(drag_frame(left(true, true, false), 9, &mut drag).is_empty());
+        assert!(drag_frame(left(false, true, false), 9, &mut drag).is_empty());
+        assert!(matches!(&drag, Some((_, covered)) if covered.is_empty()));
+        assert_eq!(drawn(&drag), (false, None));
+
+        drag_frame(left(false, true, true), 9, &mut drag);
+        assert_eq!(drawn(&drag), (false, Some(9)));
+
+        drag_frame(left(false, true, true), 10, &mut drag);
+        assert_eq!(drawn(&drag), (true, None));
+    }
+
+    /// Vanilla runs `mouseDragged` after the frame's press, so a press while
+    /// the cursor moves covers its slot at once, and a press released in the
+    /// same frame covers nothing.
+    #[test]
+    fn a_press_while_moving_covers_its_slot() {
+        let mut drag = None;
+        drag_frame(left(true, true, true), 9, &mut drag);
+        assert!(matches!(&drag, Some((_, covered)) if covered == &[9]));
+
+        let mut drag = None;
+        drag_frame(left(true, false, true), 9, &mut drag);
+        assert!(matches!(&drag, Some((_, covered)) if covered.is_empty()));
+    }
+
+    /// Vanilla `quickCraftToSlots` sends any covered drag, one slot too; the
+    /// server makes that a click.
+    #[test]
+    fn a_one_slot_drag_is_sent_as_a_drag() {
+        let mut drag = Some((QuickCraftKind::Left, vec![9]));
+        let ops = drag_frame(left(false, false, false), 9, &mut drag);
+        assert!(matches!(
+            ops.as_slice(),
+            [
+                ClickOperation::QuickCraft(QuickCraftClick {
+                    status: QuickCraftStatus::Start,
+                    ..
+                }),
+                ClickOperation::QuickCraft(QuickCraftClick {
+                    status: QuickCraftStatus::Add { slot: 9 },
+                    ..
+                }),
+                ClickOperation::QuickCraft(QuickCraftClick {
+                    status: QuickCraftStatus::End,
+                    ..
+                }),
+            ]
+        ));
+        assert!(drag.is_none());
     }
 }

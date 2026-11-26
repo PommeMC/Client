@@ -520,6 +520,7 @@ pub fn build_creative_inventory(
     advanced_tooltips: bool,
     left_held: bool,
     right_held: bool,
+    cursor_moved: bool,
     shift: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
     mut effects: Vec<MenuElement>,
@@ -602,17 +603,22 @@ pub fn build_creative_inventory(
         operator_tab: state.operator_tab,
     };
 
+    // Vanilla previews a drag only once it covers two slots, and leaves a
+    // one-slot drag's slot undrawn.
     let drag_preview: Option<DragPreview> = match (&state.drag, &state.cursor_item) {
-        (Some(drag), ItemStack::Present(carried)) => {
+        (Some(drag), ItemStack::Present(carried)) if drag.slots.len() > 1 => {
             Some(compute_drag_preview(carried, drag, inventory))
         }
         _ => None,
     };
-    let empty_preview = HashMap::new();
-    let preview_map = drag_preview
-        .as_ref()
-        .map(|p| &p.slots)
-        .unwrap_or(&empty_preview);
+    let preview_map = match (&state.drag, &drag_preview) {
+        (Some(drag), _) if drag.slots.len() == 1 => {
+            HashMap::from([(drag.slots[0], ItemStack::Empty)])
+        }
+        (_, Some(preview)) => preview.slots.clone(),
+        _ => HashMap::new(),
+    };
+    let preview_map = &preview_map;
 
     let real_hit: Option<SlotHit> = if state.tab.is_inventory_tab() {
         draw_inventory_layout(elements, ox, oy, scale, inventory, &tt, preview_map)
@@ -728,40 +734,46 @@ pub fn build_creative_inventory(
         .filter(|&slot| slot != SLOT_TRASH);
 
     // Real-slot clicks and click-drag distribution.
+    let held = [left_held, right_held];
     if let Some(drag) = &mut state.drag {
-        let held = match drag.button {
-            ClickKind::Left => left_held,
-            ClickKind::Right => right_held,
-        };
-        if held {
-            // Extend the drag onto a newly hovered, eligible slot.
-            if let Some(hit) = &real_hit
-                && hit.slot != SLOT_TRASH
-                && let ItemStack::Present(carried) = &state.cursor_item
-                && !drag.slots.contains(&hit.slot)
-                && carried.count as usize > drag.slots.len()
-                && drag_slot_eligible(carried, inventory, hit.slot)
-            {
-                drag.slots.push(hit.slot);
-            }
-        } else if let &[slot] = drag.slots.as_slice() {
-            // Vanilla `quickCraftToSlots`: a drag over one slot is a click.
-            let button = drag.button;
-            state.drag = None;
-            action = click_slot(state, inventory, slot, button, bundle);
-        } else {
-            // Released: commit the split and keep the remainder on the cursor.
-            if let Some(preview) = &drag_preview {
-                if let ItemStack::Present(carried) = state.cursor_item.clone() {
-                    state.cursor_item = stack_with_count(&carried, preview.remainder);
+        if !extend_drag(
+            drag,
+            held,
+            cursor_moved,
+            &real_hit,
+            &state.cursor_item,
+            inventory,
+        ) {
+            if drag.slots.len() <= 1 {
+                // A drag over one slot is a click on it (vanilla
+                // `quickCraftToSlots`), and one over none clicks the slot under
+                // the cursor (vanilla `mouseReleased`).
+                let button = drag.button;
+                let target = drag
+                    .slots
+                    .first()
+                    .copied()
+                    .or(real_hit.as_ref().map(|hit| hit.slot));
+                state.drag = None;
+                match target {
+                    Some(SLOT_TRASH) => state.cursor_item = ItemStack::Empty,
+                    Some(slot) => action = click_slot(state, inventory, slot, button, bundle),
+                    None => {}
                 }
-                let items: Vec<(u16, ItemStack)> =
-                    preview.slots.iter().map(|(k, v)| (*k, v.clone())).collect();
-                if !items.is_empty() {
-                    action = CreativeAction::SetSlots(items);
+            } else {
+                // Released: commit the split and keep the remainder on the cursor.
+                if let Some(preview) = &drag_preview {
+                    if let ItemStack::Present(carried) = state.cursor_item.clone() {
+                        state.cursor_item = stack_with_count(&carried, preview.remainder);
+                    }
+                    let items: Vec<(u16, ItemStack)> =
+                        preview.slots.iter().map(|(k, v)| (*k, v.clone())).collect();
+                    if !items.is_empty() {
+                        action = CreativeAction::SetSlots(items);
+                    }
                 }
+                state.drag = None;
             }
-            state.drag = None;
         }
     } else if let Some(hit) = &real_hit
         && let Some(kind) = hit.click
@@ -783,16 +795,23 @@ pub fn build_creative_inventory(
             if !items.is_empty() {
                 action = CreativeAction::SetSlots(items);
             }
-        } else if let ItemStack::Present(carried) = &state.cursor_item {
-            // Carrying: start a drag on an eligible slot, else click at once.
-            if drag_slot_eligible(carried, inventory, hit.slot) {
-                state.drag = Some(DragState {
-                    button: kind,
-                    slots: vec![hit.slot],
-                });
-            } else {
-                action = click_slot(state, inventory, hit.slot, kind, bundle);
-            }
+        } else if state.cursor_item.is_present() {
+            // Vanilla `mouseClicked` starts the drag with no slots; its
+            // `mouseDragged` runs later in the same frame, so a press while
+            // the cursor moves covers the slot at once.
+            let mut started = DragState {
+                button: kind,
+                slots: Vec::new(),
+            };
+            extend_drag(
+                &mut started,
+                held,
+                cursor_moved,
+                &real_hit,
+                &state.cursor_item,
+                inventory,
+            );
+            state.drag = Some(started);
         } else {
             action = click_slot(state, inventory, hit.slot, kind, bundle);
         }
@@ -1370,6 +1389,35 @@ fn drag_slot_eligible(carried: &ItemStackData, inventory: &Inventory, slot_num: 
     }
 }
 
+/// Vanilla `mouseDragged`: on a frame the cursor moved with the drag's button
+/// held (`held` is left then right), the hovered slot joins it if eligible
+/// and items remain to share. Returns whether the button is still held.
+fn extend_drag(
+    drag: &mut DragState,
+    held: [bool; 2],
+    cursor_moved: bool,
+    hit: &Option<SlotHit>,
+    cursor_item: &ItemStack,
+    inventory: &Inventory,
+) -> bool {
+    let held = match drag.button {
+        ClickKind::Left => held[0],
+        ClickKind::Right => held[1],
+    };
+    if held
+        && cursor_moved
+        && let Some(hit) = hit
+        && hit.slot != SLOT_TRASH
+        && let ItemStack::Present(carried) = cursor_item
+        && !drag.slots.contains(&hit.slot)
+        && carried.count as usize > drag.slots.len()
+        && drag_slot_eligible(carried, inventory, hit.slot)
+    {
+        drag.slots.push(hit.slot);
+    }
+    held
+}
+
 /// Distribute the carried stack across the dragged slots: left splits it
 /// evenly, right places one each. Returns each slot's resulting stack and the
 /// remainder.
@@ -1915,6 +1963,25 @@ mod tests {
         run_into(&mut Vec::new(), state, inventory, frame)
     }
 
+    /// A press while carrying starts a drag, so its click goes out on the
+    /// release frame that follows it.
+    fn run_released(
+        state: &mut CreativeState,
+        inventory: &Inventory,
+        frame: Frame,
+    ) -> CreativeAction {
+        let cursor = frame.cursor;
+        assert!(matches!(run(state, inventory, frame), CreativeAction::None));
+        run(
+            state,
+            inventory,
+            Frame {
+                cursor,
+                ..Default::default()
+            },
+        )
+    }
+
     fn run_into(
         elements: &mut Vec<MenuElement>,
         state: &mut CreativeState,
@@ -1940,6 +2007,7 @@ mod tests {
             inventory,
             &Default::default(),
             2.0,
+            false,
             false,
             false,
             false,
@@ -2031,7 +2099,8 @@ mod tests {
         // Holding the bundle, a click on the dirt puts it in the bundle.
         let mut state = CreativeState::new();
         state.cursor_item = ItemStack::new(ItemKind::Bundle, 1);
-        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(36)) else {
+        let CreativeAction::SetSlots(slots) = run_released(&mut state, &inventory, left_click(36))
+        else {
             panic!("expected the dirt's slot to change");
         };
         assert_eq!(slots, [(36, ItemStack::Empty)]);
@@ -2041,7 +2110,8 @@ mod tests {
         // other side.
         let mut state = CreativeState::new();
         state.cursor_item = ItemStack::new(ItemKind::Dirt, 16);
-        let CreativeAction::SetSlots(slots) = run(&mut state, &inventory, left_click(37)) else {
+        let CreativeAction::SetSlots(slots) = run_released(&mut state, &inventory, left_click(37))
+        else {
             panic!("expected the bundle's slot to change");
         };
         assert!(state.cursor_item.is_empty());
