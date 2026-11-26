@@ -326,11 +326,7 @@ pub fn transition_image_to_shader_read(
 pub fn load_resource_png(
     content: &crate::resources::ResourceContent,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    load_png_reader(
-        content.open().ok()?,
-        content.id(),
-        MAX_TEXTURE_SIZE.load(Ordering::Relaxed),
-    )
+    load_png_reader(content.open().ok()?, content.id(), max_texture_size())
 }
 
 /// An image only ever read on the CPU (a colormap, the cloud grid), which
@@ -355,6 +351,10 @@ static MAX_TEXTURE_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
 
 pub fn set_max_texture_size(size: u32) {
     MAX_TEXTURE_SIZE.store(size, Ordering::Relaxed);
+}
+
+pub fn max_texture_size() -> u32 {
+    MAX_TEXTURE_SIZE.load(Ordering::Relaxed)
 }
 
 /// Decodes a texture no wider or taller than `max_size`, checked before the
@@ -464,8 +464,18 @@ pub fn upload_images_batched(device: &rhi::backend::Device, uploads: &[PendingIm
     });
 }
 
+/// The byte offset of texel `(x, y)` in an RGBA8 image `width` texels wide.
+pub fn rgba_offset(x: u32, y: u32, width: u32) -> usize {
+    (y as usize * width as usize + x as usize) * 4
+}
+
+/// The bytes of a `width` x `height` RGBA8 image.
+pub fn rgba_len(width: u32, height: u32) -> usize {
+    rgba_offset(0, height, width)
+}
+
 fn rgba8_bytes(width: u32, height: u32) -> u64 {
-    u64::from(width) * u64::from(height) * 4
+    rgba_len(width, height) as u64
 }
 
 fn record_image_upload(
@@ -514,7 +524,15 @@ fn record_image_upload(
 
 #[cfg(test)]
 mod tests {
-    use super::load_png_reader;
+    use super::{load_png_reader, rgba_len, rgba_offset};
+
+    /// A 32768-wide atlas, which the device limit allows, has offsets past
+    /// `u32::MAX`.
+    #[test]
+    fn rgba_offsets_reach_past_u32() {
+        assert_eq!(rgba_len(32768, 32768), 1 << 32);
+        assert_eq!(rgba_offset(1, 32767, 32768), (32767 * 32768 + 1) * 4);
+    }
 
     /// An image fits up to the device's texture size on either axis.
     #[test]
