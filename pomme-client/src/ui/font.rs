@@ -372,7 +372,7 @@ impl Atlases {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 struct FontFilter {
     uniform: Option<bool>,
     japanese_variants: Option<bool>,
@@ -484,12 +484,7 @@ impl GlyphMap {
         let mut resolved_cache = HashMap::new();
         let mut font_sets = HashMap::new();
         for id in font_ids {
-            let mut resolved = match resolve_font_providers(
-                &id,
-                &unresolved,
-                &mut resolved_cache,
-                &mut HashSet::new(),
-            ) {
+            let mut resolved = match resolve_font_providers(&id, &unresolved, &mut resolved_cache) {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     tracing::warn!("Rejecting font `{id}`: {error}");
@@ -945,54 +940,80 @@ fn load_provider(
     }))
 }
 
+/// Vanilla `FontManager.resolveProviders`, minus repeated (provider, filter)
+/// pairs: lookup takes the first match, so a repeat never changes a glyph, and
+/// without them nested references can't grow a font exponentially. Like
+/// `DependencySorter`, a font's references resolve before it, but from a
+/// stack of its own, so no chain is too deep.
 fn resolve_font_providers(
     id: &str,
     unresolved: &HashMap<String, Vec<UnresolvedProvider>>,
     cache: &mut HashMap<String, Vec<ResolvedProvider>>,
-    visiting: &mut HashSet<String>,
 ) -> Result<Vec<ResolvedProvider>, String> {
-    if let Some(cached) = cache.get(id) {
-        return Ok(cached.clone());
-    }
-    let Some(entries) = unresolved.get(id) else {
-        return Err(format!("font reference `{id}` does not exist"));
-    };
-    if !visiting.insert(id.to_owned()) {
-        return Err(format!("font reference cycle includes `{id}`"));
-    }
-
-    let result = (|| {
+    // Each font with how many of its entries have been checked for an
+    // unresolved reference, so none is checked twice.
+    let mut stack = vec![(id, 0)];
+    let mut visiting = HashSet::new();
+    while let Some((current, checked)) = stack.pop() {
+        if cache.contains_key(current) {
+            continue;
+        }
+        let Some(entries) = unresolved.get(current) else {
+            return Err(format!("font reference `{current}` does not exist"));
+        };
+        let pending =
+            entries[checked..]
+                .iter()
+                .enumerate()
+                .find_map(|(offset, entry)| match entry {
+                    UnresolvedProvider::Reference { id, .. } if !cache.contains_key(id) => {
+                        Some((checked + offset + 1, id))
+                    }
+                    _ => None,
+                });
+        if let Some((checked, next)) = pending {
+            visiting.insert(current);
+            if visiting.contains(next.as_str()) {
+                return Err(format!("font reference cycle includes `{next}`"));
+            }
+            stack.push((current, checked));
+            stack.push((next, 0));
+            continue;
+        }
+        // Lookup runs the list backwards, so walking it that way keeps the copy
+        // lookup reaches first, and a repeated reference adds nothing.
         let mut resolved = Vec::new();
-        for entry in entries {
+        let mut seen = HashSet::new();
+        let mut seen_references = HashSet::new();
+        let mut add = |provider: &Arc<LoadedProvider>, filter: FontFilter| {
+            if seen.insert((Arc::as_ptr(provider), filter)) {
+                resolved.push(ResolvedProvider {
+                    provider: provider.clone(),
+                    filter,
+                });
+            }
+        };
+        for entry in entries.iter().rev() {
             match entry {
-                UnresolvedProvider::Loaded { provider, filter } => {
-                    resolved.push(ResolvedProvider {
-                        provider: provider.clone(),
-                        filter: *filter,
-                    });
-                }
+                UnresolvedProvider::Loaded { provider, filter } => add(provider, *filter),
                 UnresolvedProvider::Reference {
                     id: referenced,
                     filter,
                 } => {
-                    for provider in resolve_font_providers(referenced, unresolved, cache, visiting)?
-                    {
-                        resolved.push(ResolvedProvider {
-                            provider: provider.provider,
-                            filter: filter.merge(provider.filter),
-                        });
+                    if seen_references.insert((referenced, *filter)) {
+                        for provider in cache[referenced].iter().rev() {
+                            add(&provider.provider, filter.merge(provider.filter));
+                        }
                     }
                 }
                 UnresolvedProvider::Invalid(error) => return Err(error.clone()),
             }
         }
-        Ok(resolved)
-    })();
-    visiting.remove(id);
-    if let Ok(resolved) = &result {
-        cache.insert(id.to_owned(), resolved.clone());
+        resolved.reverse();
+        visiting.remove(current);
+        cache.insert(current.to_owned(), resolved);
     }
-    result
+    Ok(cache[id].clone())
 }
 
 fn build_font_set(providers: &[ResolvedProvider]) -> FontSetData {
@@ -1844,14 +1865,16 @@ mod tests {
         assert!(fixture.load().is_err());
     }
 
+    /// A font that only references `id`.
+    fn reference(id: &str) -> Vec<UnresolvedProvider> {
+        vec![UnresolvedProvider::Reference {
+            id: id.to_owned(),
+            filter: FontFilter::default(),
+        }]
+    }
+
     #[test]
     fn font_reference_cycles_and_missing_targets_reject_the_bundle() {
-        let reference = |id: &str| {
-            vec![UnresolvedProvider::Reference {
-                id: id.to_owned(),
-                filter: FontFilter::default(),
-            }]
-        };
         let unresolved = HashMap::from([
             ("example:a".to_owned(), reference("example:b")),
             ("example:b".to_owned(), reference("example:a")),
@@ -1861,19 +1884,101 @@ mod tests {
             ),
         ]);
         let mut cache = HashMap::new();
+        assert!(resolve_font_providers("example:a", &unresolved, &mut cache).is_err());
         assert!(
-            resolve_font_providers("example:a", &unresolved, &mut cache, &mut HashSet::new())
-                .is_err()
+            resolve_font_providers("example:missing-wrapper", &unresolved, &mut cache).is_err()
         );
-        assert!(
-            resolve_font_providers(
-                "example:missing-wrapper",
-                &unresolved,
-                &mut cache,
-                &mut HashSet::new()
-            )
-            .is_err()
+    }
+
+    /// Resolves `example:top`, failing if it takes anywhere near quadratic
+    /// time.
+    fn resolve_top_quickly(
+        unresolved: &HashMap<String, Vec<UnresolvedProvider>>,
+    ) -> Vec<ResolvedProvider> {
+        let start = std::time::Instant::now();
+        let resolved = resolve_font_providers("example:top", unresolved, &mut HashMap::new());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        resolved.unwrap()
+    }
+
+    /// A font with tens of thousands of references resolves in linear time.
+    #[test]
+    fn wide_fonts_resolve() {
+        let mut unresolved = HashMap::new();
+        let mut top = Vec::new();
+        for i in 0..40_000 {
+            let id = format!("example:{i}");
+            top.extend(reference(&id));
+            unresolved.insert(id, Vec::new());
+        }
+        unresolved.insert("example:top".to_owned(), top);
+        assert!(resolve_top_quickly(&unresolved).is_empty());
+    }
+
+    /// A font referencing one large font thousands of times builds it once.
+    #[test]
+    fn repeated_references_to_a_large_font_resolve() {
+        let large = (0..20_000)
+            .map(|_| UnresolvedProvider::Loaded {
+                provider: Arc::new(LoadedProvider {
+                    glyphs: HashMap::new(),
+                }),
+                filter: FontFilter::default(),
+            })
+            .collect();
+        let unresolved = HashMap::from([
+            ("example:large".to_owned(), large),
+            (
+                "example:top".to_owned(),
+                (0..20_000)
+                    .flat_map(|_| reference("example:large"))
+                    .collect(),
+            ),
+        ]);
+        assert_eq!(resolve_top_quickly(&unresolved).len(), 20_000);
+    }
+
+    /// A reference chain resolves however deep it goes, without recursing.
+    #[test]
+    fn deep_reference_chains_resolve() {
+        let mut unresolved = HashMap::from([("example:0".to_owned(), Vec::new())]);
+        for level in 1..=100_000 {
+            unresolved.insert(
+                format!("example:{level}"),
+                reference(&format!("example:{}", level - 1)),
+            );
+        }
+        let resolved = resolve_font_providers("example:100000", &unresolved, &mut HashMap::new());
+        assert!(resolved.unwrap().is_empty());
+    }
+
+    /// Fonts that each reference the one below twice would double per level
+    /// in vanilla; they load as the single chain, and a font with thousands
+    /// of its own providers loads whole.
+    #[test]
+    fn repeated_references_load_once() {
+        let fixture = Fixture::new();
+        let direct: Vec<_> = (0x4E00..0x5600)
+            .filter_map(char::from_u32)
+            .map(|ch| serde_json::json!({"type": "space", "advances": {ch.to_string(): 3.0}}))
+            .collect();
+        fixture.write(
+            "jar_assets/minecraft/font/default.json",
+            serde_json::to_vec(&serde_json::json!({ "providers": direct })).unwrap(),
         );
+        fixture.write("jar_assets/example/font/level0.json", DEFAULT_SPACE);
+        for level in 1..=40 {
+            let below = serde_json::json!({"type": "reference", "id": format!("example:level{}", level - 1)});
+            fixture.write(
+                format!("jar_assets/example/font/level{level}.json"),
+                serde_json::to_vec(&serde_json::json!({ "providers": [below, below] })).unwrap(),
+            );
+        }
+        let (map, _) = fixture.load().unwrap();
+        assert_eq!(map.font_sets["minecraft:default"].glyphs.len(), 0x800);
+        let top = &map.font_sets["example:level40"];
+        assert_eq!(top.glyphs.len(), 1);
+        assert_eq!(top.glyphs[&'A'].advance, 5.0);
     }
 
     #[test]
