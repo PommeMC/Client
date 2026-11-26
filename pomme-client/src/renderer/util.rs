@@ -214,19 +214,44 @@ pub fn upload_image(
     height: u32,
     label: &str,
 ) {
+    try_upload_image_level(device, image, 0, pixels, width, height, label)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// Uploads RGBA8 `pixels`, `width` x `height`, into mip `level` of `image`
+/// through a staging buffer of its own, freed once the copy has finished.
+pub fn try_upload_image_level(
+    device: &rhi::backend::Device,
+    image: rhi::backend::TextureHandle,
+    level: u32,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    label: &str,
+) -> Result<(), String> {
+    debug_assert_eq!(pixels.len(), rgba_len(width, height));
     let staging =
-        rhi::backend::Buffer::with_data(device, label, pixels, rhi::BufferUsages::COPY_SRC);
-    upload_image_mipmapped(
-        device,
-        staging.handle(),
-        rgba8_bytes(width, height),
-        image,
-        width,
-        height,
-        1,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+        rhi::backend::Buffer::try_with_data(device, label, pixels, rhi::BufferUsages::COPY_SRC)?;
+    let uploaded = device.try_submit(|encoder| {
+        encoder.upload_texture(
+            staging.handle(),
+            image,
+            rhi::TextureRange {
+                first_mip: level,
+                ..rhi::TextureRange::BASE
+            },
+            &[rhi::TexelCopy {
+                buffer_offset: 0,
+                mip_level: level,
+                layer: 0,
+                origin: [0, 0],
+                width,
+                height,
+            }],
+        );
+    });
     staging.destroy(device);
+    uploaded
 }
 
 #[derive(Clone, Copy)]
@@ -410,30 +435,6 @@ fn load_png_reader(
     };
 
     Some((data, info.width, info.height))
-}
-
-/// Uploads an image whose mip levels are all present in the staging buffer,
-/// packed tightly with level 0 first.
-pub fn upload_image_mipmapped(
-    device: &rhi::backend::Device,
-    staging_buffer: rhi::backend::BufferHandle,
-    staging_size: u64,
-    image: rhi::backend::TextureHandle,
-    width: u32,
-    height: u32,
-    mip_levels: u32,
-) -> Result<(), String> {
-    device.try_submit(|encoder| {
-        record_image_upload(
-            encoder,
-            staging_buffer,
-            staging_size,
-            image,
-            width,
-            height,
-            mip_levels,
-        );
-    })
 }
 
 pub struct PendingImageUpload {

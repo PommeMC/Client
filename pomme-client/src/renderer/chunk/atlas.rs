@@ -711,7 +711,7 @@ impl TextureAtlas {
             rhi::BufferUsages::STORAGE,
         )?;
 
-        let staging_pixels = build_mip_chain(
+        let levels = build_mip_chain(
             atlas_pixels,
             atlas_size,
             mip_level,
@@ -728,24 +728,20 @@ impl TextureAtlas {
                 ..util::sampled_texture_desc("atlas_image", atlas_size, atlas_size)
             },
         )?;
-        let staging_buffer = rhi::backend::Buffer::try_with_data(
-            device,
-            "atlas_staging",
-            &staging_pixels,
-            rhi::BufferUsages::COPY_SRC,
-        )?;
-
-        let uploaded = util::upload_image_mipmapped(
-            device,
-            staging_buffer.handle(),
-            staging_pixels.len() as u64,
-            texture.handle(),
-            atlas_size,
-            atlas_size,
-            mip_levels,
-        );
-        staging_buffer.destroy(device);
-        uploaded?;
+        // One staging buffer per level: level 0 alone is what the device
+        // limit sized to fit one allocation.
+        for (level, pixels) in (0..).zip(levels) {
+            let size = atlas_size >> level;
+            util::try_upload_image_level(
+                device,
+                texture.handle(),
+                level,
+                &pixels,
+                size,
+                size,
+                "atlas_staging",
+            )?;
+        }
 
         let sampler = rhi::backend::try_create_sampler(
             device,
@@ -1054,7 +1050,7 @@ fn build_mip_chain(
     sources: &mut [Source],
     placements: &HashMap<String, Option<(u32, u32)>>,
     missing: (u32, u32),
-) -> Vec<u8> {
+) -> Vec<Vec<u8>> {
     let pad = sprite_padding(mip_level, true);
     let mut levels = Vec::with_capacity((mip_level + 1) as usize);
     levels.push(atlas_pixels);
@@ -1136,7 +1132,7 @@ fn build_mip_chain(
         }
     }
 
-    levels.concat()
+    levels
 }
 
 fn extract_frame_rgba_at_mip(
@@ -1661,9 +1657,10 @@ mod tests {
             (16, 16),
         );
 
-        let mut offset = 0;
-        for level in 0..=MAX_MIP_LEVEL {
+        assert_eq!(chain.len(), (MAX_MIP_LEVEL + 1) as usize);
+        for (level, pixels) in (0..).zip(&chain) {
             let size = SIZE >> level;
+            assert_eq!(pixels.len(), (size * size * 4) as usize);
             let level_pad = pad >> level;
             for (source, color) in sources.iter().zip([[255u8, 0, 0, 255], [0, 0, 255, 255]]) {
                 let (x, y) = placements[&source.name].unwrap();
@@ -1674,14 +1671,12 @@ mod tests {
                 );
                 for py in dy..dy + height {
                     for px in dx..dx + width {
-                        let i = offset + ((py * size + px) * 4) as usize;
-                        assert_eq!(&chain[i..i + 4], &color, "level {level} at ({px}, {py})");
+                        let i = ((py * size + px) * 4) as usize;
+                        assert_eq!(&pixels[i..i + 4], &color, "level {level} at ({px}, {py})");
                     }
                 }
             }
-            offset += (size * size * 4) as usize;
         }
-        assert_eq!(offset, chain.len());
     }
 
     #[test]
@@ -1810,7 +1805,7 @@ mod tests {
             &placements,
             (40, 40),
         );
-        let level_one = &chain[(SIZE * SIZE * 4) as usize..];
+        let level_one = &chain[1];
         let level_one_size = SIZE >> 1;
         let expected = mean_linear([[17, 34, 51, 255]; 4]);
         for y in 8..17 {
