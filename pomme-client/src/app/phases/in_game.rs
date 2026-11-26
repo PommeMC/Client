@@ -4336,6 +4336,7 @@ pub fn update_game(
             right_pressed: raw_right && !book_blocks_pointer,
             left_held: core.input.left_held() && !book_blocks_pointer,
             right_held: core.input.right_held() && !book_blocks_pointer,
+            cursor_moved: core.input.cursor_moved_this_frame(),
             middle_pressed: core
                 .input
                 .key_bindings
@@ -4766,6 +4767,7 @@ pub fn update_game(
             core.menu.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
+            core.input.cursor_moved_this_frame(),
             core.input.shift_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
             effects,

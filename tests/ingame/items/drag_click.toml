@@ -1,0 +1,170 @@
+# A press with a carried stack starts a drag over no slots: held still on a
+# slot it previews nothing and keeps the whole stack on the cursor, and the
+# release is a plain click. Slots join only as the cursor moves over them.
+
+[[step]]
+wait_ms = 2000
+
+[[step]]
+chat = "/gamemode survival"
+
+[[step]]
+chat = "/clear"
+
+[[step]]
+chat = "/item replace entity @s hotbar.0 with minecraft:cobblestone 16"
+
+[[step]]
+expect = { slot = 36, item = "cobblestone", count = 16 }
+
+[[step]]
+open_inventory = true
+
+[[step]]
+click = { slot = 36, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 36, item = "air" }
+
+# Main inventory slot 9's centre at the harness's 427x240 GUI.
+[[step]]
+cursor = [141, 129]
+
+[[step]]
+wait_ms = 200
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "held_right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { slot = 9, item = "cobblestone", count = 1 }
+
+# The rest goes back on slot 9, and the whole stack back on the cursor.
+[[step]]
+click = { slot = 9, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 9, item = "cobblestone", count = 16 }
+
+[[step]]
+click = { slot = 9, op = "pickup_left" }
+
+[[step]]
+expect = { slot = 9, item = "air" }
+
+# A left drag from slot 9 onto slot 10 splits the stack between them.
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+cursor = [142, 129]
+
+[[step]]
+wait_ms = 100
+
+[[step]]
+cursor = [159, 129]
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "dragged_left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { slot = 9, item = "cobblestone", count = 8 }
+
+[[step]]
+expect = { slot = 10, item = "cobblestone", count = 8 }
+
+[[step]]
+close_menu = true
+
+# The creative inventory tab holds a press the same way.
+[[step]]
+chat = "/gamemode creative"
+
+[[step]]
+open_inventory = true
+
+[[step]]
+expect = { menu = "creative" }
+
+[[step]]
+hover = { tab = "inventory" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { menu = "creative", tab = "inventory" }
+
+[[step]]
+hover = { slot = 9 }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+hover = { slot = 11 }
+
+[[step]]
+wait_ms = 200
+
+[[step]]
+mouse_down = "right"
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "creative_held_right"
+
+[[step]]
+mouse_up = "right"
+
+[[step]]
+expect = { slot = 11, item = "cobblestone", count = 1 }
+
+[[step]]
+expect = { slot = 9, item = "air" }
+
+# Back to the first tab, which the screen would otherwise reopen on.
+[[step]]
+hover = { tab = "building_blocks" }
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+close_menu = true
+
+[[step]]
+chat = "/clear"
