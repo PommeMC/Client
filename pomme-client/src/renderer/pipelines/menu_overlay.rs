@@ -2786,11 +2786,6 @@ const INV_TEX_H: u32 = 166;
 /// bakes the same symmetric one-texel pad at mip 0 (`Stitcher.registerSprite`).
 const SPRITE_PAD: u32 = 1;
 
-/// Vulkan's spec floor for `maxImageDimension2D`, so this is safe on every
-/// conformant device without querying it. The GUI sprites pack into a fraction
-/// of it, so the cap is never binding in practice.
-const MAX_SPRITE_ATLAS_SIZE: u32 = 4096;
-
 /// Spins already-built vertices about a screen-space pivot. Every quad the
 /// pipeline emits is axis-aligned, so rotation is applied after the fact
 /// rather than threaded through each push helper.
@@ -4443,8 +4438,8 @@ fn build_sprite_atlas(
     }
 
     let sizes: Vec<(u32, u32)> = images.iter().map(|sprite| (sprite.2, sprite.3)).collect();
-    let (atlas_size, placements, all_fit) =
-        packing::fit_atlas_size(&sizes, SPRITE_PAD, MAX_SPRITE_ATLAS_SIZE);
+    let max_size = util::max_texture_size();
+    let (atlas_size, placements, all_fit) = packing::fit_atlas_size(&sizes, SPRITE_PAD, max_size);
 
     if !all_fit {
         let dropped: Vec<SpriteId> = images
@@ -4457,14 +4452,14 @@ fn build_sprite_atlas(
         // report. A dropped sprite renders as nothing at all, which is far
         // harder to notice, so shout in release and hard-fail in dev.
         tracing::error!(
-            "Sprite atlas overflowed the {MAX_SPRITE_ATLAS_SIZE}px cap; {} sprites will not \
+            "Sprite atlas overflowed the {max_size}px cap; {} sprites will not \
              render: {dropped:?}",
             dropped.len()
         );
         debug_assert!(all_fit, "sprite atlas dropped {dropped:?}");
     }
 
-    let mut pixels = vec![0u8; atlas_size as usize * atlas_size as usize * 4];
+    let mut pixels = vec![0u8; util::rgba_len(atlas_size, atlas_size)];
     let mut regions = HashMap::new();
     let inv = 1.0 / atlas_size as f32;
 
@@ -4688,8 +4683,8 @@ fn blit_image(
 ) {
     for py in 0..h {
         for px in 0..w {
-            let si = ((py * src_stride + px) * 4) as usize;
-            let di = (((dy + py) * dst_stride + dx + px) * 4) as usize;
+            let si = util::rgba_offset(px, py, src_stride);
+            let di = util::rgba_offset(dx + px, dy + py, dst_stride);
             if si + 4 <= src.len() && di + 4 <= dst.len() {
                 dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
             }

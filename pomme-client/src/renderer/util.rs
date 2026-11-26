@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use super::{MAX_FRAMES_IN_FLIGHT, rhi};
 use crate::resources::{ResourceId, ResourceManager};
 
@@ -212,19 +214,44 @@ pub fn upload_image(
     height: u32,
     label: &str,
 ) {
+    try_upload_image_level(device, image, 0, pixels, width, height, label)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// Uploads RGBA8 `pixels`, `width` x `height`, into mip `level` of `image`
+/// through a staging buffer of its own, freed once the copy has finished.
+pub fn try_upload_image_level(
+    device: &rhi::backend::Device,
+    image: rhi::backend::TextureHandle,
+    level: u32,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    label: &str,
+) -> Result<(), String> {
+    debug_assert_eq!(pixels.len(), rgba_len(width, height));
     let staging =
-        rhi::backend::Buffer::with_data(device, label, pixels, rhi::BufferUsages::COPY_SRC);
-    upload_image_mipmapped(
-        device,
-        staging.handle(),
-        rgba8_bytes(width, height),
-        image,
-        width,
-        height,
-        1,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+        rhi::backend::Buffer::try_with_data(device, label, pixels, rhi::BufferUsages::COPY_SRC)?;
+    let uploaded = device.try_submit(|encoder| {
+        encoder.upload_texture(
+            staging.handle(),
+            image,
+            rhi::TextureRange {
+                first_mip: level,
+                ..rhi::TextureRange::BASE
+            },
+            &[rhi::TexelCopy {
+                buffer_offset: 0,
+                mip_level: level,
+                layer: 0,
+                origin: [0, 0],
+                width,
+                height,
+            }],
+        );
+    });
     staging.destroy(device);
+    uploaded
 }
 
 #[derive(Clone, Copy)]
@@ -324,7 +351,15 @@ pub fn transition_image_to_shader_read(
 pub fn load_resource_png(
     content: &crate::resources::ResourceContent,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    load_png_reader(content.open().ok()?, content.id())
+    load_png_reader(content.open().ok()?, content.id(), max_texture_size())
+}
+
+/// An image only ever read on the CPU (a colormap, the cloud grid), which
+/// vanilla loads at any size, so no texture limit applies.
+pub fn load_cpu_resource_png(
+    content: &crate::resources::ResourceContent,
+) -> Option<(Vec<u8>, u32, u32)> {
+    load_png_reader(content.open().ok()?, content.id(), u32::MAX)
 }
 
 pub fn load_asset_png(
@@ -334,13 +369,35 @@ pub fn load_asset_png(
     load_resource_png(&crate::assets::resource_content(resources, key).ok()?)
 }
 
+/// Vanilla `TextureAtlas.maxSupportedTextureSize`, the device's RGBA8 limit,
+/// which it reads through the global `RenderSystem.getDevice()`. Unlimited
+/// until the device exists.
+static MAX_TEXTURE_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+pub fn set_max_texture_size(size: u32) {
+    MAX_TEXTURE_SIZE.store(size, Ordering::Relaxed);
+}
+
+pub fn max_texture_size() -> u32 {
+    MAX_TEXTURE_SIZE.load(Ordering::Relaxed)
+}
+
+/// Decodes a texture no wider or taller than `max_size`, checked before the
+/// output is allocated. Vanilla decodes it and then fails at the GPU (a crash
+/// when an atlas can't stitch it); here it falls back as a missing texture.
 fn load_png_reader(
     reader: impl std::io::Read,
     name: impl std::fmt::Display,
+    max_size: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
+    let (width, height) = reader.info().size();
+    if width > max_size || height > max_size {
+        tracing::error!("Image {name} is {width}x{height}, past the device's {max_size} limit");
+        return None;
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
 
@@ -380,30 +437,6 @@ fn load_png_reader(
     Some((data, info.width, info.height))
 }
 
-/// Uploads an image whose mip levels are all present in the staging buffer,
-/// packed tightly with level 0 first.
-pub fn upload_image_mipmapped(
-    device: &rhi::backend::Device,
-    staging_buffer: rhi::backend::BufferHandle,
-    staging_size: u64,
-    image: rhi::backend::TextureHandle,
-    width: u32,
-    height: u32,
-    mip_levels: u32,
-) -> Result<(), String> {
-    device.try_submit(|encoder| {
-        record_image_upload(
-            encoder,
-            staging_buffer,
-            staging_size,
-            image,
-            width,
-            height,
-            mip_levels,
-        );
-    })
-}
-
 pub struct PendingImageUpload {
     pub staging_buffer: rhi::backend::BufferHandle,
     pub staging_size: u64,
@@ -432,8 +465,18 @@ pub fn upload_images_batched(device: &rhi::backend::Device, uploads: &[PendingIm
     });
 }
 
+/// The byte offset of texel `(x, y)` in an RGBA8 image `width` texels wide.
+pub fn rgba_offset(x: u32, y: u32, width: u32) -> usize {
+    (y as usize * width as usize + x as usize) * 4
+}
+
+/// The bytes of a `width` x `height` RGBA8 image.
+pub fn rgba_len(width: u32, height: u32) -> usize {
+    rgba_offset(0, height, width)
+}
+
 fn rgba8_bytes(width: u32, height: u32) -> u64 {
-    u64::from(width) * u64::from(height) * 4
+    rgba_len(width, height) as u64
 }
 
 fn record_image_upload(
@@ -478,4 +521,34 @@ fn record_image_upload(
         },
         &copies,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_png_reader, rgba_len, rgba_offset};
+
+    /// A 32768-wide atlas, which the device limit allows, has offsets past
+    /// `u32::MAX`.
+    #[test]
+    fn rgba_offsets_reach_past_u32() {
+        assert_eq!(rgba_len(32768, 32768), 1 << 32);
+        assert_eq!(rgba_offset(1, 32767, 32768), (32767 * 32768 + 1) * 4);
+    }
+
+    /// An image fits up to the device's texture size on either axis.
+    #[test]
+    fn png_limit_is_the_device_texture_size() {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[127; 4])
+            .unwrap();
+
+        let (pixels, width, height) = load_png_reader(bytes.as_slice(), "fixture", 2).unwrap();
+        assert_eq!((width, height, pixels.len()), (2, 2, 16));
+        assert!(load_png_reader(bytes.as_slice(), "fixture", 1).is_none());
+    }
 }

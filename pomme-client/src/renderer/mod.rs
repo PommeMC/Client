@@ -1886,6 +1886,8 @@ impl Renderer {
 
         self.item_entity_pipeline.clear_meshes(&self.ctx.device);
         self.atlas.destroy(&self.ctx.device);
+        // TODO: a failed reload rolls back to the default packs, as
+        // `Minecraft.clearResourcePacksOnError` does, instead of panicking.
         self.atlas =
             TextureAtlas::upload(&self.ctx.device, atlas).expect("failed to rebuild atlas");
 

@@ -71,6 +71,8 @@ pub struct Device {
     pub max_texture_array_layers: u32,
     /// The widest 2D texture, in texels.
     pub max_texture_size: u32,
+    /// The largest single memory allocation, in bytes.
+    max_memory_allocation_size: u64,
     depth_clamp: bool,
     physical_device: vk::PhysicalDevice,
     /// `VK_EXT_memory_budget` is enabled.
@@ -107,6 +109,17 @@ impl Device {
             .map(|heap| heap.size)
             .collect();
         let properties = physical_device.get_properties();
+        // `VkPhysicalDeviceMaintenance3Properties` is core in 1.1; an older
+        // device leaves allocations bounded only by the texture size.
+        let max_memory_allocation_size = if properties.api_version >= vk::API_VERSION_1_1 {
+            let mut maintenance3 = vk::PhysicalDeviceMaintenance3Properties::default();
+            physical_device.get_properties2(
+                &mut vk::PhysicalDeviceProperties2::default().next(&mut maintenance3),
+            );
+            maintenance3.max_memory_allocation_size
+        } else {
+            u64::MAX
+        };
         Self {
             raw,
             allocator: ManuallyDrop::new(Mutex::new(allocator)),
@@ -117,6 +130,7 @@ impl Device {
             discrete: properties.device_type == vk::PhysicalDeviceType::DiscreteGpu,
             max_texture_array_layers: properties.limits.max_image_array_layers,
             max_texture_size: properties.limits.max_image_dimension2_d,
+            max_memory_allocation_size,
             depth_clamp: physical_device.get_features().depth_clamp == vk::TRUE,
             physical_device: *physical_device,
             memory_budget,
@@ -182,6 +196,14 @@ impl Device {
             budget: heaps.iter().map(|&heap| budget.heap_budget[heap]).sum(),
             usage: heaps.iter().map(|&heap| budget.heap_usage[heap]).sum(),
         })
+    }
+
+    pub fn max_texture_size_for(&self, format: TextureFormat) -> u32 {
+        max_texture_size_for(
+            self.max_texture_size,
+            self.max_memory_allocation_size,
+            format,
+        )
     }
 
     pub fn wait_idle(&self) {
@@ -2648,4 +2670,26 @@ fn read_spv<R: io::Read + io::Seek>(x: &mut R) -> io::Result<Vec<u32>> {
         ));
     }
     Ok(result)
+}
+
+/// Vanilla `DeviceLimits.maxTextureSizeForFormat`: the widest square texture
+/// of `format` one allocation holds, rounded down to a power of two.
+fn max_texture_size_for(max_size: u32, max_allocation: u64, format: TextureFormat) -> u32 {
+    let fits = (max_allocation as f64 / f64::from(format.texel_size())).sqrt();
+    let size = max_size.min(fits as u32);
+    size.checked_ilog2().map_or(0, |bit| 1 << bit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextureFormat, max_texture_size_for};
+
+    #[test]
+    fn texture_size_is_bounded_by_one_allocation() {
+        let rgba = TextureFormat::Rgba8Unorm;
+        assert_eq!(max_texture_size_for(16384, 4 << 30, rgba), 16384);
+        assert_eq!(max_texture_size_for(16384, 512 << 20, rgba), 8192);
+        assert_eq!(max_texture_size_for(12000, u64::MAX, rgba), 8192);
+        assert_eq!(max_texture_size_for(16384, u64::MAX, rgba), 16384);
+    }
 }

@@ -104,6 +104,10 @@ pub(super) fn bring_up(
     RendererError,
 > {
     let ctx = rhi::backend::Context::new(window)?;
+    super::util::set_max_texture_size(
+        ctx.device
+            .max_texture_size_for(rhi::TextureFormat::Rgba8Unorm),
+    );
     let size = window.inner_size();
     let swapchain =
         rhi::backend::Swapchain::new(&ctx, size.width.max(1), size.height.max(1), vsync)?;

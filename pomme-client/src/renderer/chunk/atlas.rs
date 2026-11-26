@@ -17,10 +17,9 @@ pub struct AtlasRegion {
     pub v_min: f32,
     pub u_max: f32,
     pub v_max: f32,
-    /// Exact level-0 content rectangle `(x, y, width, height)` in atlas texels.
-    /// The atlas is capped at 8192², so u16 is sufficient and avoids the
-    /// boundary rounding that motivated the old terrain inset.
-    pub pixel_rect: [u16; 4],
+    /// Exact level-0 content rectangle `(x, y, width, height)` in atlas texels,
+    /// which avoids the boundary rounding that motivated the old terrain inset.
+    pub pixel_rect: [u32; 4],
     /// Index into the atlas's sprite-rectangle buffer, which terrain vertices
     /// carry instead of the rectangle itself. Index 0 is the missing tile.
     pub sprite: u16,
@@ -523,8 +522,7 @@ fn extract_frame_rgba(
     let frame_y = frame / layout.frames_per_row;
     let row_bytes = full_width as usize * 4;
     let frame_row_bytes = layout.frame_width as usize * 4;
-    let mut output =
-        Vec::with_capacity(layout.frame_width as usize * layout.frame_height as usize * 4);
+    let mut output = Vec::with_capacity(util::rgba_len(layout.frame_width, layout.frame_height));
     for y in 0..layout.frame_height {
         let source_y = frame_y * layout.frame_height + y;
         let start = source_y as usize * row_bytes + frame_x as usize * frame_row_bytes;
@@ -713,7 +711,7 @@ impl TextureAtlas {
             rhi::BufferUsages::STORAGE,
         )?;
 
-        let staging_pixels = build_mip_chain(
+        let levels = build_mip_chain(
             atlas_pixels,
             atlas_size,
             mip_level,
@@ -730,24 +728,20 @@ impl TextureAtlas {
                 ..util::sampled_texture_desc("atlas_image", atlas_size, atlas_size)
             },
         )?;
-        let staging_buffer = rhi::backend::Buffer::try_with_data(
-            device,
-            "atlas_staging",
-            &staging_pixels,
-            rhi::BufferUsages::COPY_SRC,
-        )?;
-
-        let uploaded = util::upload_image_mipmapped(
-            device,
-            staging_buffer.handle(),
-            staging_pixels.len() as u64,
-            texture.handle(),
-            atlas_size,
-            atlas_size,
-            mip_levels,
-        );
-        staging_buffer.destroy(device);
-        uploaded?;
+        // One staging buffer per level: level 0 alone is what the device
+        // limit sized to fit one allocation.
+        for (level, pixels) in (0..).zip(levels) {
+            let size = atlas_size >> level;
+            util::try_upload_image_level(
+                device,
+                texture.handle(),
+                level,
+                &pixels,
+                size,
+                size,
+                "atlas_staging",
+            )?;
+        }
 
         let sampler = rhi::backend::try_create_sampler(
             device,
@@ -931,12 +925,10 @@ impl TextureAtlas {
             .chain(packed_sources.iter().map(|&(s, pad)| cell(s.w, s.h, pad)))
             .collect();
 
-        const MAX_ATLAS_SIZE: u32 = 8192;
-        let (atlas_size, packed, all_fit) = packing::fit_atlas_size(&sizes, 0, MAX_ATLAS_SIZE);
+        let max_size = util::max_texture_size();
+        let (atlas_size, packed, all_fit) = packing::fit_atlas_size(&sizes, 0, max_size);
         if !all_fit {
-            tracing::warn!(
-                "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
-            );
+            tracing::warn!("Atlas at {max_size} cap; oversize sources fall back to missing tile");
         }
         let inset = |cell: Option<(u32, u32)>, pad| cell.map(|(x, y)| (x + pad, y + pad));
         // Only an atlas already past its cap loses the missing tile; it then
@@ -950,7 +942,7 @@ impl TextureAtlas {
             .map(|(&(s, pad), &placement)| (s.name.clone(), inset(placement, pad)))
             .collect();
 
-        let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
+        let mut atlas_pixels = vec![0u8; util::rgba_len(atlas_size, atlas_size)];
         copy_rect_rgba(
             &missing_tile_rgba(),
             MISSING_TILE,
@@ -964,7 +956,7 @@ impl TextureAtlas {
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
         let mut sprite_pixels = HashMap::new();
-        let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
+        let mut rects = vec![missing_region.pixel_rect];
         for src in &sources {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
@@ -977,7 +969,7 @@ impl TextureAtlas {
                         .expect("the atlas holds fewer than 8192 sprites");
                     region.opaque = src.opaque;
                     region.translucent = src.translucent;
-                    rects.push(region.pixel_rect.map(u32::from));
+                    rects.push(region.pixel_rect);
                     copy_rect_rgba(
                         &src.data,
                         src.w,
@@ -991,7 +983,7 @@ impl TextureAtlas {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
                     if let Some(mip) = &src.mip_source {
-                        let texels = (src.w * src.h * 4) as usize;
+                        let texels = util::rgba_len(src.w, src.h);
                         sprite_pixels.insert(
                             src.name.clone(),
                             SpritePixels {
@@ -1058,13 +1050,13 @@ fn build_mip_chain(
     sources: &mut [Source],
     placements: &HashMap<String, Option<(u32, u32)>>,
     missing: (u32, u32),
-) -> Vec<u8> {
+) -> Vec<Vec<u8>> {
     let pad = sprite_padding(mip_level, true);
     let mut levels = Vec::with_capacity((mip_level + 1) as usize);
     levels.push(atlas_pixels);
     for level in 1..=mip_level {
         let size = atlas_size >> level;
-        levels.push(vec![0; (size * size * 4) as usize]);
+        levels.push(vec![0; util::rgba_len(size, size)]);
     }
 
     let missing_mips = generate_rgba_mips(
@@ -1140,7 +1132,7 @@ fn build_mip_chain(
         }
     }
 
-    levels.concat()
+    levels
 }
 
 fn extract_frame_rgba_at_mip(
@@ -1172,11 +1164,10 @@ fn extract_rect_rgba(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
-    let row_bytes = full_width as usize * 4;
     let copy_bytes = width as usize * 4;
-    let mut output = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut output = Vec::with_capacity(util::rgba_len(width, height));
     for row in y..y + height {
-        let start = row as usize * row_bytes + x as usize * 4;
+        let start = util::rgba_offset(x, row, full_width);
         output.extend_from_slice(&data[start..start + copy_bytes]);
     }
     output
@@ -1199,7 +1190,7 @@ fn copy_rect_rgba(
     for row in 0..height + 2 * pad {
         let src_row = row.saturating_sub(pad).min(height - 1) as usize;
         let src = &source[src_row * row_bytes..][..row_bytes];
-        let dst = (((y + row - pad) * destination_width + x - pad) * 4) as usize;
+        let dst = util::rgba_offset(x - pad, y + row - pad, destination_width);
         let (left, rest) = destination[dst..][..row_bytes + 2 * pad_bytes].split_at_mut(pad_bytes);
         let (middle, right) = rest.split_at_mut(row_bytes);
         middle.copy_from_slice(src);
@@ -1215,7 +1206,7 @@ fn copy_rect_rgba(
 /// `source` with a `pad` texel edge-repeating border, as its own image.
 fn padded_rgba(source: &[u8], width: u32, height: u32, pad: u32) -> Vec<u8> {
     let padded_width = width + 2 * pad;
-    let mut out = vec![0; (padded_width * (height + 2 * pad) * 4) as usize];
+    let mut out = vec![0; util::rgba_len(padded_width, height + 2 * pad)];
     copy_rect_rgba(
         source,
         width,
@@ -1294,12 +1285,12 @@ fn generate_rgba_mips(
         let next_width = current_width >> 1;
         let next_height = current_height >> 1;
         let previous = levels.last().unwrap();
-        let mut next = vec![0; (next_width * next_height * 4) as usize];
+        let mut next = vec![0; util::rgba_len(next_width, next_height)];
         for y in 0..next_height {
             for x in 0..next_width {
                 let mut pixels = [[0u8; 4]; 4];
                 for (index, (ox, oy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
-                    let src = (((y * 2 + oy) * current_width + x * 2 + ox) * 4) as usize;
+                    let src = util::rgba_offset(x * 2 + ox, y * 2 + oy, current_width);
                     pixels[index].copy_from_slice(&previous[src..src + 4]);
                 }
                 let color = if strategy == MipmapStrategy::DarkCutout {
@@ -1307,7 +1298,7 @@ fn generate_rgba_mips(
                 } else {
                     mean_linear(pixels)
                 };
-                let dst = ((y * next_width + x) * 4) as usize;
+                let dst = util::rgba_offset(x, y, next_width);
                 next[dst..dst + 4].copy_from_slice(&color);
             }
         }
@@ -1405,7 +1396,7 @@ fn alpha_test_coverage(
     for y in 0..height - 1 {
         for x in 0..width - 1 {
             let alpha_at = |px: u32, py: u32| {
-                let index = ((py * width + px) * 4 + 3) as usize;
+                let index = util::rgba_offset(px, py, width) + 3;
                 (f32::from(data[index]) / 255.0 * alpha_scale).clamp(0.0, 1.0)
             };
             let a00 = alpha_at(x, y);
@@ -1515,7 +1506,7 @@ fn fill_transparent_rgb_with_dark_color(data: &mut [u8], width: u32, height: u32
     let mut min_brightness = u32::MAX;
     for x in 0..width {
         for y in 0..height {
-            let index = ((y * width + x) * 4) as usize;
+            let index = util::rgba_offset(x, y, width);
             let pixel = &data[index..index + 4];
             if pixel[3] == 0 {
                 continue;
@@ -1553,7 +1544,7 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         v_min,
         u_max,
         v_max,
-        pixel_rect: [x as u16, y as u16, w as u16, h as u16],
+        pixel_rect: [x, y, w, h],
         // Filled in by the caller from the sprite's texels; the missing tile is a
         // solid checker at index 0, so these are its values.
         sprite: 0,
@@ -1666,9 +1657,10 @@ mod tests {
             (16, 16),
         );
 
-        let mut offset = 0;
-        for level in 0..=MAX_MIP_LEVEL {
+        assert_eq!(chain.len(), (MAX_MIP_LEVEL + 1) as usize);
+        for (level, pixels) in (0..).zip(&chain) {
             let size = SIZE >> level;
+            assert_eq!(pixels.len(), (size * size * 4) as usize);
             let level_pad = pad >> level;
             for (source, color) in sources.iter().zip([[255u8, 0, 0, 255], [0, 0, 255, 255]]) {
                 let (x, y) = placements[&source.name].unwrap();
@@ -1679,14 +1671,12 @@ mod tests {
                 );
                 for py in dy..dy + height {
                     for px in dx..dx + width {
-                        let i = offset + ((py * size + px) * 4) as usize;
-                        assert_eq!(&chain[i..i + 4], &color, "level {level} at ({px}, {py})");
+                        let i = ((py * size + px) * 4) as usize;
+                        assert_eq!(&pixels[i..i + 4], &color, "level {level} at ({px}, {py})");
                     }
                 }
             }
-            offset += (size * size * 4) as usize;
         }
-        assert_eq!(offset, chain.len());
     }
 
     #[test]
@@ -1815,7 +1805,7 @@ mod tests {
             &placements,
             (40, 40),
         );
-        let level_one = &chain[(SIZE * SIZE * 4) as usize..];
+        let level_one = &chain[1];
         let level_one_size = SIZE >> 1;
         let expected = mean_linear([[17, 34, 51, 255]; 4]);
         for y in 8..17 {

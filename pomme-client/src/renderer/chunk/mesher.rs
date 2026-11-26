@@ -486,7 +486,7 @@ impl Colormap {
 
     pub(crate) fn from_content(content: Option<&crate::resources::ResourceContent>) -> Self {
         let pixels = content
-            .and_then(crate::renderer::util::load_resource_png)
+            .and_then(crate::renderer::util::load_cpu_resource_png)
             .map(|(data, _w, _h)| {
                 data.chunks(4)
                     .take(256 * 256)
