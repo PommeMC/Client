@@ -69,6 +69,15 @@ pub struct EntityHitResult {
     pub entity_pos: DVec3,
 }
 
+/// The attack, use and pick key presses queued since the last tick,
+/// vanilla's `KeyMapping.clickCount`s.
+#[derive(Clone, Copy, Default)]
+pub struct Clicks {
+    pub attack: u32,
+    pub use_item: u32,
+    pub pick: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HitResult {
     Block(BlockHitResult),
@@ -484,6 +493,7 @@ impl InteractionState {
         &mut self,
         block_registry: &BlockRegistry,
         input: &InputState,
+        clicks: Clicks,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
@@ -518,70 +528,74 @@ impl InteractionState {
             return dirty_chunks;
         }
 
-        // Vanilla `handleKeybinds` drains attack clicks while an item is in
-        // use, and `continueAttack` early-returns on `isUsingItem`.
-        let using = self.using_item.is_some();
-
-        if !using && input.action_just_pressed(input::Action::Destroy) {
-            self.start_attack(
-                block_registry,
-                chunks,
-                sender,
-                audio,
-                input,
-                player_pos,
-                on_ground,
-                creative,
-                held_stack,
-                attributes,
-                mob_effects,
-                eyes_in_water,
-                legacy_mining,
-                effects,
-                &mut dirty_chunks,
-            );
-        }
-
-        // Vanilla `handleKeybinds`: while an item is in use, holding the use
-        // key continues it and releasing sends RELEASE_USE_ITEM (an early
-        // cancel; consumables finish on the server's own timer, never on
-        // release).
-        if using {
+        let use_item =
+            |this: &mut Self, effects: &mut BreakEffects, dirty_chunks: &mut Vec<BlockPos>| {
+                let success = this.start_use_item(
+                    block_registry,
+                    sender,
+                    audio,
+                    chunks,
+                    player_pos,
+                    player_aabb,
+                    eye_pos,
+                    look,
+                    hands,
+                    food,
+                    creative,
+                    input.performing_action(input::Action::Sneak),
+                    entity_use,
+                    effects,
+                    dirty_chunks,
+                );
+                if success {
+                    let _ = input.weak_rumble_for_instant();
+                }
+            };
+        // Vanilla `handleKeybinds`: while an item is in use, letting go of
+        // use sends RELEASE_USE_ITEM (an early cancel; consumables finish on
+        // the server's own timer) and the queued clicks are dropped.
+        let mut instant_attack = false;
+        if self.using_item.is_some() {
             if !input.performing_action(input::Action::Use) {
                 self.release_using_item(sender);
             }
-        } else if input.action_just_pressed(input::Action::Use)
-            || (input.performing_action(input::Action::Use) && self.use_delay == 0)
-        {
-            let success = self.start_use_item(
-                block_registry,
-                sender,
-                audio,
-                chunks,
-                player_pos,
-                player_aabb,
-                eye_pos,
-                look,
-                hands,
-                food,
-                creative,
-                input.performing_action(input::Action::Sneak),
-                entity_use,
-                effects,
-                &mut dirty_chunks,
-            );
-            if success {
-                let _ = input.weak_rumble_for_instant();
+        } else {
+            for _ in 0..clicks.attack {
+                instant_attack |= self.start_attack(
+                    block_registry,
+                    chunks,
+                    sender,
+                    audio,
+                    input,
+                    player_pos,
+                    on_ground,
+                    creative,
+                    held_stack,
+                    attributes,
+                    mob_effects,
+                    eyes_in_water,
+                    legacy_mining,
+                    effects,
+                    &mut dirty_chunks,
+                );
+            }
+            for _ in 0..clicks.use_item {
+                use_item(self, effects, &mut dirty_chunks);
+            }
+            for _ in 0..clicks.pick {
+                self.pick_block_or_entity(sender, input.ctrl_held());
             }
         }
-
-        // Vanilla checks `isUsingItem` once before the attack/use/pick loops,
-        // so a use started above does not suppress a pick from the same tick.
-        if !using && input.middle_just_pressed() {
-            self.pick_block_or_entity(sender, input.ctrl_held());
+        // Holding use repeats it every `rightClickDelay`.
+        if input.performing_action(input::Action::Use)
+            && self.use_delay == 0
+            && self.using_item.is_none()
+        {
+            use_item(self, effects, &mut dirty_chunks);
         }
 
-        let attack_down = input.performing_action(input::Action::Destroy);
+        // Vanilla `continueAttack(!instantAttack && keyAttack.isDown())`.
+        let attack_down = !instant_attack && input.performing_action(input::Action::Destroy);
         if !attack_down {
             self.miss_time = 0;
         }
@@ -696,6 +710,8 @@ impl InteractionState {
         }
     }
 
+    /// Vanilla `Minecraft.startAttack`; returns its `endAttack`, true when the
+    /// click broke the block outright.
     #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
@@ -714,41 +730,41 @@ impl InteractionState {
         legacy_mining: LegacyMiningEnchantments,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
-    ) {
+    ) -> bool {
         if self.miss_time > 0 {
-            return;
+            return false;
         }
 
         // TODO: full-charge spears take vanilla's PIERCING_WEAPON branch
-        // instead of the plain entity/block dispatch.
+        // (which returns true) instead of the plain entity/block dispatch.
         if self.cannot_attack_with_item(held_stack, attributes) {
-            return;
+            return false;
         }
 
+        let is_air = |pos: BlockPos| {
+            block_registry
+                .block_state_data(chunks.get_block_state(pos.x, pos.y, pos.z))
+                .is_air()
+        };
         let hit = match self.target {
-            None => {
-                // Vanilla `Minecraft.startAttack` MISS branch.
-                self.miss_time = MISS_COOLDOWN;
-                self.attack_strength_ticker = 0;
-                self.swing(sender);
-                return;
-            }
             Some(HitResult::Entity(hit)) => {
                 self.attack(sender, hit.entity_id, creative);
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
-                return;
+                return false;
             }
-            Some(HitResult::Block(hit)) => hit,
+            Some(HitResult::Block(hit)) if !is_air(hit.block_pos) => hit,
+            // Vanilla's MISS branch, which an air block falls through to.
+            _ => {
+                // Vanilla `MultiPlayerGameMode.hasMissTime`.
+                if !creative {
+                    self.miss_time = MISS_COOLDOWN;
+                }
+                self.attack_strength_ticker = 0;
+                self.swing(sender);
+                return false;
+            }
         };
-
-        let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-        if block_registry.block_state_data(state).is_air() {
-            self.miss_time = MISS_COOLDOWN;
-            self.attack_strength_ticker = 0;
-            self.swing(sender);
-            return;
-        }
 
         self.start_destroy_block(
             block_registry,
@@ -768,6 +784,7 @@ impl InteractionState {
             dirty_chunks,
         );
         self.swing(sender);
+        is_air(hit.block_pos)
     }
 
     #[allow(clippy::too_many_arguments)]
