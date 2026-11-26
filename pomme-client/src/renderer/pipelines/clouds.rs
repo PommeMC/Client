@@ -402,7 +402,8 @@ fn build_extruded_cell(
 /// vanilla colours clouds purely from the uniform tint times the face shade.
 fn load_cloud_grid(resources: &dyn ResourceManager) -> Option<CloudGrid> {
     let key = resource_id!("minecraft:textures/environment/clouds.png");
-    let (pixels, w, h) = util::load_asset_png(resources, &key)?;
+    let (pixels, w, h) =
+        util::load_cpu_resource_png(&crate::assets::resource_content(resources, &key).ok()?)?;
     let width = w as usize;
     let height = h as usize;
 

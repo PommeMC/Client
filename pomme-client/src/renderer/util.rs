@@ -333,6 +333,14 @@ pub fn load_resource_png(
     )
 }
 
+/// An image only ever read on the CPU (a colormap, the cloud grid), which
+/// vanilla loads at any size, so no texture limit applies.
+pub fn load_cpu_resource_png(
+    content: &crate::resources::ResourceContent,
+) -> Option<(Vec<u8>, u32, u32)> {
+    load_png_reader(content.open().ok()?, content.id(), u32::MAX)
+}
+
 pub fn load_asset_png(
     resources: &dyn ResourceManager,
     key: &ResourceId,
@@ -340,8 +348,9 @@ pub fn load_asset_png(
     load_resource_png(&crate::assets::resource_content(resources, key).ok()?)
 }
 
-/// Vanilla `DeviceLimits.maxTextureSize`, which it reads through the global
-/// `RenderSystem.getDevice()`. Unlimited until the device exists.
+/// Vanilla `TextureAtlas.maxSupportedTextureSize`, the device's RGBA8 limit,
+/// which it reads through the global `RenderSystem.getDevice()`. Unlimited
+/// until the device exists.
 static MAX_TEXTURE_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
 
 pub fn set_max_texture_size(size: u32) {
