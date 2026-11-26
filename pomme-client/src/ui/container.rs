@@ -529,24 +529,11 @@ pub fn resolve_gesture(
     let outside = !panel.contains(cursor);
     let mut ops = resolve_key_ops(input, hovered, slots, cursor_item);
 
-    if let Some((drag_kind, covered)) = drag {
-        let held = matches!(
-            (&drag_kind, input.left_held, input.right_held),
-            (QuickCraftKind::Left, true, _) | (QuickCraftKind::Right, _, true)
-        );
-        if held {
-            // Match vanilla's accumulation so our slot set (and split) equals the
-            // server's: only eligible slots, and only while items remain to share.
-            if input.cursor_moved
-                && let Some(slot) = hovered
-                && !covered.contains(&slot)
-                && (cursor_item.count() as usize) > covered.len()
-                && menu_click::drag_slot_eligible(kind, slots, cursor_item, slot)
-            {
-                covered.push(slot);
-            }
+    if let Some(active) = drag {
+        if extend_drag(active, input, hovered, kind, slots, cursor_item) {
             return (ops, false);
         }
+        let (drag_kind, covered) = active;
         // Released: any covered slot sends the drag (vanilla
         // `quickCraftToSlots`; the server makes a one-slot drag a click), none
         // falls back to a click wherever the cursor is now (vanilla
@@ -620,13 +607,45 @@ pub fn resolve_gesture(
         }
         ops.push(ClickOperation::PickupAll(PickupAllClick { slot }));
     } else if carrying {
-        // Vanilla `mouseClicked` starts the drag with no slots; they join as
-        // the cursor moves.
-        *drag = Some((click_kind, Vec::new()));
+        // Vanilla `mouseClicked` starts the drag with no slots; its
+        // `mouseDragged` runs later in the same frame, so a press while the
+        // cursor moves covers the slot at once.
+        let mut started = (click_kind, Vec::new());
+        extend_drag(&mut started, input, hovered, kind, slots, cursor_item);
+        *drag = Some(started);
     } else {
         ops.push(pickup(&click_kind, Some(slot)));
     }
     (ops, false)
+}
+
+/// Vanilla `mouseDragged`: on a frame the cursor moved with the drag's button
+/// held, the hovered slot joins it if eligible and items remain to share, so
+/// the slot set (and split) equals the server's. Returns whether the button
+/// is still held.
+fn extend_drag(
+    drag: &mut DragState,
+    input: &ContainerInput,
+    hovered: Option<u16>,
+    kind: ContainerKind,
+    slots: &[ItemStack],
+    cursor_item: &ItemStack,
+) -> bool {
+    let (drag_kind, covered) = drag;
+    let held = match drag_kind {
+        QuickCraftKind::Left => input.left_held,
+        QuickCraftKind::Right => input.right_held,
+    };
+    if held
+        && input.cursor_moved
+        && let Some(slot) = hovered
+        && !covered.contains(&slot)
+        && (cursor_item.count() as usize) > covered.len()
+        && menu_click::drag_slot_eligible(kind, slots, cursor_item, slot)
+    {
+        covered.push(slot);
+    }
+    held
 }
 
 /// Whether a left click on `slot` follows one on it within the double-click
@@ -819,6 +838,20 @@ mod tests {
 
         drag_frame(left(false, true, true), 10, &mut drag);
         assert_eq!(drawn(&drag), (true, None));
+    }
+
+    /// Vanilla runs `mouseDragged` after the frame's press, so a press while
+    /// the cursor moves covers its slot at once, and a press released in the
+    /// same frame covers nothing.
+    #[test]
+    fn a_press_while_moving_covers_its_slot() {
+        let mut drag = None;
+        drag_frame(left(true, true, true), 9, &mut drag);
+        assert!(matches!(&drag, Some((_, covered)) if covered == &[9]));
+
+        let mut drag = None;
+        drag_frame(left(true, false, true), 9, &mut drag);
+        assert!(matches!(&drag, Some((_, covered)) if covered.is_empty()));
     }
 
     /// Vanilla `quickCraftToSlots` sends any covered drag, one slot too; the
