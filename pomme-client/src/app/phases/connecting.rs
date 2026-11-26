@@ -92,6 +92,7 @@ pub fn update_connecting(
         }
     };
 
+    super::in_game::announce_screenshots(gfx, game);
     if game.dialog_open() {
         draw_server_dialog(core, dt, gfx, panorama, connection, game);
     } else if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {

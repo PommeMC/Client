@@ -1,0 +1,15 @@
+# A pack URL that isn't http or https is refused without a prompt, and the
+# join goes on without the pack.
+server_resource_pack = { url = "ftp://127.0.0.1/pack.zip" }
+
+[[step]]
+chat = "/tp @s 43.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [43.5, -60.0, 0.5] } }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+screenshot = "joined"

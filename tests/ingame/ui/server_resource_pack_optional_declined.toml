@@ -1,0 +1,56 @@
+# Turning down an optional server pack joins without it: stone keeps its
+# own texture rather than the pack's red.
+server_resource_pack = { name = "pomme_test", required = false }
+starts_connecting = true
+
+[[step]]
+expect = { button = "No" }
+timeout_ms = 60000
+
+[[step]]
+screenshot = "prompt"
+
+[[step]]
+cursor_to_button = "No"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+chat = "/time set 6000"
+
+[[step]]
+chat = "/fill 40 -61 0 46 -61 8 minecraft:stone"
+
+[[step]]
+chat = "/tp @s 43.5 -60 0.5 0 0"
+
+[[step]]
+expect = { player = { position = [43.5, -60.0, 0.5] } }
+
+[[step]]
+expect = { block = "stone", at = [46, -61, 8] }
+
+[[step]]
+wait_ms = 3000
+
+[[step]]
+look_at = [43.5, -61.0, 1.5]
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+wait_ms = 300
+
+[[step]]
+screenshot = "no_pack"
+
+[[step]]
+press = { key = "key.keyboard.f1" }
+
+[[step]]
+chat = "/fill 40 -61 0 46 -61 8 minecraft:grass_block"

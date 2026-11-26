@@ -2464,6 +2464,7 @@ dependencies = [
  "sha1_smol",
  "toml",
  "uuid 1.29.2",
+ "zip 9.4.1",
 ]
 
 [[package]]
@@ -4157,6 +4158,7 @@ dependencies = [
  "shaderc",
  "simdnbt",
  "symphonia",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -5894,6 +5896,19 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "term"

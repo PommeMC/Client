@@ -51,7 +51,26 @@ mod path_validation {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::Path;
+
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
     use super::RepositorySource;
+
+    pub(super) const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
+
+    /// A ZIP pack at `path` holding only `pack.mcmeta`.
+    pub(super) fn write_zip_pack(path: &Path) {
+        let mut archive = ZipWriter::new(File::create(path).unwrap());
+        archive
+            .start_file("pack.mcmeta", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(METADATA).unwrap();
+        drop(archive.finish().unwrap());
+    }
 
     pub(super) fn test_load_packs_empty<S: RepositorySource + ?Sized>(source: &mut S) {
         let actual = source.load_packs().expect("load_packs should succeed");

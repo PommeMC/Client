@@ -1,6 +1,26 @@
 use super::*;
 
 impl MainMenu {
+    /// Vanilla `ServerList.get`, as quick play and Direct Connection join:
+    /// the saved server at `address`, or a fresh one.
+    // TODO: vanilla then saves a server it didn't find, hidden for a direct
+    // connection.
+    pub fn saved_server(&self, address: &str) -> JoinedServer {
+        joined_server(self.saved_entry(address), address)
+    }
+
+    fn saved_entry(&self, address: &str) -> Option<&ServerEntry> {
+        self.server_list
+            .servers
+            .iter()
+            .find(|entry| entry.address == address)
+    }
+
+    /// Vanilla `ServerList.saveSingleServer`.
+    pub fn save_pack_status(&mut self, server: &JoinedServer) {
+        self.server_list.save_pack_status(server);
+    }
+
     pub(super) fn build_server_list(
         &mut self,
         screen_w: f32,
@@ -220,7 +240,7 @@ impl MainMenu {
             if clicked && hovered {
                 if on_icon && right_half {
                     action = MenuAction::Connect {
-                        server: server.address.clone(),
+                        server: JoinedServer::from_entry(server),
                         username: self.username.clone(),
                         protocol: join_protocol(&ping_results, &server.address, server.protocol),
                     };
@@ -235,7 +255,7 @@ impl MainMenu {
 
                     if is_double {
                         action = MenuAction::Connect {
-                            server: server.address.clone(),
+                            server: JoinedServer::from_entry(server),
                             username: self.username.clone(),
                             protocol: join_protocol(
                                 &ping_results,
@@ -365,7 +385,7 @@ impl MainMenu {
             && let Some(server) = self.server_list.servers.get(idx)
         {
             action = MenuAction::Connect {
-                server: server.address.clone(),
+                server: JoinedServer::from_entry(server),
                 username: self.username.clone(),
                 protocol: join_protocol(&ping_results, &server.address, server.protocol),
             };
@@ -406,6 +426,7 @@ impl MainMenu {
         ) {
             self.edit_name.clear();
             self.edit_address.clear();
+            self.edit_pack_status = ServerPackStatus::default();
             self.set_screen(Screen::AddServer, key_bindings);
             self.focused_field = Some(0);
             self.edit_name.set_focused(true);
@@ -434,6 +455,7 @@ impl MainMenu {
             self.edit_name.set_value(&server.name, form_inner, &wf);
             self.edit_address
                 .set_value(&server.address, form_inner, &wf);
+            self.edit_pack_status = ServerPackStatus::from_accept_textures(server.accept_textures);
             self.set_screen(Screen::EditServer(idx), key_bindings);
             self.focused_field = Some(0);
             self.edit_name.set_focused(true);
@@ -632,16 +654,15 @@ impl MainMenu {
             || enter_submit
         {
             self.close_direct_connect(key_bindings);
-            let persisted = self
-                .server_list
-                .servers
-                .iter()
-                .find(|s| s.address == address)
-                .and_then(|s| s.protocol);
+            let saved = self.saved_entry(&address);
             action = MenuAction::Connect {
-                server: address.clone(),
+                server: joined_server(saved, &address),
                 username: self.username.clone(),
-                protocol: join_protocol(&self.ping_results.read(), &address, persisted),
+                protocol: join_protocol(
+                    &self.ping_results.read(),
+                    &address,
+                    saved.and_then(|entry| entry.protocol),
+                ),
             };
         }
         if push_button(
@@ -681,7 +702,6 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
         let field_h = FIELD_H * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
@@ -696,69 +716,81 @@ impl MainMenu {
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
 
+        // Vanilla `ManageServerScreen.init`, in gui units from the top.
+        let tr = |key: &'static str| crate::lang::translate(key).unwrap_or(key);
         let cx = common::gui_half_width(screen_w, gs);
         let form_x = cx - form_w / 2.0;
-        let mut y = 17.0 * gs;
-
+        let quarter = common::gui_quarter_height(screen_h, gs);
+        let title = match self.screen {
+            Screen::EditServer(_) => "manageServer.edit.title",
+            _ => "manageServer.add.title",
+        };
         elements.push(MenuElement::Text {
             x: cx,
-            y,
-            text: "Edit Server Info".into(),
+            y: 17.0 * gs,
+            text: tr(title).into(),
             scale: fs,
             color: WHITE,
             centered: true,
         });
-        y += fs + 20.0 * gs;
+        for (key, y) in [
+            ("manageServer.enterName", 53.0),
+            ("manageServer.enterIp", 94.0),
+        ] {
+            elements.push(MenuElement::Text {
+                x: form_x + gs,
+                y: y * gs,
+                text: tr(key).into(),
+                scale: fs,
+                color: common::rgb(0xA0A0A0),
+                centered: false,
+            });
+        }
+        for (target, index, y) in [
+            (TextTarget::EditName, 0, 66.0),
+            (TextTarget::EditAddress, 1, 106.0),
+        ] {
+            self.text_field(
+                &mut elements,
+                target,
+                index,
+                input,
+                form_x,
+                y * gs,
+                form_w,
+                field_h,
+                fs,
+                gs,
+                text_width_fn,
+            );
+        }
 
-        elements.push(MenuElement::Text {
-            x: form_x,
-            y,
-            text: "Server Name".into(),
-            scale: fs,
-            color: COL_DIM,
-            centered: false,
-        });
-        y += fs + 4.0 * gs;
-
-        self.text_field(
-            &mut elements,
-            TextTarget::EditName,
-            0,
-            input,
-            form_x,
-            y,
-            form_w,
-            field_h,
-            fs,
-            gs,
-            text_width_fn,
+        let pack_label = format!(
+            "{}: {}",
+            tr("manageServer.resourcePack"),
+            tr(self.edit_pack_status.lang_key())
         );
-        y += field_h + 12.0 * gs;
-
-        elements.push(MenuElement::Text {
-            x: form_x,
-            y,
-            text: "Server Address".into(),
-            scale: fs,
-            color: COL_DIM,
-            centered: false,
-        });
-        y += fs + 4.0 * gs;
-
-        self.text_field(
+        let pack_hovered = push_button(
             &mut elements,
-            TextTarget::EditAddress,
-            1,
-            input,
+            &mut any_hovered,
+            cursor,
             form_x,
-            y,
+            quarter + 72.0 * gs,
             form_w,
-            field_h,
-            fs,
+            btn_h,
             gs,
-            text_width_fn,
+            &pack_label,
+            true,
         );
-        y += field_h + 28.0 * gs;
+        // `CycleButton`: shift-click and scrolling up cycle backwards.
+        if pack_hovered && (clicked || input.scroll_delta != 0.0) {
+            let forward = if clicked {
+                !input.shift
+            } else {
+                input.scroll_delta < 0.0
+            };
+            self.edit_pack_status = self.edit_pack_status.cycle(forward);
+        }
 
         let name_val = self.edit_name.value().to_string();
         let address = self.edit_address.value().to_string();
@@ -768,16 +800,16 @@ impl MainMenu {
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + (96.0 + 18.0) * gs,
             form_w,
             btn_h,
             gs,
-            "Done",
+            tr("gui.done"),
             valid,
         ) && clicked
         {
             let name = if name_val.is_empty() {
-                "Minecraft Server".to_string()
+                default_server_name().to_owned()
             } else {
                 name_val.clone()
             };
@@ -785,6 +817,7 @@ impl MainMenu {
                 name,
                 address: address.clone(),
                 protocol: None,
+                accept_textures: self.edit_pack_status.accept_textures(),
                 extra: Default::default(),
             };
             if let Screen::EditServer(idx) = self.screen {
@@ -802,17 +835,16 @@ impl MainMenu {
             // Absent from the results map, so it pings on draw back on the list.
             self.set_screen(Screen::ServerList, key_bindings);
         }
-        y += btn_h + gap;
         if push_button(
             &mut elements,
             &mut any_hovered,
             cursor,
             form_x,
-            y,
+            quarter + (120.0 + 18.0) * gs,
             form_w,
             btn_h,
             gs,
-            "Cancel",
+            tr("gui.cancel"),
             true,
         ) && clicked
         {
@@ -1140,6 +1172,14 @@ fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
 
 pub(super) fn write_clipboard(text: &str) -> bool {
     crate::ui::common::set_clipboard(text)
+}
+
+/// `entry` as the server a join targets, or a fresh one at `address`.
+fn joined_server(entry: Option<&ServerEntry>, address: &str) -> JoinedServer {
+    entry.map_or_else(
+        || JoinedServer::unlisted(address.to_owned()),
+        JoinedServer::from_entry,
+    )
 }
 
 /// The protocol to join `address` with: the completed ping's, else the

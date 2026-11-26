@@ -1,0 +1,23 @@
+# Turning down a required server pack disconnects, with the reason on the
+# disconnected screen.
+server_resource_pack = "pomme_test"
+starts_connecting = true
+
+[[step]]
+expect = { button = "Disconnect" }
+timeout_ms = 60000
+
+[[step]]
+cursor_to_button = "Disconnect"
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+mouse_up = "left"
+
+[[step]]
+expect = { button = "Back to Server List" }
+
+[[step]]
+screenshot = "declined"

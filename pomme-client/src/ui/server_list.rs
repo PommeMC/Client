@@ -17,10 +17,95 @@ pub struct ServerEntry {
     /// before the current ping completes still skips the wire-version probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<i32>,
+    /// Vanilla `ServerData.packStatus`, stored as its `acceptTextures`.
+    #[serde(
+        rename = "acceptTextures",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub accept_textures: Option<bool>,
     /// Fields other tools own (the launcher's category, ...), passed through
     /// untouched so a client save doesn't strip them.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Vanilla `ServerData.ServerPackStatus`, in its order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerPackStatus {
+    Enabled,
+    Disabled,
+    #[default]
+    Prompt,
+}
+
+impl ServerPackStatus {
+    /// `ServerPackStatus.FIELD_CODEC`: `acceptTextures`, absent to prompt.
+    pub fn from_accept_textures(accept: Option<bool>) -> Self {
+        match accept {
+            Some(true) => Self::Enabled,
+            Some(false) => Self::Disabled,
+            None => Self::Prompt,
+        }
+    }
+
+    pub fn accept_textures(self) -> Option<bool> {
+        match self {
+            Self::Enabled => Some(true),
+            Self::Disabled => Some(false),
+            Self::Prompt => None,
+        }
+    }
+
+    /// `CycleButton.cycleValue`: the next value, or the one before.
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Enabled, true) | (Self::Prompt, false) => Self::Disabled,
+            (Self::Disabled, true) | (Self::Enabled, false) => Self::Prompt,
+            (Self::Prompt, true) | (Self::Disabled, false) => Self::Enabled,
+        }
+    }
+
+    pub fn lang_key(self) -> &'static str {
+        match self {
+            Self::Enabled => "manageServer.resourcePack.enabled",
+            Self::Disabled => "manageServer.resourcePack.disabled",
+            Self::Prompt => "manageServer.resourcePack.prompt",
+        }
+    }
+}
+
+/// The server a join targets, as vanilla's `ServerData`: its pack status,
+/// and the entry the pack prompt saves its answer to.
+#[derive(Clone, Debug)]
+pub struct JoinedServer {
+    pub name: String,
+    pub address: String,
+    pub pack_status: ServerPackStatus,
+}
+
+impl JoinedServer {
+    pub fn from_entry(entry: &ServerEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            address: entry.address.clone(),
+            pack_status: ServerPackStatus::from_accept_textures(entry.accept_textures),
+        }
+    }
+
+    /// A direct connection's fresh `ServerData`.
+    pub fn unlisted(address: String) -> Self {
+        Self {
+            name: default_server_name().to_owned(),
+            address,
+            pack_status: ServerPackStatus::Prompt,
+        }
+    }
+}
+
+/// `I18n.get("selectServer.defaultName")`.
+pub fn default_server_name() -> &'static str {
+    crate::lang::translate("selectServer.defaultName").unwrap_or("Minecraft Server")
 }
 
 /// How the client can speak to a pinged server.
@@ -100,6 +185,19 @@ impl ServerList {
     pub fn swap(&mut self, a: usize, b: usize) {
         if a < self.servers.len() && b < self.servers.len() {
             self.servers.swap(a, b);
+            self.save();
+        }
+    }
+
+    /// Vanilla `ServerList.saveSingleServer`: the entry with the same name and
+    /// address takes the server's pack status.
+    pub fn save_pack_status(&mut self, server: &JoinedServer) {
+        if let Some(entry) = self
+            .servers
+            .iter_mut()
+            .find(|entry| entry.name == server.name && entry.address == server.address)
+        {
+            entry.accept_textures = server.pack_status.accept_textures();
             self.save();
         }
     }
@@ -249,6 +347,69 @@ fn motd_spans(description: &serde_json::Value) -> Vec<TextSpan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CycleButton` steps through the values in order, either way.
+    #[test]
+    fn pack_status_cycles_both_ways() {
+        let order = [
+            ServerPackStatus::Enabled,
+            ServerPackStatus::Disabled,
+            ServerPackStatus::Prompt,
+        ];
+        for (i, &status) in order.iter().enumerate() {
+            assert_eq!(status.cycle(true), order[(i + 1) % 3]);
+            assert_eq!(status.cycle(false), order[(i + 2) % 3]);
+        }
+    }
+
+    /// `acceptTextures` is absent to prompt, as vanilla's codec writes it.
+    #[test]
+    fn pack_status_round_trips_through_accept_textures() {
+        for status in [
+            ServerPackStatus::Enabled,
+            ServerPackStatus::Disabled,
+            ServerPackStatus::Prompt,
+        ] {
+            let entry = ServerEntry {
+                name: "Server".into(),
+                address: "example.com".into(),
+                protocol: None,
+                accept_textures: status.accept_textures(),
+                extra: Default::default(),
+            };
+            let json = serde_json::to_value(&entry).unwrap();
+            assert_eq!(
+                json.get("acceptTextures").is_some(),
+                status != ServerPackStatus::Prompt
+            );
+            let read: ServerEntry = serde_json::from_value(json).unwrap();
+            assert_eq!(JoinedServer::from_entry(&read).pack_status, status);
+        }
+    }
+
+    /// `ServerList.set` matches the name as well as the address.
+    #[test]
+    fn a_pack_answer_saves_to_the_entry_with_its_name_and_address() {
+        let dir = std::env::temp_dir().join(format!("pomme-servers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut list = ServerList::load(&dir);
+        for name in ["Other", "Server"] {
+            list.add(ServerEntry {
+                name: name.into(),
+                address: "example.com".into(),
+                protocol: None,
+                accept_textures: None,
+                extra: Default::default(),
+            });
+        }
+        let mut joined = JoinedServer::from_entry(&list.servers[1]);
+        joined.pack_status = ServerPackStatus::Enabled;
+        list.save_pack_status(&joined);
+        let saved = ServerList::load(&dir);
+        assert_eq!(saved.servers[0].accept_textures, None);
+        assert_eq!(saved.servers[1].accept_textures, Some(true));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_motds_legacy_code_carries_past_its_line_break() {

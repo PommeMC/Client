@@ -7,32 +7,33 @@ use std::rc::Rc;
 
 use super::symlinks::prepare_pack_path;
 use super::{RepositorySource, SymlinkPolicy};
-use crate::resources::pack_resources::{PackType, PathResourcesSupplier};
+use crate::resources::pack_resources::{FileResourcesSupplier, PackType};
 use crate::resources::packs::{
     Pack, PackEnablementConfig, PackFormat, PackId, PackLocationInfo, ResourcesSupplier,
 };
 
 pub(crate) enum PhysicalPack {
-    Directory(PathBuf),
+    /// A ZIP read in place, as vanilla's `FilePackResources`.
+    Zip(PathBuf),
 }
 
 impl PhysicalPack {
     fn path(&self) -> &Path {
         match self {
-            Self::Directory(path) => path,
+            Self::Zip(path) => path,
         }
     }
 
     fn prepare(&self, policy: &SymlinkPolicy) -> io::Result<Rc<dyn ResourcesSupplier>> {
         let kind = std::fs::symlink_metadata(self.path())?.file_type();
         let (path, kind) = prepare_pack_path(self.path(), kind, policy)?;
-        if !kind.is_dir() {
+        if !kind.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "pack root is not a directory",
+                "pack root is not a file",
             ));
         }
-        Ok(Rc::new(PathResourcesSupplier::new(path)))
+        Ok(Rc::new(FileResourcesSupplier::new(path)))
     }
 }
 
@@ -175,15 +176,11 @@ impl RepositorySource for RegisteredRepositorySource {
 #[cfg(test)]
 mod repository_source_tests {
 
-    use std::fs;
-
     use super::super::tests;
     use super::{PhysicalPack, RegisteredRepositorySource};
     use crate::resources::pack_resources::PackType;
     use crate::resources::packs::{PackEnablementConfig, PackLocationInfo};
     use crate::resources::test_dir::TempDir;
-
-    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
 
     fn fixture() -> (TempDir, RegisteredRepositorySource) {
         let temp = TempDir::new().unwrap();
@@ -198,17 +195,16 @@ mod repository_source_tests {
     }
 
     #[test]
-    fn test_load_packs_directory() {
+    fn test_load_packs_zip() {
         let (temp, mut source) = fixture();
-        let path = temp.0.join("directory-pack");
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("pack.mcmeta"), METADATA).unwrap();
+        let path = temp.0.join("pack.zip");
+        tests::write_zip_pack(&path);
         source.register(
-            PackLocationInfo::test("registered-directory"),
-            PhysicalPack::Directory(path),
+            PackLocationInfo::test("registered-zip"),
+            PhysicalPack::Zip(path),
             PackEnablementConfig::DISCOVERED,
         );
-        tests::test_load_packs(&mut source, &["registered-directory"]);
+        tests::test_load_packs(&mut source, &["registered-zip"]);
     }
 }
 
@@ -221,18 +217,17 @@ mod path_validation {
     use std::path::PathBuf;
 
     use super::super::path_validation::assert_load_packs_catalog;
+    use super::super::tests::write_zip_pack;
     use super::{PhysicalPack, RegisteredRepositorySource, RepositorySource};
     use crate::resources::pack_resources::PackType;
     use crate::resources::packs::{PackEnablementConfig, PackLocationInfo};
     use crate::resources::test_dir::TempDir;
 
-    const METADATA: &[u8] = br#"{"pack":{"pack_format":47,"description":"fixture"}}"#;
-
     fn source(path: PathBuf, id: &str) -> RegisteredRepositorySource {
         let source = RegisteredRepositorySource::new(PackType::ClientResources, None);
         source.register(
             PackLocationInfo::test(id),
-            PhysicalPack::Directory(path),
+            PhysicalPack::Zip(path),
             PackEnablementConfig::DISCOVERED,
         );
         source
@@ -241,16 +236,14 @@ mod path_validation {
     #[test]
     fn load_packs_skips_forbidden_root_symlink() {
         let temp = TempDir::new().unwrap();
-        let good = temp.0.join("pack");
-        let outside = temp.0.join("outside");
+        let good = temp.0.join("pack.zip");
+        let outside = temp.0.join("outside.zip");
         for pack in [&good, &outside] {
-            fs::create_dir(pack).unwrap();
-            fs::write(pack.join("pack.mcmeta"), METADATA).unwrap();
+            write_zip_pack(pack);
         }
-        fs::write(outside.join("sentinel.txt"), b"outside sentinel").unwrap();
-        let link = temp.0.join("pack-evil");
-        symlink(outside, &link).unwrap();
-        assert_eq!(fs::read(link.join("pack.mcmeta")).unwrap(), METADATA);
+        let link = temp.0.join("pack-evil.zip");
+        symlink(&outside, &link).unwrap();
+        assert_eq!(fs::read(&link).unwrap(), fs::read(&outside).unwrap());
         let mut forbidden = source(link, "forbidden");
         assert!(forbidden.load_packs().unwrap().is_empty());
         let mut clean = source(good, "good");

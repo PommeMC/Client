@@ -412,8 +412,8 @@ use super::common;
 use super::common::WHITE;
 use super::friends::{self, ActionError, FaceCache, FriendsData};
 use super::server_list::{
-    Compat, PingGeneration, PingResults, PingState, ServerEntry, ServerList, is_valid_address,
-    ping_all_servers,
+    Compat, JoinedServer, PingGeneration, PingResults, PingState, ServerEntry, ServerList,
+    ServerPackStatus, default_server_name, is_valid_address, ping_all_servers,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -461,7 +461,7 @@ const STRIP_COUNT: usize = 14;
 pub enum MenuAction {
     None,
     Connect {
-        server: String,
+        server: JoinedServer,
         username: String,
         /// From the entry's ping, when joining out of the server list.
         protocol: Option<i32>,
@@ -846,6 +846,8 @@ pub struct MainMenu {
     saves_dir: PathBuf,
     edit_name: TextFieldState,
     edit_address: TextFieldState,
+    /// The add or edit server screen's `CycleButton`.
+    edit_pack_status: ServerPackStatus,
     last_mp_ip: String,
     ping_results: PingResults,
     ping_generation: PingGeneration,
@@ -1057,6 +1059,7 @@ impl MainMenu {
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
+            edit_pack_status: ServerPackStatus::default(),
             last_mp_ip: settings.last_server,
             ping_results,
             ping_generation: Default::default(),

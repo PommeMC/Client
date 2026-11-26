@@ -3,44 +3,43 @@
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::DecodeResult;
 use pomme_protocol::resource_pack::{self, ResourcePackPacket};
-use pomme_protocol::serverbound::{GamePacket, ResourcePackAction};
 
 use super::NetworkEvent;
 use super::handler::send_ordered;
-use super::sender::PacketSender;
 
 /// Decodes a resource pack packet; `None` for any other packet.
 pub(super) fn handle_raw_resource_pack_packet(
     packet_id: u32,
     payload: &[u8],
-    sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
     Some(
-        super::read_raw_packet(packet_id, payload, resource_pack::read)?.map(|packet| {
-            if let Some(reply) = handle_resource_pack_packet(packet, event_tx) {
-                sender.send(reply);
-            }
-        }),
+        super::read_raw_packet(packet_id, payload, resource_pack::read)?
+            .map(|packet| handle_resource_pack_packet(packet, event_tx)),
     )
 }
 
-/// Forwards a resource pack packet, in whichever phase it came; the reply to
-/// send, if it wants one.
+/// Forwards a resource pack packet, in whichever phase it came; the main
+/// thread answers it.
 pub(super) fn handle_resource_pack_packet(
     packet: ResourcePackPacket,
     event_tx: &Sender<NetworkEvent>,
-) -> Option<GamePacket> {
+) {
     match packet {
         ResourcePackPacket::Push {
             id,
             url,
             hash,
             required,
-            prompt: _,
+            prompt,
         } => {
             let id = uuid::Uuid::from_u128(id);
             tracing::info!("Server pushing resource pack {id} (required: {required})");
+            let prompt = prompt.and_then(|nbt| {
+                super::chat::read_component(&nbt, &mut 0)
+                    .inspect_err(|error| tracing::warn!("Resource pack prompt: {error}"))
+                    .ok()
+            });
             send_ordered(
                 event_tx,
                 NetworkEvent::ResourcePackPush {
@@ -48,18 +47,14 @@ pub(super) fn handle_resource_pack_packet(
                     url,
                     hash,
                     required,
+                    prompt,
                 },
             );
-            Some(GamePacket::ResourcePack {
-                id: id.as_u128(),
-                action: ResourcePackAction::Accepted,
-            })
         }
         ResourcePackPacket::Pop { id } => {
             let id = id.map(uuid::Uuid::from_u128);
             tracing::info!("Server popping resource pack {id:?}");
             send_ordered(event_tx, NetworkEvent::ResourcePackPop { id });
-            None
         }
     }
 }

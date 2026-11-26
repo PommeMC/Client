@@ -622,11 +622,7 @@ async fn config_sequence(
                 write_config_frame(conn, response.encode()).await?;
             }
             ConfigFrame::ResourcePack(packet) => {
-                if let Some(reply) =
-                    super::resource_pack_wire::handle_resource_pack_packet(packet, event_tx)
-                {
-                    write_config_packet(conn, &reply).await?;
-                }
+                super::resource_pack_wire::handle_resource_pack_packet(packet, event_tx);
             }
             // The other lifecycle packets belong to the game phase.
             ConfigFrame::Lifecycle(_) => {}
