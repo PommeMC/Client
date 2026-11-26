@@ -756,7 +756,10 @@ impl InteractionState {
             Some(HitResult::Block(hit)) if !is_air(hit.block_pos) => hit,
             // Vanilla's MISS branch, which an air block falls through to.
             _ => {
-                self.miss_time = MISS_COOLDOWN;
+                // Vanilla `MultiPlayerGameMode.hasMissTime`.
+                if !creative {
+                    self.miss_time = MISS_COOLDOWN;
+                }
                 self.attack_strength_ticker = 0;
                 self.swing(sender);
                 return false;

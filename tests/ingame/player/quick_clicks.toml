@@ -73,6 +73,30 @@ mouse_up = "right"
 [[step]]
 expect = { block = "stone", at = [1170, -60, 2] }
 
+# A creative miss has no cooldown: holding attack from the sky onto the
+# stone breaks it at once, not 10 ticks later.
+[[step]]
+look_at = [1170.5, -50.0, 2.5]
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+mouse_down = "left"
+
+[[step]]
+wait_ticks = 1
+
+[[step]]
+look_at = [1170.5, -60.0, 2.5]
+
+[[step]]
+expect = { block = "air", at = [1170, -60, 2] }
+timeout_ms = 300
+
+[[step]]
+mouse_up = "left"
+
 [[step]]
 chat = "/setblock 1170 -60 2 minecraft:air"
 
