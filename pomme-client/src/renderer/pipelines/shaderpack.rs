@@ -267,6 +267,23 @@ struct FrameUniform {
     fog_color: [f32; 4],
 }
 
+type SamplerBindings = Vec<(u32, rhi::backend::BindingResource)>;
+
+/// The set in `sets` made for `bindings`, or one `create` makes and `sets`
+/// keeps.
+fn cached_set(
+    sets: &mut Vec<(SamplerBindings, rhi::backend::BindGroup)>,
+    bindings: SamplerBindings,
+    create: impl FnOnce(&SamplerBindings) -> rhi::backend::BindGroup,
+) -> rhi::backend::BindGroup {
+    if let Some((_, set)) = sets.iter().find(|(b, _)| *b == bindings) {
+        return *set;
+    }
+    let set = create(&bindings);
+    sets.push((bindings, set));
+    set
+}
+
 /// One compiled program on the GPU.
 struct Program {
     pipeline: rhi::backend::RenderPipeline,
@@ -280,10 +297,20 @@ struct Program {
     sampler_layout: rhi::backend::BindGroupLayout,
     uniform_buffers: Vec<rhi::backend::Buffer>,
     uniform_sets: Vec<rhi::backend::BindGroup>,
-    sampler_sets: Vec<rhi::backend::BindGroup>,
+    /// A sampler set for each set of bindings the program has read, which
+    /// the ping-pong buffers keep to a few. A set never changes once
+    /// written, so every frame in flight shares it, and none is freed while
+    /// a frame may still use it.
+    sampler_sets: Vec<(SamplerBindings, rhi::backend::BindGroup)>,
     compiled: CompiledProgram,
     /// The colortex indices its outputs write, in output order.
     draw_buffers: Vec<u8>,
+}
+
+impl Program {
+    fn destroy_sampler_sets(&mut self, device: &rhi::backend::Device) {
+        util::destroy_bind_groups(device, self.sampler_sets.drain(..).map(|(_, set)| set));
+    }
 }
 
 /// The shadow pass's targets, when the pack has a `shadow` program.
@@ -875,11 +902,6 @@ impl PackRenderer {
                 )
             })
             .collect();
-        let sampler_sets = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| {
-                device.create_bind_group(sampler_layout, &self.sampler_bindings(&compiled, false))
-            })
-            .collect();
         Ok(Program {
             pipeline,
             variant,
@@ -888,18 +910,14 @@ impl PackRenderer {
             sampler_layout,
             uniform_buffers,
             uniform_sets,
-            sampler_sets,
+            sampler_sets: Vec::new(),
             compiled,
             draw_buffers,
         })
     }
 
     /// What each of a program's samplers reads, by Iris's names.
-    fn sampler_bindings(
-        &self,
-        compiled: &CompiledProgram,
-        full_screen: bool,
-    ) -> Vec<(u32, rhi::backend::BindingResource)> {
+    fn sampler_bindings(&self, compiled: &CompiledProgram, full_screen: bool) -> SamplerBindings {
         use rhi::backend::BindingResource as R;
         let mut bindings = Vec::new();
         let watershadow = compiled
@@ -1069,19 +1087,22 @@ impl PackRenderer {
         self.frame_counter = self.frame_counter.wrapping_add(1);
     }
 
-    /// Points `program`'s sampler set for `frame` at what its samplers read
-    /// now, returning the set.
+    /// The sampler set of `program` for what its samplers read now, made
+    /// the first time those bindings come up.
     fn bind_samplers(
         &mut self,
         device: &rhi::backend::Device,
-        frame: usize,
         program: ProgramRef,
         full_screen: bool,
     ) -> Option<rhi::backend::BindGroup> {
         let bindings = self.sampler_bindings(&self.program_ref(program)?.compiled, full_screen);
         let program = self.program_mut(program)?;
-        program.sampler_sets[frame].replace(device, program.sampler_layout, &bindings);
-        Some(program.sampler_sets[frame])
+        let layout = program.sampler_layout;
+        Some(cached_set(
+            &mut program.sampler_sets,
+            bindings,
+            |bindings| device.create_bind_group(layout, bindings),
+        ))
     }
 
     fn program_ref(&self, program: ProgramRef) -> Option<&Program> {
@@ -1285,8 +1306,7 @@ impl PackRenderer {
         frame: usize,
         geometry: PackGeometry,
     ) -> Option<(rhi::backend::RenderPassEncoder, PackBinding)> {
-        let sampler_set =
-            self.bind_samplers(device, frame, ProgramRef::Geometry(geometry), false)?;
+        let sampler_set = self.bind_samplers(device, ProgramRef::Geometry(geometry), false)?;
         let program = self.program_ref(ProgramRef::Geometry(geometry))?;
         let resources = if geometry.terrain() {
             self.sprite_group
@@ -1368,7 +1388,7 @@ impl PackRenderer {
             } else {
                 ProgramRef::Composite(i)
             };
-            let Some(sampler_set) = self.bind_samplers(device, frame, program, true) else {
+            let Some(sampler_set) = self.bind_samplers(device, program, true) else {
                 continue;
             };
             let Some(p) = self.program_ref(program) else {
@@ -1404,7 +1424,7 @@ impl PackRenderer {
         pass: &mut rhi::backend::RenderPassEncoder,
         frame: usize,
     ) {
-        let Some(sampler_set) = self.bind_samplers(device, frame, ProgramRef::Final, true) else {
+        let Some(sampler_set) = self.bind_samplers(device, ProgramRef::Final, true) else {
             return;
         };
         let Some(program) = self.program_ref(ProgramRef::Final) else {
@@ -1440,6 +1460,16 @@ impl PackRenderer {
             buffer.current = 0;
         }
         self.previous = None;
+        // The sets point at the textures just replaced.
+        for program in self
+            .geometry
+            .values_mut()
+            .chain(&mut self.deferred)
+            .chain(&mut self.composite)
+            .chain(&mut self.final_pass)
+        {
+            program.destroy_sampler_sets(device);
+        }
     }
 
     pub fn destroy(&mut self, device: &rhi::backend::Device) {
@@ -1457,7 +1487,7 @@ impl PackRenderer {
             program.layout.destroy(device);
             util::destroy_buffers(device, &mut program.uniform_buffers);
             util::destroy_bind_groups(device, program.uniform_sets.drain(..));
-            util::destroy_bind_groups(device, program.sampler_sets.drain(..));
+            program.destroy_sampler_sets(device);
             program.uniform_layout.destroy(device);
             program.sampler_layout.destroy(device);
         }
@@ -1936,6 +1966,23 @@ impl UniformValues {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sampler_set_is_made_once_per_set_of_bindings() {
+        use rhi::backend::{BindGroup, BindingResource, TextureHandle};
+        let bindings =
+            |binding| vec![(binding, BindingResource::Texture(TextureHandle::default()))];
+        let mut sets = Vec::new();
+        let mut made = 0;
+        for binding in [0, 1, 0, 1, 0] {
+            cached_set(&mut sets, bindings(binding), |_| {
+                made += 1;
+                BindGroup::default()
+            });
+        }
+        assert_eq!(made, 2);
+        assert_eq!(sets.len(), 2);
+    }
 
     fn close(a: Vec3, b: Vec3) {
         assert!(a.abs_diff_eq(b, 1e-4), "{a} != {b}");

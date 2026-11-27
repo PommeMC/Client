@@ -788,7 +788,7 @@ pub fn try_create_sampler(device: &Device, desc: &SamplerDesc) -> Result<Sampler
 
 /// What one binding of a bind group points at. Views must be in
 /// `ShaderReadOnlyOptimal` layout.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BindingResource {
     UniformBuffer { buffer: BufferHandle, size: u64 },
     StorageBuffer { buffer: BufferHandle, size: u64 },
@@ -2522,8 +2522,12 @@ fn create_render_pass(device: &vk::Device, key: PassKey) -> vk::RenderPass {
 /// WebGPU's default, and the fewest Vulkan guarantees.
 const MAX_BIND_GROUPS: usize = 4;
 
-/// Bind groups per pool, and descriptors of each type.
-const GROUPS_PER_POOL: u32 = 256;
+/// Bind groups per pool.
+const GROUPS_PER_POOL: u32 = 1024;
+
+/// Descriptors of each type per pool: a shader pack's program binds a dozen
+/// or more textures and samplers in one group.
+const DESCRIPTORS_PER_POOL: u32 = GROUPS_PER_POOL * 16;
 
 /// A descriptor set written once, as a WebGPU `GPUBindGroup` can't change.
 /// The default is an empty placeholder.
@@ -2587,7 +2591,7 @@ impl BindGroupPools {
         ]
         .map(|ty| vk::DescriptorPoolSize {
             ty: descriptor_type(ty),
-            descriptor_count: GROUPS_PER_POOL,
+            descriptor_count: DESCRIPTORS_PER_POOL,
         });
         let info = vk::DescriptorPoolCreateInfo {
             flags: vk::DescriptorPoolCreateFlags::FreeDescriptorSet,
