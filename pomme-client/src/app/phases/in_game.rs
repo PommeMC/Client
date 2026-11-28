@@ -3445,10 +3445,7 @@ pub fn update_game(
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     let screen_open = game.paused || game.gui_open() || game.death_screen_open;
-    if screen_open && !core.input.menu_capture {
-        core.input.screen_opened();
-    }
-    core.input.menu_capture = screen_open;
+    core.input.set_menu_capture(screen_open);
     core.input.controls = core.menu.controls;
     core.input
         .set_screen_open(screen_open || core.input.text_capture);

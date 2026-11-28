@@ -82,9 +82,10 @@ pub struct InputState {
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    /// A screen (a container, the pause menu, the death screen) is open: it
-    /// consumes hotbar digits and the drop/swap keys, like vanilla screens do.
-    pub menu_capture: bool,
+    /// A screen (a container, the pause menu, the death screen, the title
+    /// screens) is open: it consumes hotbar digits and the drop/swap keys,
+    /// like vanilla screens do.
+    menu_capture: bool,
     /// The player is a spectator: digits drive the spectator menu instead of
     /// the carried slot, and middle click is `key.spectatorHotbar`.
     pub spectator: bool,
@@ -95,6 +96,9 @@ pub struct InputState {
     /// vanilla dispatches GLFW repeats to screens and debug chords.
     just_pressed: HashSet<KeyCode>,
     mouse_buttons_down: HashSet<MouseButton>,
+    /// The mouse buttons whose mappings are down, where `mouse_buttons_down`
+    /// is the buttons themselves.
+    mouse_keys_down: HashSet<MouseButton>,
     mouse_buttons_just_pressed: HashSet<MouseButton>,
     gamepad_buttons_just_pressed: HashSet<(GamepadId, Button)>,
     /// Per-action press counters mirroring vanilla `KeyMapping.click`, so a
@@ -221,6 +225,7 @@ impl InputState {
             spectator_slot_presses: Vec::new(),
             just_pressed: HashSet::new(),
             mouse_buttons_down: HashSet::new(),
+            mouse_keys_down: HashSet::new(),
             mouse_buttons_just_pressed: HashSet::new(),
             gamepad_buttons_just_pressed: HashSet::new(),
             click_counts: HashMap::new(),
@@ -596,7 +601,7 @@ impl InputState {
     pub fn input_pressed(&self, input: &InputKey) -> bool {
         match input {
             InputKey::Keyboard(key) => self.key_pressed(*key),
-            InputKey::Mouse(button) => self.mouse_buttons_down.contains(button),
+            InputKey::Mouse(button) => self.mouse_keys_down.contains(button),
             InputKey::Controller(button) => self.gamepad_button_down(*button),
         }
     }
@@ -738,6 +743,15 @@ impl InputState {
         self.release_mouse_buttons();
         self.clear_click_counts();
         self.clear_just_pressed_actions();
+    }
+
+    /// Whether a screen is up, chat aside, running `screen_opened` when one
+    /// comes up.
+    pub fn set_menu_capture(&mut self, open: bool) {
+        if open && !self.menu_capture {
+            self.screen_opened();
+        }
+        self.menu_capture = open;
     }
 
     /// Tells the toggling keys whether a screen is up, chat and text fields
@@ -1268,6 +1282,7 @@ impl InputState {
             self.mouse_buttons_just_pressed.insert(button);
         } else {
             self.mouse_buttons_down.remove(&button);
+            self.mouse_keys_down.remove(&button);
         }
         match button {
             MouseButton::Left => self.left_click.set(was_pressed),
@@ -1275,9 +1290,10 @@ impl InputState {
             _ => (),
         }
 
-        // Vanilla `MouseHandler.onButton` clicks a button's mappings only
-        // with no screen open.
+        // Vanilla `MouseHandler.onButton` sets and clicks a button's mappings
+        // only with no screen open.
         if was_pressed && self.gameplay() {
+            self.mouse_keys_down.insert(button);
             self.press_bound_actions(InputKey::Mouse(button));
         }
     }
@@ -1833,6 +1849,23 @@ mod binding_lookup_tests {
         input.menu_capture = false;
         input.set_screen_open(false);
         assert!(input.performing_action(Action::Sneak));
+    }
+
+    #[test]
+    fn a_button_pressed_in_a_screen_is_not_held_after_it_closes() {
+        let mut input = InputState::released();
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.set_menu_capture(true);
+        assert!(!input.performing_action(Action::Destroy));
+
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.set_menu_capture(false);
+        assert!(input.left_held());
+        assert!(!input.performing_action(Action::Destroy));
+
+        input.on_mouse_button(MouseButton::Left, ElementState::Released);
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        assert!(input.performing_action(Action::Destroy));
     }
 
     #[test]
