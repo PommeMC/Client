@@ -1324,6 +1324,10 @@ impl ApplicationHandler for App {
 
                 let core = &mut self.core;
 
+                // The title, connecting and saving screens are screens too.
+                if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
+                    core.input.set_menu_capture(true);
+                }
                 let should_apply_cursor_grab = core.input.update(&mut self.phase);
                 if should_apply_cursor_grab
                     && let AppPhase::InGame { gfx, game, .. } = self.phase.get_mut()

@@ -82,9 +82,10 @@ pub struct InputState {
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    /// A screen (a container, the pause menu, the death screen) is open: it
-    /// consumes hotbar digits and the drop/swap keys, like vanilla screens do.
-    pub menu_capture: bool,
+    /// A screen (a container, the pause menu, the death screen, the title
+    /// screens) is open: it consumes hotbar digits and the drop/swap keys,
+    /// like vanilla screens do.
+    menu_capture: bool,
     /// The player is a spectator: digits drive the spectator menu instead of
     /// the carried slot, and middle click is `key.spectatorHotbar`.
     pub spectator: bool,
@@ -742,6 +743,15 @@ impl InputState {
         self.release_mouse_buttons();
         self.clear_click_counts();
         self.clear_just_pressed_actions();
+    }
+
+    /// Whether a screen is up, chat aside, running `screen_opened` when one
+    /// comes up.
+    pub fn set_menu_capture(&mut self, open: bool) {
+        if open && !self.menu_capture {
+            self.screen_opened();
+        }
+        self.menu_capture = open;
     }
 
     /// Tells the toggling keys whether a screen is up, chat and text fields
@@ -1844,9 +1854,12 @@ mod binding_lookup_tests {
     #[test]
     fn a_button_pressed_in_a_screen_is_not_held_after_it_closes() {
         let mut input = InputState::released();
-        input.menu_capture = true;
         input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
-        input.menu_capture = false;
+        input.set_menu_capture(true);
+        assert!(!input.performing_action(Action::Destroy));
+
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.set_menu_capture(false);
         assert!(input.left_held());
         assert!(!input.performing_action(Action::Destroy));
 
